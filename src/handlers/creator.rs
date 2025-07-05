@@ -8,6 +8,7 @@ use std::{env, str::FromStr};
 use NumberEncoder::yourNumbFuncCall;
 
 use crate::bindings::counter::Counter;
+use crate::handlers::TaskCreator;
 use commonware_eigenlayer::config::AvsDeployment;
 
 sol! {
@@ -45,6 +46,12 @@ impl Creator {
         let current_number = self.get_current_number().await?;
         let encoded = self.encode_number_call(U256::from(current_number)).await;
         Ok((encoded, current_number))
+    }
+}
+
+impl TaskCreator for Creator {
+    async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64), Box<dyn std::error::Error>> {
+        self.get_payload_and_round().await
     }
 }
 
