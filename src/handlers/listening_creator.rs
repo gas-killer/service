@@ -1,4 +1,5 @@
 use alloy::{
+    hex,
     primitives::{Address, U256},
     sol_types::SolValue,
 };
@@ -9,7 +10,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::bindings::counter::Counter;
-use crate::handlers::{CounterProvider, TaskCreator};
+use crate::handlers::{CounterProvider, TaskCreator, TaskDetails};
 use crate::ingress::{TaskRequest, start_http_server};
 use commonware_eigenlayer::config::AvsDeployment;
 
@@ -48,7 +49,8 @@ impl ListeningCreator {
 
     // Single entry point that can be called by the orchestrator
     // This is where queue requests would be pulled from
-    pub async fn get_payload_and_round(&self) -> anyhow::Result<(Vec<u8>, u64)> {
+    // Returns (payload, round, target_contract, target_function, function_params)
+    pub async fn get_payload_and_round(&self) -> anyhow::Result<(Vec<u8>, u64, String, String, Vec<u8>)> {
         // Wait for a task to be available
         let task = loop {
             if let Some(task) = self.get_next_task().await {
@@ -57,20 +59,28 @@ impl ListeningCreator {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         };
         let current_number = self.get_current_number().await?;
-        let mut payload = self.get_payload_for_round(current_number).await?.0;
+        
+        // Decode the hex-encoded function parameters
+        let params_hex = task.body.function_params.strip_prefix("0x")
+            .unwrap_or(&task.body.function_params);
+        let function_params = hex::decode(params_hex)
+            .map_err(|e| anyhow::anyhow!("Failed to decode function parameters: {}", e))?;
+        
+        // Create a payload that combines round info and function params
+        let mut payload = self.encode_number_call(U256::from(current_number)).await;
+        payload.extend_from_slice(&function_params);
 
-        // Encode the three variables into the payload
-        payload.extend_from_slice(task.body.var1.as_bytes());
-        payload.push(0); // null terminator
-        payload.extend_from_slice(task.body.var2.as_bytes());
-        payload.push(0); // null terminator
-        payload.extend_from_slice(task.body.var3.as_bytes());
-        payload.push(0); // null terminator
-
-        Ok((payload, current_number))
+        Ok((
+            payload,
+            current_number,
+            task.body.target_contract,
+            task.body.target_function,
+            function_params,
+        ))
     }
 
     // Optional: Method to get payload for a specific round number
+    #[allow(dead_code)]
     pub async fn get_payload_for_round(&self, round_number: u64) -> anyhow::Result<(Vec<u8>, u64)> {
         let encoded = self.encode_number_call(U256::from(round_number)).await;
         info!("Created payload for specific round: {}", round_number);
@@ -87,10 +97,19 @@ impl ListeningCreator {
 }
 
 impl TaskCreator for ListeningCreator {
-    async fn get_payload_and_round(&self) -> anyhow::Result<(Vec<u8>, u64)> {
-        self.get_payload_and_round()
-            .await
-            .map_err(|e| anyhow::anyhow!("ListeningCreator error: {}", e))
+    async fn get_task_details(&self) -> anyhow::Result<TaskDetails> {
+        let (payload, round, target_contract, target_function, function_params) = 
+            self.get_payload_and_round()
+                .await
+                .map_err(|e| anyhow::anyhow!("ListeningCreator error: {}", e))?;
+        
+        Ok(TaskDetails {
+            payload,
+            round,
+            target_contract,
+            target_function,
+            function_params,
+        })
     }
 }
 

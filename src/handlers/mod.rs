@@ -35,10 +35,19 @@ pub type ViewOnlyProvider = FillProvider<
     RootProvider,
 >;
 
+/// Task details including target contract and function information
+pub struct TaskDetails {
+    pub payload: Vec<u8>,
+    pub round: u64,
+    pub target_contract: String,
+    pub target_function: String,
+    pub function_params: Vec<u8>,
+}
+
 /// Shared trait for creators that can generate payloads and round numbers
 pub trait TaskCreator: Send + Sync {
-    /// Get the current payload and round number
-    async fn get_payload_and_round(&self) -> anyhow::Result<(Vec<u8>, u64)>;
+    /// Get the current task details including payload, round, and target information
+    async fn get_task_details(&self) -> anyhow::Result<TaskDetails>;
 }
 enum TaskCreatorEnum {
     Creator(Creator),
@@ -46,14 +55,14 @@ enum TaskCreatorEnum {
 }
 
 impl TaskCreator for TaskCreatorEnum {
-    async fn get_payload_and_round(&self) -> anyhow::Result<(Vec<u8>, u64)> {
+    async fn get_task_details(&self) -> anyhow::Result<TaskDetails> {
         match self {
             TaskCreatorEnum::Creator(creator) => creator
-                .get_payload_and_round()
+                .get_task_details()
                 .await
                 .map_err(|e| anyhow::anyhow!("Creator error: {}", e)),
             TaskCreatorEnum::ListeningCreator(listening_creator) => listening_creator
-                .get_payload_and_round()
+                .get_task_details()
                 .await
                 .map_err(|e| anyhow::anyhow!("ListeningCreator error: {}", e)),
         }

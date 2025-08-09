@@ -6,26 +6,26 @@ const SIGNATURE_BYTES: usize = 32;
 /// Represents a top-level message for the Aggregation protocol,
 /// typically sent over a dedicated aggregation communication channel.
 ///
-/// It encapsulates a specific round number, task variables, and a payload containing the actual
-/// aggregation protocol message content.
+/// It encapsulates a specific round number, target contract information, and a payload containing
+/// the actual aggregation protocol message content.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Aggregation {
     pub round: u64,
-    pub var1: String,
-    pub var2: String,
-    pub var3: String,
+    pub target_contract: String,  // Target contract address (hex string)
+    pub target_function: String,  // Target function selector (hex string)
+    pub function_params: Vec<u8>, // Encoded function parameters
     pub payload: Option<aggregation::Payload>,
 }
 
 impl Write for Aggregation {
     fn write(&self, buf: &mut impl BufMut) {
         self.round.write(buf);
-        (self.var1.len() as u32).write(buf);
-        buf.put_slice(self.var1.as_bytes());
-        (self.var2.len() as u32).write(buf);
-        buf.put_slice(self.var2.as_bytes());
-        (self.var3.len() as u32).write(buf);
-        buf.put_slice(self.var3.as_bytes());
+        (self.target_contract.len() as u32).write(buf);
+        buf.put_slice(self.target_contract.as_bytes());
+        (self.target_function.len() as u32).write(buf);
+        buf.put_slice(self.target_function.as_bytes());
+        (self.function_params.len() as u32).write(buf);
+        buf.put_slice(&self.function_params);
         self.payload.write(buf);
     }
 }
@@ -36,39 +36,37 @@ impl Read for Aggregation {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = u64::read(buf)?;
 
-        let var1_len = u32::read(buf)? as usize;
-        if buf.remaining() < var1_len {
+        let target_contract_len = u32::read(buf)? as usize;
+        if buf.remaining() < target_contract_len {
             return Err(Error::EndOfBuffer);
         }
-        let mut var1_bytes = vec![0u8; var1_len];
-        buf.copy_to_slice(&mut var1_bytes);
-        let var1 = String::from_utf8(var1_bytes)
-            .map_err(|_| Error::Invalid("var1", "decoding from utf8 failed"))?;
+        let mut target_contract_bytes = vec![0u8; target_contract_len];
+        buf.copy_to_slice(&mut target_contract_bytes);
+        let target_contract = String::from_utf8(target_contract_bytes)
+            .map_err(|_| Error::Invalid("target_contract", "decoding from utf8 failed"))?;
 
-        let var2_len = u32::read(buf)? as usize;
-        if buf.remaining() < var2_len {
+        let target_function_len = u32::read(buf)? as usize;
+        if buf.remaining() < target_function_len {
             return Err(Error::EndOfBuffer);
         }
-        let mut var2_bytes = vec![0u8; var2_len];
-        buf.copy_to_slice(&mut var2_bytes);
-        let var2 = String::from_utf8(var2_bytes)
-            .map_err(|_| Error::Invalid("var2", "decoding from utf8 failed"))?;
+        let mut target_function_bytes = vec![0u8; target_function_len];
+        buf.copy_to_slice(&mut target_function_bytes);
+        let target_function = String::from_utf8(target_function_bytes)
+            .map_err(|_| Error::Invalid("target_function", "decoding from utf8 failed"))?;
 
-        let var3_len = u32::read(buf)? as usize;
-        if buf.remaining() < var3_len {
+        let function_params_len = u32::read(buf)? as usize;
+        if buf.remaining() < function_params_len {
             return Err(Error::EndOfBuffer);
         }
-        let mut var3_bytes = vec![0u8; var3_len];
-        buf.copy_to_slice(&mut var3_bytes);
-        let var3 = String::from_utf8(var3_bytes)
-            .map_err(|_| Error::Invalid("var3", "decoding from utf8 failed"))?;
+        let mut function_params = vec![0u8; function_params_len];
+        buf.copy_to_slice(&mut function_params);
 
         let payload = Option::<aggregation::Payload>::read(buf)?;
         Ok(Self {
             round,
-            var1,
-            var2,
-            var3,
+            target_contract,
+            target_function,
+            function_params,
             payload,
         })
     }
@@ -78,11 +76,11 @@ impl EncodeSize for Aggregation {
     fn encode_size(&self) -> usize {
         self.round.encode_size()
             + 4
-            + self.var1.len()
+            + self.target_contract.len()
             + 4
-            + self.var2.len()
+            + self.target_function.len()
             + 4
-            + self.var3.len()
+            + self.function_params.len()
             + self.payload.encode_size()
     }
 }
@@ -153,9 +151,9 @@ mod tests {
     fn test_aggregation_start_codec() {
         let original = Aggregation {
             round: 1,
-            var1: "test1".to_string(),
-            var2: "test2".to_string(),
-            var3: "test3".to_string(),
+            target_contract: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1".to_string(),
+            target_function: "0xa9059cbb".to_string(), // transfer function selector
+            function_params: vec![0x01, 0x02, 0x03, 0x04], // sample encoded params
             payload: Some(aggregation::Payload::Start),
         };
         let mut buf = Vec::with_capacity(original.encode_size());
@@ -168,9 +166,9 @@ mod tests {
     fn test_aggregation_signature_codec() {
         let original = Aggregation {
             round: 1,
-            var1: "test1".to_string(),
-            var2: "test2".to_string(),
-            var3: "test3".to_string(),
+            target_contract: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1".to_string(),
+            target_function: "0xa9059cbb".to_string(), // transfer function selector
+            function_params: vec![0x01, 0x02, 0x03, 0x04], // sample encoded params
             payload: Some(aggregation::Payload::Signature(
                 hex::decode(SAMPLE_SIGNATURE_HEX).expect("hex decode failed"),
             )),

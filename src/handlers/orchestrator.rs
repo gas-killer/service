@@ -16,9 +16,6 @@ use commonware_utils::hex;
 use dotenv::dotenv;
 use std::{collections::HashMap, time::Duration};
 use tracing::info;
-const DEFAULT_VAR_1: &str = "default_var1";
-const DEFAULT_VAR_2: &str = "default_var2";
-const DEFAULT_VAR_3: &str = "default_var3";
 
 pub struct Orchestrator<E: Clock> {
     runtime: E,
@@ -85,21 +82,23 @@ impl<E: Clock> Orchestrator<E> {
         let validator = Validator::new().await.unwrap();
 
         loop {
-            let (payload, current_number) = task_creator.get_payload_and_round().await.unwrap();
-            hasher.update(&payload);
-            let payload = hasher.finalize();
+            let task_details = task_creator.get_task_details().await.unwrap();
+            hasher.update(&task_details.payload);
+            let hashed_payload = hasher.finalize();
             info!(
-                round = current_number.to_string(),
-                msg = hex(&payload),
+                round = task_details.round.to_string(),
+                msg = hex(&hashed_payload),
+                target_contract = task_details.target_contract,
+                target_function = task_details.target_function,
                 "generated payload for round"
             );
 
-            // Broadcast payload
+            // Broadcast payload with target information
             let message = wire::Aggregation {
-                round: current_number,
-                var1: DEFAULT_VAR_1.to_string(),
-                var2: DEFAULT_VAR_2.to_string(),
-                var3: DEFAULT_VAR_3.to_string(),
+                round: task_details.round,
+                target_contract: task_details.target_contract.clone(),
+                target_function: task_details.target_function.clone(),
+                function_params: task_details.function_params.clone(),
                 payload: Some(Payload::Start),
             };
             let mut buf = Vec::with_capacity(message.encode_size());
@@ -108,10 +107,10 @@ impl<E: Clock> Orchestrator<E> {
                 .send(commonware_p2p::Recipients::All, Bytes::from(buf), true)
                 .await
                 .expect("failed to broadcast message");
-            signatures.insert(current_number, HashMap::new());
+            signatures.insert(task_details.round, HashMap::new());
             info!(
                 "Created signatures entry for round: {}, threshold is: {}",
-                current_number, self.t
+                task_details.round, self.t
             );
 
             // Listen for messages until the next broadcast
