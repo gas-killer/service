@@ -1,5 +1,5 @@
 use crate::bindings::counter::Counter;
-use crate::handlers::{CounterProvider, TaskCreator, TaskDetails};
+use crate::handlers::{CounterProvider, TaskCreator};
 use alloy::{
     primitives::{Address, U256},
     sol_types::SolValue,
@@ -46,20 +46,10 @@ impl Creator {
 }
 
 impl TaskCreator for Creator {
-    async fn get_task_details(&self) -> anyhow::Result<TaskDetails> {
-        let (payload, round) = self.get_payload_and_round()
+    async fn get_payload_and_round(&self) -> anyhow::Result<(Vec<u8>, u64)> {
+        self.get_payload_and_round()
             .await
-            .map_err(|e| anyhow::anyhow!("Creator error: {}", e))?;
-        
-        // For non-ingress mode, use default values for contract targeting
-        // You can customize these defaults based on your requirements
-        Ok(TaskDetails {
-            payload,
-            round,
-            target_contract: "0x0000000000000000000000000000000000000000".to_string(), // Default null address
-            target_function: "0x00000000".to_string(), // Default null selector
-            function_params: vec![],
-        })
+            .map_err(|e| anyhow::anyhow!("Creator error: {}", e))
     }
 }
 

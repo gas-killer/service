@@ -82,23 +82,68 @@ impl<E: Clock> Orchestrator<E> {
         let validator = Validator::new().await.unwrap();
 
         loop {
-            let task_details = task_creator.get_task_details().await.unwrap();
-            hasher.update(&task_details.payload);
+            let (payload, round) = task_creator.get_payload_and_round().await.unwrap();
+            
+            // Parse the encoded data from payload if in ingress mode
+            let (target_contract, target_function, function_params) = if use_ingress {
+                // Decode the payload structure:
+                // [4 bytes: target_contract length][target_contract bytes]
+                // [4 bytes: target_function length][target_function bytes]
+                // [4 bytes: function_params length][function_params bytes]
+                let mut cursor = 0;
+                
+                // Decode target contract
+                let contract_len = u32::from_le_bytes([
+                    payload[cursor], payload[cursor + 1], 
+                    payload[cursor + 2], payload[cursor + 3]
+                ]) as usize;
+                cursor += 4;
+                let target_contract = String::from_utf8_lossy(&payload[cursor..cursor + contract_len]).to_string();
+                cursor += contract_len;
+                
+                // Decode target function
+                let function_len = u32::from_le_bytes([
+                    payload[cursor], payload[cursor + 1],
+                    payload[cursor + 2], payload[cursor + 3]
+                ]) as usize;
+                cursor += 4;
+                let target_function = String::from_utf8_lossy(&payload[cursor..cursor + function_len]).to_string();
+                cursor += function_len;
+                
+                // Decode function parameters
+                let params_len = u32::from_le_bytes([
+                    payload[cursor], payload[cursor + 1],
+                    payload[cursor + 2], payload[cursor + 3]
+                ]) as usize;
+                cursor += 4;
+                let function_params = payload[cursor..cursor + params_len].to_vec();
+                
+                (target_contract, target_function, function_params)
+            } else {
+                // For non-ingress mode, use default values
+                (
+                    "0x0000000000000000000000000000000000000000".to_string(),
+                    "0x00000000".to_string(),
+                    vec![]
+                )
+            };
+            
+            hasher.update(&payload);
             let hashed_payload = hasher.finalize();
             info!(
-                round = task_details.round.to_string(),
+                round = round.to_string(),
                 msg = hex(&hashed_payload),
-                target_contract = task_details.target_contract,
-                target_function = task_details.target_function,
+                target_contract = target_contract,
+                target_function = target_function,
                 "generated payload for round"
             );
 
             // Broadcast payload with target information
             let message = wire::Aggregation {
-                round: task_details.round,
-                target_contract: task_details.target_contract.clone(),
-                target_function: task_details.target_function.clone(),
-                function_params: task_details.function_params.clone(),
+                round,
+                target_contract: target_contract.clone(),
+                target_function: target_function.clone(),
+                function_params: function_params.clone(),
                 payload: Some(Payload::Start),
             };
             let mut buf = Vec::with_capacity(message.encode_size());
@@ -107,10 +152,10 @@ impl<E: Clock> Orchestrator<E> {
                 .send(commonware_p2p::Recipients::All, Bytes::from(buf), true)
                 .await
                 .expect("failed to broadcast message");
-            signatures.insert(task_details.round, HashMap::new());
+            signatures.insert(round, HashMap::new());
             info!(
                 "Created signatures entry for round: {}, threshold is: {}",
-                task_details.round, self.t
+                round, self.t
             );
 
             // Listen for messages until the next broadcast
