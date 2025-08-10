@@ -1,10 +1,12 @@
 pub mod creator;
 pub mod executor;
 pub mod gas_killer_creator;
+pub mod gas_killer_orchestrator;
 pub mod listening_creator;
 pub mod orchestrator;
 
 pub use gas_killer_creator::create_gas_killer_creator_with_server;
+pub use gas_killer_orchestrator::GasKillerOrchestrator;
 pub use orchestrator::Orchestrator;
 
 use crate::handlers::{creator::Creator, gas_killer_creator::GasKillerCreator, listening_creator::ListeningCreator};
