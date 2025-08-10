@@ -4,10 +4,10 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::handlers::TaskCreator;
-use crate::ingress::{TaskRequest, start_http_server};
+use crate::ingress::{GasKillerTaskRequest, start_gas_killer_http_server};
 
 pub struct GasKillerCreator {
-    queue: Arc<Mutex<Vec<TaskRequest>>>,
+    queue: Arc<Mutex<Vec<GasKillerTaskRequest>>>,
     task_counter: Arc<Mutex<u64>>,  // Internal task counter for round numbers
 }
 
@@ -20,7 +20,7 @@ impl GasKillerCreator {
     }
 
     // Pulls the next task from the queue, or returns None if empty
-    pub async fn get_next_task(&self) -> Option<TaskRequest> {
+    pub async fn get_next_task(&self) -> Option<GasKillerTaskRequest> {
         let mut queue = self.queue.lock().await;
         if !queue.is_empty() {
             Some(queue.remove(0))
@@ -85,7 +85,7 @@ impl GasKillerCreator {
     pub async fn start_http_server(self: Arc<Self>, addr: String) {
         let queue = self.queue.clone();
         tokio::spawn(async move {
-            start_http_server(queue, &addr).await;
+            start_gas_killer_http_server(queue, &addr).await;
         });
     }
 }
