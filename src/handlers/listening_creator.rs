@@ -1,5 +1,4 @@
 use alloy::{
-    hex,
     primitives::{Address, U256},
     sol_types::SolValue,
 };
@@ -58,7 +57,7 @@ impl ListeningCreator {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         };
         let current_number = self.get_current_number().await?;
-        let mut payload = self.encode_number_call(U256::from(current_number)).await;
+        let mut payload = self.get_payload_for_round(current_number).await?.0;
 
         // Encode the three variables into the payload
         payload.extend_from_slice(task.body.var1.as_bytes());
@@ -72,7 +71,6 @@ impl ListeningCreator {
     }
 
     // Optional: Method to get payload for a specific round number
-    #[allow(dead_code)]
     pub async fn get_payload_for_round(&self, round_number: u64) -> anyhow::Result<(Vec<u8>, u64)> {
         let encoded = self.encode_number_call(U256::from(round_number)).await;
         info!("Created payload for specific round: {}", round_number);
