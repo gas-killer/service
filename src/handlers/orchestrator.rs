@@ -1,5 +1,6 @@
 use crate::handlers::creator::create_creator;
 use crate::handlers::executor::create_executor;
+use crate::handlers::gas_killer_creator::create_gas_killer_creator_with_server;
 use crate::handlers::listening_creator::create_listening_creator_with_server;
 use crate::handlers::{TaskCreator, TaskCreatorEnum};
 use crate::validator::Validator;
@@ -64,9 +65,19 @@ impl<E: Clock> Orchestrator<E> {
         let mut hasher = Sha256::new();
         let mut signatures = HashMap::new();
         let task_creator: TaskCreatorEnum;
-        // Check if INGRESS flag is set to determine which creator to use
+        
+        // Check environment variables to determine which creator to use
+        let use_gas_killer = std::env::var("GAS_KILLER").unwrap_or_default().to_lowercase() == "true";
         let use_ingress = std::env::var("INGRESS").unwrap_or_default().to_lowercase() == "true";
-        if use_ingress {
+        
+        if use_gas_killer {
+            info!("Using GasKillerCreator with HTTP server on port 8080");
+            let gas_killer_creator =
+                create_gas_killer_creator_with_server("0.0.0.0:8080".to_string())
+                    .await
+                    .unwrap();
+            task_creator = TaskCreatorEnum::GasKillerCreator(gas_killer_creator);
+        } else if use_ingress {
             info!("Using ListeningCreator with HTTP server on port 8080");
             let listening_creator =
                 create_listening_creator_with_server("0.0.0.0:8080".to_string())
@@ -84,8 +95,8 @@ impl<E: Clock> Orchestrator<E> {
         loop {
             let (payload, round) = task_creator.get_payload_and_round().await.unwrap();
             
-            // Parse the encoded data from payload if in ingress mode
-            let (target_contract, target_function, function_params) = if use_ingress {
+            // Parse the encoded data from payload if using GasKillerCreator or ingress mode
+            let (target_contract, target_function, function_params) = if use_gas_killer || use_ingress {
                 // Decode the payload structure:
                 // [4 bytes: target_contract length][target_contract bytes]
                 // [4 bytes: target_function length][target_function bytes]
