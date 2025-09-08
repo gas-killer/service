@@ -1,3 +1,12 @@
+#![allow(
+    unused_imports,
+    clippy::identity_op,
+    clippy::useless_conversion,
+    clippy::large_enum_variant,
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::clone_on_copy
+)]
 ///Module containing a contract's types and functions.
 /**
 
