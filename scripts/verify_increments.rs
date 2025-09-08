@@ -4,17 +4,14 @@ use commonware_eigenlayer::config::AvsDeployment;
 use std::{env, time::Duration};
 use tokio::time::sleep;
 
-const DEFAULT_HTTP_RPC: &str = "http://localhost:8545";
-const DEFAULT_AVS_DEPLOYMENT_PATH: &str = "../eigenlayer-bls-local/.nodes/avs_deploy.json";
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load environment variables
     dotenv::dotenv().ok();
 
-    // Load configuration - try different possible paths
-    let deployment_path =
-        env::var("AVS_DEPLOYMENT_PATH").unwrap_or_else(|_| DEFAULT_AVS_DEPLOYMENT_PATH.to_string());
+    // Load configuration strictly from environment
+    let deployment_path = env::var("AVS_DEPLOYMENT_PATH")
+        .map_err(|_| "AVS_DEPLOYMENT_PATH environment variable is required")?;
 
     println!("Trying to load deployment from: {}", deployment_path);
 
@@ -24,17 +21,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Try different loading methods based on what's available
-    let deployment = if let Ok(deployment) = AvsDeployment::load() {
-        deployment
-    } else {
-        // If load() doesn't work, we might need to set the environment variable
-        std::env::set_var("AVS_DEPLOYMENT_PATH", &deployment_path);
-        AvsDeployment::load().map_err(|e| format!("Failed to load deployment: {}", e))?
-    };
+    // Ensure AvsDeployment::load() reads the path we validated above
+    std::env::set_var("AVS_DEPLOYMENT_PATH", &deployment_path);
+    let deployment =
+        AvsDeployment::load().map_err(|e| format!("Failed to load deployment: {}", e))?;
     let counter_address = deployment
         .counter_address()
         .map_err(|e| format!("Failed to get counter address: {}", e))?;
-    let http_rpc = env::var("HTTP_RPC").unwrap_or_else(|_| DEFAULT_HTTP_RPC.to_string());
+    let http_rpc = env::var("HTTP_RPC").map_err(|_| "HTTP_RPC environment variable is required")?;
 
     println!("Connecting to RPC: {}", http_rpc);
     println!("Counter address: {}", counter_address);
