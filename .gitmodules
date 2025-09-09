@@ -1,3 +1,3 @@
-[submodule "commonware-avs-node"]
-	path = commonware-avs-node
-	url = https://github.com/BreadchainCoop/commonware-avs-node.git
+[submodule "gas-killer-node"]
+	path = gas-killer-node
+	url = https://github.com/BreadchainCoop/gas-killer-node.git
