@@ -1,4 +1,4 @@
-//! Generic orchestrator module for the commonware-avs-router.
+//! Generic orchestrator module for the gas-killer-router.
 //!
 //! This module provides a generic interface for orchestration behavior,
 //! allowing different implementations to be swapped without changing

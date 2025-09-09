@@ -28,11 +28,11 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Checkout commonware-avs-node
+      - name: Checkout gas-killer-node
         uses: actions/checkout@v3
         with:
-          repository: BreadchainCoop/commonware-avs-node
-          path: commonware-avs-node
+          repository: BreadchainCoop/gas-killer-node
+          path: gas-killer-node
           ref: dev
 
       - name: Set up Docker Buildx
@@ -52,7 +52,7 @@ jobs:
             ~/.cargo/git
             target
             scripts/target
-            commonware-avs-node/target
+            gas-killer-node/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build projects
@@ -60,7 +60,7 @@ jobs:
           echo "Building router..."
           cargo build --release
           echo "Building AVS node..."
-          cd commonware-avs-node
+          cd gas-killer-node
           cargo build --release
           cd ..
           echo "Building verification script..."
@@ -83,18 +83,18 @@ jobs:
             exit 1
           fi
 
-          echo "=== Checking commonware-avs-node ==="
-          if [ -d commonware-avs-node ]; then
-            echo "commonware-avs-node directory found"
-            ls -la commonware-avs-node/
-            if [ -f commonware-avs-node/example.env ]; then
-              cp commonware-avs-node/example.env commonware-avs-node/.env
+          echo "=== Checking gas-killer-node ==="
+          if [ -d gas-killer-node ]; then
+            echo "gas-killer-node directory found"
+            ls -la gas-killer-node/
+            if [ -f gas-killer-node/example.env ]; then
+              cp gas-killer-node/example.env gas-killer-node/.env
             else
-              echo "No example.env in commonware-avs-node, creating from main .env"
-              cp .env commonware-avs-node/.env
+              echo "No example.env in gas-killer-node, creating from main .env"
+              cp .env gas-killer-node/.env
             fi
           else
-            echo "ERROR: commonware-avs-node directory not found"
+            echo "ERROR: gas-killer-node directory not found"
             exit 1
           fi
 
@@ -135,11 +135,11 @@ jobs:
           # For LOCAL mode, keep contract addresses commented out so they can be auto-deployed
           # The eigenlayer container will deploy these contracts and save addresses to avs_deploy.json
 
-          # Update commonware-avs-node .env file
-          sed -i 's|^HTTP_RPC=.*|HTTP_RPC=http://localhost:8545|' commonware-avs-node/.env
-          sed -i 's|^WS_RPC=.*|WS_RPC=ws://localhost:8545|' commonware-avs-node/.env
-          sed -i 's|^AVS_DEPLOYMENT_PATH=.*|AVS_DEPLOYMENT_PATH="../.nodes/avs_deploy.json"|' commonware-avs-node/.env
-          sed -i "s|^PRIVATE_KEY=.*|PRIVATE_KEY=$DEFAULT_PRIVATE_KEY|" commonware-avs-node/.env
+          # Update gas-killer-node .env file
+          sed -i 's|^HTTP_RPC=.*|HTTP_RPC=http://localhost:8545|' gas-killer-node/.env
+          sed -i 's|^WS_RPC=.*|WS_RPC=ws://localhost:8545|' gas-killer-node/.env
+          sed -i 's|^AVS_DEPLOYMENT_PATH=.*|AVS_DEPLOYMENT_PATH="../.nodes/avs_deploy.json"|' gas-killer-node/.env
+          sed -i "s|^PRIVATE_KEY=.*|PRIVATE_KEY=$DEFAULT_PRIVATE_KEY|" gas-killer-node/.env
 
           echo "Environment configuration:"
           grep -E "^(ENVIRONMENT|HTTP_RPC|PRIVATE_KEY)" .env
@@ -227,10 +227,10 @@ jobs:
 
       - name: Start AVS nodes
         run: |
-          # The commonware-avs-node already has the correct orchestrator.json with G2 public key
+          # The gas-killer-node already has the correct orchestrator.json with G2 public key
           # No need to copy from config/ (which has wrong format)
 
-          cd commonware-avs-node
+          cd gas-killer-node
           source .env
 
           # Create logs directory
@@ -255,21 +255,21 @@ jobs:
           done
 
           # Start node 1
-          ./target/release/commonware-avs-node --key-file $CONTRIBUTOR_1_KEYFILE --port 3001 --orchestrator orchestrator.json > ../logs/node1.log 2>&1 &
+          ./target/release/gas-killer-node --key-file $CONTRIBUTOR_1_KEYFILE --port 3001 --orchestrator orchestrator.json > ../logs/node1.log 2>&1 &
           echo $! > ../node1.pid
           echo "Node 1 started with PID: $(cat ../node1.pid)"
 
           sleep 2
 
           # Start node 2
-          ./target/release/commonware-avs-node --key-file $CONTRIBUTOR_2_KEYFILE --port 3002 --orchestrator orchestrator.json > ../logs/node2.log 2>&1 &
+          ./target/release/gas-killer-node --key-file $CONTRIBUTOR_2_KEYFILE --port 3002 --orchestrator orchestrator.json > ../logs/node2.log 2>&1 &
           echo $! > ../node2.pid
           echo "Node 2 started with PID: $(cat ../node2.pid)"
 
           sleep 2
 
           # Start node 3  
-          ./target/release/commonware-avs-node --key-file $CONTRIBUTOR_3_KEYFILE --port 3003 --orchestrator orchestrator.json > ../logs/node3.log 2>&1 &
+          ./target/release/gas-killer-node --key-file $CONTRIBUTOR_3_KEYFILE --port 3003 --orchestrator orchestrator.json > ../logs/node3.log 2>&1 &
           echo $! > ../node3.pid
           echo "Node 3 started with PID: $(cat ../node3.pid)"
 
@@ -282,7 +282,7 @@ jobs:
           source .env
 
           # Start router in orchestrator mode
-          ./target/release/commonware-avs-router --key-file config/orchestrator.json --port 3000 > logs/router.log 2>&1 &
+          ./target/release/gas-killer-node --key-file config/orchestrator.json --port 3000 > logs/router.log 2>&1 &
           echo $! > router.pid
           echo "Router started with PID: $(cat router.pid)"
 

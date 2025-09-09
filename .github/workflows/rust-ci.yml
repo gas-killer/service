@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate_dir: [".", "commonware-avs-node"]
+        crate_dir: [".", "gas-killer-node"]
     defaults:
       run:
         working-directory: ${{ matrix.crate_dir }}
@@ -30,7 +30,7 @@ jobs:
           # Cache both crates to speed up matrix runs
           workspaces: |
             .
-            commonware-avs-node
+            gas-killer-node
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check

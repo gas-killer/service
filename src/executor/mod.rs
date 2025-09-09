@@ -1,4 +1,4 @@
-//! Executor module for the commonware-avs-router.
+//! Executor module for the gas-killer-router.
 
 // Public modules
 pub mod bls;

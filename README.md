@@ -1,9 +1,9 @@
-# Commonware AVS Router
+# Gas Killer Router
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io/breadchaincoop/commonware--avs--router-blue.svg)](https://github.com/BreadchainCoop/commonware-avs-router/pkgs/container/commonware-avs-router)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io/breadchaincoop/gas--killer--router-blue.svg)](https://github.com/BreadchainCoop/gas-killer-router/pkgs/container/gas-killer-router)
 
-A BLS signature aggregation protocol with onchain execution for EigenLayer AVS operators.
+A specialized router for Gas Killer optimized transaction execution with BLS signature aggregation for EigenLayer AVS operators.
 
 ## Overview
 
@@ -40,7 +40,7 @@ If you need to run nodes outside of Docker, you can use the following process.
 
 1. **Configure environment:**
 ```bash
-cd commonware-avs-node
+cd gas-killer-node
 
 cp example.env .env
 
@@ -101,7 +101,7 @@ The system consists of:
 - **Creator**: Generates payloads and manages rounds  
 - **Executor**: Handles onchain execution
 - **Validator**: Validates messages and signatures
-- **Contributors**: Operator nodes that sign messages (implemented in [`commonware-avs-node`](https://github.com/BreadchainCoop/commonware-avs-node) submodule)
+- **Contributors**: Operator nodes that sign messages (implemented in [`gas-killer-node`](https://github.com/BreadchainCoop/gas-killer-node) submodule)
 
 ### Usecases
 
@@ -129,7 +129,7 @@ Contract addresses are automatically loaded from the deployment JSON file.
 
 Pull the latest image:
 ```bash
-docker pull ghcr.io/breadchaincoop/commonware-avs-router:latest
+docker pull ghcr.io/breadchaincoop/gas-killer-router:latest
 ```
 
 Run with Docker Compose:
@@ -137,7 +137,7 @@ Run with Docker Compose:
 version: '3.8'
 services:
   orchestrator:
-    image: ghcr.io/breadchaincoop/commonware-avs-router:latest
+    image: ghcr.io/breadchaincoop/gas-killer-router:latest
     volumes:
       - ./config:/app/config
       - ./keys:/app/keys
