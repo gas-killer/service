@@ -18,7 +18,7 @@ impl GasKillerExecutor {
             optimization_factor: 20, // 20% optimization by default
         }
     }
-    
+
     /// Simulates gas optimization logic
     fn optimize_gas(&self, original_gas: u64) -> u64 {
         // Apply optimization factor
@@ -39,18 +39,18 @@ impl VerificationExecutor for GasKillerExecutor {
             "Executing gas killer verification for payload hash: 0x{}",
             hex::encode(&payload_hash[..8])
         );
-        
+
         debug!(
             "Verification data - {} signatures, {} public keys",
             verification_data.signatures.len(),
             verification_data.public_keys.len()
         );
-        
+
         // Simulate gas estimation based on payload size
         let estimated_gas = 21000u64 + (payload_hash.len() as u64 * 68);
         let optimized_gas = self.optimize_gas(estimated_gas);
         let gas_saved = estimated_gas - optimized_gas;
-        
+
         info!(
             "Gas optimization complete - Original: {}, Optimized: {}, Saved: {} ({}%)",
             estimated_gas,
@@ -58,7 +58,7 @@ impl VerificationExecutor for GasKillerExecutor {
             gas_saved,
             (gas_saved * 100) / estimated_gas.max(1)
         );
-        
+
         // Create execution result
         // In a real implementation, this would submit an optimized transaction
         Ok(ExecutionResult {

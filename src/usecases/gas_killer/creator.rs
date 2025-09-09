@@ -1,10 +1,10 @@
-use crate::creator::core::Creator;
 use super::task::{GasKillerTaskData, QueueMessage, Task, TaskEvent};
-use anyhow::{anyhow, Result};
+use crate::creator::core::Creator;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tokio::time::{interval, sleep};
 use tracing::{error, info, warn};
 
@@ -36,12 +36,12 @@ impl GasKillerCreator {
 
     pub async fn run(&self) -> Result<()> {
         info!("Starting GasKillerCreator");
-        
+
         let mut poll_interval = interval(Duration::from_millis(QUEUE_POLL_INTERVAL_MS));
-        
+
         loop {
             poll_interval.tick().await;
-            
+
             if let Err(e) = self.process_queue_messages().await {
                 error!("Error processing queue messages: {}", e);
             }
@@ -50,7 +50,7 @@ impl GasKillerCreator {
 
     pub async fn process_queue_messages(&self) -> Result<()> {
         let mut receiver = self.queue_receiver.write().await;
-        
+
         while let Ok(message) = receiver.try_recv() {
             match self.handle_message(message.clone()).await {
                 Ok(task) => {
@@ -63,13 +63,13 @@ impl GasKillerCreator {
                 }
             }
         }
-        
+
         Ok(())
     }
 
     async fn handle_message(&self, message: QueueMessage) -> Result<Task> {
         message.validate()?;
-        
+
         let task = Task::new(
             message.request_id,
             message.target_contract,
@@ -79,16 +79,16 @@ impl GasKillerCreator {
             message.caller,
             message.metadata,
         );
-        
+
         self.send_to_orchestrator_with_retry(&task).await?;
-        
+
         Ok(task)
     }
 
     async fn send_to_orchestrator_with_retry(&self, task: &Task) -> Result<()> {
         let event = task.to_event();
         let mut retries = 0;
-        
+
         loop {
             match self.orchestrator_sender.send(event.clone()) {
                 Ok(_) => {
@@ -98,9 +98,16 @@ impl GasKillerCreator {
                 Err(e) => {
                     retries += 1;
                     if retries >= MAX_RETRIES {
-                        return Err(anyhow!("Failed to send to orchestrator after {} retries: {}", MAX_RETRIES, e));
+                        return Err(anyhow!(
+                            "Failed to send to orchestrator after {} retries: {}",
+                            MAX_RETRIES,
+                            e
+                        ));
                     }
-                    warn!("Failed to send to orchestrator (attempt {}/{}): {}", retries, MAX_RETRIES, e);
+                    warn!(
+                        "Failed to send to orchestrator (attempt {}/{}): {}",
+                        retries, MAX_RETRIES, e
+                    );
                     sleep(Duration::from_millis(RETRY_DELAY_MS * retries as u64)).await;
                 }
             }
@@ -110,10 +117,10 @@ impl GasKillerCreator {
     pub async fn store_task(&self, task: Task) {
         let mut current = self.current_task.write().await;
         *current = Some(task.clone());
-        
+
         let mut buffer = self.task_buffer.write().await;
         buffer.push(task);
-        
+
         if buffer.len() > 1000 {
             buffer.drain(0..500);
         }
@@ -122,7 +129,7 @@ impl GasKillerCreator {
     pub async fn add_to_dlq(&self, message: QueueMessage) {
         let mut dlq = self.dead_letter_queue.write().await;
         dlq.push(message);
-        
+
         if dlq.len() > 100 {
             warn!("DLQ size exceeds 100 messages, removing oldest 50");
             dlq.drain(0..50);
@@ -148,26 +155,30 @@ impl Creator for GasKillerCreator {
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
         let current_task = self.current_task.read().await;
-        
+
         match &*current_task {
             Some(task) => {
                 let mut payload = Vec::new();
                 payload.extend_from_slice(task.target_contract.as_slice());
                 payload.extend_from_slice(task.target_method.as_bytes());
                 payload.extend_from_slice(&task.params);
-                
+
                 let round = task.created_at;
-                
+
                 Ok((payload, round))
             }
-            None => Err(anyhow!("No current task available"))
+            None => Err(anyhow!("No current task available")),
         }
     }
 
     fn get_task_metadata(&self) -> Self::TaskData {
         // Note: This is a synchronous method, so we use try_read to avoid blocking
         // In production, the task should be set before this is called
-        let current_task = self.current_task.try_read().ok().and_then(|guard| guard.clone());
+        let current_task = self
+            .current_task
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.clone());
 
         match current_task {
             Some(task) => GasKillerTaskData {
@@ -183,7 +194,7 @@ impl Creator for GasKillerCreator {
                 target_contract: alloy_primitives::Address::ZERO,
                 target_method: String::new(),
                 params: Vec::new(),
-            }
+            },
         }
     }
 }
@@ -198,7 +209,8 @@ impl QueueSender {
     }
 
     pub fn send(&self, message: QueueMessage) -> Result<()> {
-        self.sender.send(message)
+        self.sender
+            .send(message)
             .map_err(|e| anyhow!("Failed to send message to queue: {}", e))
     }
 }

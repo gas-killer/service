@@ -1,8 +1,8 @@
 use crate::orchestrator::OrchestratorBuilder;
+use crate::usecases::gas_killer::GasKillerOrchestrator;
 use crate::usecases::gas_killer::factories::{
     create_gas_killer_creator, create_gas_killer_executor, create_gas_killer_validator,
 };
-use crate::usecases::gas_killer::GasKillerOrchestrator;
 use commonware_runtime::Clock;
 use tracing::info;
 
@@ -28,7 +28,7 @@ impl GasKillerOrchestratorBuilder {
         builder: OrchestratorBuilder<C>,
     ) -> Result<GasKillerOrchestrator<C>, Box<dyn std::error::Error>> {
         info!("Building Gas Killer orchestrator");
-        
+
         // Create gas-killer-specific dependencies
         let task_creator = create_gas_killer_creator().await?;
         let executor = create_gas_killer_executor().await?;

@@ -13,7 +13,7 @@ pub mod executor;
 // Gas Killer orchestrator builder
 pub mod builder;
 
-// Gas Killer orchestrator implementation  
+// Gas Killer orchestrator implementation
 pub mod orchestrator;
 
 // Gas Killer factories

@@ -161,11 +161,11 @@ impl Write for GasKillerTaskData {
         buf.put_slice(id_bytes);
         self.chain_id.write(buf);
         buf.put_slice(self.target_contract.as_slice());
-        
+
         let method_bytes = self.target_method.as_bytes();
         (method_bytes.len() as u32).write(buf);
         buf.put_slice(method_bytes);
-        
+
         (self.params.len() as u32).write(buf);
         buf.put_slice(&self.params);
     }
@@ -173,7 +173,7 @@ impl Write for GasKillerTaskData {
 
 impl Read for GasKillerTaskData {
     type Cfg = ();
-    
+
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         if buf.remaining() < 16 {
             return Err(CodecError::EndOfBuffer);
@@ -181,16 +181,16 @@ impl Read for GasKillerTaskData {
         let mut id_bytes = [0u8; 16];
         buf.copy_to_slice(&mut id_bytes);
         let task_id = uuid::Uuid::from_bytes(id_bytes);
-        
+
         let chain_id = u64::read(buf)?;
-        
+
         if buf.remaining() < 20 {
             return Err(CodecError::EndOfBuffer);
         }
         let mut contract_bytes = [0u8; 20];
         buf.copy_to_slice(&mut contract_bytes);
         let target_contract = Address::from_slice(&contract_bytes);
-        
+
         let method_len = u32::read(buf)? as usize;
         if buf.remaining() < method_len {
             return Err(CodecError::EndOfBuffer);
@@ -199,14 +199,14 @@ impl Read for GasKillerTaskData {
         buf.copy_to_slice(&mut method_bytes);
         let target_method = String::from_utf8(method_bytes)
             .map_err(|_| CodecError::Invalid("target_method", "decoding from utf8 failed"))?;
-        
+
         let params_len = u32::read(buf)? as usize;
         if buf.remaining() < params_len {
             return Err(CodecError::EndOfBuffer);
         }
         let mut params = vec![0u8; params_len];
         buf.copy_to_slice(&mut params);
-        
+
         Ok(Self {
             task_id,
             chain_id,
