@@ -1,7 +1,7 @@
+use super::types::{GasAnalysisResult, GasKillerTask, OptimizationType, StateUpdate};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
-use super::types::{GasKillerTask, StateUpdate, GasAnalysisResult, OptimizationType};
 
 /// Mock Validator for Gas Killer tasks
 /// This component performs gas analysis and validates tasks
@@ -17,23 +17,32 @@ impl GasKillerValidator {
     }
 
     /// Perform gas analysis on a task
-    pub async fn analyze_gas_optimizations(&self, task: &GasKillerTask) -> Result<GasAnalysisResult, String> {
+    pub async fn analyze_gas_optimizations(
+        &self,
+        task: &GasKillerTask,
+    ) -> Result<GasAnalysisResult, String> {
         // Check cache first
         let cache = self.gas_analysis_cache.read().await;
         if let Some(cached) = cache.get(&task.task_id) {
-            println!("Using cached gas analysis for task: {:02x?}...", &task.task_id[..8]);
+            println!(
+                "Using cached gas analysis for task: {:02x?}...",
+                &task.task_id[..8]
+            );
             return Ok(cached.clone());
         }
         drop(cache);
 
-        println!("Performing gas analysis for task: {:02x?}...", &task.task_id[..8]);
-        
+        println!(
+            "Performing gas analysis for task: {:02x?}...",
+            &task.task_id[..8]
+        );
+
         // Mock gas analysis based on calldata
         let mut state_updates = Vec::new();
         let total_gas_saved: u64;
-        
+
         let optimization_type = self.detect_optimization_type(&task.calldata);
-        
+
         match optimization_type {
             OptimizationType::StoragePacking => {
                 state_updates.push(StateUpdate {
@@ -122,7 +131,10 @@ impl GasKillerValidator {
     }
 
     /// Validate a task and return expected hash
-    pub async fn validate_and_return_expected_hash(&self, task: &GasKillerTask) -> Result<[u8; 32], String> {
+    pub async fn validate_and_return_expected_hash(
+        &self,
+        task: &GasKillerTask,
+    ) -> Result<[u8; 32], String> {
         // Basic validation
         if task.chain_id == 0 || task.chain_id > 10000 {
             return Err(format!("Invalid chain ID: {}", task.chain_id));
@@ -136,32 +148,34 @@ impl GasKillerValidator {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         if task.timestamp > current_time + 3600 {
             return Err("Task timestamp too far in the future".to_string());
         }
 
         // Perform gas analysis
         let gas_analysis = self.analyze_gas_optimizations(task).await?;
-        
+
         // Create mock hash (in production would use proper crypto)
         let mut hash = [0u8; 32];
         hash[..8].copy_from_slice(&task.task_id[..8]);
         hash[8..16].copy_from_slice(&task.chain_id.to_be_bytes());
         hash[16..20].copy_from_slice(&gas_analysis.total_gas_saved.to_be_bytes()[..4]);
-        
+
         println!(
             "Validated Gas Killer task: {:02x?}..., hash: {:02x?}...",
             &task.task_id[..8],
             &hash[..8]
         );
-        
+
         Ok(hash)
     }
 
     /// Get cached state updates for a task
     pub async fn get_state_updates(&self, task_id: &[u8; 32]) -> Option<Vec<StateUpdate>> {
         let cache = self.gas_analysis_cache.read().await;
-        cache.get(task_id).map(|result| result.state_updates.clone())
+        cache
+            .get(task_id)
+            .map(|result| result.state_updates.clone())
     }
 }

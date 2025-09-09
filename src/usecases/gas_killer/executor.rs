@@ -1,7 +1,7 @@
+use super::types::ExecutionPackage;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
-use super::types::ExecutionPackage;
 
 /// Mock Executor for Gas Killer tasks
 /// This component broadcasts validated tasks for execution
@@ -27,56 +27,70 @@ impl GasKillerExecutor {
             "Executing Gas Killer task: {:02x?}...",
             &package.task_id[..8]
         );
-        
+
         // Validate package has required signatures
         if package.signers.is_empty() {
             return Err("No signers in execution package".to_string());
         }
-        
+
         if package.aggregated_signature.is_empty() {
             return Err("No aggregated signature in execution package".to_string());
         }
-        
+
         // Broadcast to network (mock)
         let result = self.broadcast_to_network(&package).await?;
-        
+
         // Store executed task
         let mut executed = self.executed_tasks.write().await;
         executed.insert(package.task_id, package.clone());
-        
+
         // Increment execution count
         let mut count = self.execution_count.write().await;
         *count += 1;
         let execution_count = *count;
-        
+
         println!(
             "Successfully executed Gas Killer task: {:02x?}... (total executions: {})",
             &package.task_id[..8],
             execution_count
         );
-        
+
         Ok(result)
     }
 
     /// Mock broadcast to network
-    async fn broadcast_to_network(&self, package: &ExecutionPackage) -> Result<ExecutionResult, String> {
+    async fn broadcast_to_network(
+        &self,
+        package: &ExecutionPackage,
+    ) -> Result<ExecutionResult, String> {
         println!(
             "Broadcasting execution package for task: {:02x?}... to network",
             &package.task_id[..8]
         );
-        
+
         println!(
             "Package details: {} signers, {} state updates, total gas saved: {}",
             package.signers.len(),
             package.state_updates.len(),
-            package.state_updates.iter().map(|u| u.gas_saved).sum::<u64>()
+            package
+                .state_updates
+                .iter()
+                .map(|u| u.gas_saved)
+                .sum::<u64>()
         );
-        
+
         // Simulate network broadcast delay
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        
+
         Ok(ExecutionResult {
-            transaction_hash: format!("0x{:02x}", package.task_id.iter().take(4).fold(0u32, |acc, &b| acc * 256 + b as u32)),
+            transaction_hash: format!(
+                "0x{:02x}",
+                package
+                    .task_id
+                    .iter()
+                    .take(4)
+                    .fold(0u32, |acc, &b| acc * 256 + b as u32)
+            ),
             block_number: 1000000,
             gas_used: 21000,
             success: true,

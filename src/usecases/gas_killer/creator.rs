@@ -1,6 +1,6 @@
-use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
 use super::types::GasKillerTask;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 /// Mock Creator for Gas Killer tasks
 /// This component manages the task queue and provides tasks to the orchestrator
@@ -21,7 +21,10 @@ impl GasKillerCreator {
     pub fn add_task(&self, task: GasKillerTask) -> Result<(), String> {
         let mut queue = self.task_queue.lock().unwrap();
         queue.push_back(task);
-        println!("Added new Gas Killer task to queue, queue size: {}", queue.len());
+        println!(
+            "Added new Gas Killer task to queue, queue size: {}",
+            queue.len()
+        );
         Ok(())
     }
 
@@ -53,7 +56,7 @@ impl GasKillerCreator {
 
         // Create payload from task
         let payload = task.to_bytes();
-        
+
         println!(
             "Created payload for Gas Killer task: {:02x?}..., round: {}, payload size: {} bytes",
             &task.task_id[..8],
@@ -66,15 +69,18 @@ impl GasKillerCreator {
 
     /// Get metadata of the current task (mock implementation)
     pub fn get_task_metadata(&self) -> GasKillerTask {
-        self.task_queue.lock().unwrap().front().cloned().unwrap_or(
-            GasKillerTask {
+        self.task_queue
+            .lock()
+            .unwrap()
+            .front()
+            .cloned()
+            .unwrap_or(GasKillerTask {
                 task_id: [0u8; 32],
                 chain_id: 1,
                 target_contract: [0u8; 20],
                 calldata: Vec::new(),
                 priority: 0,
                 timestamp: 0,
-            }
-        )
+            })
     }
 }

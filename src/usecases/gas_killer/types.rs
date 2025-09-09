@@ -24,36 +24,37 @@ impl GasKillerTask {
         bytes.extend_from_slice(&self.timestamp.to_be_bytes());
         bytes
     }
-    
+
     /// Deserialize task from bytes
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < 65 {
             return Err("Invalid bytes length".to_string());
         }
-        
+
         let mut cursor = 0;
         let mut task_id = [0u8; 32];
-        task_id.copy_from_slice(&bytes[cursor..cursor+32]);
+        task_id.copy_from_slice(&bytes[cursor..cursor + 32]);
         cursor += 32;
-        
-        let chain_id = u64::from_be_bytes(bytes[cursor..cursor+8].try_into().unwrap());
+
+        let chain_id = u64::from_be_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
         cursor += 8;
-        
+
         let mut target_contract = [0u8; 20];
-        target_contract.copy_from_slice(&bytes[cursor..cursor+20]);
+        target_contract.copy_from_slice(&bytes[cursor..cursor + 20]);
         cursor += 20;
-        
-        let calldata_len = u32::from_be_bytes(bytes[cursor..cursor+4].try_into().unwrap()) as usize;
+
+        let calldata_len =
+            u32::from_be_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
         cursor += 4;
-        
-        let calldata = bytes[cursor..cursor+calldata_len].to_vec();
+
+        let calldata = bytes[cursor..cursor + calldata_len].to_vec();
         cursor += calldata_len;
-        
+
         let priority = bytes[cursor];
         cursor += 1;
-        
-        let timestamp = u64::from_be_bytes(bytes[cursor..cursor+8].try_into().unwrap());
-        
+
+        let timestamp = u64::from_be_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+
         Ok(Self {
             task_id,
             chain_id,
