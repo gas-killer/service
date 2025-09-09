@@ -41,6 +41,7 @@ sol! {
 /// Gas Killer executor implementation
 pub struct GasKillerExecutor<H: GasKillerContractHandler> {
     provider: Box<dyn Provider>,
+    #[allow(dead_code)]
     wallet: EthereumWallet,
     config: GasKillerConfig,
     contract_handler: H,
@@ -62,6 +63,7 @@ impl<H: GasKillerContractHandler> GasKillerExecutor<H> {
         let wallet = EthereumWallet::from(signer);
 
         // Create provider with wallet
+        #[allow(deprecated)] // TODO: Update to connect() when available in our alloy version
         let provider = ProviderBuilder::new()
             .wallet(wallet.clone())
             .on_builtin(&config.rpc_url)
@@ -243,7 +245,7 @@ impl<H: GasKillerContractHandler> GasKillerExecutorTrait for GasKillerExecutor<H
 
     fn prepare_calldata(
         &self,
-        target_method: &str,
+        _target_method: &str,
         params: &Bytes,
         package: &ExecutionPackage,
     ) -> Result<Bytes> {

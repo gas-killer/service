@@ -1,7 +1,6 @@
 use alloy::providers::Provider;
 use alloy::rpc::types::{BlockId, BlockNumberOrTag};
 use alloy::sol;
-use alloy::sol_types::SolCall;
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -32,6 +31,7 @@ sol! {
 
 /// Default implementation of Gas Killer contract handler
 pub struct DefaultGasKillerHandler {
+    #[allow(dead_code)]
     provider: Box<dyn Provider>,
 }
 
