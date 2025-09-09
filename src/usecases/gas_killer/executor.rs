@@ -10,6 +10,12 @@ pub struct GasKillerExecutor {
     execution_count: Arc<RwLock<u64>>,
 }
 
+impl Default for GasKillerExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GasKillerExecutor {
     pub fn new() -> Self {
         Self {

@@ -1,5 +1,5 @@
 use super::creator::GasKillerCreator;
-use super::executor::{ExecutionResult, GasKillerExecutor};
+use super::executor::GasKillerExecutor;
 use super::types::{
     ExecutionPackage, GasKillerTask, OperatorRegistry, OperatorResponse, OperatorStatus,
     ValidationRequest,
@@ -67,7 +67,7 @@ impl GasKillerOrchestrator {
             let (payload, round) = match self.creator.get_payload_and_round().await {
                 Ok(result) => result,
                 Err(e) => {
-                    println!("Failed to get payload: {}", e);
+                    println!("Failed to get payload: {e}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
@@ -172,7 +172,7 @@ impl GasKillerOrchestrator {
         }
 
         registry.operators.insert(chain_id, operators);
-        println!("Added {} mock operators for chain {}", 5, chain_id);
+        println!("Added 5 mock operators for chain {chain_id}");
     }
 
     /// Broadcast validation request to operators
@@ -180,7 +180,7 @@ impl GasKillerOrchestrator {
         &self,
         task: &GasKillerTask,
         operators: Vec<[u8; 64]>,
-        round: u64,
+        _round: u64,
     ) -> Result<(), String> {
         let deadline = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -222,8 +222,8 @@ impl GasKillerOrchestrator {
         // Simulate that 80% of operators respond positively
         let responding_count = ((operators.len() as f64) * 0.8).ceil() as usize;
 
-        for i in 0..responding_count {
-            let operator = operators[i];
+        for (i, operator) in operators.iter().take(responding_count).enumerate() {
+            let operator = *operator;
 
             // Get state updates from validator
             let state_updates = self
@@ -304,10 +304,12 @@ impl GasKillerOrchestrator {
 
         // Mock BLS signature aggregation
         let mut aggregated_signature = vec![0u8; 96];
-        for (i, response) in valid_responses.iter().enumerate() {
+        for (_i, response) in valid_responses.iter().enumerate() {
             // XOR signatures together (mock aggregation)
             for j in 0..96.min(response.signature.len()) {
-                aggregated_signature[j] ^= response.signature[j];
+                if let Some(byte) = aggregated_signature.get_mut(j) {
+                    *byte ^= response.signature[j];
+                }
             }
         }
 
@@ -315,7 +317,7 @@ impl GasKillerOrchestrator {
         let mut all_state_updates = Vec::new();
 
         for response in &valid_responses {
-            signers.push(response.operator.clone());
+            signers.push(response.operator);
             all_state_updates.extend(response.state_updates.clone());
         }
 

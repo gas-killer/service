@@ -134,6 +134,12 @@ pub enum OperatorStatus {
     Exited,
 }
 
+impl Default for OperatorRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OperatorRegistry {
     pub fn new() -> Self {
         Self {

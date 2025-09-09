@@ -9,6 +9,12 @@ pub struct GasKillerCreator {
     current_round: Arc<Mutex<u64>>,
 }
 
+impl Default for GasKillerCreator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GasKillerCreator {
     pub fn new() -> Self {
         Self {

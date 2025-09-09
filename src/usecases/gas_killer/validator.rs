@@ -9,6 +9,12 @@ pub struct GasKillerValidator {
     gas_analysis_cache: Arc<RwLock<HashMap<[u8; 32], GasAnalysisResult>>>,
 }
 
+impl Default for GasKillerValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GasKillerValidator {
     pub fn new() -> Self {
         Self {
@@ -39,11 +45,9 @@ impl GasKillerValidator {
 
         // Mock gas analysis based on calldata
         let mut state_updates = Vec::new();
-        let total_gas_saved: u64;
-
         let optimization_type = self.detect_optimization_type(&task.calldata);
 
-        match optimization_type {
+        let total_gas_saved = match optimization_type {
             OptimizationType::StoragePacking => {
                 state_updates.push(StateUpdate {
                     storage_slot: [1u8; 32],
@@ -51,7 +55,7 @@ impl GasKillerValidator {
                     new_value: [1u8; 32],
                     gas_saved: 15000,
                 });
-                total_gas_saved = 15000;
+                15000
             }
             OptimizationType::BatchedUpdates => {
                 for i in 0..3 {
@@ -62,7 +66,7 @@ impl GasKillerValidator {
                         gas_saved: 5000,
                     });
                 }
-                total_gas_saved = 15000;
+                15000
             }
             OptimizationType::ColdToWarmSlot => {
                 state_updates.push(StateUpdate {
@@ -71,7 +75,7 @@ impl GasKillerValidator {
                     new_value: [2u8; 32],
                     gas_saved: 2100,
                 });
-                total_gas_saved = 2100;
+                2100
             }
             OptimizationType::NonZeroToZero => {
                 state_updates.push(StateUpdate {
@@ -80,7 +84,7 @@ impl GasKillerValidator {
                     new_value: [0u8; 32],
                     gas_saved: 15000,
                 });
-                total_gas_saved = 15000;
+                15000
             }
             OptimizationType::ZeroToNonZero => {
                 state_updates.push(StateUpdate {
@@ -89,9 +93,9 @@ impl GasKillerValidator {
                     new_value: [1u8; 32],
                     gas_saved: 20000,
                 });
-                total_gas_saved = 20000;
+                20000
             }
-        }
+        };
 
         let result = GasAnalysisResult {
             task_id: task.task_id,
