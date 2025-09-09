@@ -72,7 +72,7 @@ async fn test_validator_with_custom_retry_config() {
     let _validator = GasKillerValidator::new(endpoints)
         .with_retry_config(5, std::time::Duration::from_secs(3));
     
-    assert!(true);
+    // Validator created successfully with custom retry config
 }
 
 #[tokio::test]
@@ -138,7 +138,7 @@ async fn test_port_picker() {
     assert!(port.is_some());
     
     if let Some(p) = port {
-        assert!(p >= 8545 && p < 9000);
+        assert!((8545..9000).contains(&p));
     }
 }
 
@@ -168,7 +168,7 @@ mod integration_tests {
         
         assert!(response.is_ok());
         if let Ok(resp) = response {
-            println!("Validation response: {:?}", resp);
+            println!("Validation response: {resp:?}");
         }
     }
 }

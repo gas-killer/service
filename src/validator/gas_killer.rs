@@ -64,7 +64,9 @@ pub struct ValidationResponse {
 
 pub struct AnvilInstance {
     pub rpc_url: String,
+    #[allow(dead_code)]
     pub chain_id: u64,
+    #[allow(dead_code)]
     pub fork_block: u64,
     pub process: Option<Child>,
 }
@@ -78,7 +80,7 @@ impl AnvilInstance {
         let port = pick_unused_port()
             .ok_or_else(|| anyhow!("No available ports"))?;
         
-        let rpc_url = format!("http://127.0.0.1:{}", port);
+        let rpc_url = format!("http://127.0.0.1:{port}");
         
         let mut cmd = Command::new("anvil");
         cmd.arg("--fork-url").arg(fork_url)
@@ -127,12 +129,14 @@ impl Drop for AnvilInstance {
 
 pub struct GasKillerValidator {
     rpc_endpoints: HashMap<u64, String>,
+    #[allow(dead_code)]
     signer: Option<PrivateKeySigner>,
     max_retries: u32,
     retry_delay: Duration,
 }
 
 impl GasKillerValidator {
+    #[allow(dead_code)]
     pub fn new(rpc_endpoints: HashMap<u64, String>) -> Self {
         Self {
             rpc_endpoints,
@@ -142,11 +146,13 @@ impl GasKillerValidator {
         }
     }
     
+    #[allow(dead_code)]
     pub fn with_signer(mut self, signer: PrivateKeySigner) -> Self {
         self.signer = Some(signer);
         self
     }
     
+    #[allow(dead_code)]
     pub fn with_retry_config(mut self, max_retries: u32, retry_delay: Duration) -> Self {
         self.max_retries = max_retries;
         self.retry_delay = retry_delay;
@@ -165,7 +171,7 @@ impl GasKillerValidator {
             match self.attempt_validation(&task, rpc_url).await {
                 Ok(response) => return Ok(response),
                 Err(e) if retries < self.max_retries => {
-                    warn!("Validation attempt {} failed: {}", retries + 1, e);
+                    warn!("Validation attempt {} failed: {e}", retries + 1);
                     retries += 1;
                     sleep(self.retry_delay).await;
                 }
@@ -223,14 +229,14 @@ impl GasKillerValidator {
         let estimated_gas = match provider.estimate_gas(tx_request.clone()).await {
             Ok(gas) => gas,
             Err(e) => {
-                warn!("Gas estimation failed: {}", e);
+                warn!("Gas estimation failed: {e}");
                 return Ok(ValidationResponse {
                     task_id: task.task_id,
                     validated: false,
                     state_updates: None,
                     simulation_block: block_number,
                     gas_metrics: None,
-                    error_message: Some(format!("Gas estimation failed: {}", e)),
+                    error_message: Some(format!("Gas estimation failed: {e}")),
                 });
             }
         };
@@ -248,7 +254,7 @@ impl GasKillerValidator {
                 (true, Some(output))
             }
             Err(e) => {
-                warn!("Transaction simulation failed: {}", e);
+                warn!("Transaction simulation failed: {e}");
                 (false, None)
             }
         };

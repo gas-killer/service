@@ -63,11 +63,11 @@ async fn main() -> Result<()> {
             }
             
             if let Some(error) = response.error_message {
-                println!("\n  Error: {}", error);
+                println!("\n  Error: {error}");
             }
         }
         Err(e) => {
-            eprintln!("Validation failed: {}", e);
+            eprintln!("Validation failed: {e}");
         }
     }
     
