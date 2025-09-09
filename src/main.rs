@@ -192,11 +192,22 @@ fn main() {
             .with_threshold(threshold)
             .load_from_env(); // Read configuration from environment variables
 
-        let orchestrator = crate::usecases::counter::CounterOrchestratorBuilder::build(builder)
-            .await
-            .expect("Failed to build orchestrator");
-
-        context.spawn(|_| async move { orchestrator.run(sender, receiver).await });
+        // Select orchestrator type based on environment variable
+        let use_gas_killer = env::var("USE_GAS_KILLER").unwrap_or_default().to_lowercase() == "true";
+        
+        if use_gas_killer {
+            tracing::info!("Using Gas Killer orchestrator");
+            let orchestrator = crate::usecases::gas_killer::GasKillerOrchestratorBuilder::build(builder)
+                .await
+                .expect("Failed to build gas killer orchestrator");
+            context.spawn(|_| async move { orchestrator.run(sender, receiver).await });
+        } else {
+            tracing::info!("Using Counter orchestrator");
+            let orchestrator = crate::usecases::counter::CounterOrchestratorBuilder::build(builder)
+                .await
+                .expect("Failed to build counter orchestrator");
+            context.spawn(|_| async move { orchestrator.run(sender, receiver).await });
+        }
 
         let _ = network.start().await;
     });
