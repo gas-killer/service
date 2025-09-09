@@ -1,6 +1,7 @@
 //! Validator module for the commonware-avs-router.
 
 // Public modules
+pub mod gas_killer;
 pub mod generic;
 pub mod interface;
 
@@ -9,6 +10,8 @@ pub mod interface;
 pub mod tests;
 
 // Re-export the main types for easy access
+#[allow(unused_imports)]
+pub use gas_killer::GasKillerValidator;
 #[allow(unused_imports)]
 pub use generic::Validator;
 #[allow(unused_imports)]
