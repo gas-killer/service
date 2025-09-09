@@ -92,7 +92,7 @@ impl ValidationError {
     pub fn invalid_address(field: String) -> Self {
         Self {
             code: "INVALID_ADDRESS".to_string(),
-            message: format!("Invalid Ethereum address format for field: {}", field),
+            message: format!("Invalid Ethereum address format for field: {field}"),
             details: None,
         }
     }
@@ -115,7 +115,7 @@ impl ValidationError {
 
         Self {
             code: "UNSUPPORTED_CHAIN".to_string(),
-            message: format!("Chain ID {} is not supported", chain_id),
+            message: format!("Chain ID {chain_id} is not supported"),
             details: Some(details),
         }
     }
@@ -131,7 +131,7 @@ impl ValidationError {
     pub fn missing_field(field: String) -> Self {
         Self {
             code: "MISSING_FIELD".to_string(),
-            message: format!("Required field '{}' is missing", field),
+            message: format!("Required field '{field}' is missing"),
             details: None,
         }
     }
@@ -221,14 +221,9 @@ fn is_valid_hex_string(hex: &str) -> bool {
     }
 
     // Check if it starts with 0x
-    if hex.starts_with("0x") {
-        let hex_part = &hex[2..];
-        // Must have even number of hex characters
-        hex_part.len() % 2 == 0 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
-    } else {
-        // Also accept without 0x prefix
-        hex.len() % 2 == 0 && hex.chars().all(|c| c.is_ascii_hexdigit())
-    }
+    let hex_part = hex.strip_prefix("0x").unwrap_or(hex);
+    // Must have even number of hex characters
+    hex_part.len() % 2 == 0 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]

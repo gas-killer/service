@@ -139,11 +139,7 @@ fn read_string(buf: &mut impl Buf) -> Result<String, commonware_codec::Error> {
 
 // Helper function to decode hex string to bytes
 fn decode_hex_string(hex: &str) -> Option<Vec<u8>> {
-    let hex = if hex.starts_with("0x") {
-        &hex[2..]
-    } else {
-        hex
-    };
+    let hex = hex.strip_prefix("0x").unwrap_or(hex);
 
     if hex.is_empty() {
         return Some(Vec::new());

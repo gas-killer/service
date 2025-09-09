@@ -207,7 +207,6 @@ async fn legacy_trigger_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[tokio::test]
     async fn test_valid_gas_killer_request() {
