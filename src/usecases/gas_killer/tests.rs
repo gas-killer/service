@@ -189,7 +189,7 @@ async fn test_task_buffer_management() {
         let task = Task::new(
             Uuid::new_v4(),
             Address::from_str("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb7").unwrap(),
-            format!("method_{}", i),
+            format!("method_{i}"),
             1,
             Bytes::from(vec![i as u8]),
             Address::from_str("0x5aAeb6053f3E94C9b9A09f33669435E7Ef1BeAed").unwrap(),
