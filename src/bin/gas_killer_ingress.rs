@@ -42,12 +42,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = *matches.get_one::<u16>("port").unwrap();
     let host = matches.get_one::<String>("host").unwrap();
     let max_queue_size = *matches.get_one::<usize>("max-queue-size").unwrap();
-    
+
     let addr = format!("{}:{}", host, port);
-    
+
     tracing::info!("Starting Gas Killer Ingress server on {}", addr);
-    
+
     start_gas_killer_ingress(addr, max_queue_size).await?;
-    
+
     Ok(())
 }

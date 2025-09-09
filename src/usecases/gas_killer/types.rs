@@ -15,12 +15,16 @@ impl GasKillerTransactionRequest {
     pub fn validate(&self) -> Result<(), ValidationError> {
         // Validate Ethereum address format for target_contract_address
         if !is_valid_ethereum_address(&self.target_contract_address) {
-            return Err(ValidationError::invalid_address("target_contract_address".to_string()));
+            return Err(ValidationError::invalid_address(
+                "target_contract_address".to_string(),
+            ));
         }
 
         // Validate Ethereum address format for caller_address
         if !is_valid_ethereum_address(&self.caller_address) {
-            return Err(ValidationError::invalid_address("caller_address".to_string()));
+            return Err(ValidationError::invalid_address(
+                "caller_address".to_string(),
+            ));
         }
 
         // Validate method signature format (e.g., "transfer(address,uint256)")
@@ -104,8 +108,11 @@ impl ValidationError {
     pub fn unsupported_chain_id(chain_id: u64) -> Self {
         let mut details = HashMap::new();
         details.insert("chain_id".to_string(), chain_id.to_string());
-        details.insert("supported_chains".to_string(), get_supported_chains().join(", "));
-        
+        details.insert(
+            "supported_chains".to_string(),
+            get_supported_chains().join(", "),
+        );
+
         Self {
             code: "UNSUPPORTED_CHAIN".to_string(),
             message: format!("Chain ID {} is not supported", chain_id),
@@ -144,7 +151,7 @@ fn is_valid_ethereum_address(address: &str) -> bool {
     if !address.starts_with("0x") {
         return false;
     }
-    
+
     let address_part = &address[2..];
     address_part.len() == 40 && address_part.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -155,19 +162,19 @@ fn is_valid_method_signature(method: &str) -> bool {
     if method.is_empty() {
         return false;
     }
-    
+
     // Check if it contains parentheses
     if let Some(paren_pos) = method.find('(') {
         if !method.ends_with(')') {
             return false;
         }
-        
+
         let function_name = &method[..paren_pos];
         // Function name should be valid identifier
         if function_name.is_empty() || !function_name.chars().next().unwrap().is_alphabetic() {
             return false;
         }
-        
+
         true
     } else {
         false
@@ -178,18 +185,18 @@ fn is_supported_chain_id(chain_id: u64) -> bool {
     // List of supported chain IDs
     // These are example chain IDs - adjust based on actual requirements
     const SUPPORTED_CHAINS: &[u64] = &[
-        1,      // Ethereum Mainnet
-        5,      // Goerli
+        1,        // Ethereum Mainnet
+        5,        // Goerli
         11155111, // Sepolia
-        17000,  // Holesky
-        137,    // Polygon
-        80001,  // Mumbai
-        42161,  // Arbitrum One
-        421613, // Arbitrum Goerli
-        10,     // Optimism
-        420,    // Optimism Goerli
+        17000,    // Holesky
+        137,      // Polygon
+        80001,    // Mumbai
+        42161,    // Arbitrum One
+        421613,   // Arbitrum Goerli
+        10,       // Optimism
+        420,      // Optimism Goerli
     ];
-    
+
     SUPPORTED_CHAINS.contains(&chain_id)
 }
 
@@ -212,7 +219,7 @@ fn is_valid_hex_string(hex: &str) -> bool {
     if hex.is_empty() {
         return true; // Empty params are valid
     }
-    
+
     // Check if it starts with 0x
     if hex.starts_with("0x") {
         let hex_part = &hex[2..];
@@ -230,11 +237,19 @@ mod tests {
 
     #[test]
     fn test_valid_ethereum_address() {
-        assert!(is_valid_ethereum_address("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0"));
-        assert!(is_valid_ethereum_address("0x0000000000000000000000000000000000000000"));
+        assert!(is_valid_ethereum_address(
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0"
+        ));
+        assert!(is_valid_ethereum_address(
+            "0x0000000000000000000000000000000000000000"
+        ));
         assert!(!is_valid_ethereum_address("0x123")); // Too short
-        assert!(!is_valid_ethereum_address("742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")); // Missing 0x
-        assert!(!is_valid_ethereum_address("0xGGGG35Cc6634C0532925a3b844Bc9e7595f0bEb0")); // Invalid hex
+        assert!(!is_valid_ethereum_address(
+            "742d35Cc6634C0532925a3b844Bc9e7595f0bEb0"
+        )); // Missing 0x
+        assert!(!is_valid_ethereum_address(
+            "0xGGGG35Cc6634C0532925a3b844Bc9e7595f0bEb0"
+        )); // Invalid hex
     }
 
     #[test]
@@ -266,21 +281,21 @@ mod tests {
             params: "0x1234567890".to_string(),
             caller_address: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0".to_string(),
         };
-        
+
         assert!(valid_request.validate().is_ok());
-        
+
         let invalid_address_request = GasKillerTransactionRequest {
             target_contract_address: "invalid".to_string(),
             ..valid_request.clone()
         };
-        
+
         assert!(invalid_address_request.validate().is_err());
-        
+
         let invalid_chain_request = GasKillerTransactionRequest {
             target_chain_id: 999999,
             ..valid_request.clone()
         };
-        
+
         assert!(invalid_chain_request.validate().is_err());
     }
 }
