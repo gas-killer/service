@@ -16,8 +16,7 @@ pub use bls::{BlsEigenlayerExecutor, convert_non_signer_data};
 pub use core::{ExecutionResult, VerificationData, VerificationExecutor};
 #[allow(unused_imports)]
 pub use gas_killer::{
-    GasKillerExecutor, ExecutionPackage, StateUpdate, 
-    GasKillerExecutionResult, GasKillerConfig
+    ExecutionPackage, GasKillerConfig, GasKillerExecutionResult, GasKillerExecutor, StateUpdate,
 };
 
 // Re-export test utilities

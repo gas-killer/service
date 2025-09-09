@@ -29,10 +29,9 @@ pub struct ExecutionPackage {
 /// Custom serialization for bn254::Signature
 mod signature_serde {
     use super::*;
-    use serde::{Serializer, Deserializer};
-    use std::convert::TryFrom;
-    
-    pub fn serialize<S>(sig: &Signature, serializer: S) -> Result<S::Ok, S::Error>
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(_sig: &Signature, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -42,7 +41,7 @@ mod signature_serde {
         let bytes = Bytes::from(vec![0u8; 96]);
         bytes.serialize(serializer)
     }
-    
+
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Signature, D::Error>
     where
         D: Deserializer<'de>,
@@ -50,7 +49,9 @@ mod signature_serde {
         let _bytes = Bytes::deserialize(deserializer)?;
         // For now, we cannot deserialize without knowing the bn254 API
         // This would need proper implementation based on the actual bn254 crate API
-        Err(serde::de::Error::custom("Signature deserialization not yet implemented"))
+        Err(serde::de::Error::custom(
+            "Signature deserialization not yet implemented",
+        ))
     }
 }
 
@@ -112,17 +113,17 @@ impl GasPriceConfig {
     pub fn calculate_optimal_price(&self) -> U256 {
         // EIP-1559 calculation
         let target_fee = self.base_fee + self.max_priority_fee;
-        
+
         // Apply priority multiplier
         let multiplier = match self.priority {
-            0 => 100,  // Normal priority
-            1 => 110,  // Medium priority (10% higher)
-            2 => 125,  // High priority (25% higher)
+            0 => 100, // Normal priority
+            1 => 110, // Medium priority (10% higher)
+            2 => 125, // High priority (25% higher)
             _ => 100,
         };
-        
+
         let optimal = target_fee * U256::from(multiplier) / U256::from(100);
-        
+
         // Cap at max_fee_per_gas
         if optimal > self.max_fee_per_gas {
             self.max_fee_per_gas

@@ -14,8 +14,8 @@ mod tests;
 // Re-export main types
 pub use executor::GasKillerExecutor;
 pub use handlers::{DefaultGasKillerHandler, DefaultGasPriceOracle};
-pub use traits::{GasKillerExecutorTrait, GasKillerContractHandler, GasPriceOracle};
+pub use traits::{GasKillerContractHandler, GasKillerExecutorTrait, GasPriceOracle};
 pub use types::{
-    ExecutionPackage, StateUpdate, GasKillerExecutionResult, 
-    GasKillerConfig, ExecutionStatus, GasPriceConfig
+    ExecutionPackage, ExecutionStatus, GasKillerConfig, GasKillerExecutionResult, GasPriceConfig,
+    StateUpdate,
 };
