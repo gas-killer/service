@@ -1,7 +1,6 @@
 use crate::executor::core::{ExecutionResult, VerificationData, VerificationExecutor};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
 use tracing::{debug, info};
 
 /// Gas Killer executor for processing gas optimization tasks
@@ -24,6 +23,12 @@ impl GasKillerExecutor {
         // Apply optimization factor
         let optimized = original_gas * (100 - self.optimization_factor) as u64 / 100;
         optimized.max(21000) // Minimum gas limit
+    }
+}
+
+impl Default for GasKillerExecutor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

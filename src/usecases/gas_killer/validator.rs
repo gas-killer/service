@@ -3,7 +3,7 @@ use crate::validator::interface::ValidatorTrait;
 use crate::wire;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use commonware_codec::{DecodeExt, ReadExt};
+use commonware_codec::DecodeExt;
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use tracing::{debug, info};
 
@@ -15,6 +15,12 @@ impl GasKillerValidator {
     pub fn new() -> Self {
         info!("Creating Gas Killer validator");
         Self {}
+    }
+}
+
+impl Default for GasKillerValidator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
