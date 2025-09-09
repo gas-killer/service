@@ -1,6 +1,5 @@
 use clap::{Arg, Command};
 use commonware_avs_router::usecases::gas_killer::start_gas_killer_ingress;
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,9 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = matches.get_one::<String>("host").unwrap();
     let max_queue_size = *matches.get_one::<usize>("max-queue-size").unwrap();
 
-    let addr = format!("{}:{}", host, port);
+    let addr = format!("{host}:{port}");
 
-    tracing::info!("Starting Gas Killer Ingress server on {}", addr);
+    tracing::info!("Starting Gas Killer Ingress server on {addr}");
 
     start_gas_killer_ingress(addr, max_queue_size).await?;
 
