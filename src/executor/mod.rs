@@ -3,6 +3,7 @@
 // Public modules
 pub mod bls;
 pub mod core;
+pub mod gas_killer;
 
 // Test module
 #[cfg(test)]
@@ -13,6 +14,11 @@ pub mod tests;
 pub use bls::{BlsEigenlayerExecutor, convert_non_signer_data};
 #[allow(unused_imports)]
 pub use core::{ExecutionResult, VerificationData, VerificationExecutor};
+#[allow(unused_imports)]
+pub use gas_killer::{
+    GasKillerExecutor, ExecutionPackage, StateUpdate, 
+    GasKillerExecutionResult, GasKillerConfig
+};
 
 // Re-export test utilities
 #[cfg(test)]
