@@ -17,13 +17,10 @@ struct AvsAddresses {
     incredible_squaring_service_manager: String,
 }
 
-// Removed unused deployment helper structs
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("🚀 Deploying ArraySummation...");
 
-    // Load environment variables
     dotenv::dotenv().ok();
 
     let http_rpc = env::var("HTTP_RPC").map_err(|_| "HTTP_RPC environment variable is required")?;
@@ -43,16 +40,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map_err(|_| "ARRAY_SUMMATION_SEED environment variable is required")?
         .parse::<u64>()
         .map_err(|_| "ARRAY_SUMMATION_SEED must be a valid number")?;
-
-    println!("📋 Configuration:");
-    println!("  RPC URL: {}", http_rpc);
-    println!(
-        "  Array Summation Factory: {}",
-        array_summation_factory_address
-    );
-    println!("  Array Size: {}", array_size);
-    println!("  Max Value: {}", max_value);
-    println!("  Seed: {}", seed);
 
     // Parse addresses
     let factory_address: Address = array_summation_factory_address
@@ -84,13 +71,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let bls_address: Address = bls_sig_check_address
         .parse()
         .map_err(|_| "Invalid BLS sig check address format")?;
-
-    println!("📋 Deployment parameters:");
-    println!("  AVS Address: {}", avs_address);
-    println!("  BLS Sig Check: {}", bls_address);
-    println!("  Array Size: {}", array_size);
-    println!("  Max Value: {}", max_value);
-    println!("  Seed: {}", seed);
 
     // Setup provider and signer
     let signer: PrivateKeySigner = private_key
@@ -146,9 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !receipt.status() {
         return Err("Transaction reverted".into());
     }
-
     println!("✅ Transaction confirmed!");
-    println!("📋 Gas used: {}", receipt.gas_used);
 
     // Get the deployed contract address
     println!("🔍 Retrieving deployed contract address...");
