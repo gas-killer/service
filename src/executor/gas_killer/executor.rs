@@ -50,6 +50,7 @@ pub struct GasKillerExecutor<H: GasKillerContractHandler> {
 
 impl<H: GasKillerContractHandler> GasKillerExecutor<H> {
     /// Create a new Gas Killer executor
+    #[allow(dead_code)]
     pub async fn new(
         config: GasKillerConfig,
         contract_handler: H,

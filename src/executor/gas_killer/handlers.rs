@@ -36,6 +36,7 @@ pub struct DefaultGasKillerHandler {
 }
 
 impl DefaultGasKillerHandler {
+    #[allow(dead_code)]
     pub fn new(provider: Box<dyn Provider>) -> Self {
         Self { provider }
     }
@@ -110,6 +111,7 @@ pub struct DefaultGasPriceOracle {
 }
 
 impl DefaultGasPriceOracle {
+    #[allow(dead_code)]
     pub fn new(provider: Box<dyn Provider>) -> Self {
         Self { provider }
     }

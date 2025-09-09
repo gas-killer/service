@@ -135,6 +135,7 @@ impl GasPriceConfig {
 
 /// Configuration for the Gas Killer executor
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GasKillerConfig {
     /// RPC endpoint URL
     pub rpc_url: String,

@@ -6,6 +6,7 @@ use super::types::{ExecutionPackage, GasKillerExecutionResult, GasPriceConfig};
 
 /// Main trait for Gas Killer executor implementation
 #[async_trait]
+#[allow(dead_code)]
 pub trait GasKillerExecutorTrait: Send + Sync {
     /// Execute a Gas Killer optimized transaction
     async fn execute_gas_killer_transaction(
@@ -56,6 +57,7 @@ pub trait GasKillerExecutorTrait: Send + Sync {
 
 /// Trait for handling Gas Killer SDK contract interactions
 #[async_trait]
+#[allow(dead_code)]
 pub trait GasKillerContractHandler: Send + Sync {
     /// Execute the optimized transaction with state updates
     async fn execute_with_state_updates(
@@ -83,6 +85,7 @@ pub trait GasKillerContractHandler: Send + Sync {
 
 /// Trait for gas price optimization strategies
 #[async_trait]
+#[allow(dead_code)]
 pub trait GasPriceOracle: Send + Sync {
     /// Get current base fee from the network
     async fn get_base_fee(&self) -> Result<U256>;
