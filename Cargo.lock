@@ -2245,6 +2245,7 @@ dependencies = [
  "commonware-eigenlayer",
  "dotenv",
  "serde",
+ "serde_json",
  "tokio",
  "url",
 ]

@@ -27,14 +27,15 @@ cleanup() {
 # Set trap for cleanup
 trap cleanup EXIT INT TERM
 
-echo -e "${GREEN}Starting BLS Signature Aggregation Integration Test${NC}"
+echo -e "${GREEN}Starting BLS Signature Aggregation + ArraySummation Integration Test${NC}"
 echo "Project root: $PROJECT_ROOT"
 echo "Logs directory: $LOG_DIR"
 
-# Step 1: Build verification script
-echo -e "${YELLOW}Step 1: Building verification script...${NC}"
+# Step 1: Build scripts
+echo -e "${YELLOW}Step 1: Building scripts...${NC}"
 cd "$PROJECT_ROOT/scripts"
-cargo build --release --bin verify_increments --quiet
+cargo build --release -p avs-scripts --bin verify_increments
+cargo build --release -p avs-scripts --bin deploy_array_summation
 cd "$PROJECT_ROOT"
 
 # Step 2: Set up environment files
@@ -71,6 +72,12 @@ sed -i '' 's|^#BLS_SIGNATURE_CHECKER_ADDRESS=|BLS_SIGNATURE_CHECKER_ADDRESS=|' .
 sed -i '' 's|^#OPERATOR_STATE_RETRIEVER_ADDRESS=|OPERATOR_STATE_RETRIEVER_ADDRESS=|' .env
 sed -i '' 's|^#ALLOCATION_MANAGER_ADDRESS=|ALLOCATION_MANAGER_ADDRESS=|' .env
 
+# Set ArraySummation deployment parameters
+sed -i '' 's|^ARRAY_SUMMATION_ARRAY_SIZE=.*|ARRAY_SUMMATION_ARRAY_SIZE=1000|' .env
+sed -i '' 's|^ARRAY_SUMMATION_MAX_VALUE=.*|ARRAY_SUMMATION_MAX_VALUE=10000|' .env
+sed -i '' 's|^ARRAY_SUMMATION_SEED=.*|ARRAY_SUMMATION_SEED=0|' .env
+sed -i '' 's|^ARRAY_SUMMATION_FACTORY_ADDRESS=.*|ARRAY_SUMMATION_FACTORY_ADDRESS=0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032|' .env
+
 echo "Environment configuration complete"
 
 # Step 3: Pull Docker images
@@ -86,7 +93,7 @@ docker compose ps
 
 # Step 5: Wait for EigenLayer setup to complete
 echo -e "${YELLOW}Step 5: Waiting for EigenLayer setup to complete...${NC}"
-timeout=300
+timeout=500
 elapsed=0
 
 while [ $elapsed -lt $timeout ]; do
@@ -112,26 +119,16 @@ fi
 echo "Waiting for nodes to initialize..."
 sleep 30
 
-# Step 6: Check service health
-echo -e "${YELLOW}Step 6: Checking service health...${NC}"
-for service in node1 node2 node3 router; do
-    if docker compose ps | grep -q "$service.*Up"; then
-        echo "Service $service is running"
-    else
-        echo -e "${YELLOW}Warning: Service $service might not be ready${NC}"
-    fi
-done
+# Step 6: Deploy ArraySummation
+echo -e "${YELLOW}Step 6: Deploying ArraySummation...${NC}"
+cd "$PROJECT_ROOT/scripts"
 
-# Step 7: Wait for aggregation cycles
-echo -e "${YELLOW}Step 7: Waiting for signature aggregation cycles...${NC}"
-echo "This will take approximately 2-3 minutes..."
-sleep 120
+# Set deployment parameters from example.env
+export ARRAY_SUMMATION_ARRAY_SIZE="${ARRAY_SUMMATION_ARRAY_SIZE:-1000}"
+export ARRAY_SUMMATION_MAX_VALUE="${ARRAY_SUMMATION_MAX_VALUE:-10000}"
+export ARRAY_SUMMATION_SEED="${ARRAY_SUMMATION_SEED:-0}"
 
-# Step 8: Verify increments
-echo -e "${YELLOW}Step 8: Verifying counter increments...${NC}"
-cd scripts
-
-# Source environment and run verification
+# Source environment and run deployment
 source ../.env
 export AVS_DEPLOYMENT_PATH="../.nodes/avs_deploy.json"
 
@@ -140,8 +137,42 @@ if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
     exit 1
 fi
 
+echo "Running ArraySummation deployment..."
+cargo run --release -p avs-scripts --bin deploy_array_summation
+
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}ArraySummation deployment completed successfully${NC}"
+else
+    echo -e "${RED}ArraySummation deployment failed${NC}"
+    exit 1
+fi
+
+cd "$PROJECT_ROOT"
+
+# Step 7: Check service health
+echo -e "${YELLOW}Step 7: Checking service health...${NC}"
+for service in node1 node2 node3 router; do
+    if docker compose ps | grep -q "$service.*Up"; then
+        echo "Service $service is running"
+    else
+        echo -e "${YELLOW}Warning: Service $service might not be ready${NC}"
+    fi
+done
+
+# Step 8: Wait for aggregation cycles
+echo -e "${YELLOW}Step 8: Waiting for signature aggregation cycles...${NC}"
+echo "This will take approximately 2-3 minutes..."
+sleep 120
+
+# Step 9: Verify increments
+echo -e "${YELLOW}Step 9: Verifying counter increments...${NC}"
+
 echo "Running verification..."
-cargo run --release --bin verify_increments
+cargo_env_avs_path=".nodes/avs_deploy.json"
+if [ -f "$cargo_env_avs_path" ]; then
+    export AVS_DEPLOYMENT_PATH="$cargo_env_avs_path"
+fi
+cargo run --release -p avs-scripts --bin verify_increments
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✅ Integration test PASSED! Counter was incremented successfully.${NC}"
