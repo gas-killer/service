@@ -1,7 +1,7 @@
 use alloy::primitives::{Address, FixedBytes};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 
 /// Task data specific to the gas killer use case
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +31,8 @@ impl Default for GasKillerTaskData {
 impl Write for GasKillerTaskData {
     fn write(&self, buf: &mut impl BufMut) {
         // Write storage updates as length-prefixed bytes
+        // Note: Using u32 for length prefix limits storage_updates to ~4.3GB
+        // This is sufficient for gas killer use cases but could be extended to u64 if needed
         (self.storage_updates.len() as u32).write(buf);
         buf.put_slice(&self.storage_updates);
 
@@ -50,6 +52,8 @@ impl Read for GasKillerTaskData {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         // Read storage updates
+        // Note: Reading u32 length prefix, matching the Write implementation
+        // This limits deserialized storage_updates to ~4.3GB
         let storage_updates_len = u32::read(buf)? as usize;
         if buf.remaining() < storage_updates_len {
             return Err(commonware_codec::Error::EndOfBuffer);
@@ -82,5 +86,18 @@ impl Read for GasKillerTaskData {
             target_address,
             target_function,
         })
+    }
+}
+
+impl EncodeSize for GasKillerTaskData {
+    fn encode_size(&self) -> usize {
+        // Calculate serialized size matching the Write implementation exactly
+        // storage_updates: u32 length prefix (4 bytes) + raw bytes
+        const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for storage_updates
+        const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index
+        const ADDRESS_SIZE: usize = 20; // target_address (Ethereum address)
+        const FUNCTION_SELECTOR_SIZE: usize = 4; // target_function (4-byte selector)
+
+        U32_SIZE + self.storage_updates.len() + U64_SIZE + ADDRESS_SIZE + FUNCTION_SELECTOR_SIZE
     }
 }
