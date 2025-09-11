@@ -60,12 +60,9 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             nonSignerStakeIndices: converted_data.nonSignerStakeIndices,
         };
 
-        // Validate that task data is provided - GasKiller requires specific task data
-        let task_data = task_data.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Requires task data for verification. Task data must include storage updates, transition index, target address, and target function."
-            )
-        })?;
+        // Validate that task data is provided
+        let task_data = task_data
+            .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
         // Extract task data parameters
         let storage_updates = Bytes::from(task_data.storage_updates.clone());
