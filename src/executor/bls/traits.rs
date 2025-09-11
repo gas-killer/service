@@ -20,15 +20,6 @@ where
 }
 
 /// Contract-specific handler for BLS signature verification in EigenLayer context
-///
-/// This trait supports both basic verification (without task data) and enhanced verification
-/// (with task data) through an optional parameter. Implementations can choose to:
-/// 1. Return an error if task data is required but not provided (recommended for safety)
-/// 2. Use default/placeholder values if task data is not provided (not recommended)
-/// 3. Use the provided task data for enhanced functionality
-///
-/// Note: It's recommended to validate task data and return clear error messages
-/// rather than using placeholder values that may cause issues later.
 #[async_trait]
 pub trait BlsSignatureVerificationHandler: Send + Sync {
     type TaskData: Send + Sync;
