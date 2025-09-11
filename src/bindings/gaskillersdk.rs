@@ -12,16 +12,10 @@ library BN254 {
     non_snake_case,
     clippy::pub_underscore_fields,
     clippy::style,
-    clippy::empty_structs_with_brackets,
-    unused_imports,
-    clippy::identity_op,
-    clippy::large_enum_variant,
-    clippy::type_complexity,
-    clippy::too_many_arguments,
-    dead_code,
-    missing_docs
+    clippy::empty_structs_with_brackets
 )]
 pub mod BN254 {
+    #[allow(unused_imports)]
     use super::*;
     use alloy::sol_types as alloy_sol_types;
     #[derive(serde::Serialize, serde::Deserialize, Default, Debug, PartialEq, Eq, Hash)]
@@ -184,6 +178,7 @@ pub mod BN254 {
         #[automatically_derived]
         impl alloy_sol_types::EventTopic for G1Point {
             #[inline]
+            #[allow(clippy::identity_op)]
             fn topic_preimage_length(rust: &Self::RustType) -> usize {
                 0usize
                     + <alloy::sol_types::sol_data::Uint<
@@ -378,6 +373,7 @@ pub mod BN254 {
         #[automatically_derived]
         impl alloy_sol_types::EventTopic for G2Point {
             #[inline]
+            #[allow(clippy::identity_op)]
             fn topic_preimage_length(rust: &Self::RustType) -> usize {
                 0usize
                     + <alloy::sol_types::sol_data::FixedArray<
@@ -835,9 +831,9 @@ pub mod IBLSSignatureCheckerTypes {
         #[automatically_derived]
         impl alloy_sol_types::EventTopic for NonSignerStakesAndSignature {
             #[inline]
+            #[allow(clippy::identity_op)]
             fn topic_preimage_length(rust: &Self::RustType) -> usize {
-                #[allow(clippy::identity_op)]
-                let result = 0usize
+                0usize
                     + <alloy::sol_types::sol_data::Array<
                         alloy::sol_types::sol_data::Uint<32>,
                     > as alloy_sol_types::EventTopic>::topic_preimage_length(
@@ -875,8 +871,7 @@ pub mod IBLSSignatureCheckerTypes {
                         >,
                     > as alloy_sol_types::EventTopic>::topic_preimage_length(
                         &rust.nonSignerStakeIndices,
-                    );
-                result
+                    )
             }
             #[inline]
             fn encode_topic_preimage(
@@ -1113,7 +1108,7 @@ interface GasKillerSDK {
     function blsSignatureChecker() external view returns (address);
     function namespace() external view returns (bytes memory);
     function stateTransitionCount() external view returns (uint256 count);
-    function verifyAndUpdate(bytes32 msgHash, bytes memory quorumNumbers, uint32 referenceBlockNumber, bytes memory storageUpdates, uint256 transitionIndex, address targetAddr, bytes4 targetFunction, IBLSSignatureCheckerTypes.NonSignerStakesAndSignature memory nonSignerStakesAndSignature) external;
+    function verifyAndUpdate(bytes32 msgHash, bytes memory quorumNumbers, uint32 referenceBlockNumber, bytes memory storageUpdates, uint256 transitionIndex, bytes4 targetFunction, IBLSSignatureCheckerTypes.NonSignerStakesAndSignature memory nonSignerStakesAndSignature) external;
 }
 ```
 
@@ -1239,11 +1234,6 @@ interface GasKillerSDK {
         "name": "transitionIndex",
         "type": "uint256",
         "internalType": "uint256"
-      },
-      {
-        "name": "targetAddr",
-        "type": "address",
-        "internalType": "address"
       },
       {
         "name": "targetFunction",
@@ -2825,9 +2815,9 @@ pub mod GasKillerSDK {
         }
     };
     #[derive(serde::Serialize, serde::Deserialize, Default, Debug, PartialEq, Eq, Hash)]
-    /**Function with signature `verifyAndUpdate(bytes32,bytes,uint32,bytes,uint256,address,bytes4,(uint32[],(uint256,uint256)[],(uint256,uint256)[],(uint256[2],uint256[2]),(uint256,uint256),uint32[],uint32[],uint32[][]))` and selector `0x8f0bb7cc`.
+    /**Function with signature `verifyAndUpdate(bytes32,bytes,uint32,bytes,uint256,bytes4,(uint32[],(uint256,uint256)[],(uint256,uint256)[],(uint256[2],uint256[2]),(uint256,uint256),uint32[],uint32[],uint32[][]))` and selector `0x93de4531`.
     ```solidity
-    function verifyAndUpdate(bytes32 msgHash, bytes memory quorumNumbers, uint32 referenceBlockNumber, bytes memory storageUpdates, uint256 transitionIndex, address targetAddr, bytes4 targetFunction, IBLSSignatureCheckerTypes.NonSignerStakesAndSignature memory nonSignerStakesAndSignature) external;
+    function verifyAndUpdate(bytes32 msgHash, bytes memory quorumNumbers, uint32 referenceBlockNumber, bytes memory storageUpdates, uint256 transitionIndex, bytes4 targetFunction, IBLSSignatureCheckerTypes.NonSignerStakesAndSignature memory nonSignerStakesAndSignature) external;
     ```*/
     #[allow(non_camel_case_types, non_snake_case, clippy::pub_underscore_fields)]
     #[derive(Clone)]
@@ -2843,13 +2833,11 @@ pub mod GasKillerSDK {
         #[allow(missing_docs)]
         pub transitionIndex: alloy::sol_types::private::primitives::aliases::U256,
         #[allow(missing_docs)]
-        pub targetAddr: alloy::sol_types::private::Address,
-        #[allow(missing_docs)]
         pub targetFunction: alloy::sol_types::private::FixedBytes<4>,
         #[allow(missing_docs)]
         pub nonSignerStakesAndSignature: <IBLSSignatureCheckerTypes::NonSignerStakesAndSignature as alloy::sol_types::SolType>::RustType,
     }
-    ///Container type for the return parameters of the [`verifyAndUpdate(bytes32,bytes,uint32,bytes,uint256,address,bytes4,(uint32[],(uint256,uint256)[],(uint256,uint256)[],(uint256[2],uint256[2]),(uint256,uint256),uint32[],uint32[],uint32[][]))`](verifyAndUpdateCall) function.
+    ///Container type for the return parameters of the [`verifyAndUpdate(bytes32,bytes,uint32,bytes,uint256,bytes4,(uint32[],(uint256,uint256)[],(uint256,uint256)[],(uint256[2],uint256[2]),(uint256,uint256),uint32[],uint32[],uint32[][]))`](verifyAndUpdateCall) function.
     #[allow(non_camel_case_types, non_snake_case, clippy::pub_underscore_fields)]
     #[derive(Clone)]
     pub struct verifyAndUpdateReturn {}
@@ -2869,7 +2857,6 @@ pub mod GasKillerSDK {
                 alloy::sol_types::sol_data::Uint<32>,
                 alloy::sol_types::sol_data::Bytes,
                 alloy::sol_types::sol_data::Uint<256>,
-                alloy::sol_types::sol_data::Address,
                 alloy::sol_types::sol_data::FixedBytes<4>,
                 IBLSSignatureCheckerTypes::NonSignerStakesAndSignature,
             );
@@ -2880,7 +2867,6 @@ pub mod GasKillerSDK {
                 u32,
                 alloy::sol_types::private::Bytes,
                 alloy::sol_types::private::primitives::aliases::U256,
-                alloy::sol_types::private::Address,
                 alloy::sol_types::private::FixedBytes<4>,
                 <IBLSSignatureCheckerTypes::NonSignerStakesAndSignature as alloy::sol_types::SolType>::RustType,
             );
@@ -2903,7 +2889,6 @@ pub mod GasKillerSDK {
                         value.referenceBlockNumber,
                         value.storageUpdates,
                         value.transitionIndex,
-                        value.targetAddr,
                         value.targetFunction,
                         value.nonSignerStakesAndSignature,
                     )
@@ -2919,9 +2904,8 @@ pub mod GasKillerSDK {
                         referenceBlockNumber: tuple.2,
                         storageUpdates: tuple.3,
                         transitionIndex: tuple.4,
-                        targetAddr: tuple.5,
-                        targetFunction: tuple.6,
-                        nonSignerStakesAndSignature: tuple.7,
+                        targetFunction: tuple.5,
+                        nonSignerStakesAndSignature: tuple.6,
                     }
                 }
             }
@@ -2963,7 +2947,6 @@ pub mod GasKillerSDK {
                 alloy::sol_types::sol_data::Uint<32>,
                 alloy::sol_types::sol_data::Bytes,
                 alloy::sol_types::sol_data::Uint<256>,
-                alloy::sol_types::sol_data::Address,
                 alloy::sol_types::sol_data::FixedBytes<4>,
                 IBLSSignatureCheckerTypes::NonSignerStakesAndSignature,
             );
@@ -2971,8 +2954,8 @@ pub mod GasKillerSDK {
             type Return = verifyAndUpdateReturn;
             type ReturnTuple<'a> = ();
             type ReturnToken<'a> = <Self::ReturnTuple<'a> as alloy_sol_types::SolType>::Token<'a>;
-            const SIGNATURE: &'static str = "verifyAndUpdate(bytes32,bytes,uint32,bytes,uint256,address,bytes4,(uint32[],(uint256,uint256)[],(uint256,uint256)[],(uint256[2],uint256[2]),(uint256,uint256),uint32[],uint32[],uint32[][]))";
-            const SELECTOR: [u8; 4] = [143u8, 11u8, 183u8, 204u8];
+            const SIGNATURE: &'static str = "verifyAndUpdate(bytes32,bytes,uint32,bytes,uint256,bytes4,(uint32[],(uint256,uint256)[],(uint256,uint256)[],(uint256[2],uint256[2]),(uint256,uint256),uint32[],uint32[],uint32[][]))";
+            const SELECTOR: [u8; 4] = [147u8, 222u8, 69u8, 49u8];
             #[inline]
             fn new<'a>(
                 tuple: <Self::Parameters<'a> as alloy_sol_types::SolType>::RustType,
@@ -2997,9 +2980,6 @@ pub mod GasKillerSDK {
                     <alloy::sol_types::sol_data::Uint<
                         256,
                     > as alloy_sol_types::SolType>::tokenize(&self.transitionIndex),
-                    <alloy::sol_types::sol_data::Address as alloy_sol_types::SolType>::tokenize(
-                        &self.targetAddr,
-                    ),
                     <alloy::sol_types::sol_data::FixedBytes<
                         4,
                     > as alloy_sol_types::SolType>::tokenize(&self.targetFunction),
@@ -3054,7 +3034,7 @@ pub mod GasKillerSDK {
             [94u8, 81u8, 11u8, 96u8],
             [94u8, 139u8, 63u8, 45u8],
             [124u8, 1u8, 90u8, 137u8],
-            [143u8, 11u8, 183u8, 204u8],
+            [147u8, 222u8, 69u8, 49u8],
             [218u8, 50u8, 76u8, 19u8],
             [239u8, 2u8, 68u8, 88u8],
             [244u8, 131u8, 62u8, 32u8],
@@ -3778,7 +3758,6 @@ pub mod GasKillerSDK {
             referenceBlockNumber: u32,
             storageUpdates: alloy::sol_types::private::Bytes,
             transitionIndex: alloy::sol_types::private::primitives::aliases::U256,
-            targetAddr: alloy::sol_types::private::Address,
             targetFunction: alloy::sol_types::private::FixedBytes<4>,
             nonSignerStakesAndSignature: <IBLSSignatureCheckerTypes::NonSignerStakesAndSignature as alloy::sol_types::SolType>::RustType,
         ) -> alloy_contract::SolCallBuilder<T, &P, verifyAndUpdateCall, N> {
@@ -3788,7 +3767,6 @@ pub mod GasKillerSDK {
                 referenceBlockNumber,
                 storageUpdates,
                 transitionIndex,
-                targetAddr,
                 targetFunction,
                 nonSignerStakesAndSignature,
             })
