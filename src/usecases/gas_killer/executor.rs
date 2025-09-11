@@ -12,14 +12,13 @@ use super::task_data::GasKillerTaskData;
 /// Handler for executing verifyAndUpdate transactions
 #[allow(dead_code)]
 pub struct GasKillerHandler {
-    gas_killer_sdk: GasKillerSDK::GasKillerSDKInstance<(), WalletProvider>,
+    provider: WalletProvider,
 }
 
 #[allow(dead_code)]
 impl GasKillerHandler {
-    pub fn new(gas_killer_address: Address, provider: WalletProvider) -> Self {
-        let gas_killer_sdk = GasKillerSDK::new(gas_killer_address, provider);
-        Self { gas_killer_sdk }
+    pub fn new(provider: WalletProvider) -> Self {
+        Self { provider }
     }
 }
 
@@ -92,9 +91,11 @@ impl BlsSignatureVerificationHandler<GasKillerTaskData> for GasKillerHandler {
         let target_addr = task_data.target_address;
         let target_function = task_data.target_function;
 
+        // Create GasKillerSDK instance dynamically using target_address from task data
+        let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
+
         // Execute the gas killer verifyAndUpdate
-        let call_return = self
-            .gas_killer_sdk
+        let call_return = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
                 quorum_numbers,

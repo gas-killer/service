@@ -120,7 +120,13 @@ async fn test_mock_verification_handler_success() {
     };
 
     let result = handler
-        .handle_verification(msg_hash, quorum_numbers, current_block_number, mock_data, None)
+        .handle_verification(
+            msg_hash,
+            quorum_numbers,
+            current_block_number,
+            mock_data,
+            None,
+        )
         .await;
 
     assert!(result.is_ok());
@@ -168,7 +174,13 @@ async fn test_verification_handler_trait_success() {
     };
 
     let result = handler
-        .handle_verification(msg_hash, quorum_numbers, current_block_number, mock_data, None)
+        .handle_verification(
+            msg_hash,
+            quorum_numbers,
+            current_block_number,
+            mock_data,
+            None,
+        )
         .await;
 
     assert!(result.is_ok());
@@ -218,7 +230,13 @@ async fn test_verification_handler_trait_failure() {
     };
 
     let result = handler
-        .handle_verification(msg_hash, quorum_numbers, current_block_number, mock_data, None)
+        .handle_verification(
+            msg_hash,
+            quorum_numbers,
+            current_block_number,
+            mock_data,
+            None,
+        )
         .await;
 
     assert!(result.is_err());
