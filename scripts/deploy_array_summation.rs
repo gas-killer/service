@@ -1,7 +1,7 @@
 use alloy::primitives::{Address, U256};
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
-use commonware_avs_router::usecases::gas_killer::bindings::arraysummationfactory::ArraySummationFactory;
+use bindings::arraysummationfactory::ArraySummationFactory;
 use serde::Deserialize;
 use std::env;
 use std::fs;
