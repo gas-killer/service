@@ -30,16 +30,15 @@ where
 /// Note: It's recommended to validate task data and return clear error messages
 /// rather than using placeholder values that may cause issues later.
 #[async_trait]
-pub trait BlsSignatureVerificationHandler<T = ()>: Send + Sync
-where
-    T: Send + Sync,
-{
+pub trait BlsSignatureVerificationHandler: Send + Sync {
+    type TaskData: Send + Sync;
+
     async fn handle_verification(
         &mut self,
         msg_hash: FixedBytes<32>,
         quorum_numbers: Bytes,
         current_block_number: u32,
         non_signer_data: getNonSignerStakesAndSignatureReturn,
-        task_data: Option<&T>,
+        task_data: Option<&Self::TaskData>,
     ) -> Result<crate::executor::core::ExecutionResult>;
 }

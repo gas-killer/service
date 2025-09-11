@@ -13,8 +13,6 @@ use anyhow::Result;
 use commonware_eigenlayer::config::AvsDeployment;
 use std::{env, str::FromStr};
 
-use super::creator::CounterTaskData;
-
 /// Factory function to create a default creator
 pub async fn create_creator() -> anyhow::Result<CounterCreatorType> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
@@ -66,8 +64,7 @@ pub async fn create_listening_creator_with_server(
 }
 
 /// Creates a new BlsEigenlayerExecutor configured for Counter operations
-pub async fn create_counter_executor()
--> Result<BlsEigenlayerExecutor<CounterHandler, CounterTaskData>> {
+pub async fn create_counter_executor() -> Result<BlsEigenlayerExecutor<CounterHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let view_only_provider = ProviderBuilder::new().on_http(url::Url::parse(&http_rpc).unwrap());
 

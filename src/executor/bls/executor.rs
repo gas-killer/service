@@ -11,29 +11,22 @@ use async_trait::async_trait;
 use bn254::{G1PublicKey, PublicKey};
 use commonware_utils::hex;
 use eigen_crypto_bls::convert_to_g1_point;
-use std::{collections::HashMap, marker::PhantomData, str::FromStr};
+use std::{collections::HashMap, str::FromStr};
 use tracing::debug;
 
 use super::traits::{BlsExecutorTrait, BlsSignatureVerificationHandler};
 use super::types::BlsVerificationData;
 
-pub struct BlsEigenlayerExecutor<H: BlsSignatureVerificationHandler<T>, T = ()>
-where
-    T: Send + Sync,
-{
+pub struct BlsEigenlayerExecutor<H> {
     view_only_provider: ReadOnlyProvider,
     bls_apk_registry: BLSApkRegistryInstance<(), ReadOnlyProvider>,
     bls_operator_state_retriever: BLSSigCheckOperatorStateRetrieverInstance<(), ReadOnlyProvider>,
     registry_coordinator_address: Address,
     contract_handler: H,
     g1_hash_map: HashMap<PublicKey, Address>,
-    _phantom: PhantomData<T>,
 }
 
-impl<H: BlsSignatureVerificationHandler<T>, T> BlsEigenlayerExecutor<H, T>
-where
-    T: Send + Sync,
-{
+impl<H> BlsEigenlayerExecutor<H> {
     pub fn new(
         view_only_provider: ReadOnlyProvider,
         bls_apk_registry: BLSApkRegistryInstance<(), ReadOnlyProvider>,
@@ -51,7 +44,6 @@ where
             registry_coordinator_address,
             contract_handler,
             g1_hash_map: HashMap::new(),
-            _phantom: PhantomData,
         }
     }
 
@@ -91,16 +83,14 @@ where
 }
 
 #[async_trait]
-impl<H: BlsSignatureVerificationHandler<T>, T> VerificationExecutor<T>
-    for BlsEigenlayerExecutor<H, T>
-where
-    T: Send + Sync,
+impl<H: BlsSignatureVerificationHandler> VerificationExecutor<H::TaskData>
+    for BlsEigenlayerExecutor<H>
 {
     async fn execute_verification(
         &mut self,
         payload_hash: &[u8],
         verification_data: VerificationData,
-        task_data: Option<&T>,
+        task_data: Option<&H::TaskData>,
     ) -> Result<ExecutionResult> {
         let g1_public_keys = if let Some(context) = verification_data.context {
             // Each G1 public key is stored in compressed format (32 bytes)
@@ -146,15 +136,14 @@ where
 }
 
 #[async_trait]
-impl<H: BlsSignatureVerificationHandler<T>, T> BlsExecutorTrait<T> for BlsEigenlayerExecutor<H, T>
-where
-    T: Send + Sync,
+impl<H: BlsSignatureVerificationHandler> BlsExecutorTrait<H::TaskData>
+    for BlsEigenlayerExecutor<H>
 {
     async fn execute_bls_verification(
         &mut self,
         payload_hash: &[u8],
         verification_data: BlsVerificationData,
-        task_data: Option<&T>,
+        task_data: Option<&H::TaskData>,
     ) -> Result<ExecutionResult> {
         let participating_g1 = &verification_data.g1_public_keys;
         let participating = &verification_data.public_keys;
