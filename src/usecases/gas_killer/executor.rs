@@ -23,14 +23,15 @@ impl GasKillerHandler {
 }
 
 #[async_trait]
-impl BlsSignatureVerificationHandler<GasKillerTaskData> for GasKillerHandler {
+impl BlsSignatureVerificationHandler for GasKillerHandler {
+    type TaskData = GasKillerTaskData;
     async fn handle_verification(
         &mut self,
         msg_hash: FixedBytes<32>,
         quorum_numbers: Bytes,
         current_block_number: u32,
         non_signer_data: getNonSignerStakesAndSignatureReturn,
-        task_data: Option<&GasKillerTaskData>,
+        task_data: Option<&Self::TaskData>,
     ) -> Result<ExecutionResult> {
         // Convert the non-signer data to the format expected by the GasKillerSDK
         let converted_data = convert_non_signer_data(non_signer_data);
