@@ -3,7 +3,7 @@ use crate::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorState
 use crate::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes};
 use crate::executor::bls::{BlsSignatureVerificationHandler, convert_non_signer_data};
 use crate::executor::core::ExecutionResult;
-use alloy_primitives::{Address, Bytes, FixedBytes, U256};
+use alloy_primitives::{Bytes, FixedBytes, U256};
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -67,26 +67,7 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             )
         })?;
 
-        // Validate task data parameters
-        if task_data.storage_updates.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Task data validation failed: storage_updates cannot be empty"
-            ));
-        }
-
-        if task_data.target_address == Address::ZERO {
-            return Err(anyhow::anyhow!(
-                "Task data validation failed: target_address cannot be zero address"
-            ));
-        }
-
-        if task_data.target_function == FixedBytes::ZERO {
-            return Err(anyhow::anyhow!(
-                "Task data validation failed: target_function cannot be zero"
-            ));
-        }
-
-        // Extract validated task data parameters
+        // Extract task data parameters
         let storage_updates = Bytes::from(task_data.storage_updates.clone());
         let transition_index = U256::from(task_data.transition_index);
         let target_addr = task_data.target_address;
