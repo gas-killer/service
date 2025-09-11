@@ -22,14 +22,15 @@ impl Default for MockVerificationHandler {
 }
 
 #[async_trait]
-impl BlsSignatureVerificationHandler<()> for MockVerificationHandler {
+impl BlsSignatureVerificationHandler for MockVerificationHandler {
+    type TaskData = ();
     async fn handle_verification(
         &mut self,
         _msg_hash: FixedBytes<32>,
         _quorum_numbers: Bytes,
         _current_block_number: u32,
         _non_signer_data: getNonSignerStakesAndSignatureReturn,
-        _task_data: Option<&()>,
+        _task_data: Option<&Self::TaskData>,
     ) -> Result<ExecutionResult> {
         // Mock implementation returns success with dummy values
         Ok(ExecutionResult {
@@ -60,14 +61,15 @@ impl TestBlsSignatureVerificationHandler {
 }
 
 #[async_trait]
-impl BlsSignatureVerificationHandler<()> for TestBlsSignatureVerificationHandler {
+impl BlsSignatureVerificationHandler for TestBlsSignatureVerificationHandler {
+    type TaskData = ();
     async fn handle_verification(
         &mut self,
         _msg_hash: FixedBytes<32>,
         _quorum_numbers: Bytes,
         _current_block_number: u32,
         _non_signer_data: getNonSignerStakesAndSignatureReturn,
-        _task_data: Option<&()>,
+        _task_data: Option<&Self::TaskData>,
     ) -> Result<ExecutionResult> {
         self.call_count += 1;
 

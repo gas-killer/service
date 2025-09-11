@@ -1,7 +1,7 @@
 use crate::bindings::blsapkregistry::BLSApkRegistry;
 use crate::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorStateRetriever;
 use crate::executor::bls::BlsEigenlayerExecutor;
-use crate::usecases::gas_killer::{GasKillerHandler, GasKillerTaskData};
+use crate::usecases::gas_killer::GasKillerHandler;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
@@ -10,8 +10,7 @@ use std::{env, str::FromStr};
 
 /// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations
 #[allow(dead_code)]
-pub async fn create_gas_killer_executor()
--> Result<BlsEigenlayerExecutor<GasKillerHandler, GasKillerTaskData>> {
+pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let view_only_provider = ProviderBuilder::new().on_http(url::Url::parse(&http_rpc).unwrap());
 
