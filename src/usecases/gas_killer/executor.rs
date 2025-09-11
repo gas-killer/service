@@ -70,8 +70,8 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         // Extract task data parameters
         let storage_updates = Bytes::from(task_data.storage_updates.clone());
         let transition_index = U256::from(task_data.transition_index);
-        let target_addr = task_data.target_address;
         let target_function = task_data.target_function;
+        let target_addr = task_data.target_address;
 
         // Create GasKillerSDK instance dynamically using target_address from task data
         let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
@@ -84,7 +84,6 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
                 current_block_number,
                 storage_updates,
                 transition_index,
-                target_addr,
                 target_function,
                 non_signer_struct_data,
             )
