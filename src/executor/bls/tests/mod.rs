@@ -22,13 +22,14 @@ impl Default for MockVerificationHandler {
 }
 
 #[async_trait]
-impl BlsSignatureVerificationHandler for MockVerificationHandler {
+impl BlsSignatureVerificationHandler<()> for MockVerificationHandler {
     async fn handle_verification(
         &mut self,
         _msg_hash: FixedBytes<32>,
         _quorum_numbers: Bytes,
         _current_block_number: u32,
         _non_signer_data: getNonSignerStakesAndSignatureReturn,
+        _task_data: Option<&()>,
     ) -> Result<ExecutionResult> {
         // Mock implementation returns success with dummy values
         Ok(ExecutionResult {
@@ -59,13 +60,14 @@ impl TestBlsSignatureVerificationHandler {
 }
 
 #[async_trait]
-impl BlsSignatureVerificationHandler for TestBlsSignatureVerificationHandler {
+impl BlsSignatureVerificationHandler<()> for TestBlsSignatureVerificationHandler {
     async fn handle_verification(
         &mut self,
         _msg_hash: FixedBytes<32>,
         _quorum_numbers: Bytes,
         _current_block_number: u32,
         _non_signer_data: getNonSignerStakesAndSignatureReturn,
+        _task_data: Option<&()>,
     ) -> Result<ExecutionResult> {
         self.call_count += 1;
 
@@ -118,7 +120,7 @@ async fn test_mock_verification_handler_success() {
     };
 
     let result = handler
-        .handle_verification(msg_hash, quorum_numbers, current_block_number, mock_data)
+        .handle_verification(msg_hash, quorum_numbers, current_block_number, mock_data, None)
         .await;
 
     assert!(result.is_ok());
@@ -166,7 +168,7 @@ async fn test_verification_handler_trait_success() {
     };
 
     let result = handler
-        .handle_verification(msg_hash, quorum_numbers, current_block_number, mock_data)
+        .handle_verification(msg_hash, quorum_numbers, current_block_number, mock_data, None)
         .await;
 
     assert!(result.is_ok());
@@ -216,7 +218,7 @@ async fn test_verification_handler_trait_failure() {
     };
 
     let result = handler
-        .handle_verification(msg_hash, quorum_numbers, current_block_number, mock_data)
+        .handle_verification(msg_hash, quorum_numbers, current_block_number, mock_data, None)
         .await;
 
     assert!(result.is_err());

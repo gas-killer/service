@@ -7,6 +7,8 @@ use alloy_primitives::{Bytes, FixedBytes};
 use anyhow::Result;
 use async_trait::async_trait;
 
+use super::creator::CounterTaskData;
+
 pub struct CounterHandler {
     counter: Counter::CounterInstance<(), WalletProvider>,
 }
@@ -18,13 +20,14 @@ impl CounterHandler {
 }
 
 #[async_trait]
-impl BlsSignatureVerificationHandler for CounterHandler {
+impl BlsSignatureVerificationHandler<CounterTaskData> for CounterHandler {
     async fn handle_verification(
         &mut self,
         msg_hash: FixedBytes<32>,
         quorum_numbers: Bytes,
         current_block_number: u32,
         non_signer_data: getNonSignerStakesAndSignatureReturn,
+        _task_data: Option<&CounterTaskData>,
     ) -> Result<ExecutionResult> {
         let converted_data = convert_non_signer_data(non_signer_data);
         let non_signer_struct_data =
