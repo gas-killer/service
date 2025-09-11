@@ -574,8 +574,8 @@ pub mod ArraySummationFactory {
                 )
             }
             #[inline]
-            fn eip712_components()
-            -> alloy_sol_types::private::Vec<alloy_sol_types::private::Cow<'static, str>>
+            fn eip712_components(
+            ) -> alloy_sol_types::private::Vec<alloy_sol_types::private::Cow<'static, str>>
             {
                 alloy_sol_types::private::Vec::new()
             }
@@ -2649,10 +2649,10 @@ pub mod ArraySummationFactory {
     /// Instantiation and getters/setters.
     #[automatically_derived]
     impl<
-        T: alloy_contract::private::Transport + ::core::clone::Clone,
-        P: alloy_contract::private::Provider<T, N>,
-        N: alloy_contract::private::Network,
-    > ArraySummationFactoryInstance<T, P, N>
+            T: alloy_contract::private::Transport + ::core::clone::Clone,
+            P: alloy_contract::private::Provider<T, N>,
+            N: alloy_contract::private::Network,
+        > ArraySummationFactoryInstance<T, P, N>
     {
         /**Creates a new wrapper around an on-chain [`ArraySummationFactory`](self) contract instance.
 
@@ -2725,10 +2725,10 @@ pub mod ArraySummationFactory {
     /// Function calls.
     #[automatically_derived]
     impl<
-        T: alloy_contract::private::Transport + ::core::clone::Clone,
-        P: alloy_contract::private::Provider<T, N>,
-        N: alloy_contract::private::Network,
-    > ArraySummationFactoryInstance<T, P, N>
+            T: alloy_contract::private::Transport + ::core::clone::Clone,
+            P: alloy_contract::private::Provider<T, N>,
+            N: alloy_contract::private::Network,
+        > ArraySummationFactoryInstance<T, P, N>
     {
         /// Creates a new call builder using this contract instance's provider and address.
         ///
@@ -2826,10 +2826,10 @@ pub mod ArraySummationFactory {
     /// Event filters.
     #[automatically_derived]
     impl<
-        T: alloy_contract::private::Transport + ::core::clone::Clone,
-        P: alloy_contract::private::Provider<T, N>,
-        N: alloy_contract::private::Network,
-    > ArraySummationFactoryInstance<T, P, N>
+            T: alloy_contract::private::Transport + ::core::clone::Clone,
+            P: alloy_contract::private::Provider<T, N>,
+            N: alloy_contract::private::Network,
+        > ArraySummationFactoryInstance<T, P, N>
     {
         /// Creates a new event filter using this contract instance's provider and address.
         ///
