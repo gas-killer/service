@@ -33,7 +33,15 @@ impl Write for GasKillerTaskData {
         // Write storage updates as length-prefixed bytes
         // Note: Using u32 for length prefix limits storage_updates to ~4.3GB
         // This is sufficient for gas killer use cases but could be extended to u64 if needed
-        (self.storage_updates.len() as u32).write(buf);
+        let len = self.storage_updates.len();
+        if len > u32::MAX as usize {
+            panic!(
+                "storage_updates length ({}) exceeds u32::MAX ({})",
+                len,
+                u32::MAX
+            );
+        }
+        (len as u32).write(buf);
         buf.put_slice(&self.storage_updates);
 
         // Write transition index as u64
