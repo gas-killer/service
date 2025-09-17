@@ -140,6 +140,13 @@ impl EncodeSize for GasKillerTaskData {
         const ADDRESS_SIZE: usize = 20; // target_address (Ethereum address)
         const FUNCTION_SELECTOR_SIZE: usize = 4; // target_function (4-byte selector)
 
-        U32_SIZE + self.storage_updates.len() + U64_SIZE + ADDRESS_SIZE + FUNCTION_SELECTOR_SIZE + U64_SIZE + U32_SIZE + self.call_data.len()
+        U32_SIZE
+            + self.storage_updates.len()
+            + U64_SIZE
+            + ADDRESS_SIZE
+            + FUNCTION_SELECTOR_SIZE
+            + U64_SIZE
+            + U32_SIZE
+            + self.call_data.len()
     }
 }

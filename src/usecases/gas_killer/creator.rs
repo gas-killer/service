@@ -81,7 +81,7 @@ impl GasKillerCreator {
             transition_index,
             target_address: self.config.target_address,
             target_function: self.config.target_function,
-            gas_savings: 1000, // Mock gas savings
+            gas_savings: 1000,                        // Mock gas savings
             call_data: self.config.call_data.clone(), // Use call data from config
         };
 
