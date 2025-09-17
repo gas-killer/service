@@ -15,6 +15,10 @@ pub struct GasKillerTaskData {
     pub target_address: Address,
     /// Function selector for target call (4 bytes)
     pub target_function: FixedBytes<4>,
+    /// Estimated gas savings from the analysis
+    pub gas_savings: u64,
+    /// Call data for the transaction (includes function selector + parameters)
+    pub call_data: Vec<u8>,
 }
 
 impl Default for GasKillerTaskData {
@@ -24,6 +28,8 @@ impl Default for GasKillerTaskData {
             transition_index: 0,
             target_address: Address::ZERO,
             target_function: FixedBytes::ZERO,
+            gas_savings: 0,
+            call_data: vec![],
         }
     }
 }
@@ -52,6 +58,21 @@ impl Write for GasKillerTaskData {
 
         // Write target function selector as 4 bytes
         buf.put_slice(self.target_function.as_slice());
+
+        // Write gas savings as u64
+        self.gas_savings.write(buf);
+
+        // Write call data as length-prefixed bytes
+        let call_data_len = self.call_data.len();
+        if call_data_len > u32::MAX as usize {
+            panic!(
+                "call_data length ({}) exceeds u32::MAX ({})",
+                call_data_len,
+                u32::MAX
+            );
+        }
+        (call_data_len as u32).write(buf);
+        buf.put_slice(&self.call_data);
     }
 }
 
@@ -88,11 +109,24 @@ impl Read for GasKillerTaskData {
         buf.copy_to_slice(&mut function_bytes);
         let target_function = FixedBytes::from_slice(&function_bytes);
 
+        // Read gas savings
+        let gas_savings = u64::read(buf)?;
+
+        // Read call data
+        let call_data_len = u32::read(buf)? as usize;
+        if buf.remaining() < call_data_len {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut call_data = vec![0u8; call_data_len];
+        buf.copy_to_slice(&mut call_data);
+
         Ok(Self {
             storage_updates,
             transition_index,
             target_address,
             target_function,
+            gas_savings,
+            call_data,
         })
     }
 }
@@ -101,11 +135,11 @@ impl EncodeSize for GasKillerTaskData {
     fn encode_size(&self) -> usize {
         // Calculate serialized size matching the Write implementation exactly
         // storage_updates: u32 length prefix (4 bytes) + raw bytes
-        const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for storage_updates
-        const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index
+        const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for storage_updates and call_data
+        const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index and gas_savings
         const ADDRESS_SIZE: usize = 20; // target_address (Ethereum address)
         const FUNCTION_SELECTOR_SIZE: usize = 4; // target_function (4-byte selector)
 
-        U32_SIZE + self.storage_updates.len() + U64_SIZE + ADDRESS_SIZE + FUNCTION_SELECTOR_SIZE
+        U32_SIZE + self.storage_updates.len() + U64_SIZE + ADDRESS_SIZE + FUNCTION_SELECTOR_SIZE + U64_SIZE + U32_SIZE + self.call_data.len()
     }
 }
