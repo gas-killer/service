@@ -1,10 +1,14 @@
 use alloy::primitives::{Address, FixedBytes};
 use alloy::sol_types::SolValue;
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::{
+    env,
+    sync::{Arc, Mutex},
+};
 use tracing::info;
 
 use crate::creator::core::Creator;
+use crate::usecases::gas_killer::storage_validator::StorageValidator;
 use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 
 /// Configuration for the gas analyzer
@@ -28,7 +32,8 @@ pub struct GasAnalyzerConfig {
 impl Default for GasAnalyzerConfig {
     fn default() -> Self {
         Self {
-            fork_rpc_url: "https://ethereum-holesky.publicnode.com".to_string(),
+            fork_rpc_url: env::var("RPC_URL")
+                .unwrap_or_else(|_| "https://ethereum-holesky.publicnode.com".to_string()),
             fork_block: "latest".to_string(),
             target_address: Address::ZERO,
             target_function: FixedBytes::ZERO,
@@ -63,35 +68,6 @@ impl GasKillerCreator {
         }
     }
 
-    /// Runs gas analysis using the gas-analyzer-rs library
-    #[allow(dead_code)]
-    async fn run_gas_analysis(&self) -> Result<GasKillerTaskData> {
-        info!("Starting gas analysis with config: {:?}", self.config);
-
-        // TODO: Implement actual gas analysis using gas-analyzer-rs
-        // For now, return mock data
-        let transition_index = {
-            let current_round = self.current_round.lock().unwrap();
-            *current_round
-        };
-
-        // Create task data with mock analysis results
-        let task_data = GasKillerTaskData {
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04], // Mock storage updates
-            transition_index,
-            target_address: self.config.target_address,
-            target_function: self.config.target_function,
-            gas_savings: 1000,                        // Mock gas savings
-            call_data: self.config.call_data.clone(), // Use call data from config
-        };
-
-        info!(
-            "Mock gas analysis completed. Estimated gas: {}",
-            task_data.gas_savings
-        );
-        Ok(task_data)
-    }
-
     /// Creates payload bytes from the task data
     ///
     /// The payload is deterministically encoded from the task data to ensure
@@ -115,19 +91,51 @@ impl GasKillerCreator {
 impl Creator for GasKillerCreator {
     type TaskData = GasKillerTaskData;
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
-        // TODO: Implement actual gas analysis
-        // For now, return default task data
-        let task_data = GasKillerTaskData::default();
+        info!("Starting gas analysis for creator");
 
-        let payload = self.create_payload_from_task_data(&task_data)?;
-
-        // Increment round
+        // Get the next round number
         let current_round = {
             let mut round = self.current_round.lock().unwrap();
             *round += 1;
             *round
         };
 
+        // Create storage validator for real gas analysis
+        let storage_validator = StorageValidator::from_env()?;
+
+        // Use storage validator to get complete analysis results
+        // This performs the same gas analysis as the validator
+        let analysis_result = storage_validator
+            .perform_complete_analysis(
+                self.config.target_address,
+                self.config.target_function,
+                &self.config.call_data,
+                1000000, // Default gas limit for analysis
+            )
+            .await?;
+
+        // Calculate gas savings (difference between gas limit and actual estimate)
+        let gas_savings = analysis_result
+            .gas_limit_used
+            .saturating_sub(analysis_result.gas_estimate);
+
+        // Use the gas estimate as the optimal gas limit for the actual transaction
+        let optimal_gas_limit = analysis_result.gas_estimate;
+
+        // Create task data with real analysis results
+        let task_data = GasKillerTaskData {
+            storage_updates: analysis_result.storage_updates,
+            transition_index: current_round,
+            target_address: self.config.target_address,
+            target_function: self.config.target_function,
+            gas_savings,
+            gas_limit: optimal_gas_limit,
+            call_data: self.config.call_data.clone(),
+        };
+
+        let payload = self.create_payload_from_task_data(&task_data)?;
+
+        info!("Gas analysis completed for round {}", current_round);
         Ok((payload, current_round))
     }
 
@@ -178,6 +186,7 @@ mod tests {
             target_address: Address::from([1u8; 20]),
             target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
             gas_savings: 1000,
+            gas_limit: 1000000,
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
         };
 
@@ -212,6 +221,7 @@ mod tests {
             target_address: Address::from([1u8; 20]),
             target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
             gas_savings: 1000,
+            gas_limit: 1000000,
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
         };
 

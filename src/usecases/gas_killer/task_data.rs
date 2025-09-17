@@ -17,6 +17,8 @@ pub struct GasKillerTaskData {
     pub target_function: FixedBytes<4>,
     /// Estimated gas savings from the analysis
     pub gas_savings: u64,
+    /// Gas limit for the transaction
+    pub gas_limit: u64,
     /// Call data for the transaction (includes function selector + parameters)
     pub call_data: Vec<u8>,
 }
@@ -29,6 +31,7 @@ impl Default for GasKillerTaskData {
             target_address: Address::ZERO,
             target_function: FixedBytes::ZERO,
             gas_savings: 0,
+            gas_limit: 1000000, // Default gas limit
             call_data: vec![],
         }
     }
@@ -61,6 +64,9 @@ impl Write for GasKillerTaskData {
 
         // Write gas savings as u64
         self.gas_savings.write(buf);
+
+        // Write gas limit as u64
+        self.gas_limit.write(buf);
 
         // Write call data as length-prefixed bytes
         let call_data_len = self.call_data.len();
@@ -112,6 +118,9 @@ impl Read for GasKillerTaskData {
         // Read gas savings
         let gas_savings = u64::read(buf)?;
 
+        // Read gas limit
+        let gas_limit = u64::read(buf)?;
+
         // Read call data
         let call_data_len = u32::read(buf)? as usize;
         if buf.remaining() < call_data_len {
@@ -126,6 +135,7 @@ impl Read for GasKillerTaskData {
             target_address,
             target_function,
             gas_savings,
+            gas_limit,
             call_data,
         })
     }
@@ -136,7 +146,7 @@ impl EncodeSize for GasKillerTaskData {
         // Calculate serialized size matching the Write implementation exactly
         // storage_updates: u32 length prefix (4 bytes) + raw bytes
         const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for storage_updates and call_data
-        const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index and gas_savings
+        const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index, gas_savings, and gas_limit
         const ADDRESS_SIZE: usize = 20; // target_address (Ethereum address)
         const FUNCTION_SELECTOR_SIZE: usize = 4; // target_function (4-byte selector)
 
@@ -145,6 +155,7 @@ impl EncodeSize for GasKillerTaskData {
             + U64_SIZE
             + ADDRESS_SIZE
             + FUNCTION_SELECTOR_SIZE
+            + U64_SIZE
             + U64_SIZE
             + U32_SIZE
             + self.call_data.len()
