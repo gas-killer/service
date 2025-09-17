@@ -31,9 +31,19 @@ impl Default for GasKillerTaskData {
             target_address: Address::ZERO,
             target_function: FixedBytes::ZERO,
             gas_savings: 0,
-            gas_limit: 1000000, // Default gas limit
+            gas_limit: Self::get_default_gas_limit(),
             call_data: vec![],
         }
+    }
+}
+
+impl GasKillerTaskData {
+    /// Gets the default gas limit from environment variable with fallback to unlimited for simulations
+    fn get_default_gas_limit() -> u64 {
+        std::env::var("GAS_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(u32::MAX as u64) // Unlimited gas for simulations
     }
 }
 

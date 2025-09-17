@@ -50,6 +50,14 @@ impl StorageValidator {
         }
     }
 
+    /// Gets the gas limit from environment variable with fallback to unlimited for simulations
+    fn get_gas_limit() -> u64 {
+        env::var("GAS_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(u32::MAX as u64) // Unlimited gas for simulations
+    }
+
     /// Internal method that performs the core gas analysis using gas-analyzer-rs
     ///
     /// This method contains the shared logic for:
@@ -62,7 +70,6 @@ impl StorageValidator {
         call_data: &[u8],
         gas_limit: u64,
     ) -> Result<GasAnalysisResult> {
-        // Get and parse the RPC URL
         let rpc_url_str = self.get_rpc_url()?;
         let rpc_url =
             Url::parse(&rpc_url_str).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
@@ -77,7 +84,7 @@ impl StorageValidator {
             ..Default::default()
         };
 
-        // Initialize GasKiller
+        // Initialize GasKiller instance (spawns new Anvil process)
         let gk = GasKillerDefault::new(rpc_url.clone(), None)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize GasKiller: {}", e))?;
@@ -88,11 +95,13 @@ impl StorageValidator {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to compute state updates: {}", e))?;
 
-        Ok(GasAnalysisResult {
+        let result = GasAnalysisResult {
             storage_updates: encoded_updates.to_vec(),
             gas_estimate,
             gas_limit_used: gas_limit,
-        })
+        };
+
+        Ok(result)
     }
 
     /// Validates storage updates by replaying the transaction locally
@@ -167,7 +176,7 @@ impl StorageValidator {
 
         // Get actual storage updates using shared logic
         let analysis_result = self
-            .perform_gas_analysis(contract_address, call_data, 1000000)
+            .perform_gas_analysis(contract_address, call_data, Self::get_gas_limit())
             .await?;
 
         info!(
@@ -263,7 +272,7 @@ mod tests {
             target_address: contract_address,
             target_function: function_selector,
             gas_savings: 1000,
-            gas_limit: 1000000,
+            gas_limit: StorageValidator::get_gas_limit(),
             call_data: call_data.clone(),
         };
 

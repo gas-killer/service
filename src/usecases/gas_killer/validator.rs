@@ -217,6 +217,14 @@ mod tests {
     use commonware_codec::{EncodeSize, Write};
     use std::env;
 
+    /// Gets the gas limit from environment variable with fallback to unlimited for simulations
+    fn get_gas_limit() -> u64 {
+        std::env::var("GAS_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(u32::MAX as u64) // Unlimited gas for simulations
+    }
+
     fn create_test_task_data() -> GasKillerTaskData {
         GasKillerTaskData {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04],
@@ -224,7 +232,7 @@ mod tests {
             target_address: Address::from([1u8; 20]),
             target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
             gas_savings: 1000,
-            gas_limit: 1000000,
+            gas_limit: get_gas_limit(),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01], // function selector + params
         }
     }
@@ -406,7 +414,7 @@ mod tests {
             target_address: contract_address,
             target_function: function_selector,
             gas_savings: 1000,
-            gas_limit: 1000000,
+            gas_limit: get_gas_limit(),
             call_data: call_data.clone(),
         };
 

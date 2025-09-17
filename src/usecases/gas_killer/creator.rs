@@ -47,25 +47,37 @@ pub struct GasKillerCreator {
     #[allow(dead_code)]
     config: GasAnalyzerConfig,
     current_round: Arc<Mutex<u64>>,
+    storage_validator: StorageValidator,
 }
 
 impl GasKillerCreator {
+    fn get_gas_limit() -> u64 {
+        std::env::var("GAS_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(u32::MAX as u64) // Unlimited gas for simulations
+    }
+
     /// Creates a new GasKillerCreator with the given configuration
     #[allow(dead_code)]
-    pub fn new(config: GasAnalyzerConfig) -> Self {
-        Self {
+    pub fn new(config: GasAnalyzerConfig) -> Result<Self> {
+        let storage_validator = StorageValidator::from_env()?;
+        Ok(Self {
             config,
             current_round: Arc::new(Mutex::new(0)),
-        }
+            storage_validator,
+        })
     }
 
     /// Creates a new GasKillerCreator with a specific starting round
     #[allow(dead_code)]
-    pub fn with_round(config: GasAnalyzerConfig, starting_round: u64) -> Self {
-        Self {
+    pub fn with_round(config: GasAnalyzerConfig, starting_round: u64) -> Result<Self> {
+        let storage_validator = StorageValidator::from_env()?;
+        Ok(Self {
             config,
             current_round: Arc::new(Mutex::new(starting_round)),
-        }
+            storage_validator,
+        })
     }
 
     /// Creates payload bytes from the task data
@@ -100,17 +112,15 @@ impl Creator for GasKillerCreator {
             *round
         };
 
-        // Create storage validator for real gas analysis
-        let storage_validator = StorageValidator::from_env()?;
-
-        // Use storage validator to get complete analysis results
+        // Use the stored storage validator for real gas analysis
         // This performs the same gas analysis as the validator
-        let analysis_result = storage_validator
+        let analysis_result = self
+            .storage_validator
             .perform_complete_analysis(
                 self.config.target_address,
                 self.config.target_function,
                 &self.config.call_data,
-                1000000, // Default gas limit for analysis
+                Self::get_gas_limit(), // Configurable gas limit for analysis
             )
             .await?;
 
@@ -161,24 +171,54 @@ mod tests {
         }
     }
 
+    /// Helper function to set up RPC_URL environment variable for tests
+    fn setup_test_env() -> Option<String> {
+        let original_rpc_url = std::env::var("RPC_URL").ok();
+        if original_rpc_url.is_none() {
+            unsafe {
+                std::env::set_var("RPC_URL", "https://ethereum-holesky.publicnode.com");
+            }
+        }
+        original_rpc_url
+    }
+
+    /// Helper function to restore RPC_URL environment variable after tests
+    fn restore_test_env(original_rpc_url: Option<String>) {
+        if original_rpc_url.is_none() {
+            unsafe {
+                std::env::remove_var("RPC_URL");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_creator_creation() {
+        let original_rpc_url = setup_test_env();
+
         let config = create_test_config();
-        let creator = GasKillerCreator::new(config);
+        let creator = GasKillerCreator::new(config).unwrap();
         assert_eq!(*creator.current_round.lock().unwrap(), 0);
+
+        restore_test_env(original_rpc_url);
     }
 
     #[tokio::test]
     async fn test_creator_with_round() {
+        let original_rpc_url = setup_test_env();
+
         let config = create_test_config();
-        let creator = GasKillerCreator::with_round(config, 5);
+        let creator = GasKillerCreator::with_round(config, 5).unwrap();
         assert_eq!(*creator.current_round.lock().unwrap(), 5);
+
+        restore_test_env(original_rpc_url);
     }
 
     #[tokio::test]
     async fn test_create_payload_from_task_data() {
+        let original_rpc_url = setup_test_env();
+
         let config = create_test_config();
-        let creator = GasKillerCreator::new(config);
+        let creator = GasKillerCreator::new(config).unwrap();
 
         let task_data = GasKillerTaskData {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04],
@@ -186,7 +226,7 @@ mod tests {
             target_address: Address::from([1u8; 20]),
             target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
             gas_savings: 1000,
-            gas_limit: 1000000,
+            gas_limit: GasKillerCreator::get_gas_limit(),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
         };
 
@@ -195,24 +235,32 @@ mod tests {
 
         let payload = result.unwrap();
         assert!(!payload.is_empty());
+
+        restore_test_env(original_rpc_url);
     }
 
     #[tokio::test]
     async fn test_get_task_metadata_default() {
+        let original_rpc_url = setup_test_env();
+
         let config = create_test_config();
-        let creator = GasKillerCreator::new(config);
+        let creator = GasKillerCreator::new(config).unwrap();
 
         let metadata = creator.get_task_metadata();
         assert_eq!(metadata.target_address, Address::ZERO);
         assert_eq!(metadata.target_function, FixedBytes::ZERO);
+
+        restore_test_env(original_rpc_url);
     }
 
     #[tokio::test]
     async fn test_creator_validator_hash_consistency() {
         use crate::usecases::gas_killer::validator::GasKillerValidator;
 
+        let original_rpc_url = setup_test_env();
+
         let config = create_test_config();
-        let creator = GasKillerCreator::new(config);
+        let creator = GasKillerCreator::new(config).unwrap();
         let validator = GasKillerValidator::new();
 
         let task_data = GasKillerTaskData {
@@ -221,7 +269,7 @@ mod tests {
             target_address: Address::from([1u8; 20]),
             target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
             gas_savings: 1000,
-            gas_limit: 1000000,
+            gas_limit: GasKillerCreator::get_gas_limit(),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
         };
 
@@ -256,5 +304,7 @@ mod tests {
 
         // Both should produce the same hash
         assert_eq!(creator_payload_hash, validator_payload_hash);
+
+        restore_test_env(original_rpc_url);
     }
 }
