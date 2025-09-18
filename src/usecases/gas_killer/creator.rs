@@ -5,8 +5,7 @@ use anyhow::Result;
 /// Minimal creator implementation for the gas killer use case
 ///
 /// This is a placeholder implementation that only provides the payload creation
-/// functionality needed by validator tests. The real creator is being implemented
-/// by another developer.
+/// functionality needed by validator tests.
 #[derive(Debug)]
 pub struct GasKillerCreator;
 
