@@ -1,15 +1,161 @@
 use alloy::primitives::{Address, FixedBytes};
+use alloy::rpc::types::eth::TransactionRequest as AlloyTransactionRequest;
 use alloy::sol_types::SolValue;
 use anyhow::Result;
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
 use commonware_cryptography::{Hasher, Sha256};
-use tracing::debug;
+use std::env;
+use tracing::{debug, info};
+use url::Url;
 
-use crate::usecases::gas_killer::storage_validator::StorageValidator;
 use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 use crate::validator::interface::ValidatorTrait;
 use crate::wire;
+
+use gas_analyzer_rs::{call_to_encoded_state_updates_with_gas_estimate, gk::GasKillerDefault};
+
+/// Result of gas analysis containing storage updates and gas information
+#[derive(Debug, Clone)]
+pub struct AnalysisResult {
+    /// The storage updates extracted from the transaction
+    pub storage_updates: Vec<u8>,
+    /// The gas estimate from gas-analyzer-rs
+    #[allow(dead_code)]
+    pub gas_estimate: u64,
+}
+
+/// Storage validator that uses gas-analyzer-rs to replay transactions
+/// and validate storage updates against the provided task data
+#[derive(Debug)]
+pub struct StorageValidator {
+    /// RPC URL for the gas analyzer
+    pub fork_rpc_url: String,
+}
+
+impl StorageValidator {
+    /// Creates a new StorageValidator with the given RPC URL
+    pub fn new(fork_rpc_url: String) -> Self {
+        Self { fork_rpc_url }
+    }
+
+    /// Creates a new StorageValidator using RPC URL from environment variables
+    pub fn from_env() -> Result<Self> {
+        let rpc_url = env::var("RPC_URL")
+            .map_err(|_| anyhow::anyhow!("RPC_URL environment variable not set"))?;
+        Ok(Self::new(rpc_url))
+    }
+
+    /// Gets the RPC URL, using environment variable if not explicitly set
+    fn get_rpc_url(&self) -> Result<String> {
+        if !self.fork_rpc_url.is_empty() {
+            Ok(self.fork_rpc_url.clone())
+        } else {
+            env::var("RPC_URL").map_err(|_| {
+                anyhow::anyhow!("Neither fork_rpc_url nor RPC_URL environment variable is set")
+            })
+        }
+    }
+
+    /// Performs the core gas analysis using gas-analyzer-rs
+    ///
+    /// This method contains the core logic for:
+    /// 1. Forking the blockchain state
+    /// 2. Executing the transaction
+    /// 3. Extracting storage changes and gas information
+    ///
+    /// # Arguments
+    /// * `contract_address` - The target contract address
+    /// * `call_data` - The transaction call data (function selector + parameters)
+    /// * `from_address` - Optional sender address (uses default if None)
+    /// * `value` - Optional ETH value to send (uses default if None)
+    pub async fn perform_analysis(
+        &self,
+        contract_address: alloy::primitives::Address,
+        call_data: &[u8],
+        from_address: Option<alloy::primitives::Address>,
+        value: Option<alloy::primitives::U256>,
+    ) -> Result<AnalysisResult> {
+        let rpc_url_str = self.get_rpc_url()?;
+        let rpc_url =
+            Url::parse(&rpc_url_str).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
+
+        // Create transaction request for gas-analyzer-rs
+        let tx_request = AlloyTransactionRequest {
+            from: from_address,
+            to: Some(contract_address.into()),
+            input: alloy::rpc::types::TransactionInput::new(alloy::primitives::Bytes::from(
+                call_data.to_vec(),
+            )),
+            value,
+            gas: Some(u32::MAX as u64), // Unlimited gas for simulations
+            ..Default::default()
+        };
+
+        // Initialize GasKiller instance (spawns new Anvil process)
+        let gk = GasKillerDefault::new(rpc_url.clone(), None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize GasKiller: {}", e))?;
+
+        // Get actual storage updates from gas-analyzer-rs
+        let (encoded_updates, gas_estimate, _) =
+            call_to_encoded_state_updates_with_gas_estimate(rpc_url, tx_request, gk)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to compute state updates: {}", e))?;
+
+        let result = AnalysisResult {
+            storage_updates: encoded_updates.to_vec(),
+            gas_estimate,
+        };
+
+        Ok(result)
+    }
+
+    /// Validates storage updates by replaying the transaction locally
+    ///
+    /// This method is used by the validator to verify that the storage updates
+    /// in the task data match what would actually happen when the transaction
+    /// is executed. It uses the same core analysis as the creator but compares
+    /// the results instead of returning them.
+    ///
+    /// # Arguments
+    /// * `task_data` - The task data containing the expected storage updates
+    ///
+    /// # Returns
+    /// * `Result<bool>` - True if storage updates match, false otherwise
+    pub async fn validate_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<bool> {
+        info!(
+            "Starting storage validation for contract: {}, function: {:?}",
+            task_data.target_address,
+            task_data.function_selector()
+        );
+
+        // Use the same analysis method as the creator for consistency
+        let analysis_result = self
+            .perform_analysis(
+                task_data.target_address,
+                &task_data.call_data,
+                Some(task_data.from_address),
+                Some(task_data.value),
+            )
+            .await?;
+
+        // Compare actual vs expected storage updates
+        let validation_passed = analysis_result.storage_updates == task_data.storage_updates;
+
+        if validation_passed {
+            info!("Storage validation passed: updates match expected values");
+        } else {
+            info!(
+                "Storage validation failed: expected {} bytes, got {} bytes",
+                task_data.storage_updates.len(),
+                analysis_result.storage_updates.len()
+            );
+        }
+
+        Ok(validation_passed)
+    }
+}
 
 /// Validator implementation for the gas killer use case
 #[allow(dead_code)]
@@ -116,6 +262,8 @@ impl GasKillerValidator {
         let payload_data = (
             task_data.transition_index,
             task_data.target_address,
+            task_data.from_address,
+            task_data.value,
             task_data.call_data.clone(),
         );
 
@@ -212,7 +360,7 @@ impl ValidatorTrait for GasKillerValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, FixedBytes};
+    use alloy::primitives::{Address, FixedBytes, U256};
     use commonware_codec::{EncodeSize, Write};
     use std::env;
 
@@ -222,6 +370,8 @@ mod tests {
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01], // function selector + params
+            from_address: Address::from([2u8; 20]),
+            value: U256::from(1000),
         }
     }
 
@@ -401,6 +551,8 @@ mod tests {
             transition_index: 1,
             target_address: contract_address,
             call_data: call_data.clone(),
+            from_address: Address::from([3u8; 20]),
+            value: U256::from(500),
         };
 
         // Test validation - this will make a real RPC call
