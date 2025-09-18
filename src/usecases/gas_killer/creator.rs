@@ -22,10 +22,7 @@ pub struct GasAnalyzerConfig {
     pub fork_block: String,
     /// Target contract address for analysis
     pub target_address: Address,
-    /// Function selector for analysis
-    pub target_function: FixedBytes<4>,
-    /// Call data for the transaction
-    #[allow(dead_code)]
+    /// Call data for the transaction (includes function selector + parameters)
     pub call_data: Vec<u8>,
 }
 
@@ -36,7 +33,6 @@ impl Default for GasAnalyzerConfig {
                 .unwrap_or_else(|_| "https://ethereum-holesky.publicnode.com".to_string()),
             fork_block: "latest".to_string(),
             target_address: Address::ZERO,
-            target_function: FixedBytes::ZERO,
             call_data: vec![],
         }
     }
@@ -83,7 +79,6 @@ impl GasKillerCreator {
         let payload_data = (
             task_data.transition_index,
             task_data.target_address,
-            task_data.target_function,
             task_data.call_data.clone(),
         );
 
@@ -117,7 +112,6 @@ impl Creator for GasKillerCreator {
             storage_updates: analysis_result.storage_updates,
             transition_index: current_round,
             target_address: self.config.target_address,
-            target_function: self.config.target_function,
             call_data: self.config.call_data.clone(),
         };
 
@@ -144,7 +138,6 @@ mod tests {
             fork_rpc_url: "https://ethereum-holesky.publicnode.com".to_string(),
             fork_block: "latest".to_string(),
             target_address: Address::ZERO,
-            target_function: FixedBytes::ZERO,
             call_data: vec![],
         }
     }
@@ -202,7 +195,6 @@ mod tests {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04],
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
-            target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
         };
 
@@ -224,7 +216,7 @@ mod tests {
 
         let metadata = creator.get_task_metadata();
         assert_eq!(metadata.target_address, Address::ZERO);
-        assert_eq!(metadata.target_function, FixedBytes::ZERO);
+        assert_eq!(metadata.function_selector(), FixedBytes::ZERO);
 
         restore_test_env(original_rpc_url);
     }
@@ -243,7 +235,6 @@ mod tests {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04],
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
-            target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
         };
 

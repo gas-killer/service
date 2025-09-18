@@ -85,8 +85,8 @@ impl GasKillerValidator {
             ));
         }
 
-        // Check target function selector
-        if task_data.target_function == FixedBytes::ZERO {
+        // Check target function selector (extracted from call_data)
+        if task_data.function_selector() == FixedBytes::ZERO {
             return Err(anyhow::anyhow!("Target function selector cannot be zero"));
         }
 
@@ -116,7 +116,6 @@ impl GasKillerValidator {
         let payload_data = (
             task_data.transition_index,
             task_data.target_address,
-            task_data.target_function,
             task_data.call_data.clone(),
         );
 
@@ -222,7 +221,6 @@ mod tests {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04],
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
-            target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01], // function selector + params
         }
     }
@@ -390,7 +388,7 @@ mod tests {
             0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,
             0xde, 0xf0, 0x12, 0x34, 0x56, 0x78,
         ]);
-        let function_selector = FixedBytes::from([0x60, 0xfe, 0x47, 0xb1]); // set(uint256) function selector
+        let _function_selector = FixedBytes::from([0x60, 0xfe, 0x47, 0xb1]); // set(uint256) function selector
         let call_data = vec![
             0x60, 0xfe, 0x47, 0xb1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -402,7 +400,6 @@ mod tests {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04], // Mock storage updates
             transition_index: 1,
             target_address: contract_address,
-            target_function: function_selector,
             call_data: call_data.clone(),
         };
 
