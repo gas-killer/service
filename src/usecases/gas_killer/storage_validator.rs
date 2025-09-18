@@ -11,8 +11,6 @@ pub struct GasAnalysisResult {
     pub storage_updates: Vec<u8>,
     /// The gas estimate from gas-analyzer-rs
     pub gas_estimate: u64,
-    /// The gas limit used for the analysis
-    pub gas_limit_used: u64,
 }
 
 use alloy::rpc::types::eth::TransactionRequest as AlloyTransactionRequest;
@@ -50,25 +48,16 @@ impl StorageValidator {
         }
     }
 
-    /// Gets the gas limit from environment variable with fallback to unlimited for simulations
-    fn get_gas_limit() -> u64 {
-        env::var("GAS_LIMIT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(u32::MAX as u64) // Unlimited gas for simulations
-    }
-
-    /// Internal method that performs the core gas analysis using gas-analyzer-rs
+    /// Performs the core gas analysis using gas-analyzer-rs
     ///
-    /// This method contains the shared logic for:
+    /// This method contains the core logic for:
     /// 1. Forking the blockchain state
     /// 2. Executing the transaction
     /// 3. Extracting storage changes and gas information
-    async fn perform_gas_analysis(
+    pub async fn perform_gas_analysis(
         &self,
         contract_address: alloy::primitives::Address,
         call_data: &[u8],
-        gas_limit: u64,
     ) -> Result<GasAnalysisResult> {
         let rpc_url_str = self.get_rpc_url()?;
         let rpc_url =
@@ -80,7 +69,7 @@ impl StorageValidator {
             input: alloy::rpc::types::TransactionInput::new(alloy::primitives::Bytes::from(
                 call_data.to_vec(),
             )),
-            gas: Some(gas_limit),
+            gas: Some(u32::MAX as u64), // Unlimited gas for simulations
             ..Default::default()
         };
 
@@ -98,7 +87,6 @@ impl StorageValidator {
         let result = GasAnalysisResult {
             storage_updates: encoded_updates.to_vec(),
             gas_estimate,
-            gas_limit_used: gas_limit,
         };
 
         Ok(result)
@@ -106,11 +94,10 @@ impl StorageValidator {
 
     /// Validates storage updates by replaying the transaction locally
     ///
-    /// This method directly uses gas-analyzer-rs to:
-    /// 1. Fork the blockchain state
-    /// 2. Execute the transaction
-    /// 3. Extract storage changes
-    /// 4. Compare with expected updates
+    /// This method is used by the validator to verify that the storage updates
+    /// in the task data match what would actually happen when the transaction
+    /// is executed. It uses the same core analysis as the creator but compares
+    /// the results instead of returning them.
     ///
     /// # Arguments
     /// * `task_data` - The task data containing the expected storage updates
@@ -123,13 +110,9 @@ impl StorageValidator {
             task_data.target_address, task_data.target_function
         );
 
-        // Get actual storage updates using shared logic
+        // Use the same analysis method as the creator for consistency
         let analysis_result = self
-            .perform_gas_analysis(
-                task_data.target_address,
-                &task_data.call_data,
-                task_data.gas_limit,
-            )
+            .perform_gas_analysis(task_data.target_address, &task_data.call_data)
             .await?;
 
         // Compare actual vs expected storage updates
@@ -146,85 +129,6 @@ impl StorageValidator {
         }
 
         Ok(validation_passed)
-    }
-
-    /// Extracts storage updates by replaying the transaction locally
-    ///
-    /// This method directly uses gas-analyzer-rs to:
-    /// 1. Fork the blockchain state
-    /// 2. Execute the transaction
-    /// 3. Extract and return storage changes
-    ///
-    /// # Arguments
-    /// * `contract_address` - The contract address to call
-    /// * `function_selector` - The 4-byte function selector (for logging)
-    /// * `call_data` - The call data for the transaction
-    ///
-    /// # Returns
-    /// * `Result<Vec<u8>>` - The storage updates as raw bytes
-    #[allow(dead_code)]
-    pub async fn extract_storage_updates(
-        &self,
-        contract_address: alloy::primitives::Address,
-        function_selector: alloy::primitives::FixedBytes<4>,
-        call_data: &[u8],
-    ) -> Result<Vec<u8>> {
-        info!(
-            "Extracting storage updates for contract: {}, function: {:?}",
-            contract_address, function_selector
-        );
-
-        // Get actual storage updates using shared logic
-        let analysis_result = self
-            .perform_gas_analysis(contract_address, call_data, Self::get_gas_limit())
-            .await?;
-
-        info!(
-            "Extracted {} bytes of storage updates with gas estimate: {}",
-            analysis_result.storage_updates.len(),
-            analysis_result.gas_estimate
-        );
-
-        Ok(analysis_result.storage_updates)
-    }
-
-    /// Performs complete gas analysis and returns all analysis results
-    ///
-    /// This method provides access to both storage updates and gas information
-    /// for use cases that need complete analysis data (like the creator).
-    ///
-    /// # Arguments
-    /// * `contract_address` - The contract address to call
-    /// * `function_selector` - The 4-byte function selector (for logging)
-    /// * `call_data` - The call data for the transaction
-    /// * `gas_limit` - The gas limit to use for analysis
-    ///
-    /// # Returns
-    /// * `Result<GasAnalysisResult>` - Complete analysis results
-    pub async fn perform_complete_analysis(
-        &self,
-        contract_address: alloy::primitives::Address,
-        function_selector: alloy::primitives::FixedBytes<4>,
-        call_data: &[u8],
-        gas_limit: u64,
-    ) -> Result<GasAnalysisResult> {
-        info!(
-            "Performing complete gas analysis for contract: {}, function: {:?}",
-            contract_address, function_selector
-        );
-
-        let analysis_result = self
-            .perform_gas_analysis(contract_address, call_data, gas_limit)
-            .await?;
-
-        info!(
-            "Complete analysis: {} bytes storage updates, {} gas estimate, {} gas limit used",
-            analysis_result.storage_updates.len(),
-            analysis_result.gas_estimate,
-            analysis_result.gas_limit_used
-        );
-
-        Ok(analysis_result)
     }
 }
 
@@ -271,8 +175,6 @@ mod tests {
             transition_index: 1,
             target_address: contract_address,
             target_function: function_selector,
-            gas_savings: 1000,
-            gas_limit: StorageValidator::get_gas_limit(),
             call_data: call_data.clone(),
         };
 

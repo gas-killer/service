@@ -51,13 +51,6 @@ pub struct GasKillerCreator {
 }
 
 impl GasKillerCreator {
-    fn get_gas_limit() -> u64 {
-        std::env::var("GAS_LIMIT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(u32::MAX as u64) // Unlimited gas for simulations
-    }
-
     /// Creates a new GasKillerCreator with the given configuration
     #[allow(dead_code)]
     pub fn new(config: GasAnalyzerConfig) -> Result<Self> {
@@ -91,7 +84,7 @@ impl GasKillerCreator {
             task_data.transition_index,
             task_data.target_address,
             task_data.target_function,
-            task_data.gas_savings, // Use actual gas savings from task data
+            task_data.call_data.clone(),
         );
 
         let payload = payload_data.abi_encode();
@@ -116,21 +109,8 @@ impl Creator for GasKillerCreator {
         // This performs the same gas analysis as the validator
         let analysis_result = self
             .storage_validator
-            .perform_complete_analysis(
-                self.config.target_address,
-                self.config.target_function,
-                &self.config.call_data,
-                Self::get_gas_limit(), // Configurable gas limit for analysis
-            )
+            .perform_gas_analysis(self.config.target_address, &self.config.call_data)
             .await?;
-
-        // Calculate gas savings (difference between gas limit and actual estimate)
-        let gas_savings = analysis_result
-            .gas_limit_used
-            .saturating_sub(analysis_result.gas_estimate);
-
-        // Use the gas estimate as the optimal gas limit for the actual transaction
-        let optimal_gas_limit = analysis_result.gas_estimate;
 
         // Create task data with real analysis results
         let task_data = GasKillerTaskData {
@@ -138,8 +118,6 @@ impl Creator for GasKillerCreator {
             transition_index: current_round,
             target_address: self.config.target_address,
             target_function: self.config.target_function,
-            gas_savings,
-            gas_limit: optimal_gas_limit,
             call_data: self.config.call_data.clone(),
         };
 
@@ -225,8 +203,6 @@ mod tests {
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
             target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
-            gas_savings: 1000,
-            gas_limit: GasKillerCreator::get_gas_limit(),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
         };
 
@@ -268,8 +244,6 @@ mod tests {
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
             target_function: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
-            gas_savings: 1000,
-            gas_limit: GasKillerCreator::get_gas_limit(),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
         };
 
