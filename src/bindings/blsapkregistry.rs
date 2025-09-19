@@ -453,7 +453,6 @@ pub mod BN254 {
         }
     }
     /// Instantiation and getters/setters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -504,7 +503,6 @@ pub mod BN254 {
         }
     }
     /// Function calls.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -523,7 +521,6 @@ pub mod BN254 {
         }
     }
     /// Event filters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -1038,7 +1035,6 @@ pub mod IBLSApkRegistryTypes {
         }
     }
     /// Instantiation and getters/setters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -1089,7 +1085,6 @@ pub mod IBLSApkRegistryTypes {
         }
     }
     /// Function calls.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -1108,7 +1103,6 @@ pub mod IBLSApkRegistryTypes {
         }
     }
     /// Event filters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -6201,7 +6195,7 @@ pub mod BLSApkRegistry {
         #[allow(missing_docs)]
         verifyAndRegisterG2PubkeyForOperator(verifyAndRegisterG2PubkeyForOperatorCall),
     }
-    #[automatically_derived]
+
     impl BLSApkRegistryCalls {
         /// All the selectors of this enum.
         ///
@@ -6815,7 +6809,7 @@ pub mod BLSApkRegistry {
         #[allow(missing_docs)]
         ZeroPubKey(ZeroPubKey),
     }
-    #[automatically_derived]
+
     impl BLSApkRegistryErrors {
         /// All the selectors of this enum.
         ///
@@ -7226,7 +7220,7 @@ pub mod BLSApkRegistry {
         #[allow(missing_docs)]
         OperatorRemovedFromQuorums(OperatorRemovedFromQuorums),
     }
-    #[automatically_derived]
+
     impl BLSApkRegistryEvents {
         /// All the selectors of this enum.
         ///
@@ -7429,8 +7423,8 @@ pub mod BLSApkRegistry {
                 .finish()
         }
     }
+
     /// Instantiation and getters/setters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -7517,7 +7511,6 @@ pub mod BLSApkRegistry {
         }
     }
     /// Function calls.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -7706,7 +7699,6 @@ pub mod BLSApkRegistry {
         }
     }
     /// Event filters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
