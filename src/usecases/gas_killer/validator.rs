@@ -1,4 +1,3 @@
-use alloy::primitives::{Address, FixedBytes};
 use alloy::rpc::types::eth::TransactionRequest as AlloyTransactionRequest;
 use alloy::sol_types::SolValue;
 use anyhow::Result;
@@ -30,8 +29,6 @@ pub struct AnalysisResult {
 /// Validator implementation for the gas killer use case
 #[allow(dead_code)]
 pub struct GasKillerValidator {
-    /// Whether to perform strict validation (reject zero addresses, etc.)
-    strict_validation: bool,
     /// RPC URL for the gas analyzer
     fork_rpc_url: String,
 }
@@ -43,18 +40,6 @@ impl GasKillerValidator {
         let rpc_url = env::var("RPC_URL")
             .unwrap_or_else(|_| "https://ethereum-holesky.publicnode.com".to_string());
         Self {
-            strict_validation: true,
-            fork_rpc_url: rpc_url,
-        }
-    }
-
-    /// Creates a new GasKillerValidator with the specified validation mode
-    #[allow(dead_code)]
-    pub fn with_validation_mode(strict_validation: bool) -> Self {
-        let rpc_url = env::var("RPC_URL")
-            .unwrap_or_else(|_| "https://ethereum-holesky.publicnode.com".to_string());
-        Self {
-            strict_validation,
             fork_rpc_url: rpc_url,
         }
     }
@@ -81,32 +66,6 @@ impl GasKillerValidator {
             aggregation.round
         );
         Ok(aggregation)
-    }
-
-    /// Validates the task data for basic consistency
-    #[allow(dead_code)]
-    async fn validate_task_data(&self, task_data: &GasKillerTaskData) -> Result<()> {
-        debug!("Validating task data: {:?}", task_data);
-
-        // Check target address
-        if self.strict_validation && task_data.target_address == Address::ZERO {
-            return Err(anyhow::anyhow!(
-                "Target address cannot be zero in strict mode"
-            ));
-        }
-
-        // Check target function selector (extracted from call_data)
-        if task_data.function_selector() == FixedBytes::ZERO {
-            return Err(anyhow::anyhow!("Target function selector cannot be zero"));
-        }
-
-        // Check storage updates
-        if task_data.storage_updates.is_empty() {
-            return Err(anyhow::anyhow!("Storage updates cannot be empty"));
-        }
-
-        debug!("Task data validation passed");
-        Ok(())
     }
 
     /// Reconstructs the payload hash from task data
@@ -261,9 +220,6 @@ impl ValidatorTrait for GasKillerValidator {
         // Validate message format and decode
         let aggregation = self.validate_message_format(msg).await?;
 
-        // Validate task data
-        self.validate_task_data(&aggregation.metadata).await?;
-
         // Perform storage validation if enabled
         let storage_validation_passed =
             self.validate_storage_updates(&aggregation.metadata).await?;
@@ -315,14 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validator_creation() {
-        let validator = GasKillerValidator::new();
-        assert!(validator.strict_validation);
-    }
-
-    #[tokio::test]
-    async fn test_validator_with_validation_mode() {
-        let validator = GasKillerValidator::with_validation_mode(false);
-        assert!(!validator.strict_validation);
+        let _validator = GasKillerValidator::new();
     }
 
     #[tokio::test]
@@ -393,35 +342,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_task_data_success() {
-        let validator = GasKillerValidator::new();
-        let task_data = create_test_task_data();
-
-        let result = validator.validate_task_data(&task_data).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_validate_task_data_zero_address_strict() {
-        let validator = GasKillerValidator::new(); // strict mode
-        let mut task_data = create_test_task_data();
-        task_data.target_address = Address::ZERO;
-
-        let result = validator.validate_task_data(&task_data).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_validate_task_data_zero_address_permissive() {
-        let validator = GasKillerValidator::with_validation_mode(false); // permissive mode
-        let mut task_data = create_test_task_data();
-        task_data.target_address = Address::ZERO;
-
-        let result = validator.validate_task_data(&task_data).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn test_reconstruct_payload_hash() {
         let validator = GasKillerValidator::new();
         let task_data = create_test_task_data();
@@ -436,28 +356,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validator_with_storage_validation() {
-        // Set a test RPC URL if not already set
-        let original_rpc_url = env::var("RPC_URL").ok();
-        if original_rpc_url.is_none() {
-            unsafe {
-                env::set_var("RPC_URL", "https://ethereum-holesky.publicnode.com");
-            }
-        }
-
-        let validator = GasKillerValidator::with_validation_mode(true);
-
-        assert!(validator.strict_validation);
-
-        // Restore original environment variable
-        if original_rpc_url.is_none() {
-            unsafe {
-                env::remove_var("RPC_URL");
-            }
-        }
-    }
-
-    #[tokio::test]
     async fn test_validate_storage_updates() {
         // Set a test RPC URL if not already set
         let original_rpc_url = env::var("RPC_URL").ok();
@@ -467,7 +365,7 @@ mod tests {
             }
         }
 
-        let validator = GasKillerValidator::with_validation_mode(true);
+        let validator = GasKillerValidator::new();
 
         // Use a real contract address and function call for testing
         let contract_address = Address::from([
