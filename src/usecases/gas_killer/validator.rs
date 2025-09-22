@@ -74,12 +74,8 @@ impl GasKillerValidator {
     /// to ensure consensus consistency.
     #[allow(dead_code)]
     async fn reconstruct_payload_hash(&self, task_data: &GasKillerTaskData) -> Result<Digest> {
-        // Reconstruct the same payload that the creator would have created
-        // This matches the logic in GasKillerCreator::create_payload_from_analysis
-
-        // For now, we'll use the task data fields directly since we don't have
-        // the original analysis result. In a real implementation, we might need
-        // to re-run the analysis or store additional data.
+        // Reconstruct the same payload that the creator/nodes would have created
+        // Now includes storage_updates to commit to outputs as well as inputs
 
         // Create payload using the same fields that would be in the analysis result
         let payload_data = (
@@ -88,11 +84,12 @@ impl GasKillerValidator {
             task_data.from_address,
             task_data.value,
             task_data.call_data.clone(),
+            task_data.storage_updates.clone(),
         );
 
         let payload = payload_data.abi_encode();
 
-        // Hash the payload using the same method as the creator
+        // Hash the payload using the same method as the creator/nodes
         let mut hasher = Sha256::new();
         hasher.update(&payload);
         let payload_hash = hasher.finalize();
