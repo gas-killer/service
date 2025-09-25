@@ -453,7 +453,6 @@ pub mod BN254 {
         }
     }
     /// Instantiation and getters/setters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -504,7 +503,6 @@ pub mod BN254 {
         }
     }
     /// Function calls.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -523,7 +521,6 @@ pub mod BN254 {
         }
     }
     /// Event filters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -969,7 +966,6 @@ pub mod IBLSSignatureCheckerTypes {
         }
     }
     /// Instantiation and getters/setters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -1020,7 +1016,6 @@ pub mod IBLSSignatureCheckerTypes {
         }
     }
     /// Function calls.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -1039,7 +1034,6 @@ pub mod IBLSSignatureCheckerTypes {
         }
     }
     /// Event filters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -1607,7 +1601,6 @@ pub mod OperatorStateRetriever {
         }
     }
     /// Instantiation and getters/setters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -1658,7 +1651,6 @@ pub mod OperatorStateRetriever {
         }
     }
     /// Function calls.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -1677,7 +1669,6 @@ pub mod OperatorStateRetriever {
         }
     }
     /// Event filters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -3608,7 +3599,6 @@ pub mod BLSSigCheckOperatorStateRetriever {
         #[allow(missing_docs)]
         getQuorumBitmapsAtBlockNumber(getQuorumBitmapsAtBlockNumberCall),
     }
-    #[automatically_derived]
     impl BLSSigCheckOperatorStateRetrieverCalls {
         /// All the selectors of this enum.
         ///
@@ -3869,7 +3859,6 @@ pub mod BLSSigCheckOperatorStateRetriever {
         #[allow(missing_docs)]
         OperatorNotRegistered(OperatorNotRegistered),
     }
-    #[automatically_derived]
     impl BLSSigCheckOperatorStateRetrieverErrors {
         /// All the selectors of this enum.
         ///
@@ -4082,7 +4071,6 @@ pub mod BLSSigCheckOperatorStateRetriever {
         }
     }
     /// Instantiation and getters/setters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -4133,7 +4121,6 @@ pub mod BLSSigCheckOperatorStateRetriever {
         }
     }
     /// Function calls.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
@@ -4247,7 +4234,6 @@ pub mod BLSSigCheckOperatorStateRetriever {
         }
     }
     /// Event filters.
-    #[automatically_derived]
     impl<
         T: alloy_contract::private::Transport + ::core::clone::Clone,
         P: alloy_contract::private::Provider<T, N>,
