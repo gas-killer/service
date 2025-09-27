@@ -9,32 +9,37 @@ use crate::usecases::gas_killer::provider::GasKillerProvider;
 use crate::{
     bindings::blsapkregistry::BLSApkRegistry, usecases::gas_killer::creator::GasKillerCreatorType,
 };
-use alloy_provider::ProviderBuilder;
+use alloy::network::EthereumWallet;
+use alloy_provider::fillers::{
+    BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
+};
+use alloy_provider::{Identity, ProviderBuilder, RootProvider};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
 use commonware_eigenlayer::config::AvsDeployment;
 use std::{env, str::FromStr};
 
+type ConnectHTTPDefaultProvider = FillProvider<
+    JoinFill<
+        JoinFill<
+            Identity,
+            JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>,
+        >,
+        WalletFiller<EthereumWallet>,
+    >,
+    RootProvider,
+>;
+
 /// Factory function to create a default creator
 pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
-    let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
-    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
-    let signer = PrivateKeySigner::from_str(&private_key)
-        .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
-    let provider = ProviderBuilder::new()
-        .wallet(signer)
-        .connect(&http_rpc)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect provider: {}", e))?;
-
+    let provider = create_provider().await?;
     let deployment =
         AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
-    let counter_address = deployment
-        .counter_address()
+    let gas_killer_address = deployment
+        .counter_address() //TODO: change this to meet gas killer's creator model
         .map_err(|e| anyhow::anyhow!("Failed to get counter address: {}", e))?;
-
-    let provider = GasKillerProvider::new(counter_address, provider.clone());
-    let creator = GasKillerCreator::new(provider);
+    let gas_killer_provider = GasKillerProvider::new(gas_killer_address, provider.clone());
+    let creator = GasKillerCreator::new(gas_killer_provider);
     Ok(GasKillerCreatorType::Basic(creator))
 }
 
@@ -42,22 +47,16 @@ pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
 pub async fn create_listening_creator_with_server(
     addr: String,
 ) -> anyhow::Result<GasKillerCreatorType> {
-    let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
-    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
-    let signer = PrivateKeySigner::from_str(&private_key)?;
-    let provider = ProviderBuilder::new()
-        .wallet(signer)
-        .connect(&http_rpc)
-        .await?;
+    let provider = create_provider().await?;
     let deployment =
         AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
-    let counter_address = deployment
-        .counter_address()
+    let gas_killer_address = deployment
+        .counter_address() //TODO: change this to meet gas killer's creator model
         .map_err(|e| anyhow::anyhow!("Failed to get counter address: {}", e))?;
-    let provider = GasKillerProvider::new(counter_address, provider.clone());
+    let gas_killer_provider = GasKillerProvider::new(gas_killer_address, provider.clone());
     let queue = GasKillerTaskQueue::new();
     let config = GasKillerConfig::default();
-    let creator = ListeningGasKillerCreator::new(provider, queue.clone(), config);
+    let creator = ListeningGasKillerCreator::new(gas_killer_provider, queue.clone(), config);
     let queue = queue.get_queue();
     tokio::spawn(async move {
         start_gas_killer_http_server(queue, &addr).await;
@@ -112,4 +111,16 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         registry_coordinator_address,
         gas_killer_handler,
     ))
+}
+
+/// Helper function to create provider
+async fn create_provider() -> anyhow::Result<ConnectHTTPDefaultProvider> {
+    let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
+    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
+    let signer = PrivateKeySigner::from_str(&private_key)?;
+    let provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect(&http_rpc)
+        .await?;
+    Ok(provider)
 }
