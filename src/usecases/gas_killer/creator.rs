@@ -140,7 +140,7 @@ impl Default for GasKillerConfig {
     }
 }
 
-/// Creator for the counter usecase without ingress.
+/// Creator for the gas killer usecase without ingress
 pub struct GasKillerCreator {
     provider: Arc<GasKillerProvider>,
 }
@@ -171,7 +171,7 @@ impl Creator for GasKillerCreator {
     }
 }
 
-/// Creator for the counter usecase that listens for external requests.
+/// Creator for the gas killer usecase that listens for external requests
 pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     provider: Arc<GasKillerProvider>,
     queue: Arc<Q>,
@@ -245,7 +245,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                 target_address: task.body.target_address,
                 call_data: task.body.call_data.clone(),
                 from_address: task.body.from_address,
-                value: task.body.value
+                value: task.body.value,
             };
         }
 
@@ -255,8 +255,8 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
 }
 
 impl GasKillerCreator {
-    
-pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Vec<u8>> {  // TODO: refactor to avoid duplication with get_task_metadata
+    pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
+        // TODO: refactor to avoid duplication with get_task_metadata
         // Create a deterministic payload by ABI-encoding key fields
         // This must match the logic in GasKillerValidator::reconstruct_payload_hash
         let payload_data = (
@@ -269,7 +269,6 @@ pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Ve
 
         let payload = payload_data.abi_encode();
         Ok(payload)
-
     }
 }
 
@@ -277,9 +276,9 @@ pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Ve
 /// supporting different creator implementations. This enables the generic
 /// orchestrator to work without runtime polymorphism.
 pub enum GasKillerCreatorType {
-    /// Basic counter creator without ingress
+    /// Basic gas killer creator without ingress
     Basic(GasKillerCreator),
-    /// Listening counter creator with HTTP ingress
+    /// Listening gas killer creator with HTTP ingress
     Listening(ListeningGasKillerCreator<GasKillerTaskQueue>),
 }
 

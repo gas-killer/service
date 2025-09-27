@@ -5,7 +5,6 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GasKillerTaskRequestBody {
     pub target_address: Address,
@@ -13,7 +12,7 @@ pub struct GasKillerTaskRequestBody {
     pub storage_updates: Vec<u8>,
     pub transition_index: u64,
     pub from_address: Address,
-    pub value: U256
+    pub value: U256,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

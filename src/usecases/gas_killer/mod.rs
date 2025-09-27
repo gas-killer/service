@@ -3,7 +3,7 @@
 // Gas killer ingress
 pub mod ingress;
 
-// Gas killer counter provider
+// Gas killer provider
 pub mod provider;
 
 // Gas killer creator implementation
@@ -29,4 +29,3 @@ pub use structs::GasKillerTaskData;
 
 #[allow(unused_imports)]
 pub use validator::GasKillerValidator;
-
