@@ -53,7 +53,7 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 hex = "0.4"
 anyhow = "1.0"
-gas-analyzer-rs = { git = "ssh://git@github.com/BreadchainCoop/gas-killer-analyzer", branch = "feat/downgrade-alloy" }
+gas-analyzer-rs = { git = "https://ggithub.com/BreadchainCoop/gas-killer-analyzer", branch = "feat/downgrade-alloy" }
 
 [build-dependencies]
 prost-build = "0.13.5"
