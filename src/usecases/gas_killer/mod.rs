@@ -1,7 +1,10 @@
 // Gas killer usecase implementations
 
-// Gas killer task data
-pub mod task_data;
+// Gas killer ingress
+pub mod ingress;
+
+// Gas killer counter provider
+pub mod provider;
 
 // Gas killer creator implementation
 pub mod creator;
@@ -12,13 +15,16 @@ pub mod validator;
 // Gas killer executor implementation
 pub mod executor;
 
-// Gas killer factories
+// Gas killer factories implementation
 pub mod factories;
+
+// Gas killer structs
+pub mod structs;
 
 // Re-export main types for easy access
 #[allow(unused_imports)]
 pub use executor::GasKillerHandler;
 #[allow(unused_imports)]
-pub use task_data::GasKillerTaskData;
+pub use structs::GasKillerTaskData;
 #[allow(unused_imports)]
 pub use validator::GasKillerValidator;

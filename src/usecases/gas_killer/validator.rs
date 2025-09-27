@@ -8,7 +8,7 @@ use std::env;
 use tracing::debug;
 use url::Url;
 
-use crate::usecases::gas_killer::task_data::GasKillerTaskData;
+use crate::usecases::gas_killer::structs::GasKillerTaskData;
 use crate::validator::interface::ValidatorTrait;
 use crate::wire;
 
