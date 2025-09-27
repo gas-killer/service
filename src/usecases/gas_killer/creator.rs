@@ -3,6 +3,7 @@ use crate::usecases::gas_killer::provider::GasKillerProvider;
 use crate::usecases::gas_killer::structs::GasKillerTaskData;
 use crate::usecases::gas_killer::structs::GasKillerTaskRequest;
 use alloy::sol_types::SolValue;
+
 use alloy_primitives::U256;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -237,6 +238,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             && let Some(ref task) = *current_task
         {
             // Extract metadata from the task request body
+
             return GasKillerTaskData {
                 storage_updates: task.body.storage_updates.clone(),
                 transition_index: task.body.transition_index,
@@ -250,7 +252,6 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         // Fall back to default metadata if no task data is available
         GasKillerTaskData::default()
     }
-
 }
 
 impl GasKillerCreator {
@@ -268,6 +269,7 @@ pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Ve
 
         let payload = payload_data.abi_encode();
         Ok(payload)
+
     }
 }
 

@@ -1,8 +1,10 @@
-use alloy::primitives::{Address, FixedBytes, U256};
-use serde::{Deserialize, Serialize};
+use alloy::primitives::FixedBytes;
+use alloy_primitives::{Address, U256};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use serde::{Deserialize, Serialize};
+
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GasKillerTaskRequestBody {
