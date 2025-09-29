@@ -11,6 +11,10 @@ path = "verify_increments.rs"
 name = "deploy_array_summation"
 path = "deploy_array_summation.rs"
 
+[lib]
+name = "bindings"
+path = "bindings/mod.rs"
+
 [dependencies]
 alloy = { workspace = true }
 tokio = { workspace = true }
