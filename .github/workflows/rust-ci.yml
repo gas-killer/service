@@ -6,7 +6,7 @@ on:
 
 jobs:
   check:
-    name: Format, Clippy, Check (${{ matrix.crate_dir }})
+    name: Format, Clippy, Check
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -15,6 +15,7 @@ jobs:
     defaults:
       run:
         working-directory: ${{ matrix.crate_dir }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -42,9 +42,6 @@ cd "$PROJECT_ROOT"
 echo -e "${YELLOW}Step 2: Setting up environment files...${NC}"
 cp example.env .env
 
-# Create required directories
-mkdir -p .nodes/operator_keys
-
 # Copy config template
 cp config/config.example.json config/config.json
 
@@ -98,7 +95,7 @@ elapsed=0
 
 while [ $elapsed -lt $timeout ]; do
     # Check if eigenlayer container has completed setup
-    if docker compose logs eigenlayer 2>/dev/null | grep -q "Operator 3 weight in quorum" && [ -f .nodes/avs_deploy.json ]; then
+    if docker compose logs eigenlayer 2>/dev/null | grep -q "Operator 3 weight in quorum" && [ -f config/.nodes/avs_deploy.json ]; then
         echo -e "${GREEN}EigenLayer setup completed successfully${NC}"
         break
     fi
@@ -130,7 +127,7 @@ export ARRAY_SUMMATION_SEED="${ARRAY_SUMMATION_SEED:-0}"
 
 # Source environment and run deployment
 source ../.env
-export AVS_DEPLOYMENT_PATH="../.nodes/avs_deploy.json"
+export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
     echo -e "${RED}Deployment file not found at $AVS_DEPLOYMENT_PATH${NC}"
