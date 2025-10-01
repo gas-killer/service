@@ -1,14 +1,11 @@
 use crate::creator::core::Creator;
-use crate::usecases::gas_killer::provider::GasKillerProvider;
 use crate::usecases::gas_killer::structs::GasKillerTaskData;
 use crate::usecases::gas_killer::structs::GasKillerTaskRequest;
 use alloy::sol_types::SolValue;
 
-use alloy_primitives::U256;
 use anyhow::Result;
 use async_trait::async_trait;
 use commonware_codec::Encode;
-use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{error, warn};
@@ -143,13 +140,9 @@ impl Default for GasKillerConfig {
 }
 
 /// Creator for the gas killer usecase without ingress
+#[derive(Default)]
 pub struct GasKillerCreator {}
 
-impl Default for GasKillerCreator {
-    fn default() -> Self {
-        Self {}
-    }
-}
 impl GasKillerCreator {
     pub fn new() -> Self {
         Self {}

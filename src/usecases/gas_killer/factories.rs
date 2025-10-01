@@ -5,7 +5,6 @@ use crate::usecases::gas_killer::creator::{
     GasKillerConfig, GasKillerCreator, GasKillerTaskQueue, ListeningGasKillerCreator,
 };
 use crate::usecases::gas_killer::ingress::start_gas_killer_http_server;
-use crate::usecases::gas_killer::provider::GasKillerProvider;
 use crate::{
     bindings::blsapkregistry::BLSApkRegistry, usecases::gas_killer::creator::GasKillerCreatorType,
 };

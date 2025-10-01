@@ -2,10 +2,7 @@ use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
-use crate::usecases::gas_killer::{
-    factories::create_provider,
-    structs::{GasKillerTaskRequest, GasKillerTaskResponse},
-};
+use crate::usecases::gas_killer::structs::{GasKillerTaskRequest, GasKillerTaskResponse};
 
 // Handler for POST /trigger
 pub async fn trigger_task_handler(
