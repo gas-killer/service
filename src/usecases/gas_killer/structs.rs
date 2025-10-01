@@ -42,7 +42,7 @@ pub struct GasKillerTaskResponse {
 }
 
 /// Task data specific to the gas killer use case
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub struct GasKillerTaskData {
     /// Encoded storage updates to be applied
@@ -109,7 +109,7 @@ impl Write for GasKillerTaskData {
         buf.put_slice(self.from_address.as_slice());
 
         // Write value as 32 bytes (U256)
-        buf.put_slice(&self.value.to_be_bytes::<32>());
+        buf.put_slice(&self.value.to_le_bytes::<32>());
 
         // Write call data as length-prefixed bytes
         let call_data_len = self.call_data.len();
@@ -158,14 +158,6 @@ impl Read for GasKillerTaskData {
         buf.copy_to_slice(&mut from_address_bytes);
         let from_address = Address::from_slice(&from_address_bytes);
 
-        // Read value (32 bytes - U256)
-        if buf.remaining() < 32 {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        let mut value_bytes = [0u8; 32];
-        buf.copy_to_slice(&mut value_bytes);
-        let value = U256::from_be_bytes(value_bytes);
-
         // Read call data
         let call_data_len = u32::read(buf)? as usize;
         if buf.remaining() < call_data_len {
@@ -173,6 +165,30 @@ impl Read for GasKillerTaskData {
         }
         let mut call_data = vec![0u8; call_data_len];
         buf.copy_to_slice(&mut call_data);
+
+        // Read from_address
+        if buf.remaining() < 20 {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut from_address_bytes = [0u8; 20];
+        buf.copy_to_slice(&mut address_bytes);
+        let from_address = Address::from_slice(&address_bytes);
+
+        // Read from_address
+        if buf.remaining() < 20 {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut from_address_bytes = [0u8; 20];
+        buf.copy_to_slice(&mut address_bytes);
+        let from_address = Address::from_slice(&address_bytes);
+
+        // Read value (32 bytes - U256)
+        if buf.remaining() < 32 {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut value_bytes = [0u8; 32];
+        buf.copy_to_slice(&mut value_bytes);
+        let value = U256::from_le_bytes(value_bytes);
 
         Ok(Self {
             storage_updates,
