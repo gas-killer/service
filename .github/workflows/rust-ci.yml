@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate_dir: [".", "gas-killer-node"]
+        crate_dir: ["."]
     defaults:
       run:
         working-directory: ${{ matrix.crate_dir }}
@@ -28,10 +28,9 @@ jobs:
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
         with:
-          # Cache both crates to speed up matrix runs
+          # Cache workspace to speed up runs
           workspaces: |
             .
-            gas-killer-node
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -41,5 +40,3 @@ jobs:
 
       - name: cargo check (all targets)
         run: cargo check --all-targets --all-features
-
-
