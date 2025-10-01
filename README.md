@@ -20,57 +20,6 @@ The router coordinates multiple operators to sign messages, aggregates their sig
 1. **Configure environment:**
 ```bash
 cp example.env .env
-
-# Edit .env to set your configuration
-
-cp config/config.example.json config/config.json
-
-# Edit "config/config.json" if you need different operator socket addresses
-```
-
-2. **Start services:**
-```bash
-docker compose up
-
-# Add -d flag to run in background
-```
-
-### Manual Node Setup
-If you need to run nodes outside of Docker, you can use the following process.
-
-1. **Configure environment:**
-```bash
-cd gas-killer-node
-
-cp example.env .env
-
-# Edit .env to set your configuration
-```
-
-2. **Build binaries:**
-```bash
-cargo build --release
-```
-
-3. **Run nodes (one per terminal):**
-```bash
-# Node 1
-cargo run --release -- --key-file $CONTRIBUTOR_1_KEYFILE --port 3001 --orchestrator orchestrator.json
-
-# Node 2
-cargo run --release -- --key-file $CONTRIBUTOR_2_KEYFILE --port 3002 --orchestrator orchestrator.json
-
-# Node 3
-cargo run --release -- --key-file $CONTRIBUTOR_3_KEYFILE --port 3003 --orchestrator orchestrator.json
-```
-
-### Manual Router Setup
-
-If you need to run a router outside of Docker, you can use the following process.
-
-1. **Configure environment:**
-```bash
-cp example.env .env
 ```
 
 For LOCAL mode (default), the example.env is pre-configured. You'll need to set a private key:

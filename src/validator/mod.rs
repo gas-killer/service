@@ -1,4 +1,4 @@
-//! Validator module for the gas-killer-router.
+//! Validator module for the commonware-avs-router.
 
 // Public modules
 pub mod generic;
