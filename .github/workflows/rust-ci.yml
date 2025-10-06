@@ -8,6 +8,10 @@ jobs:
   check:
     name: Format, Clippy, Check
     runs-on: ubuntu-latest
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+      GIT_ASKPASS: /bin/echo
+      GIT_TERMINAL_PROMPT: 0
     strategy:
       fail-fast: false
       matrix:
@@ -19,6 +23,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configure git to use PAT for GitHub
+        run: |
+          git config --global url."https://${GH_PAT}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://${GH_PAT}:x-oauth-basic@github.com/".insteadOf "ssh://git@github.com/"
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
