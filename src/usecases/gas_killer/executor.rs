@@ -73,6 +73,19 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         // Create GasKillerSDK instance dynamically using target_address from task data
         let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
 
+        // Ensure contract implements the GasKiller interface via ERC-165 check
+        let interface_id = FixedBytes::<4>::from([0x93, 0xde, 0x45, 0x31]);
+        let supports = gas_killer_sdk
+            .supportsInterface(interface_id)
+            .call()
+            .await
+            .map_err(|e| anyhow::anyhow!("supportsInterface call failed: {}", e))?;
+        if !supports._0 {
+            return Err(anyhow::anyhow!(
+                "Target contract does not support GasKiller interface (0x93de4531)"
+            ));
+        }
+
         // Execute the gas killer verifyAndUpdate
         let call_return = gas_killer_sdk
             .verifyAndUpdate(

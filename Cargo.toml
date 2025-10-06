@@ -2,7 +2,7 @@
 members = [".", "scripts"]
 
 [package]
-name = "commonware-avs-router"
+name = "gas-killer-router"
 version = "0.1.0"
 edition = "2024"
 
