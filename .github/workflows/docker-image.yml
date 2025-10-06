@@ -47,6 +47,7 @@ jobs:
             GIT_ASKPASS=/bin/echo
           secrets: |
             GIT_AUTH_TOKEN=${{ secrets.GH_PAT }}
+            id=GIT_AUTH_TOKEN,env=GH_PAT
 
       - name: Tag and push version tags
         run: |
