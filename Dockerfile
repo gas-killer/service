@@ -12,11 +12,15 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 
 RUN --mount=type=secret,id=GIT_AUTH_TOKEN \
+    echo "Checking for secret..." && \
+    ls -la /run/secrets/ && \
     if [ -f /run/secrets/GIT_AUTH_TOKEN ]; then \
+        echo "Secret file found" && \
         TOKEN=$(cat /run/secrets/GIT_AUTH_TOKEN) && \
         git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"; \
     else \
-        echo "ERROR: Secret file not found at /run/secrets/GIT_AUTH_TOKEN" && exit 1; \
+        echo "ERROR: Secret file not found at /run/secrets/GIT_AUTH_TOKEN" && \
+        exit 1; \
     fi
 
 RUN cargo build --release && rm -rf src
