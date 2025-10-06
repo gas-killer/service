@@ -56,7 +56,7 @@ jobs:
           if [ -n "${{ secrets.RPC_URL }}" ]; then
             sed -i "s|^# FORK_URL=.*|FORK_URL=${{ secrets.RPC_URL }}|" .env
           else
-            sed -i 's|^# FORK_URL=.*|FORK_URL=https://ethereum-holesky.publicnode.com|' .env
+            sed -i 's|^# FORK_URL=.*|FORK_URL=https://holesky.drpc.org|' .env
           fi
 
           # Uncomment Holesky testnet contract addresses (needed for LOCAL mode with fork)
