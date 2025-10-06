@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -u 1000 -s /bin/bash appuser
 
 # Copy the binary from builder
-COPY --from=builder /app/target/release/commonware-avs-router /usr/local/bin/commonware-avs-router
+COPY --from=builder /app/target/release/gas-killer-router /usr/local/bin/gas-killer-router
 
 # Copy configuration files
 COPY config /app/config
@@ -54,5 +54,5 @@ WORKDIR /app
 EXPOSE 3000
 
 # Run the binary
-ENTRYPOINT ["commonware-avs-router"]
+ENTRYPOINT ["gas-killer-router"]
 
