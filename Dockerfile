@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.83 AS builder
+FROM rust:1.83-slim AS builder
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
@@ -7,20 +7,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libs
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 
 # Pre-build deps  
-# Create dummy main files for both workspace members to satisfy Cargo during dependency pre-build
-RUN mkdir src && echo 'fn main(){}' > src/main.rs
-RUN mkdir -p scripts/src && echo 'fn main(){}' > scripts/src/main.rs
-RUN echo '[package]\nname = "scripts"\nversion = "0.1.0"\nedition = "2021"' > scripts/Cargo.toml
-RUN cargo build --release || true
-RUN rm -rf src scripts
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs
 
-# Now copy real source
+RUN --mount=type=secret,id=GIT_AUTH_TOKEN \
+    if [ -f /run/secrets/GIT_AUTH_TOKEN ]; then \
+        TOKEN=$(cat /run/secrets/GIT_AUTH_TOKEN) && \
+        git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"; \
+    else \
+        echo "ERROR: Secret file not found at /run/secrets/GIT_AUTH_TOKEN" && exit 1; \
+    fi
+
+RUN cargo build --release && rm -rf src
+
 COPY src ./src
-
-# Copy scripts
-COPY scripts ./scripts
-
-# Do the actual build
 RUN cargo build --release
 
 # Runtime stage
