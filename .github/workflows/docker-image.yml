@@ -31,6 +31,18 @@ jobs:
         id: repo
         run: echo "name=$(echo ${{ env.IMAGE_NAME }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
+      - name: Debug secrets
+        run: |
+          echo "Checking if GH_PAT is available..."
+          if [ -z "${{ secrets.GH_PAT }}" ]; then
+            echo "ERROR: GH_PAT is empty or not set!"
+            exit 1
+          else
+            echo "GH_PAT is set (length: ${#GH_PAT})"
+          fi
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+
       - name: Build and push amd64 image
         uses: docker/build-push-action@v6
         with:
