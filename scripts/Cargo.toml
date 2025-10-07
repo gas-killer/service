@@ -23,4 +23,4 @@ url = { workspace = true }
 dotenv = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-commonware-avs-router = { path = ".." }
+gas-killer-router = { path = ".." }
