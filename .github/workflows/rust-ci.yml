@@ -24,12 +24,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure git to use PAT for GitHub
+      - name: Configure git authentication
         run: |
-          git config --global url."https://${GH_PAT}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
-          git config --global url."https://${GH_PAT}:x-oauth-basic@github.com/".insteadOf "ssh://git@github.com/"
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          git config --global credential.helper store
+          echo "https://${{ secrets.GH_PAT }}:x-oauth-basic@github.com" > ~/.git-credentials
+          
+          # Configure git URL rewrites
+          git config --global url."https://${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://${{ secrets.GH_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          
+          # Configure Cargo to use git CLI
+          mkdir -p ~/.cargo
+          cat > ~/.cargo/config.toml << 'EOF'
+          [net]
+          git-fetch-with-cli = true
+          EOF
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
