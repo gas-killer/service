@@ -4785,7 +4785,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/BreadchainCoop/gas-killer-analyzer?branch=feat%2Fdowngrade-alloy#5e85308ed4d998587837bb1be928c781501c7217"
+source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer?branch=feat%2Fdowngrade-alloy#5e85308ed4d998587837bb1be928c781501c7217"
 dependencies = [
  "alloy 0.12.6",
  "alloy-eips 0.12.6",
