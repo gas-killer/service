@@ -20,6 +20,7 @@ pub mod builder;
 pub mod orchestrator;
 
 // Re-export main types for easy access
+#[allow(unused_imports)]
 pub use builder::CounterOrchestratorBuilder;
 pub use creator::{
     CounterCreator, CounterCreatorType, CreatorConfig, ListeningCounterCreator, SimpleTaskQueue,

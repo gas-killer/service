@@ -5,12 +5,10 @@ use crate::usecases::gas_killer::creator::{
     GasKillerConfig, GasKillerCreator, GasKillerTaskQueue, ListeningGasKillerCreator,
 };
 use crate::usecases::gas_killer::ingress::start_gas_killer_http_server;
-use crate::usecases::gas_killer::provider::GasKillerProvider;
 use crate::{
     bindings::blsapkregistry::BLSApkRegistry, usecases::gas_killer::creator::GasKillerCreatorType,
 };
 use alloy::network::EthereumWallet;
-use alloy_primitives::Address;
 use alloy_provider::fillers::{
     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
 };
@@ -20,6 +18,7 @@ use anyhow::Result;
 use commonware_eigenlayer::config::AvsDeployment;
 use std::{env, str::FromStr};
 
+#[allow(dead_code)]
 type ConnectHTTPDefaultProvider = FillProvider<
     JoinFill<
         JoinFill<
@@ -39,7 +38,6 @@ pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
 
 /// Factory function to create a listening creator with HTTP server
 pub async fn create_listening_creator_with_server(
-    gas_killer_address: Address,
     addr: String,
 ) -> anyhow::Result<GasKillerCreatorType> {
     let queue = GasKillerTaskQueue::new();
@@ -53,7 +51,6 @@ pub async fn create_listening_creator_with_server(
 }
 
 /// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations
-#[allow(dead_code)]
 pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let view_only_provider = ProviderBuilder::new().on_http(url::Url::parse(&http_rpc).unwrap());
@@ -102,6 +99,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
 }
 
 /// Helper function to create provider
+#[allow(dead_code)]
 pub async fn create_provider() -> anyhow::Result<ConnectHTTPDefaultProvider> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");

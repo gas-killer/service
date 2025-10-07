@@ -27,7 +27,6 @@ pub struct AnalysisResult {
 //
 
 /// Validator implementation for the gas killer use case
-#[allow(dead_code)]
 pub struct GasKillerValidator {
     /// RPC URL for the gas analyzer
     fork_rpc_url: String,
@@ -35,7 +34,6 @@ pub struct GasKillerValidator {
 
 impl GasKillerValidator {
     /// Creates a new GasKillerValidator with default settings.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         let rpc_url = env::var("RPC_URL")
             .unwrap_or_else(|_| "https://ethereum-holesky.publicnode.com".to_string());
@@ -45,7 +43,6 @@ impl GasKillerValidator {
     }
 
     /// Validates the message format and decodes the aggregation
-    #[allow(dead_code)]
     async fn validate_message_format(
         &self,
         msg: &[u8],
@@ -72,7 +69,6 @@ impl GasKillerValidator {
     ///
     /// This method must produce the same hash as the creator's payload generation
     /// to ensure consensus consistency.
-    #[allow(dead_code)]
     async fn reconstruct_payload_hash(&self, task_data: &GasKillerTaskData) -> Result<Digest> {
         // Reconstruct the same payload that the creator/nodes would have created
         // Now includes storage_updates to commit to outputs as well as inputs
@@ -174,7 +170,6 @@ impl GasKillerValidator {
     ///
     /// # Returns
     /// * `Result<bool>` - True if storage updates match, false otherwise
-    #[allow(dead_code)]
     async fn validate_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<bool> {
         debug!("Starting storage validation");
 

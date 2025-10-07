@@ -96,11 +96,13 @@ pub trait TaskQueue: Send + Sync {
     fn push(&self, task: TaskRequest);
 
     /// Remove and return the next task from the queue
+    #[allow(dead_code)]
     fn pop(&self) -> Option<TaskRequest>;
 }
 
 /// Simple in-memory task queue using Arc<Mutex> with proper error handling
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct SimpleTaskQueue {
     queue: Arc<Mutex<Vec<TaskRequest>>>,
     timeout_ms: u64,
@@ -135,6 +137,7 @@ impl SimpleTaskQueue {
     }
 
     /// Try to acquire the lock with timeout and retries
+    #[allow(dead_code)]
     fn try_lock_with_timeout(&self) -> Result<std::sync::MutexGuard<'_, Vec<TaskRequest>>, String> {
         let start_time = Instant::now();
         let timeout_duration = Duration::from_millis(self.timeout_ms);
@@ -198,6 +201,7 @@ impl TaskQueue for SimpleTaskQueue {
 
 /// Configuration for listening creators
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CreatorConfig {
     pub polling_interval_ms: u64,
     pub timeout_ms: u64,
@@ -213,11 +217,13 @@ impl Default for CreatorConfig {
 }
 
 /// Creator for the counter usecase without ingress.
+#[allow(dead_code)]
 pub struct CounterCreator {
     provider: Arc<CounterProvider>,
 }
 
 impl CounterCreator {
+    #[allow(dead_code)]
     pub fn new(provider: CounterProvider) -> Self {
         Self {
             provider: Arc::new(provider),
@@ -242,6 +248,7 @@ impl Creator for CounterCreator {
 }
 
 /// Creator for the counter usecase that listens for external requests.
+#[allow(dead_code)]
 pub struct ListeningCounterCreator<Q: TaskQueue + Send + Sync + 'static> {
     provider: Arc<CounterProvider>,
     queue: Arc<Q>,
@@ -250,6 +257,7 @@ pub struct ListeningCounterCreator<Q: TaskQueue + Send + Sync + 'static> {
 }
 
 impl<Q: TaskQueue + Send + Sync + 'static> ListeningCounterCreator<Q> {
+    #[allow(dead_code)]
     pub fn new(provider: CounterProvider, queue: Q, config: CreatorConfig) -> Self {
         Self {
             provider: Arc::new(provider),
@@ -259,6 +267,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningCounterCreator<Q> {
         }
     }
 
+    #[allow(dead_code)]
     async fn wait_for_task(&self) -> Result<TaskRequest> {
         use tokio::time::{Duration, sleep};
         let mut attempts = 0;
