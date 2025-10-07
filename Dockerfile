@@ -1,7 +1,7 @@
 # Build stage
 FROM rust:1.83 AS builder
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev git && rm -rf /var/lib/apt/lists/*
 
 # Copy manifest files
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
@@ -11,17 +11,32 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 RUN mkdir src && echo 'fn main(){}' > src/main.rs
 RUN mkdir -p scripts/src && echo 'fn main(){}' > scripts/src/main.rs
 RUN echo '[package]\nname = "scripts"\nversion = "0.1.0"\nedition = "2021"' > scripts/Cargo.toml
-RUN cargo build --release || true
+
+RUN mkdir -p /usr/local/cargo && \
+    echo '[net]' > /usr/local/cargo/config.toml && \
+    echo 'git-fetch-with-cli = true' >> /usr/local/cargo/config.toml
+
+# Pre-build dependencies with secret mounted
+RUN --mount=type=secret,id=GIT_AUTH_TOKEN \
+    if [ -f /run/secrets/GIT_AUTH_TOKEN ]; then \
+        TOKEN=$(cat /run/secrets/GIT_AUTH_TOKEN) && \
+        git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"; \
+    fi && \
+    cargo build --release || true
+
 RUN rm -rf src scripts
 
 # Now copy real source
 COPY src ./src
-
-# Copy scripts
 COPY scripts ./scripts
 
-# Do the actual build
-RUN cargo build --release
+# Do the actual build with secret mounted
+RUN --mount=type=secret,id=GIT_AUTH_TOKEN \
+    if [ -f /run/secrets/GIT_AUTH_TOKEN ]; then \
+        TOKEN=$(cat /run/secrets/GIT_AUTH_TOKEN) && \
+        git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"; \
+    fi && \
+    cargo build --release
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -55,4 +70,3 @@ EXPOSE 3000
 
 # Run the binary
 ENTRYPOINT ["gas-killer-router"]
-

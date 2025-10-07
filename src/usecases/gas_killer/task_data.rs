@@ -1,4 +1,4 @@
-use alloy::primitives::{Address, FixedBytes};
+use alloy::primitives::{Address, FixedBytes, U256};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
@@ -13,8 +13,23 @@ pub struct GasKillerTaskData {
     pub transition_index: u64,
     /// Target contract address for function call
     pub target_address: Address,
-    /// Function selector for target call (4 bytes)
-    pub target_function: FixedBytes<4>,
+    /// Call data for the transaction (includes function selector + parameters)
+    pub call_data: Vec<u8>,
+    /// Sender address for the transaction
+    pub from_address: Address,
+    /// ETH value to send with the transaction
+    pub value: U256,
+}
+
+impl GasKillerTaskData {
+    /// Extracts the function selector (first 4 bytes) from call_data
+    pub fn function_selector(&self) -> FixedBytes<4> {
+        if self.call_data.len() >= 4 {
+            FixedBytes::from_slice(&self.call_data[0..4])
+        } else {
+            FixedBytes::ZERO
+        }
+    }
 }
 
 impl Default for GasKillerTaskData {
@@ -23,7 +38,9 @@ impl Default for GasKillerTaskData {
             storage_updates: vec![],
             transition_index: 0,
             target_address: Address::ZERO,
-            target_function: FixedBytes::ZERO,
+            call_data: vec![],
+            from_address: Address::ZERO,
+            value: U256::ZERO,
         }
     }
 }
@@ -50,8 +67,23 @@ impl Write for GasKillerTaskData {
         // Write target address as 20 bytes
         buf.put_slice(self.target_address.as_slice());
 
-        // Write target function selector as 4 bytes
-        buf.put_slice(self.target_function.as_slice());
+        // Write from address as 20 bytes
+        buf.put_slice(self.from_address.as_slice());
+
+        // Write value as 32 bytes (U256)
+        buf.put_slice(&self.value.to_be_bytes::<32>());
+
+        // Write call data as length-prefixed bytes
+        let call_data_len = self.call_data.len();
+        if call_data_len > u32::MAX as usize {
+            panic!(
+                "call_data length ({}) exceeds u32::MAX ({})",
+                call_data_len,
+                u32::MAX
+            );
+        }
+        (call_data_len as u32).write(buf);
+        buf.put_slice(&self.call_data);
     }
 }
 
@@ -80,19 +112,37 @@ impl Read for GasKillerTaskData {
         buf.copy_to_slice(&mut address_bytes);
         let target_address = Address::from_slice(&address_bytes);
 
-        // Read target function selector (4 bytes)
-        if buf.remaining() < 4 {
+        // Read from address (20 bytes)
+        if buf.remaining() < 20 {
             return Err(commonware_codec::Error::EndOfBuffer);
         }
-        let mut function_bytes = [0u8; 4];
-        buf.copy_to_slice(&mut function_bytes);
-        let target_function = FixedBytes::from_slice(&function_bytes);
+        let mut from_address_bytes = [0u8; 20];
+        buf.copy_to_slice(&mut from_address_bytes);
+        let from_address = Address::from_slice(&from_address_bytes);
+
+        // Read value (32 bytes - U256)
+        if buf.remaining() < 32 {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut value_bytes = [0u8; 32];
+        buf.copy_to_slice(&mut value_bytes);
+        let value = U256::from_be_bytes(value_bytes);
+
+        // Read call data
+        let call_data_len = u32::read(buf)? as usize;
+        if buf.remaining() < call_data_len {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut call_data = vec![0u8; call_data_len];
+        buf.copy_to_slice(&mut call_data);
 
         Ok(Self {
             storage_updates,
             transition_index,
             target_address,
-            target_function,
+            call_data,
+            from_address,
+            value,
         })
     }
 }
@@ -101,11 +151,18 @@ impl EncodeSize for GasKillerTaskData {
     fn encode_size(&self) -> usize {
         // Calculate serialized size matching the Write implementation exactly
         // storage_updates: u32 length prefix (4 bytes) + raw bytes
-        const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for storage_updates
+        const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for storage_updates and call_data
         const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index
-        const ADDRESS_SIZE: usize = 20; // target_address (Ethereum address)
-        const FUNCTION_SELECTOR_SIZE: usize = 4; // target_function (4-byte selector)
+        const ADDRESS_SIZE: usize = 20; // target_address and from_address (Ethereum addresses)
+        const U256_SIZE: usize = 32; // value (U256)
 
-        U32_SIZE + self.storage_updates.len() + U64_SIZE + ADDRESS_SIZE + FUNCTION_SELECTOR_SIZE
+        U32_SIZE
+            + self.storage_updates.len()
+            + U64_SIZE
+            + ADDRESS_SIZE
+            + ADDRESS_SIZE
+            + U256_SIZE
+            + U32_SIZE
+            + self.call_data.len()
     }
 }

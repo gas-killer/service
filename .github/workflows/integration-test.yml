@@ -87,7 +87,11 @@ jobs:
 
       - name: Build router image for CI testing
         run: |
-          docker build -t gas-killer-router:ci-test .
+          docker build \
+            --secret id=GIT_AUTH_TOKEN,env=GIT_AUTH_TOKEN  \
+            -t gas-killer-router:ci-test .
+        env:
+          GIT_AUTH_TOKEN: ${{ secrets.GH_PAT }}
 
       - name: Pull required images
         run: |

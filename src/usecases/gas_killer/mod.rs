@@ -3,6 +3,12 @@
 // Gas killer task data
 pub mod task_data;
 
+// Gas killer creator implementation
+pub mod creator;
+
+// Gas killer validator implementation
+pub mod validator;
+
 // Gas killer executor implementation
 pub mod executor;
 
@@ -14,3 +20,5 @@ pub mod factories;
 pub use executor::GasKillerHandler;
 #[allow(unused_imports)]
 pub use task_data::GasKillerTaskData;
+#[allow(unused_imports)]
+pub use validator::GasKillerValidator;
