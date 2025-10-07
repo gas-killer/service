@@ -1,7 +1,45 @@
-use alloy::primitives::{Address, FixedBytes, U256};
+use alloy::primitives::FixedBytes;
+use alloy_primitives::{Address, U256};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GasKillerTaskRequestBody {
+    pub target_address: Address,
+    pub call_data: Vec<u8>,
+    pub storage_updates: Vec<u8>,
+    pub transition_index: u64,
+    pub from_address: Address,
+    pub value: U256,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GasKillerTaskRequest {
+    pub body: GasKillerTaskRequestBody,
+}
+
+impl GasKillerTaskRequest {
+    pub fn is_valid(&self) -> bool {
+        let body = &self.body;
+        if body.target_address.is_zero()
+            || body.call_data.is_empty()
+            || body.storage_updates.is_empty()
+            || body.transition_index == 0
+        {
+            // TODO: add additional checks
+            return false;
+        }
+        true
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GasKillerTaskResponse {
+    pub success: bool,
+    pub message: String,
+}
 
 /// Task data specific to the gas killer use case
 #[derive(Debug, Clone, PartialEq)]
