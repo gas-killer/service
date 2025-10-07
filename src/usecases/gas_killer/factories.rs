@@ -10,6 +10,7 @@ use crate::{
     bindings::blsapkregistry::BLSApkRegistry, usecases::gas_killer::creator::GasKillerCreatorType,
 };
 use alloy::network::EthereumWallet;
+use alloy_primitives::Address;
 use alloy_provider::fillers::{
     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
 };
@@ -32,31 +33,18 @@ type ConnectHTTPDefaultProvider = FillProvider<
 
 /// Factory function to create a default creator
 pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
-    let provider = create_provider().await?;
-    let deployment =
-        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
-    let gas_killer_address = deployment
-        .counter_address() //TODO: change this to meet gas killer's creator model
-        .map_err(|e| anyhow::anyhow!("Failed to get counter address: {}", e))?;
-    let gas_killer_provider = GasKillerProvider::new(gas_killer_address, provider.clone());
-    let creator = GasKillerCreator::new(gas_killer_provider);
+    let creator = GasKillerCreator::new();
     Ok(GasKillerCreatorType::Basic(creator))
 }
 
 /// Factory function to create a listening creator with HTTP server
 pub async fn create_listening_creator_with_server(
+    gas_killer_address: Address,
     addr: String,
 ) -> anyhow::Result<GasKillerCreatorType> {
-    let provider = create_provider().await?;
-    let deployment =
-        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
-    let gas_killer_address = deployment
-        .counter_address() //TODO: change this to meet gas killer's creator model
-        .map_err(|e| anyhow::anyhow!("Failed to get counter address: {}", e))?;
-    let gas_killer_provider = GasKillerProvider::new(gas_killer_address, provider.clone());
     let queue = GasKillerTaskQueue::new();
     let config = GasKillerConfig::default();
-    let creator = ListeningGasKillerCreator::new(gas_killer_provider, queue.clone(), config);
+    let creator = ListeningGasKillerCreator::new(queue.clone(), config);
     let queue = queue.get_queue();
     tokio::spawn(async move {
         start_gas_killer_http_server(queue, &addr).await;
@@ -114,7 +102,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
 }
 
 /// Helper function to create provider
-async fn create_provider() -> anyhow::Result<ConnectHTTPDefaultProvider> {
+pub async fn create_provider() -> anyhow::Result<ConnectHTTPDefaultProvider> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
     let signer = PrivateKeySigner::from_str(&private_key)?;

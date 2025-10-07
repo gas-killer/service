@@ -7,6 +7,8 @@ use alloy::sol_types::SolValue;
 use alloy_primitives::U256;
 use anyhow::Result;
 use async_trait::async_trait;
+use commonware_codec::Encode;
+use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{error, warn};
@@ -141,15 +143,36 @@ impl Default for GasKillerConfig {
 }
 
 /// Creator for the gas killer usecase without ingress
-pub struct GasKillerCreator {
-    provider: Arc<GasKillerProvider>,
-}
+pub struct GasKillerCreator {}
 
+impl Default for GasKillerCreator {
+    fn default() -> Self {
+        Self {}
+    }
+}
 impl GasKillerCreator {
-    pub fn new(provider: GasKillerProvider) -> Self {
-        Self {
-            provider: Arc::new(provider),
-        }
+    pub fn new() -> Self {
+        Self {}
+    }
+    /// Creates payload bytes from the task data
+    ///
+    /// The payload is deterministically encoded from the task data to ensure
+    /// that the same analysis produces the same payload hash for consensus.
+    /// This method is used by validator tests to verify hash consistency.
+    #[allow(dead_code)]
+    pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
+        // Create a deterministic payload by ABI-encoding key fields
+        // This must match the logic in GasKillerValidator::reconstruct_payload_hash
+        let payload_data = (
+            task_data.transition_index,
+            task_data.target_address,
+            task_data.from_address,
+            task_data.value,
+            task_data.call_data.clone(),
+        );
+
+        let payload = payload_data.abi_encode();
+        Ok(payload)
     }
 }
 
@@ -158,12 +181,10 @@ impl Creator for GasKillerCreator {
     type TaskData = GasKillerTaskData;
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
-        let count = self.provider.get_state_transition_count().await?;
-        // Domain decision: payload is ABI-encoded round
-        let payload = self
-            .provider
-            .encode_state_transition_count(U256::from(count));
-        Ok((payload, count))
+        let payload = self.get_task_metadata();
+        let raw_payload = payload.encode().to_vec();
+
+        Ok((raw_payload, 0)) // set default "round" to 0
     }
 
     fn get_task_metadata(&self) -> Self::TaskData {
@@ -173,16 +194,14 @@ impl Creator for GasKillerCreator {
 
 /// Creator for the gas killer usecase that listens for external requests
 pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
-    provider: Arc<GasKillerProvider>,
     queue: Arc<Q>,
     config: GasKillerConfig,
     current_task: std::sync::Mutex<Option<GasKillerTaskRequest>>,
 }
 
 impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
-    pub fn new(provider: GasKillerProvider, queue: Q, config: GasKillerConfig) -> Self {
+    pub fn new(queue: Q, config: GasKillerConfig) -> Self {
         Self {
-            provider: Arc::new(provider),
             queue: Arc::new(queue),
             config,
             current_task: std::sync::Mutex::new(None),
@@ -224,11 +243,8 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
         let _task = self.wait_for_task().await?;
-        let round = self.provider.get_state_transition_count().await?;
-        let payload = self
-            .provider
-            .encode_state_transition_count(U256::from(round));
-        Ok((payload, round))
+        let payload = self.get_task_metadata().encode().to_vec();
+        Ok((payload, 0)) // set default "round" to 0
     }
 
     fn get_task_metadata(&self) -> Self::TaskData {
@@ -251,24 +267,6 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
 
         // Fall back to default metadata if no task data is available
         GasKillerTaskData::default()
-    }
-}
-
-impl GasKillerCreator {
-    pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
-        // TODO: refactor to avoid duplication with get_task_metadata
-        // Create a deterministic payload by ABI-encoding key fields
-        // This must match the logic in GasKillerValidator::reconstruct_payload_hash
-        let payload_data = (
-            task_data.transition_index,
-            task_data.target_address,
-            task_data.from_address,
-            task_data.value,
-            task_data.call_data.clone(),
-        );
-
-        let payload = payload_data.abi_encode();
-        Ok(payload)
     }
 }
 
@@ -319,9 +317,7 @@ mod tests {
 
         let result = GasKillerCreator::create_payload_from_task_data(&task_data);
         assert!(result.is_ok());
-
-        let payload = result.unwrap();
-        assert!(!payload.is_empty());
+        assert!(!result.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -340,7 +336,8 @@ mod tests {
         };
 
         // Create payload using creator
-        let creator_payload = GasKillerCreator::create_payload_from_task_data(&task_data).unwrap();
+        let creator_payload = GasKillerCreator::create_payload_from_task_data(&task_data);
+        assert!(creator_payload.is_ok());
 
         // Create a test message to validate with validator
         use crate::validator::interface::ValidatorTrait;
@@ -365,7 +362,7 @@ mod tests {
         // Hash the creator payload to compare
         use commonware_cryptography::{Hasher, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(&creator_payload);
+        hasher.update(&creator_payload.unwrap());
         let creator_payload_hash = hasher.finalize();
 
         // Both should produce the same hash
