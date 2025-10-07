@@ -42,9 +42,6 @@ cd "$PROJECT_ROOT"
 echo -e "${YELLOW}Step 2: Setting up environment files...${NC}"
 cp example.env .env
 
-# Create required directories
-mkdir -p .nodes/operator_keys
-
 # Copy config template
 cp config/config.example.json config/config.json
 
@@ -56,7 +53,7 @@ sed -i '' 's|^RPC_URL=.*|RPC_URL=http://ethereum:8545|' .env
 sed -i '' 's|^ENVIRONMENT=.*|ENVIRONMENT=LOCAL|' .env
 
 # Set FORK_URL for local forking
-sed -i '' 's|^# FORK_URL=.*|FORK_URL=https://ethereum-holesky.publicnode.com|' .env
+sed -i '' 's|^# FORK_URL=.*|FORK_URL=https://holesky.drpc.org|' .env
 
 # Use default Anvil private key for testing
 DEFAULT_PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -98,7 +95,7 @@ elapsed=0
 
 while [ $elapsed -lt $timeout ]; do
     # Check if eigenlayer container has completed setup
-    if docker compose logs eigenlayer 2>/dev/null | grep -q "Operator 3 weight in quorum" && [ -f .nodes/avs_deploy.json ]; then
+    if docker compose logs eigenlayer 2>/dev/null | grep -q "Operator 3 weight in quorum" && [ -f config/.nodes/avs_deploy.json ]; then
         echo -e "${GREEN}EigenLayer setup completed successfully${NC}"
         break
     fi
@@ -130,7 +127,7 @@ export ARRAY_SUMMATION_SEED="${ARRAY_SUMMATION_SEED:-0}"
 
 # Source environment and run deployment
 source ../.env
-export AVS_DEPLOYMENT_PATH="../.nodes/avs_deploy.json"
+export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
     echo -e "${RED}Deployment file not found at $AVS_DEPLOYMENT_PATH${NC}"
