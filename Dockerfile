@@ -12,6 +12,10 @@ RUN mkdir src && echo 'fn main(){}' > src/main.rs
 RUN mkdir -p scripts/src && echo 'fn main(){}' > scripts/src/main.rs
 RUN echo '[package]\nname = "scripts"\nversion = "0.1.0"\nedition = "2021"' > scripts/Cargo.toml
 
+RUN mkdir -p /usr/local/cargo && \
+    echo '[net]' > /usr/local/cargo/config.toml && \
+    echo 'git-fetch-with-cli = true' >> /usr/local/cargo/config.toml
+
 # Pre-build dependencies with secret mounted
 RUN --mount=type=secret,id=GIT_AUTH_TOKEN \
     if [ -f /run/secrets/GIT_AUTH_TOKEN ]; then \
