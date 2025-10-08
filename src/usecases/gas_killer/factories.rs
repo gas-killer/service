@@ -37,7 +37,9 @@ pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
 }
 
 /// Factory function to create a listening creator with HTTP server
-pub async fn create_listening_creator_with_server(addr: String) -> anyhow::Result<GasKillerCreatorType> {
+pub async fn create_listening_creator_with_server(
+    addr: String,
+) -> anyhow::Result<GasKillerCreatorType> {
     let queue = GasKillerTaskQueue::new();
     let config = GasKillerConfig::default();
     let creator = ListeningGasKillerCreator::new(queue.clone(), config);
