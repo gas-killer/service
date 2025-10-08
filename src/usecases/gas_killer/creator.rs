@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::creator::core::Creator;
 use crate::usecases::gas_killer::structs::GasKillerTaskData;
 use crate::usecases::gas_killer::structs::GasKillerTaskRequest;
