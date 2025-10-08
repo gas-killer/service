@@ -129,8 +129,15 @@ jobs:
 
       - name: Start router after dependencies are ready
         run: |
-          # Start router once nodes and EigenLayer are up so DNS is ready
-          docker compose -f docker-compose.yml up -d router
+          # Build router image with access to private Git deps, tag to match Compose service
+          docker build \
+            --secret id=GIT_AUTH_TOKEN,env=GIT_AUTH_TOKEN \
+            -t gas-killer-router-router:latest .
+
+          # Start router once nodes and EigenLayer are up so DNS is ready, do not rebuild
+          docker compose -f docker-compose.yml up -d router --no-build
+        env:
+          GIT_AUTH_TOKEN: ${{ secrets.GH_PAT }}
 
       - name: Test counter increment functionality
         run: |
