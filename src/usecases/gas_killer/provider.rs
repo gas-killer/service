@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use alloy::{primitives::U256, sol_types::SolValue};
 use anyhow::Result;
 

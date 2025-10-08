@@ -20,6 +20,7 @@ pub struct GasKillerTaskRequest {
     pub body: GasKillerTaskRequestBody,
 }
 
+#[allow(dead_code)]
 impl GasKillerTaskRequest {
     pub fn is_valid(&self) -> bool {
         let body = &self.body;
@@ -162,17 +163,9 @@ impl Read for GasKillerTaskData {
         if buf.remaining() < 20 {
             return Err(commonware_codec::Error::EndOfBuffer);
         }
-        let from_address_bytes = [0u8; 20];
-        buf.copy_to_slice(&mut address_bytes);
-        let from_address = Address::from_slice(&address_bytes);
-
-        // Read from_address
-        if buf.remaining() < 20 {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        let from_address_bytes = [0u8; 20];
-        buf.copy_to_slice(&mut address_bytes);
-        let from_address = Address::from_slice(&address_bytes);
+        let mut from_address_bytes = [0u8; 20];
+        buf.copy_to_slice(&mut from_address_bytes);
+        let from_address = Address::from_slice(&from_address_bytes);
 
         // Read value (32 bytes - U256)
         if buf.remaining() < 32 {

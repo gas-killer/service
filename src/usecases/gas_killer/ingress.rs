@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use std::sync::{Arc, Mutex};
 use tracing::info;
