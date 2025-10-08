@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorStateRetriever;
 use crate::executor::bls::BlsEigenlayerExecutor;
 use crate::usecases::gas_killer::GasKillerHandler;
@@ -5,12 +6,10 @@ use crate::usecases::gas_killer::creator::{
     GasKillerConfig, GasKillerCreator, GasKillerTaskQueue, ListeningGasKillerCreator,
 };
 use crate::usecases::gas_killer::ingress::start_gas_killer_http_server;
-use crate::usecases::gas_killer::provider::GasKillerProvider;
 use crate::{
     bindings::blsapkregistry::BLSApkRegistry, usecases::gas_killer::creator::GasKillerCreatorType,
 };
 use alloy::network::EthereumWallet;
-use alloy_primitives::Address;
 use alloy_provider::fillers::{
     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
 };
@@ -39,7 +38,6 @@ pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
 
 /// Factory function to create a listening creator with HTTP server
 pub async fn create_listening_creator_with_server(
-    gas_killer_address: Address,
     addr: String,
 ) -> anyhow::Result<GasKillerCreatorType> {
     let queue = GasKillerTaskQueue::new();
