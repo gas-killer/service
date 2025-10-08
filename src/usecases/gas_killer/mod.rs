@@ -15,17 +15,17 @@ pub mod validator;
 // Gas killer executor implementation
 pub mod executor;
 
-// Gas killer factories implementation
+// Gas killer factories
 pub mod factories;
 
 // Gas killer structs
-pub mod structs;
+pub mod task_data;
 
 // Re-export main types for easy access
 #[allow(unused_imports)]
 pub use executor::GasKillerHandler;
 #[allow(unused_imports)]
-pub use structs::GasKillerTaskData;
+pub use task_data::GasKillerTaskData;
 
 #[allow(unused_imports)]
 pub use validator::GasKillerValidator;

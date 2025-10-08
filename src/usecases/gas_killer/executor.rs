@@ -3,7 +3,7 @@ use crate::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorState
 use crate::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes};
 use crate::executor::bls::{BlsSignatureVerificationHandler, convert_non_signer_data};
 use crate::executor::core::ExecutionResult;
-use crate::usecases::gas_killer::structs::GasKillerTaskData;
+use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 use alloy_primitives::{Bytes, FixedBytes, U256};
 use anyhow::Result;
 use async_trait::async_trait;
