@@ -35,7 +35,7 @@ services:
     restart: unless-stopped
 
   node-1:
-    image: ghcr.io/breadchaincoop/gas-killer-node:dev
+    image: ghcr.io/breadchaincoop/gas-killer-node:amd64-98c82c332e7506c7dbfc1be6917887b89a9a8ae5
     pull_policy: always
     platform: linux/amd64
     depends_on:
@@ -67,7 +67,7 @@ services:
     restart: unless-stopped
 
   node-2:
-    image: ghcr.io/breadchaincoop/gas-killer-node:dev
+    image: ghcr.io/breadchaincoop/gas-killer-node:amd64-98c82c332e7506c7dbfc1be6917887b89a9a8ae5
     pull_policy: always
     platform: linux/amd64
     depends_on:
@@ -99,7 +99,7 @@ services:
     restart: unless-stopped
 
   node-3:
-    image: ghcr.io/breadchaincoop/gas-killer-node:dev
+    image: ghcr.io/breadchaincoop/gas-killer-node:amd64-98c82c332e7506c7dbfc1be6917887b89a9a8ae5
     pull_policy: always
     platform: linux/amd64
     depends_on:
