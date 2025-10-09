@@ -1,10 +1,12 @@
-use alloy::primitives::{Address, FixedBytes, U256};
+use alloy::primitives::FixedBytes;
+use alloy_primitives::{Address, U256};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use serde::{Deserialize, Serialize};
 
 /// Task data specific to the gas killer use case
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub struct GasKillerTaskData {
     /// Encoded storage updates to be applied
@@ -71,7 +73,7 @@ impl Write for GasKillerTaskData {
         buf.put_slice(self.from_address.as_slice());
 
         // Write value as 32 bytes (U256)
-        buf.put_slice(&self.value.to_be_bytes::<32>());
+        buf.put_slice(&self.value.to_le_bytes::<32>());
 
         // Write call data as length-prefixed bytes
         let call_data_len = self.call_data.len();
@@ -91,6 +93,25 @@ impl Read for GasKillerTaskData {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        // Read target address (20 bytes)
+        if buf.remaining() < 20 {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut address_bytes = [0u8; 20];
+        buf.copy_to_slice(&mut address_bytes);
+        let target_address = Address::from_slice(&address_bytes);
+
+        // Read call data
+        let call_data_len = u32::read(buf)? as usize;
+        if buf.remaining() < call_data_len {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut call_data = vec![0u8; call_data_len];
+        buf.copy_to_slice(&mut call_data);
+
+        // Read transition index
+        let transition_index = u64::read(buf)?;
+
         // Read storage updates
         // Note: Reading u32 length prefix, matching the Write implementation
         // This limits deserialized storage_updates to ~4.3GB
@@ -101,18 +122,7 @@ impl Read for GasKillerTaskData {
         let mut storage_updates = vec![0u8; storage_updates_len];
         buf.copy_to_slice(&mut storage_updates);
 
-        // Read transition index
-        let transition_index = u64::read(buf)?;
-
-        // Read target address (20 bytes)
-        if buf.remaining() < 20 {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        let mut address_bytes = [0u8; 20];
-        buf.copy_to_slice(&mut address_bytes);
-        let target_address = Address::from_slice(&address_bytes);
-
-        // Read from address (20 bytes)
+        // Read from_address
         if buf.remaining() < 20 {
             return Err(commonware_codec::Error::EndOfBuffer);
         }
@@ -126,21 +136,13 @@ impl Read for GasKillerTaskData {
         }
         let mut value_bytes = [0u8; 32];
         buf.copy_to_slice(&mut value_bytes);
-        let value = U256::from_be_bytes(value_bytes);
-
-        // Read call data
-        let call_data_len = u32::read(buf)? as usize;
-        if buf.remaining() < call_data_len {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        let mut call_data = vec![0u8; call_data_len];
-        buf.copy_to_slice(&mut call_data);
+        let value = U256::from_le_bytes(value_bytes);
 
         Ok(Self {
-            storage_updates,
-            transition_index,
             target_address,
             call_data,
+            storage_updates,
+            transition_index,
             from_address,
             value,
         })
