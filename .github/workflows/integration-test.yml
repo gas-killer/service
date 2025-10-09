@@ -147,6 +147,51 @@ jobs:
             exit 1
           fi
 
+      - name: Debug - Compose status and networks
+        run: |
+          echo "=== docker compose ps ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml ps -a || true
+          echo
+          echo "=== docker network ls ==="
+          docker network ls || true
+          echo
+          echo "=== inspect default network (if found) ==="
+          DEFAULT_NET=$(docker network ls --format '{{.Name}}' | grep '_default$' | head -n1 || true)
+          if [ -n "$DEFAULT_NET" ]; then
+            docker network inspect "$DEFAULT_NET" | head -n 200 || true
+          else
+            echo "No _default network found"
+          fi
+          echo
+          echo "=== container IPs ==="
+          for s in ethereum eigenlayer signer node-1 node-2 node-3 router; do
+            ID=$(docker compose -f docker-compose.yml -f docker-compose.ci.yml ps -q "$s" || true)
+            if [ -n "$ID" ]; then
+              IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ID" 2>/dev/null || true)
+              echo "$s => $IP"
+            else
+              echo "$s => not running"
+            fi
+          done
+
+      - name: Debug - DNS checks from router
+        run: |
+          ROUTER_ID=$(docker compose -f docker-compose.yml -f docker-compose.ci.yml ps -q router || true)
+          if [ -z "$ROUTER_ID" ]; then
+            echo "Router container not running yet"
+            exit 0
+          fi
+          echo "=== /etc/hosts in router ==="
+          docker exec "$ROUTER_ID" sh -lc 'cat /etc/hosts || true'
+          echo
+          echo "=== /etc/resolv.conf in router ==="
+          docker exec "$ROUTER_ID" sh -lc 'cat /etc/resolv.conf || true'
+          echo
+          for host in node-1 node-2 node-3; do
+            echo "=== getent hosts $host (from router) ==="
+            docker exec "$ROUTER_ID" sh -lc "getent hosts $host || true"
+          done
+
       - name: Test counter increment functionality
         run: |
           echo "Testing counter increment..."

@@ -12,7 +12,7 @@ services:
     image: ghcr.io/breadchaincoop/eigenlayer:dev
     depends_on:
       ethereum:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     volumes:
@@ -42,7 +42,7 @@ services:
       eigenlayer:
         condition: service_completed_successfully
       ethereum:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -74,7 +74,7 @@ services:
       eigenlayer:
         condition: service_completed_successfully
       ethereum:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -106,7 +106,7 @@ services:
       eigenlayer:
         condition: service_completed_successfully
       ethereum:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -139,13 +139,13 @@ services:
       eigenlayer:
         condition: service_completed_successfully
       ethereum:
-        condition: service_started
+        condition: service_healthy
       node-1:
-        condition: service_started
+        condition: service_healthy
       node-2:
-        condition: service_started
+        condition: service_healthy
       node-3:
-        condition: service_started
+        condition: service_healthy
     env_file:
       - .env
     environment:
