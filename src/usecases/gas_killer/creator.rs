@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 use crate::creator::core::Creator;
-use crate::usecases::gas_killer::structs::GasKillerTaskData;
-use crate::usecases::gas_killer::structs::GasKillerTaskRequest;
+use crate::usecases::gas_killer::ingress::GasKillerTaskRequest;
+use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 use alloy::sol_types::SolValue;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use commonware_codec::Encode;
+use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{error, warn};
@@ -56,10 +57,6 @@ impl GasKillerTaskQueue {
         }
     }
 
-    pub fn get_queue(&self) -> Arc<Mutex<Vec<GasKillerTaskRequest>>> {
-        self.queue.clone()
-    }
-
     /// Try to acquire the lock with timeout and retries
     fn try_lock_with_timeout(
         &self,
@@ -100,6 +97,9 @@ impl Default for GasKillerTaskQueue {
     }
 }
 
+// Align naming with the counter usecase so factories and ingress can share a consistent type.
+pub type SimpleTaskQueue = GasKillerTaskQueue;
+
 impl TaskQueue for GasKillerTaskQueue {
     fn push(&self, task: GasKillerTaskRequest) {
         match self.try_lock_with_timeout() {
@@ -133,9 +133,14 @@ pub struct GasKillerConfig {
 
 impl Default for GasKillerConfig {
     fn default() -> Self {
+        let timeout_ms: u64 = env::var("INGRESS_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30_000);
+
         Self {
             polling_interval_ms: 100,
-            timeout_ms: 5000,
+            timeout_ms,
         }
     }
 }

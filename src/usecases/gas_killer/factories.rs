@@ -3,7 +3,7 @@ use crate::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorState
 use crate::executor::bls::BlsEigenlayerExecutor;
 use crate::usecases::gas_killer::GasKillerHandler;
 use crate::usecases::gas_killer::creator::{
-    GasKillerConfig, GasKillerCreator, GasKillerTaskQueue, ListeningGasKillerCreator,
+    GasKillerConfig, GasKillerCreator, ListeningGasKillerCreator, SimpleTaskQueue,
 };
 use crate::usecases::gas_killer::ingress::start_gas_killer_http_server;
 use crate::{
@@ -17,7 +17,7 @@ use alloy_provider::{Identity, ProviderBuilder, RootProvider};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
 use commonware_eigenlayer::config::AvsDeployment;
-use std::{env, str::FromStr};
+use std::{env, str::FromStr, sync::Arc};
 
 type ConnectHTTPDefaultProvider = FillProvider<
     JoinFill<
@@ -40,12 +40,13 @@ pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
 pub async fn create_listening_creator_with_server(
     addr: String,
 ) -> anyhow::Result<GasKillerCreatorType> {
-    let queue = GasKillerTaskQueue::new();
+    let queue = SimpleTaskQueue::new();
     let config = GasKillerConfig::default();
     let creator = ListeningGasKillerCreator::new(queue.clone(), config);
-    let queue = queue.get_queue();
+    // Wrap the queue in Arc for the HTTP server
+    let queue_for_server = Arc::new(queue);
     tokio::spawn(async move {
-        start_gas_killer_http_server(queue, &addr).await;
+        start_gas_killer_http_server(queue_for_server, &addr).await;
     });
     Ok(GasKillerCreatorType::Listening(creator))
 }
