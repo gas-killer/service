@@ -21,6 +21,9 @@ pub mod factories;
 // Gas killer structs
 pub mod task_data;
 
+// Gas killer orchestrator implementation
+pub mod orchestrator;
+
 // Re-export main types for easy access
 #[allow(unused_imports)]
 pub use executor::GasKillerHandler;
@@ -29,3 +32,6 @@ pub use task_data::GasKillerTaskData;
 
 #[allow(unused_imports)]
 pub use validator::GasKillerValidator;
+
+#[allow(unused_imports)]
+pub use creator::GasKillerCreatorType;
