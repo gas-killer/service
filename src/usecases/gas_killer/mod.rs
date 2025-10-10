@@ -12,9 +12,9 @@ pub mod validator;
 #[allow(unused_imports)]
 pub use builder::GasKillerOrchestratorBuilder;
 #[allow(unused_imports)]
-pub use executor::GasKillerHandler;
-#[allow(unused_imports)]
 pub use creator::GasKillerCreatorType;
+#[allow(unused_imports)]
+pub use executor::GasKillerHandler;
 #[allow(unused_imports)]
 pub use orchestrator::GasKillerOrchestrator;
 #[allow(unused_imports)]

@@ -75,5 +75,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 fn env_var(name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     env::var(name).map_err(|_| format!("{} environment variable is required", name).into())
 }
-
-
