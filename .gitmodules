@@ -1,3 +1,7 @@
 [submodule "commonware-avs-node"]
 	path = commonware-avs-node
 	url = https://github.com/BreadchainCoop/commonware-avs-node.git
+[submodule "vendor/gas-killer-analyzer"]
+	path = vendor/gas-killer-analyzer
+	url = https://github.com/BreadchainCoop/gas-killer-analyzer
+	branch = feat/downgrade-alloy
