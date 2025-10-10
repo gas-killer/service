@@ -5,42 +5,6 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct GasKillerTaskRequestBody {
-    pub target_address: Address,
-    pub call_data: Vec<u8>,
-    pub storage_updates: Vec<u8>,
-    pub transition_index: u64,
-    pub from_address: Address,
-    pub value: U256,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct GasKillerTaskRequest {
-    pub body: GasKillerTaskRequestBody,
-}
-
-impl GasKillerTaskRequest {
-    pub fn is_valid(&self) -> bool {
-        let body = &self.body;
-        if body.target_address.is_zero()
-            || body.call_data.is_empty()
-            || body.storage_updates.is_empty()
-            || body.transition_index == 0
-        {
-            // TODO: add additional checks
-            return false;
-        }
-        true
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GasKillerTaskResponse {
-    pub success: bool,
-    pub message: String,
-}
-
 /// Task data specific to the gas killer use case
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[allow(dead_code)]
@@ -129,6 +93,25 @@ impl Read for GasKillerTaskData {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        // Read target address (20 bytes)
+        if buf.remaining() < 20 {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut address_bytes = [0u8; 20];
+        buf.copy_to_slice(&mut address_bytes);
+        let target_address = Address::from_slice(&address_bytes);
+
+        // Read call data
+        let call_data_len = u32::read(buf)? as usize;
+        if buf.remaining() < call_data_len {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut call_data = vec![0u8; call_data_len];
+        buf.copy_to_slice(&mut call_data);
+
+        // Read transition index
+        let transition_index = u64::read(buf)?;
+
         // Read storage updates
         // Note: Reading u32 length prefix, matching the Write implementation
         // This limits deserialized storage_updates to ~4.3GB
@@ -139,18 +122,7 @@ impl Read for GasKillerTaskData {
         let mut storage_updates = vec![0u8; storage_updates_len];
         buf.copy_to_slice(&mut storage_updates);
 
-        // Read transition index
-        let transition_index = u64::read(buf)?;
-
-        // Read target address (20 bytes)
-        if buf.remaining() < 20 {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        let mut address_bytes = [0u8; 20];
-        buf.copy_to_slice(&mut address_bytes);
-        let target_address = Address::from_slice(&address_bytes);
-
-        // Read from address (20 bytes)
+        // Read from_address
         if buf.remaining() < 20 {
             return Err(commonware_codec::Error::EndOfBuffer);
         }
@@ -175,10 +147,10 @@ impl Read for GasKillerTaskData {
         buf.copy_to_slice(&mut call_data);
 
         Ok(Self {
-            storage_updates,
-            transition_index,
             target_address,
             call_data,
+            storage_updates,
+            transition_index,
             from_address,
             value,
         })
