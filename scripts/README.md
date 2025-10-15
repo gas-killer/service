@@ -62,5 +62,5 @@ You can also run the verification script separately:
 # Start the system manually (follow README steps)
 # Then run verification from the project root
 source .env
-cargo run -p avs-scripts --bin verify_increments
+cargo run -p avs-scripts --bin trigger_gas_killer
 ```
