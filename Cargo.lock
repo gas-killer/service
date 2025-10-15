@@ -2280,6 +2280,7 @@ dependencies = [
  "alloy 0.12.6",
  "commonware-eigenlayer",
  "dotenv",
+ "gas-analyzer-rs",
  "gas-killer-router",
  "reqwest 0.12.23",
  "serde",

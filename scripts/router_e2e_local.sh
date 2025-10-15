@@ -38,68 +38,13 @@ cargo build --release -p avs-scripts --bin deploy_array_summation
 cargo build --release -p avs-scripts --bin trigger_gas_killer
 cd "$PROJECT_ROOT"
 
-# Step 2: Set up environment files
-echo -e "${YELLOW}Step 2: Setting up environment files...${NC}"
-cp example.env .env
-
-# Copy config template
-cp config/config.example.json config/config.json
-
-# Update .env for local mode
-echo "Configuring .env for local mode..."
-sed -i '' 's|^HTTP_RPC=.*|HTTP_RPC=http://localhost:8545|' .env
-sed -i '' 's|^WS_RPC=.*|WS_RPC=ws://localhost:8545|' .env
-sed -i '' 's|^RPC_URL=.*|RPC_URL=http://ethereum:8545|' .env
-sed -i '' 's|^ENVIRONMENT=.*|ENVIRONMENT=LOCAL|' .env
-
-# Enable HTTP ingress for Gas Killer
-sed -i '' 's|^INGRESS=.*|INGRESS=true|' .env || true
-if ! grep -q '^INGRESS_ADDRESS=' .env; then
-    echo 'INGRESS_ADDRESS=0.0.0.0:8080' >> .env
+# Step 2: Assume .env already exists and contains required values
+echo -e "${YELLOW}Step 2: Using existing .env without modification...${NC}"
+if [ ! -f .env ]; then
+    cp example.env .env
+    echo ".env created from example.env"
 else
-    sed -i '' 's|^INGRESS_ADDRESS=.*|INGRESS_ADDRESS=0.0.0.0:8080|' .env
-fi
-
-# Set FORK_URL for local forking
-sed -i '' 's|^# FORK_URL=.*|FORK_URL=https://holesky.drpc.org|' .env
-
-# Use default Anvil private key for testing
-DEFAULT_PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-sed -i '' "s|^PRIVATE_KEY=.*|PRIVATE_KEY=$DEFAULT_PRIVATE_KEY|" .env
-sed -i '' "s|^FUNDED_KEY=.*|FUNDED_KEY=$DEFAULT_PRIVATE_KEY|" .env
-
-# Set Holesky contract addresses for LOCAL mode
-sed -i '' 's|^#DELEGATION_MANAGER_ADDRESS=|DELEGATION_MANAGER_ADDRESS=|' .env
-sed -i '' 's|^#STRATEGY_MANAGER_ADDRESS=|STRATEGY_MANAGER_ADDRESS=|' .env
-sed -i '' 's|^#LST_CONTRACT_ADDRESS=|LST_CONTRACT_ADDRESS=|' .env
-sed -i '' 's|^#LST_STRATEGY_ADDRESS=|LST_STRATEGY_ADDRESS=|' .env
-sed -i '' 's|^#BLS_SIGNATURE_CHECKER_ADDRESS=|BLS_SIGNATURE_CHECKER_ADDRESS=|' .env
-sed -i '' 's|^#OPERATOR_STATE_RETRIEVER_ADDRESS=|OPERATOR_STATE_RETRIEVER_ADDRESS=|' .env
-sed -i '' 's|^#ALLOCATION_MANAGER_ADDRESS=|ALLOCATION_MANAGER_ADDRESS=|' .env
-
-# Set ArraySummation deployment parameters (example Gas Killer-enabled contract)
-if grep -q '^ARRAY_SUMMATION_ARRAY_SIZE=' .env; then
-    sed -i '' 's|^ARRAY_SUMMATION_ARRAY_SIZE=.*|ARRAY_SUMMATION_ARRAY_SIZE=1000|' .env
-else
-    echo 'ARRAY_SUMMATION_ARRAY_SIZE=1000' >> .env
-fi
-
-if grep -q '^ARRAY_SUMMATION_MAX_VALUE=' .env; then
-    sed -i '' 's|^ARRAY_SUMMATION_MAX_VALUE=.*|ARRAY_SUMMATION_MAX_VALUE=10000|' .env
-else
-    echo 'ARRAY_SUMMATION_MAX_VALUE=10000' >> .env
-fi
-
-if grep -q '^ARRAY_SUMMATION_SEED=' .env; then
-    sed -i '' 's|^ARRAY_SUMMATION_SEED=.*|ARRAY_SUMMATION_SEED=0|' .env
-else
-    echo 'ARRAY_SUMMATION_SEED=0' >> .env
-fi
-
-if grep -q '^ARRAY_SUMMATION_FACTORY_ADDRESS=' .env; then
-    sed -i '' 's|^ARRAY_SUMMATION_FACTORY_ADDRESS=.*|ARRAY_SUMMATION_FACTORY_ADDRESS=0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032|' .env
-else
-    echo 'ARRAY_SUMMATION_FACTORY_ADDRESS=0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032' >> .env
+    echo ".env already exists; leaving it unchanged"
 fi
 
 echo "Environment configuration complete"
@@ -200,43 +145,16 @@ sleep 5
 
 # Step 9: Trigger Gas Killer task (optional if variables are provided)
 echo -e "${YELLOW}Step 9: Trigger Gas Killer task (optional)${NC}"
+echo "Sending a test task to the router..."
+cd "$PROJECT_ROOT/scripts"
+cargo run --release -p avs-scripts --bin trigger_gas_killer
+TRIGGER_STATUS=$?
+cd "$PROJECT_ROOT"
 
-TRIGGER_URL=${GAS_KILLER_TRIGGER_URL:-"http://localhost:8080/trigger"}
-
-if [ -n "$GAS_KILLER_TARGET_ADDRESS" ] && [ -n "$GAS_KILLER_CALL_DATA" ] && [ -n "$GAS_KILLER_FROM_ADDRESS" ] && [ -n "$GAS_KILLER_TRANSITION_INDEX" ]; then
-    echo "Attempting to trigger Gas Killer task via $TRIGGER_URL"
-    cd "$PROJECT_ROOT/scripts"
-    cargo run --release -p avs-scripts --bin trigger_gas_killer
-    TRIGGER_STATUS=$?
-    cd "$PROJECT_ROOT"
-
-    if [ $TRIGGER_STATUS -eq 0 ]; then
-        echo -e "${GREEN}✅ Triggered Gas Killer task successfully.${NC}"
-    else
-        echo -e "${YELLOW}⚠️  Trigger helper returned a non-success status. Check inputs and router logs.${NC}"
-    fi
+if [ $TRIGGER_STATUS -eq 0 ]; then
+    echo -e "${GREEN}✅ Triggered Gas Killer task successfully.${NC}"
 else
-    # Fallback: if we discovered ArraySummation address, send a minimal demo task to avoid creator timeout
-    if [ -n "$GAS_KILLER_TARGET_ADDRESS" ]; then
-        echo -e "${YELLOW}No GAS_KILLER_* inputs provided. Sending a minimal demo task to avoid timeout...${NC}"
-        export GAS_KILLER_CALL_DATA="0x00000000" # dummy selector
-        export GAS_KILLER_FROM_ADDRESS="0x0000000000000000000000000000000000000001"
-        export GAS_KILLER_TRANSITION_INDEX="1"
-        export GAS_KILLER_VALUE="0"
-        export GAS_KILLER_STORAGE_UPDATES="0x01" # non-empty to pass basic validation
-        cd "$PROJECT_ROOT/scripts"
-        cargo run --release -p avs-scripts --bin trigger_gas_killer || true
-        cd "$PROJECT_ROOT"
-        echo -e "${YELLOW}Demo task submitted. Provide real GAS_KILLER_* inputs to test full flow.${NC}"
-    else
-        echo "Skipping trigger. To enable, set the following env vars before running this script:"
-        echo "  GAS_KILLER_TARGET_ADDRESS (defaults to deployed ArraySummation if found)"
-        echo "  GAS_KILLER_CALL_DATA (0x-prefixed hex)"
-        echo "  GAS_KILLER_FROM_ADDRESS (0x-prefixed hex)"
-        echo "  GAS_KILLER_TRANSITION_INDEX (> 0)"
-        echo "  GAS_KILLER_VALUE (optional, default 0)"
-        echo "  GAS_KILLER_STORAGE_UPDATES (optional; if omitted, helper attempts analysis)"
-    fi
+    echo -e "${YELLOW}⚠️  Trigger helper returned a non-success status. Check inputs and router logs.${NC}"
 fi
 
 # Show recent router logs for confirmation

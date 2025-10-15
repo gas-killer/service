@@ -29,3 +29,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 gas-killer-router = { path = ".." }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+gas-analyzer-rs = { path = "../vendor/gas-killer-analyzer" }
