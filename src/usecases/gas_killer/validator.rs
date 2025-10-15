@@ -136,7 +136,7 @@ impl GasKillerValidator {
                 call_data.to_vec(),
             )),
             value,
-            gas: Some(u32::MAX as u64), // Unlimited gas for simulations
+            gas: None,
             ..Default::default()
         };
 

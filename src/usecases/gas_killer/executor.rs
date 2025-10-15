@@ -7,6 +7,7 @@ use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 use alloy_primitives::{Bytes, FixedBytes, U256};
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::{info, warn};
 
 /// Handler for executing verifyAndUpdate transactions
 #[allow(dead_code)]
@@ -32,6 +33,11 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         non_signer_data: getNonSignerStakesAndSignatureReturn,
         task_data: Option<&Self::TaskData>,
     ) -> Result<ExecutionResult> {
+        info!(
+            msg_hash = %msg_hash,
+            current_block_number,
+            "Executor starting GasKiller verifyAndUpdate"
+        );
         // Convert the non-signer data to the format expected by the GasKillerSDK
         let converted_data = convert_non_signer_data(non_signer_data);
         let non_signer_struct_data = IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
@@ -70,6 +76,14 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         let target_addr = task_data.target_address;
 
         // Create GasKillerSDK instance dynamically using target_address from task data
+        info!(
+            target = ?target_addr,
+            transition_index = %transition_index,
+            storage_updates_len = storage_updates.len(),
+            selector = %target_function,
+            "Prepared task parameters"
+        );
+
         let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
 
         // Ensure contract implements the GasKiller interface via ERC-165 check
@@ -80,12 +94,14 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             .await
             .map_err(|e| anyhow::anyhow!("supportsInterface call failed: {}", e))?;
         if !supports._0 {
+            warn!("Target contract does not support GasKiller interface (0x93de4531)");
             return Err(anyhow::anyhow!(
                 "Target contract does not support GasKiller interface (0x93de4531)"
             ));
         }
 
         // Execute the gas killer verifyAndUpdate
+        info!("Sending verifyAndUpdate transaction");
         let call_return = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
@@ -104,6 +120,13 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             .get_receipt()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get transaction receipt: {}", e))?;
+        info!(
+            tx = %receipt.transaction_hash,
+            block = receipt.block_number,
+            status = ?receipt.status(),
+            gas_used = ?receipt.gas_used,
+            "verifyAndUpdate receipt"
+        );
 
         Ok(ExecutionResult {
             transaction_hash: format!("{:?}", receipt.transaction_hash),

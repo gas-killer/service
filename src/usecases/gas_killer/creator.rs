@@ -10,7 +10,7 @@ use commonware_codec::Encode;
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 /// A queue that can hold and provide task requests
 pub trait TaskQueue: Send + Sync {
@@ -105,6 +105,7 @@ impl TaskQueue for GasKillerTaskQueue {
         match self.try_lock_with_timeout() {
             Ok(mut queue) => {
                 queue.push(task);
+                info!("Task enqueued: queue_len={} (after push)", queue.len());
             }
             Err(e) => {
                 error!("Failed to push task to queue: {}", e);
@@ -115,7 +116,15 @@ impl TaskQueue for GasKillerTaskQueue {
 
     fn pop(&self) -> Option<GasKillerTaskRequest> {
         match self.try_lock_with_timeout() {
-            Ok(mut queue) => queue.pop(),
+            Ok(mut queue) => {
+                let task = queue.pop();
+                info!(
+                    "Task dequeued: present={}, queue_len={} (after pop)",
+                    task.is_some(),
+                    queue.len()
+                );
+                task
+            }
             Err(e) => {
                 error!("Failed to pop task from queue: {}", e);
                 None
@@ -241,7 +250,15 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
     type TaskData = GasKillerTaskData;
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
-        let _task = self.wait_for_task().await?;
+        let task = self.wait_for_task().await?;
+        info!(
+            target = format!("{:?}", task.body.target_address),
+            from = format!("{:?}", task.body.from_address),
+            transition_index = task.body.transition_index,
+            call_data_len = task.body.call_data.len(),
+            storage_updates_len = task.body.storage_updates.len(),
+            "Creator received task"
+        );
         let payload = self.get_task_metadata().encode().to_vec();
         Ok((payload, 0)) // set default "round" to 0
     }
@@ -253,6 +270,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             && let Some(ref task) = *current_task
         {
             // Extract metadata from the task request body
+            info!("Building task metadata from current task");
 
             return GasKillerTaskData {
                 storage_updates: task.body.storage_updates.clone(),
