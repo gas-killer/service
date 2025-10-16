@@ -8,6 +8,7 @@ use alloy_primitives::{Bytes, FixedBytes, U256};
 use anyhow::Result;
 use async_trait::async_trait;
 use tracing::{info, warn};
+use std::env;
 
 /// Handler for executing verifyAndUpdate transactions
 #[allow(dead_code)]
@@ -86,18 +87,32 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
 
         let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
 
-        // Ensure contract implements the GasKiller interface via ERC-165 check
-        let interface_id = FixedBytes::<4>::from([0x93, 0xde, 0x45, 0x31]);
-        let supports = gas_killer_sdk
-            .supportsInterface(interface_id)
-            .call()
-            .await
-            .map_err(|e| anyhow::anyhow!("supportsInterface call failed: {}", e))?;
-        if !supports._0 {
-            warn!("Target contract does not support GasKiller interface (0x93de4531)");
-            return Err(anyhow::anyhow!(
-                "Target contract does not support GasKiller interface (0x93de4531)"
-            ));
+        // Ensure contract implements the GasKiller interface via ERC-165 check (optional)
+        let skip_check = env::var("SKIP_INTERFACE_CHECK")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
+            .unwrap_or(false);
+
+        if skip_check {
+            warn!("SKIP_INTERFACE_CHECK is set; skipping supportsInterface check");
+        } else {
+            let interface_id = FixedBytes::<4>::from([0x93, 0xde, 0x45, 0x31]);
+            match gas_killer_sdk.supportsInterface(interface_id).call().await {
+                Ok(result) => {
+                    if !result._0 {
+                        warn!("Target contract does not support GasKiller interface (0x93de4531)");
+                        return Err(anyhow::anyhow!(
+                            "Target contract does not support GasKiller interface (0x93de4531)"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    warn!("supportsInterface call failed: {}", e);
+                    return Err(anyhow::anyhow!(
+                        "supportsInterface call failed: {}",
+                        e
+                    ));
+                }
+            }
         }
 
         // Execute the gas killer verifyAndUpdate

@@ -70,22 +70,20 @@ impl GasKillerValidator {
     /// This method must produce the same hash as the creator's payload generation
     /// to ensure consensus consistency.
     async fn reconstruct_payload_hash(&self, task_data: &GasKillerTaskData) -> Result<Digest> {
-        // Reconstruct the same payload that the creator/nodes would have created
-        // Now includes storage_updates to commit to outputs as well as inputs
+        // IMPORTANT: This hash must match the on-chain expectedHash in GasKillerSDK.verifyAndUpdate:
+        // sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))
+        // We use target_address (which will be address(this) at execution), the 4-byte selector,
+        // and the exact storage_updates bytes.
 
-        // Create payload using the same fields that would be in the analysis result
-        let payload_data = (
+        let selector = task_data.function_selector();
+        let payload = (
             task_data.transition_index,
             task_data.target_address,
-            task_data.from_address,
-            task_data.value,
-            task_data.call_data.clone(),
+            selector,
             task_data.storage_updates.clone(),
-        );
+        )
+            .abi_encode();
 
-        let payload = payload_data.abi_encode();
-
-        // Hash the payload using the same method as the creator/nodes
         let mut hasher = Sha256::new();
         hasher.update(&payload);
         let payload_hash = hasher.finalize();

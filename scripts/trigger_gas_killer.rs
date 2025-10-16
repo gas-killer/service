@@ -212,15 +212,27 @@ async fn build_mock_request(
 
     let gk = GasKillerDefault::new(rpc_url.clone(), None).await?;
     let (encoded_updates, _gas_estimate, _) =
-        call_to_encoded_state_updates_with_gas_estimate(rpc_url, tx_request, gk).await?;
+        call_to_encoded_state_updates_with_gas_estimate(rpc_url.clone(), tx_request, gk).await?;
 
     let storage_updates = encoded_updates.to_vec();
+
+    // Read current stateTransitionCount to compute correct transition_index
+    let provider = ProviderBuilder::new().on_http(rpc_url.clone());
+    let array_contract = bindings::arraysummation::ArraySummation::new(target_address, provider);
+    let current_count = array_contract
+        .stateTransitionCount()
+        .call()
+        .await
+        .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
+        .count
+        .to::<u64>();
 
     let body = GasKillerTaskRequestBody {
         target_address,
         call_data,
         storage_updates,
-        transition_index: 1,
+        // transitionIndex must equal the current stateTransitionCount() at call time
+        transition_index: current_count,
         from_address,
         value,
     };
