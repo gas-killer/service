@@ -117,8 +117,7 @@ impl TaskQueue for GasKillerTaskQueue {
     fn pop(&self) -> Option<GasKillerTaskRequest> {
         match self.try_lock_with_timeout() {
             Ok(mut queue) => {
-                let task = queue.pop();
-                task
+                queue.pop()
             }
             Err(e) => {
                 error!("Failed to pop task from queue: {}", e);

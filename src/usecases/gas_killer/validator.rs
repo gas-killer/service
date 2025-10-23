@@ -93,7 +93,7 @@ impl GasKillerValidator {
         tail.extend_from_slice(data_bytes);
         let pad_len = (32 - (data_bytes.len() % 32)) % 32;
         if pad_len > 0 {
-            tail.extend(std::iter::repeat(0u8).take(pad_len));
+            tail.extend(std::iter::repeat_n(0u8, pad_len));
         }
 
         // Concatenate head and tail into final payload
