@@ -28,7 +28,6 @@ impl GasKillerTaskRequest {
         if body.target_address.is_zero()
             || body.call_data.is_empty()
             || body.storage_updates.is_empty()
-            || body.transition_index == 0
         {
             // TODO: add additional checks
             return false;

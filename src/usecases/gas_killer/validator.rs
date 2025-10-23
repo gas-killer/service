@@ -1,3 +1,4 @@
+use alloy::primitives::U256;
 use alloy::rpc::types::eth::TransactionRequest as AlloyTransactionRequest;
 use alloy::sol_types::SolValue;
 use anyhow::Result;
@@ -76,13 +77,32 @@ impl GasKillerValidator {
         // and the exact storage_updates bytes.
 
         let selector = task_data.function_selector();
-        let payload = (
-            task_data.transition_index,
-            task_data.target_address,
-            selector,
-            task_data.storage_updates.clone(),
-        )
-            .abi_encode();
+
+        // Build flattened ABI encoding matching abi.encode(transitionIndex, address(this), selector, storageUpdates)
+        // Heads (32 bytes each)
+        let head_transition = U256::from(task_data.transition_index).abi_encode();
+        let head_address = task_data.target_address.abi_encode();
+        let head_selector = selector.abi_encode();
+        // Offset to the dynamic bytes tail: 4 words (3 static + 1 offset) = 0x80
+        let head_offset = U256::from(32u64 * 4u64).abi_encode();
+
+        // Tail for dynamic bytes: length (u256) + data + padding
+        let data_bytes: &[u8] = &task_data.storage_updates;
+        let mut tail = Vec::with_capacity(32 + data_bytes.len() + 31);
+        tail.extend_from_slice(&U256::from(data_bytes.len()).abi_encode());
+        tail.extend_from_slice(data_bytes);
+        let pad_len = (32 - (data_bytes.len() % 32)) % 32;
+        if pad_len > 0 {
+            tail.extend(std::iter::repeat(0u8).take(pad_len));
+        }
+
+        // Concatenate head and tail into final payload
+        let mut payload = Vec::with_capacity(32 * 4 + tail.len());
+        payload.extend_from_slice(&head_transition);
+        payload.extend_from_slice(&head_address);
+        payload.extend_from_slice(&head_selector);
+        payload.extend_from_slice(&head_offset);
+        payload.extend_from_slice(&tail);
 
         let mut hasher = Sha256::new();
         hasher.update(&payload);

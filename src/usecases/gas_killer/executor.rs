@@ -8,7 +8,6 @@ use alloy_primitives::{Bytes, FixedBytes, U256};
 use anyhow::Result;
 use async_trait::async_trait;
 use tracing::{info, warn};
-use std::env;
 
 /// Handler for executing verifyAndUpdate transactions
 #[allow(dead_code)]
@@ -34,11 +33,6 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         non_signer_data: getNonSignerStakesAndSignatureReturn,
         task_data: Option<&Self::TaskData>,
     ) -> Result<ExecutionResult> {
-        info!(
-            msg_hash = %msg_hash,
-            current_block_number,
-            "Executor starting GasKiller verifyAndUpdate"
-        );
         // Convert the non-signer data to the format expected by the GasKillerSDK
         let converted_data = convert_non_signer_data(non_signer_data);
         let non_signer_struct_data = IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
@@ -76,44 +70,50 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         let target_function = task_data.function_selector();
         let target_addr = task_data.target_address;
 
-        // Create GasKillerSDK instance dynamically using target_address from task data
-        info!(
-            target = ?target_addr,
-            transition_index = %transition_index,
-            storage_updates_len = storage_updates.len(),
-            selector = %target_function,
-            "Prepared task parameters"
-        );
-
         let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
-
-        // Ensure contract implements the GasKiller interface via ERC-165 check (optional)
-        let skip_check = env::var("SKIP_INTERFACE_CHECK")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
-            .unwrap_or(false);
-
-        if skip_check {
-            warn!("SKIP_INTERFACE_CHECK is set; skipping supportsInterface check");
-        } else {
-            let interface_id = FixedBytes::<4>::from([0x93, 0xde, 0x45, 0x31]);
-            match gas_killer_sdk.supportsInterface(interface_id).call().await {
-                Ok(result) => {
-                    if !result._0 {
-                        warn!("Target contract does not support GasKiller interface (0x93de4531)");
-                        return Err(anyhow::anyhow!(
-                            "Target contract does not support GasKiller interface (0x93de4531)"
-                        ));
-                    }
-                }
-                Err(e) => {
-                    warn!("supportsInterface call failed: {}", e);
+        // Query the contract's getMessageHash and compare with the provided msg_hash
+        match gas_killer_sdk
+            .getMessageHash(transition_index, target_function, storage_updates.clone())
+            .call()
+            .await
+        {
+            Ok(ret) => {
+                if ret._0 != msg_hash {
+                    warn!(
+                        offchain_msg_hash = %msg_hash,
+                        onchain_expected_hash = %ret._0,
+                        "Message hash mismatch between offchain and onchain"
+                    );
                     return Err(anyhow::anyhow!(
-                        "supportsInterface call failed: {}",
-                        e
+                        "Message hash mismatch: offchain {} != onchain {}",
+                        msg_hash,
+                        ret._0
+                    ));
+                } else {
+                    info!("Message hash match confirmed");
+                }
+            }
+            Err(e) => {
+                warn!("getMessageHash call failed: {}", e);
+            }
+        }
+
+        // Ensure contract implements the GasKiller interface via ERC-165 check
+        let interface_id = FixedBytes::<4>::from([0x93, 0xde, 0x45, 0x31]);
+        match gas_killer_sdk.supportsInterface(interface_id).call().await {
+            Ok(result) => {
+                if !result._0 {
+                    warn!("Target contract does not support GasKiller interface (0x93de4531)");
+                    return Err(anyhow::anyhow!(
+                        "Target contract does not support GasKiller interface (0x93de4531)"
                     ));
                 }
             }
-        }
+            Err(e) => {
+                warn!("supportsInterface call failed: {}", e);
+                return Err(anyhow::anyhow!("supportsInterface call failed: {}", e));
+            }
+        };
 
         // Execute the gas killer verifyAndUpdate
         info!("Sending verifyAndUpdate transaction");

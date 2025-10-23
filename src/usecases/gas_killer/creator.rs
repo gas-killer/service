@@ -118,11 +118,6 @@ impl TaskQueue for GasKillerTaskQueue {
         match self.try_lock_with_timeout() {
             Ok(mut queue) => {
                 let task = queue.pop();
-                info!(
-                    "Task dequeued: present={}, queue_len={} (after pop)",
-                    task.is_some(),
-                    queue.len()
-                );
                 task
             }
             Err(e) => {
