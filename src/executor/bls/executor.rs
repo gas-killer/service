@@ -175,8 +175,23 @@ impl<H: BlsSignatureVerificationHandler> BlsExecutorTrait<H::TaskData>
             .get_block_number()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?;
+        // Use the next block as the reference per user request
+        let head_block_u64: u64 = current_block_number
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("Failed to convert block number: {}", e))?;
+        let reference_block_number: u32 = head_block_u64.saturating_sub(1) as u32;
         let quorum_numbers = Bytes::from_str("0x00")
             .map_err(|e| anyhow::anyhow!("Failed to parse quorum numbers: {}", e))?;
+
+        // Print out all the argument values before calling getNonSignerStakesAndSignature for debugging
+        debug!(
+            registry_coordinator_address = ?self.registry_coordinator_address,
+            quorum_numbers = ?quorum_numbers,
+            sigma_struct = ?sigma_struct,
+            operators = ?operators,
+            reference_block_number = reference_block_number,
+            "Arguments to getNonSignerStakesAndSignature"
+        );
 
         // Call the BLS operator state retriever to get the non-signer data
         let non_signer_return = self
@@ -186,11 +201,21 @@ impl<H: BlsSignatureVerificationHandler> BlsExecutorTrait<H::TaskData>
                 quorum_numbers.clone(),
                 sigma_struct,
                 operators,
-                current_block_number as u32,
+                reference_block_number,
             )
             .call()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get non-signer stakes and signature: {}", e))?;
+
+        // Print out all the argument values before calling handle_verification for debugging
+        debug!(
+            msg_hash = ?msg_hash,
+            quorum_numbers = ?quorum_numbers,
+            reference_block_number = reference_block_number,
+            non_signer_return = ?non_signer_return,
+            task_data_present = task_data.is_some(),
+            "Arguments to handle_verification"
+        );
 
         // Delegate the contract-specific execution to the handler
         let result = self
@@ -198,9 +223,7 @@ impl<H: BlsSignatureVerificationHandler> BlsExecutorTrait<H::TaskData>
             .handle_verification(
                 msg_hash,
                 quorum_numbers,
-                current_block_number
-                    .try_into()
-                    .map_err(|e| anyhow::anyhow!("Failed to convert block number: {}", e))?,
+                reference_block_number,
                 non_signer_return,
                 task_data,
             )

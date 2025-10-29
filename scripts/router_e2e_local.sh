@@ -24,8 +24,26 @@ cleanup() {
     echo -e "${GREEN}Cleanup completed${NC}"
 }
 
-# Set trap for cleanup
-trap cleanup EXIT INT TERM
+# Parse flags/env for keeping containers up after script finishes
+KEEP_UP=false
+for arg in "$@"; do
+    case "$arg" in
+        --keep-up|--no-cleanup)
+            KEEP_UP=true
+            ;;
+    esac
+done
+
+if [ "${KEEP_CONTAINERS:-}" = "1" ] || [ "${KEEP_CONTAINERS:-}" = "true" ]; then
+    KEEP_UP=true
+fi
+
+# Set trap for cleanup unless explicitly keeping containers up
+if [ "$KEEP_UP" = true ]; then
+    echo -e "${YELLOW}Skipping auto-cleanup; containers will remain running. Use 'docker compose down' to stop.${NC}"
+else
+    trap cleanup EXIT INT TERM
+fi
 
 echo -e "${GREEN}Starting Gas Killer Integration Test${NC}"
 echo "Project root: $PROJECT_ROOT"
