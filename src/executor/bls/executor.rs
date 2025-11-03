@@ -176,9 +176,7 @@ impl<H: BlsSignatureVerificationHandler> BlsExecutorTrait<H::TaskData>
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?;
         // Use the next block as the reference per user request
-        let head_block_u64: u64 = current_block_number
-            .try_into()
-            .map_err(|e| anyhow::anyhow!("Failed to convert block number: {}", e))?;
+        let head_block_u64: u64 = current_block_number;
         let reference_block_number: u32 = head_block_u64.saturating_sub(1) as u32;
         let quorum_numbers = Bytes::from_str("0x00")
             .map_err(|e| anyhow::anyhow!("Failed to parse quorum numbers: {}", e))?;
