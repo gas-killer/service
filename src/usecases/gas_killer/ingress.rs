@@ -29,8 +29,9 @@ impl GasKillerTaskRequest {
             || body.call_data.is_empty()
             || body.storage_updates.is_empty()
             || body.transition_index == 0
+            || body.from_address.is_zero()
+            || body.value.is_zero()
         {
-            // TODO: add additional checks
             return false;
         }
         true
@@ -80,3 +81,110 @@ pub async fn start_gas_killer_http_server(queue: Arc<SimpleTaskQueue>, addr: &st
         .await
         .expect("HTTP server failed");
 }
+
+mod tests {
+    use super::*;   
+    
+    #[test]
+    fn test_invalid_target_address() {
+        let request = GasKillerTaskRequest {
+            body: GasKillerTaskRequestBody {
+                target_address: Address::ZERO,
+                call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
+                storage_updates: vec![0x01, 0x02, 0x03, 0x04],
+                transition_index: 20,
+                from_address: Address::from([1u8; 20]),
+                value: U256::from(1000),
+            }
+        };
+        assert!(!request.is_valid());
+    }
+
+    #[test]
+    fn test_invalid_from_address() {
+        let request = GasKillerTaskRequest {
+            body: GasKillerTaskRequestBody {
+                target_address: Address::from([1u8; 20]),
+                call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
+                storage_updates: vec![0x01, 0x02, 0x03, 0x04],
+                transition_index: 20,
+                from_address: Address::ZERO,
+                value: U256::from(1000),
+            }
+        };
+        assert!(!request.is_valid());
+    }
+    #[test]
+    fn test_invalid_value() {
+        let request = GasKillerTaskRequest {
+            body: GasKillerTaskRequestBody {
+                target_address: Address::from([1u8; 20]),
+                call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
+                storage_updates: vec![0x01, 0x02, 0x03, 0x04],
+                transition_index: 20,
+                from_address: Address::from([1u8; 20]),
+                value: U256::ZERO,
+            }
+        };
+        assert!(!request.is_valid());
+    }
+    #[test] 
+    fn test_invalid_transition_index() {
+        let request = GasKillerTaskRequest {
+            body: GasKillerTaskRequestBody {
+                target_address: Address::from([1u8; 20]),
+                call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
+                storage_updates: vec![0x01, 0x02, 0x03, 0x04],
+                transition_index: 0,
+                from_address: Address::from([1u8; 20]),
+                value: U256::from(1000),
+            }
+        };
+        assert!(!request.is_valid());
+    }
+    #[test]
+    fn test_invalid_storage_updates() {
+        let request = GasKillerTaskRequest {
+            body: GasKillerTaskRequestBody {
+                target_address: Address::from([1u8; 20]),
+                call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
+                storage_updates: vec![],
+                transition_index: 20,
+                from_address: Address::from([1u8; 20]),
+                value: U256::from(1000),
+            }
+        };
+        assert!(!request.is_valid());
+    }
+
+    #[test]
+    fn test_invalid_call_data() {
+        let request = GasKillerTaskRequest {
+            body: GasKillerTaskRequestBody {
+                target_address: Address::from([1u8; 20]),
+                call_data: vec![],
+                storage_updates: vec![0x01, 0x02, 0x03, 0x04],
+                transition_index: 20,
+                from_address: Address::from([1u8; 20]),
+                value: U256::from(1000),
+            }
+        };
+        assert!(!request.is_valid());
+    }
+    
+    #[test]
+    fn test_valid_request() {
+        let request = GasKillerTaskRequest {
+            body: GasKillerTaskRequestBody {
+                target_address: Address::from([1u8; 20]),
+                call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
+                storage_updates: vec![0x01, 0x02, 0x03, 0x04],
+                transition_index: 20,
+                from_address: Address::from([1u8; 20]),
+                value: U256::from(1000),
+            }
+        };
+        assert!(request.is_valid());
+    }
+}
+
