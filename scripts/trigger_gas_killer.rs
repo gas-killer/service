@@ -80,16 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         String::from("")
     };
     println!(
-        "========================================\n\
-         DEBUG: TARGET ADDRESS BEING SENT\n\
-         ========================================\n\
-         target_address: {:?}\n\
-         from_address: {:?}\n\
-         transition_index: {}\n\
-         value: {}\n\
-         call_data_len: {} (selector: 0x{})\n\
-         storage_updates_len: {}\n\
-         ========================================",
+        "Debug request summary:\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})\n  storage_updates_len: {}",
         request.body.target_address,
         request.body.from_address,
         request.body.transition_index,
@@ -218,7 +209,6 @@ async fn build_mock_request(
     // Try to source a real deployed ArraySummation address from AVS_DEPLOYMENT_PATH; fallback to placeholder
     let target_address: Address = match env::var("AVS_DEPLOYMENT_PATH") {
         Ok(path) => {
-            println!("DEBUG: Reading ArraySummation address from AVS_DEPLOYMENT_PATH: {}", path);
             if let Ok(content) = fs::read_to_string(&path) {
                 if let Ok(deployment) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(addr) = deployment
@@ -226,26 +216,18 @@ async fn build_mock_request(
                         .and_then(|a| a.get("arraySummation"))
                         .and_then(|v| v.as_str())
                     {
-                        let parsed_addr = addr.parse()?;
-                        println!("DEBUG: Successfully parsed ArraySummation address from deployment file: {:?}", parsed_addr);
-                        parsed_addr
+                        addr.parse()?
                     } else {
-                        println!("WARN: arraySummation address not found in deployment file, using placeholder");
                         "0x0000000000000000000000000000000000000001".parse()?
                     }
                 } else {
-                    println!("WARN: Failed to parse deployment file as JSON, using placeholder");
                     "0x0000000000000000000000000000000000000001".parse()?
                 }
             } else {
-                println!("WARN: Failed to read deployment file, using placeholder");
                 "0x0000000000000000000000000000000000000001".parse()?
             }
         }
-        Err(_) => {
-            println!("WARN: AVS_DEPLOYMENT_PATH not set, using placeholder address");
-            "0x0000000000000000000000000000000000000001".parse()?
-        }
+        Err(_) => "0x0000000000000000000000000000000000000001".parse()?,
     };
     // Use Anvil's default first unlocked account to ensure a signing credential exists in the spawned fork
     let from_address: Address = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse()?;
