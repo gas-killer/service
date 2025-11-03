@@ -82,6 +82,8 @@ pub async fn start_gas_killer_http_server(queue: Arc<SimpleTaskQueue>, addr: &st
         .expect("HTTP server failed");
 }
 
+
+#[cfg(test)]
 mod tests {
     use super::{Address, GasKillerTaskRequest, GasKillerTaskRequestBody, U256};
 
