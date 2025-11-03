@@ -1,0 +1,178 @@
+name: Gas Killer E2E Test
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - staging
+  pull_request:
+    branches:
+      - main
+      - dev
+      - staging
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  gas-killer-e2e:
+    name: Gas Killer End-to-End Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Prepare .env for CI
+        run: |
+          cp example.env .env
+
+          # Set to LOCAL mode
+          sed -i 's|^ENVIRONMENT=.*|ENVIRONMENT=LOCAL|' .env
+
+          # Uncomment local RPC URLs
+          sed -i '/^# HTTP_RPC=http:\/\/localhost:8545/s/^# //' .env
+          sed -i '/^# WS_RPC=ws:\/\/localhost:8545/s/^# //' .env
+          sed -i '/^# RPC_URL=http:\/\/ethereum:8545/s/^# //' .env
+
+          # Set FORK_URL
+          if [ -n "${{ secrets.RPC_URL }}" ]; then
+            sed -i "s|^# FORK_URL=.*|FORK_URL=${{ secrets.RPC_URL }}|" .env
+          else
+            sed -i 's|^# FORK_URL=.*|FORK_URL=https://holesky.drpc.org|' .env
+          fi
+
+          # Uncomment Holesky testnet contract addresses
+          sed -i 's/^#DELEGATION_MANAGER_ADDRESS=/DELEGATION_MANAGER_ADDRESS=/' .env
+          sed -i 's/^#STRATEGY_MANAGER_ADDRESS=/STRATEGY_MANAGER_ADDRESS=/' .env
+          sed -i 's/^#LST_CONTRACT_ADDRESS=/LST_CONTRACT_ADDRESS=/' .env
+          sed -i 's/^#LST_STRATEGY_ADDRESS=/LST_STRATEGY_ADDRESS=/' .env
+          sed -i 's/^#BLS_SIGNATURE_CHECKER_ADDRESS=/BLS_SIGNATURE_CHECKER_ADDRESS=/' .env
+          sed -i 's/^#OPERATOR_STATE_RETRIEVER_ADDRESS=/OPERATOR_STATE_RETRIEVER_ADDRESS=/' .env
+          sed -i 's/^#ALLOCATION_MANAGER_ADDRESS=/ALLOCATION_MANAGER_ADDRESS=/' .env
+
+          # Use default Anvil private key
+          DEFAULT_ANVIL_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+          sed -i "s|^PRIVATE_KEY=.*|PRIVATE_KEY=$DEFAULT_ANVIL_KEY|" .env
+          sed -i "s|^FUNDED_KEY=.*|FUNDED_KEY=$DEFAULT_ANVIL_KEY|" .env
+
+          # Enable INGRESS for Gas Killer
+          sed -i 's/^INGRESS=false/INGRESS=true/' .env
+          sed -i 's/^# INGRESS_ADDRESS=/INGRESS_ADDRESS=/' .env
+
+          # Comment out ARRAY_SUMMATION_ADDRESS to force new deployment
+          sed -i 's/^ARRAY_SUMMATION_ADDRESS=/#ARRAY_SUMMATION_ADDRESS=/' .env
+
+          echo "=== .env configured for CI ==="
+
+      - name: Create CI docker-compose override
+        run: |
+          cat > docker-compose.ci.yml << 'EOF'
+          services:
+            router:
+              image: gas-killer-router:ci-test
+              build:
+                context: .
+                dockerfile: Dockerfile
+              environment:
+                - INGRESS=true
+                - INGRESS_ADDRESS=0.0.0.0:8080
+                - INGRESS_TIMEOUT_MS=120000
+          EOF
+
+      - name: Build router image for CI
+        run: |
+          docker build \
+            --secret id=GIT_AUTH_TOKEN,env=GIT_AUTH_TOKEN \
+            -t gas-killer-router:ci-test .
+        env:
+          GIT_AUTH_TOKEN: ${{ secrets.GH_PAT }}
+
+      - name: Pull required Docker images
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml pull ethereum eigenlayer signer node-1 node-2 node-3
+
+      - name: Run E2E test script
+        run: |
+          # Export CI flag to prevent auto-cleanup
+          export KEEP_CONTAINERS=false
+
+          # Override docker compose command to use CI override file
+          export COMPOSE_FILE="docker-compose.yml:docker-compose.ci.yml"
+
+          # Run the e2e script
+          bash ./scripts/router_e2e_local.sh
+        env:
+          # CI environment indicator
+          CI: true
+
+      - name: Show final router logs
+        if: always()
+        run: |
+          echo "=== Final Router Logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs router --tail=100 || true
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose Status ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml ps -a
+
+          echo "=== Ethereum Logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs ethereum --tail=50
+
+          echo "=== EigenLayer Logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs eigenlayer --tail=100
+
+          echo "=== Router Logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs router --tail=200
+
+          echo "=== Node-1 Logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs node-1 --tail=100
+
+          echo "=== Node-2 Logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs node-2 --tail=100
+
+          echo "=== Node-3 Logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs node-3 --tail=100
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml down --volumes --remove-orphans

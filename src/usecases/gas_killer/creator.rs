@@ -137,7 +137,7 @@ impl Default for GasKillerConfig {
         let timeout_ms: u64 = env::var("INGRESS_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(30_000);
+            .unwrap_or(120_000); // 2 minutes to handle e2e test delays
 
         Self {
             polling_interval_ms: 100,
