@@ -1,10 +1,19 @@
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
+use alloy::sol;
 use bindings::arraysummationfactory::ArraySummationFactory;
 use serde::Deserialize;
 use std::env;
 use std::fs;
+
+// Define minimal interface for IncredibleSquaringServiceManager
+sol! {
+    #[sol(rpc)]
+    interface IIncredibleSquaringServiceManager {
+        function blsSignatureChecker() external view returns (address);
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct AvsDeploymentJson {
@@ -16,6 +25,7 @@ struct AvsAddresses {
     #[serde(rename = "IncredibleSquaringServiceManager")]
     incredible_squaring_service_manager: String,
     #[serde(rename = "blsSigCheck")]
+    #[allow(dead_code)] // Kept for JSON compatibility, but no longer used (queried from contract instead)
     bls_sig_check: Option<String>,
 }
 
@@ -65,26 +75,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .parse()
         .map_err(|_| "Invalid AVS address format in deployment JSON")?;
 
-    // Resolve BLS signature checker address: prefer AVS deployment JSON, allow env override
-    let bls_sig_check_address = match env::var("BLS_SIGNATURE_CHECKER_ADDRESS") {
-        Ok(v) => v,
-        Err(_) => avs_deployment.addresses.bls_sig_check.clone().ok_or(
-            "BLS sig check address missing in deployment JSON; set BLS_SIGNATURE_CHECKER_ADDRESS",
-        )?,
-    };
-
-    let bls_address: Address = bls_sig_check_address
-        .parse()
-        .map_err(|_| "Invalid BLS sig check address format")?;
-    println!("🔐 Using BLS Signature Checker: {}", bls_address);
-
-    // Setup provider and signer
+    // Setup provider and signer (needed to query the contract)
     let signer: PrivateKeySigner = private_key
         .parse()
         .map_err(|_| "Invalid private key format")?;
     let provider = ProviderBuilder::new()
         .wallet(signer)
         .on_http(http_rpc.parse().map_err(|_| "Invalid RPC URL")?);
+
+    // Get BLS signature checker address from the ServiceManager contract (authoritative source)
+    // Allow env override if explicitly set
+    let bls_address: Address = match env::var("BLS_SIGNATURE_CHECKER_ADDRESS") {
+        Ok(addr_str) => {
+            println!("📌 Using BLS Signature Checker from env override: {}", addr_str);
+            addr_str
+                .parse()
+                .map_err(|_| "Invalid BLS_SIGNATURE_CHECKER_ADDRESS format")?
+        }
+        Err(_) => {
+            println!("📖 Querying BLS Signature Checker from IncredibleSquaringServiceManager...");
+            let service_manager =
+                IIncredibleSquaringServiceManager::new(avs_address, provider.clone());
+            let bls_addr = service_manager
+                .blsSignatureChecker()
+                .call()
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to call blsSignatureChecker() on ServiceManager {}: {}",
+                        avs_address, e
+                    )
+                })?
+                ._0;
+            println!("✓ Retrieved BLS Signature Checker from contract: {}", bls_addr);
+            bls_addr
+        }
+    };
+
+    println!("🔐 Using BLS Signature Checker: {}", bls_address);
 
     // Sanity checks: ensure target addresses have code deployed
     println!("🔍 Checking deployed code of contracts...");
