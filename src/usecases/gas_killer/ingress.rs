@@ -83,7 +83,7 @@ pub async fn start_gas_killer_http_server(queue: Arc<SimpleTaskQueue>, addr: &st
 }
 
 mod tests {
-    use super::{Address, U256, GasKillerTaskRequest,  GasKillerTaskRequestBody};
+    use super::{Address, GasKillerTaskRequest, GasKillerTaskRequestBody, U256};
 
     #[test]
     fn test_invalid_target_address() {
