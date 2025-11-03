@@ -83,8 +83,8 @@ pub async fn start_gas_killer_http_server(queue: Arc<SimpleTaskQueue>, addr: &st
 }
 
 mod tests {
-    use super::*;   
-    
+    use super::{Address, U256, GasKillerTaskRequest,  GasKillerTaskRequestBody};
+
     #[test]
     fn test_invalid_target_address() {
         let request = GasKillerTaskRequest {
@@ -95,7 +95,7 @@ mod tests {
                 transition_index: 20,
                 from_address: Address::from([1u8; 20]),
                 value: U256::from(1000),
-            }
+            },
         };
         assert!(!request.is_valid());
     }
@@ -110,7 +110,7 @@ mod tests {
                 transition_index: 20,
                 from_address: Address::ZERO,
                 value: U256::from(1000),
-            }
+            },
         };
         assert!(!request.is_valid());
     }
@@ -124,11 +124,11 @@ mod tests {
                 transition_index: 20,
                 from_address: Address::from([1u8; 20]),
                 value: U256::ZERO,
-            }
+            },
         };
         assert!(!request.is_valid());
     }
-    #[test] 
+    #[test]
     fn test_invalid_transition_index() {
         let request = GasKillerTaskRequest {
             body: GasKillerTaskRequestBody {
@@ -138,7 +138,7 @@ mod tests {
                 transition_index: 0,
                 from_address: Address::from([1u8; 20]),
                 value: U256::from(1000),
-            }
+            },
         };
         assert!(!request.is_valid());
     }
@@ -152,7 +152,7 @@ mod tests {
                 transition_index: 20,
                 from_address: Address::from([1u8; 20]),
                 value: U256::from(1000),
-            }
+            },
         };
         assert!(!request.is_valid());
     }
@@ -167,11 +167,11 @@ mod tests {
                 transition_index: 20,
                 from_address: Address::from([1u8; 20]),
                 value: U256::from(1000),
-            }
+            },
         };
         assert!(!request.is_valid());
     }
-    
+
     #[test]
     fn test_valid_request() {
         let request = GasKillerTaskRequest {
@@ -182,9 +182,8 @@ mod tests {
                 transition_index: 20,
                 from_address: Address::from([1u8; 20]),
                 value: U256::from(1000),
-            }
+            },
         };
         assert!(request.is_valid());
     }
 }
-
