@@ -1,19 +1,10 @@
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
-use alloy::sol;
 use bindings::arraysummationfactory::ArraySummationFactory;
 use serde::Deserialize;
 use std::env;
 use std::fs;
-
-// Define minimal interface for IncredibleSquaringTaskManager
-sol! {
-    #[sol(rpc)]
-    interface IIncredibleSquaringTaskManager {
-        function blsSignatureChecker() external view returns (address);
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct AvsDeploymentJson {
@@ -22,8 +13,10 @@ struct AvsDeploymentJson {
 
 #[derive(Debug, Deserialize)]
 struct AvsAddresses {
+    #[serde(rename = "IncredibleSquaringServiceManager")]
+    incredible_squaring_service_manager: String,
     #[serde(rename = "IncredibleSquaringTaskManager")]
-    incredible_squaring_task_manager: String,
+    bls_sig_check: String,
 }
 
 #[tokio::main]
@@ -66,15 +59,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let avs_deployment: AvsDeploymentJson = serde_json::from_str(&avs_content)
         .map_err(|e| format!("Failed to parse AVS deployment JSON: {}", e))?;
 
-    let task_manager_address: Address = avs_deployment
+    let avs_address: Address = avs_deployment
         .addresses
-        .incredible_squaring_task_manager
+        .incredible_squaring_service_manager
         .parse()
-        .map_err(|_| "Invalid IncredibleSquaringTaskManager address format in deployment JSON")?;
+        .map_err(|_| "Invalid AVS address format in deployment JSON")?;
 
-    println!("📋 IncredibleSquaringTaskManager: {}", task_manager_address);
+    // Get BLS signature checker address from deployment JSON
+    let bls_address: Address = avs_deployment
+        .addresses
+        .bls_sig_check
+        .parse()
+        .map_err(|_| "Invalid IncredibleSquaringTaskManager address format")?;
+    println!("🔐 Using BLS Signature Checker: {}", bls_address);
 
-    // Setup provider and signer (needed to query the contract)
+    // Setup provider and signer
     let signer: PrivateKeySigner = private_key
         .parse()
         .map_err(|_| "Invalid private key format")?;
@@ -82,33 +81,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .wallet(signer)
         .on_http(http_rpc.parse().map_err(|_| "Invalid RPC URL")?);
 
-    // Query BLS signature checker address directly from TaskManager contract
-    println!("📖 Querying BLS Signature Checker from IncredibleSquaringTaskManager...");
-    let task_manager = IIncredibleSquaringTaskManager::new(task_manager_address, provider.clone());
-    let bls_address = task_manager
-        .blsSignatureChecker()
-        .call()
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to call blsSignatureChecker() on TaskManager {}: {}",
-                task_manager_address, e
-            )
-        })?
-        ._0;
-
-    println!("🔐 Using BLS Signature Checker: {}", bls_address);
-
     // Sanity checks: ensure target addresses have code deployed
     println!("🔍 Checking deployed code of contracts...");
-    let code_task_manager = provider
-        .get_code_at(task_manager_address)
+    let code_avs = provider
+        .get_code_at(avs_address)
         .await
-        .map_err(|e| format!("Failed to get code for TaskManager {}: {}", task_manager_address, e))?;
-    if code_task_manager.as_ref().is_empty() {
+        .map_err(|e| format!("Failed to get code for AVS address {}: {}", avs_address, e))?;
+    if code_avs.as_ref().is_empty() {
         return Err(format!(
-            "TaskManager {} has no code deployed. Check AVS_DEPLOYMENT_PATH.",
-            task_manager_address
+            "AVS address {} has no code deployed. Check AVS_DEPLOYMENT_PATH.",
+            avs_address
         )
         .into());
     }
@@ -121,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     })?;
     if code_bls.as_ref().is_empty() {
         return Err(format!(
-            "BLS Signature Checker {} has no code deployed.",
+            "BLS Signature Checker {} has no code deployed. Ensure addresses.blsSigCheck is correct or set BLS_SIGNATURE_CHECKER_ADDRESS.",
             bls_address
         )
         .into());
@@ -174,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🚀 Sending deployment transaction...");
 
         let deploy_call = factory.deployArraySummation(
-            task_manager_address,
+            avs_address,
             bls_address,
             U256::from(array_size),
             U256::from(max_value),
@@ -238,8 +220,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         println!("  ArraySummation Contract: {}", deployed_address);
     }
-    println!("  IncredibleSquaringTaskManager: {}", task_manager_address);
-    println!("  BLS Signature Checker: {}", bls_address);
+    println!("  AVS Service: {}", avs_address);
+    println!("  BLS Sig Check: {}", bls_address);
 
     Ok(())
 }
