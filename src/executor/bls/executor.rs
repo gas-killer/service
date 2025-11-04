@@ -181,16 +181,6 @@ impl<H: BlsSignatureVerificationHandler> BlsExecutorTrait<H::TaskData>
         let quorum_numbers = Bytes::from_str("0x00")
             .map_err(|e| anyhow::anyhow!("Failed to parse quorum numbers: {}", e))?;
 
-        // Print out all the argument values before calling getNonSignerStakesAndSignature for debugging
-        debug!(
-            registry_coordinator_address = ?self.registry_coordinator_address,
-            quorum_numbers = ?quorum_numbers,
-            sigma_struct = ?sigma_struct,
-            operators = ?operators,
-            reference_block_number = reference_block_number,
-            "Arguments to getNonSignerStakesAndSignature"
-        );
-
         // Call the BLS operator state retriever to get the non-signer data
         let non_signer_return = self
             .bls_operator_state_retriever
@@ -204,16 +194,6 @@ impl<H: BlsSignatureVerificationHandler> BlsExecutorTrait<H::TaskData>
             .call()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get non-signer stakes and signature: {}", e))?;
-
-        // Print out all the argument values before calling handle_verification for debugging
-        debug!(
-            msg_hash = ?msg_hash,
-            quorum_numbers = ?quorum_numbers,
-            reference_block_number = reference_block_number,
-            non_signer_return = ?non_signer_return,
-            task_data_present = task_data.is_some(),
-            "Arguments to handle_verification"
-        );
 
         // Delegate the contract-specific execution to the handler
         let result = self
