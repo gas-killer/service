@@ -71,15 +71,19 @@ echo "Environment configuration complete"
 echo -e "${YELLOW}Step 3: Pulling Docker images...${NC}"
 docker compose pull
 
-# Step 4: Start Docker Compose services
-echo -e "${YELLOW}Step 4: Starting Docker Compose services...${NC}"
+# Step 4: Build router image
+echo -e "${YELLOW}Step 4: Building router Docker image...${NC}"
+docker compose build router
+
+# Step 5: Start Docker Compose services
+echo -e "${YELLOW}Step 5: Starting Docker Compose services...${NC}"
 docker compose up -d
 
 # Show running containers
 docker compose ps
 
-# Step 5: Wait for EigenLayer setup to complete
-echo -e "${YELLOW}Step 5: Waiting for EigenLayer setup to complete...${NC}"
+# Step 6: Wait for EigenLayer setup to complete
+echo -e "${YELLOW}Step 6: Waiting for EigenLayer setup to complete...${NC}"
 timeout=500
 elapsed=0
 
@@ -106,8 +110,8 @@ fi
 echo "Waiting for nodes to initialize..."
 sleep 30
 
-# Step 6: Deploy ArraySummation (Gas Killer example contract)
-echo -e "${YELLOW}Step 6: Deploying ArraySummation (Gas Killer example contract)...${NC}"
+# Step 7: Deploy ArraySummation (Gas Killer example contract)
+echo -e "${YELLOW}Step 7: Deploying ArraySummation (Gas Killer example contract)...${NC}"
 cd "$PROJECT_ROOT/scripts"
 
 # Source environment and run deployment
@@ -147,8 +151,8 @@ fi
 
 cd "$PROJECT_ROOT"
 
-# Step 7: Check service health
-echo -e "${YELLOW}Step 7: Checking service health...${NC}"
+# Step 8: Check service health
+echo -e "${YELLOW}Step 8: Checking service health...${NC}"
 for service in node-1 node-2 node-3 router; do
     if docker compose ps | grep -q "$service.*Up"; then
         echo "Service $service is running"
@@ -157,12 +161,12 @@ for service in node-1 node-2 node-3 router; do
     fi
 done
 
-# Step 8: Brief wait for services to stabilize
-echo -e "${YELLOW}Step 8: Waiting briefly for services to stabilize...${NC}"
+# Step 9: Brief wait for services to stabilize
+echo -e "${YELLOW}Step 9: Waiting briefly for services to stabilize...${NC}"
 sleep 5
 
-# Step 9: Trigger Gas Killer task and verify execution
-echo -e "${YELLOW}Step 9: Trigger Gas Killer task and verify execution${NC}"
+# Step 10: Trigger Gas Killer task and verify execution
+echo -e "${YELLOW}Step 10: Trigger Gas Killer task and verify execution${NC}"
 echo "Sending a test task to the router..."
 cd "$PROJECT_ROOT/scripts"
 cargo run --release -p avs-scripts --bin trigger_gas_killer
