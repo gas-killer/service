@@ -76,7 +76,16 @@ jobs:
           SIGNER_ENDPOINT=http://signer:50051
           CERBERUS_GRPC_PORT=50051
           CERBERUS_METRICS_PORT=9081
+          RUST_LOG=info
           EOF
 
       - name: Run E2E test
-        run: bash ./scripts/router_e2e_local.sh
+        run: bash ./scripts/router_e2e_local.sh 2>&1 | tee e2e-test-output.log
+
+      - name: Upload test output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-output
+          path: e2e-test-output.log
+          retention-days: 7
