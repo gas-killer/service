@@ -137,8 +137,8 @@ sudo chmod -R 777 config/.nodes || chmod -R 777 config/.nodes
 echo "Waiting for nodes to initialize..."
 sleep 30
 
-# Step 7: Deploy ArraySummation (Gas Killer example contract)
-echo -e "${YELLOW}Step 7: Deploying ArraySummation (Gas Killer example contract)...${NC}"
+# Step 7: Deploy Gas Killer example contract (ArraySummation)
+echo -e "${YELLOW}Step 7: Deploying Gas Killer example contract (ArraySummation)...${NC}"
 cd "$PROJECT_ROOT/scripts"
 
 # Source environment and run deployment
@@ -197,7 +197,7 @@ echo -e "${YELLOW}Step 9: Waiting briefly for services to stabilize...${NC}"
 sleep 5
 
 # Step 10: Trigger Gas Killer task and verify execution
-echo -e "${YELLOW}Step 10: Trigger Gas Killer task and verify execution${NC}"
+echo -e "${YELLOW}Step 10: Triggering task and verifying execution...${NC}"
 echo "Sending a test task to the router..."
 cd "$PROJECT_ROOT/scripts"
 cargo run --release -p avs-scripts --bin trigger_gas_killer
