@@ -13,16 +13,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$PROJECT_ROOT/logs"
 
+# Track if test passed
+TEST_PASSED=false
+
 # Create logs directory
 mkdir -p "$LOG_DIR"
 
 # Cleanup function
 cleanup() {
-    exit_code=$?
     echo -e "${YELLOW}Cleaning up Docker containers...${NC}"
 
-    # If exiting with error, dump all container logs for debugging
-    if [ $exit_code -ne 0 ]; then
+    # If test didn't pass, dump all container logs for debugging
+    if [ "$TEST_PASSED" != "true" ]; then
         echo -e "${YELLOW}=== Dumping all container logs for debugging ===${NC}"
         echo -e "${YELLOW}Ethereum logs:${NC}"
         docker compose logs ethereum 2>/dev/null || true
@@ -36,6 +38,8 @@ cleanup() {
         docker compose logs node-2 2>/dev/null || true
         echo -e "${YELLOW}Node-3 logs:${NC}"
         docker compose logs node-3 2>/dev/null || true
+        echo -e "${YELLOW}Signer logs:${NC}"
+        docker compose logs signer 2>/dev/null || true
     fi
 
     cd "$PROJECT_ROOT"
@@ -216,4 +220,5 @@ echo -e "${YELLOW}Recent router logs:${NC}"
 docker compose logs --tail=50 router || true
 
 echo -e "${GREEN}✅ E2E test passed - Stack is up and array summation completed successfully!${NC}"
+TEST_PASSED=true
 exit 0
