@@ -18,7 +18,26 @@ mkdir -p "$LOG_DIR"
 
 # Cleanup function
 cleanup() {
+    exit_code=$?
     echo -e "${YELLOW}Cleaning up Docker containers...${NC}"
+
+    # If exiting with error, dump all container logs for debugging
+    if [ $exit_code -ne 0 ]; then
+        echo -e "${YELLOW}=== Dumping all container logs for debugging ===${NC}"
+        echo -e "${YELLOW}Ethereum logs:${NC}"
+        docker compose logs ethereum 2>/dev/null || true
+        echo -e "${YELLOW}Eigenlayer logs:${NC}"
+        docker compose logs eigenlayer 2>/dev/null || true
+        echo -e "${YELLOW}Router logs:${NC}"
+        docker compose logs router 2>/dev/null || true
+        echo -e "${YELLOW}Node-1 logs:${NC}"
+        docker compose logs node-1 2>/dev/null || true
+        echo -e "${YELLOW}Node-2 logs:${NC}"
+        docker compose logs node-2 2>/dev/null || true
+        echo -e "${YELLOW}Node-3 logs:${NC}"
+        docker compose logs node-3 2>/dev/null || true
+    fi
+
     cd "$PROJECT_ROOT"
     docker compose down || true
     echo -e "${GREEN}Cleanup completed${NC}"
