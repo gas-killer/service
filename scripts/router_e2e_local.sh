@@ -221,12 +221,7 @@ docker compose logs --tail=50 router || true
 
 # Extract transaction hash from router logs and show execution trace
 echo -e "${YELLOW}Extracting transaction hash and showing execution trace...${NC}"
-TX_HASH=$(docker compose logs router 2>/dev/null | grep -oP "verifyAndUpdate.*tx_hash[=:]?\s*[\"']?(0x[a-fA-F0-9]{64})[\"']?" | grep -oP "0x[a-fA-F0-9]{64}" | head -1)
-
-if [ -z "$TX_HASH" ]; then
-    # Try alternative patterns for transaction hash
-    TX_HASH=$(docker compose logs router 2>/dev/null | grep -oP "(transaction|tx).*hash[=:]?\s*[\"']?(0x[a-fA-F0-9]{64})[\"']?" | grep -oP "0x[a-fA-F0-9]{64}" | head -1)
-fi
+TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -oP "transaction_hash=0x[a-fA-F0-9]{64}" | grep -oP "0x[a-fA-F0-9]{64}" | tail -1)
 
 if [ -n "$TX_HASH" ]; then
     echo -e "${GREEN}Found transaction hash: $TX_HASH${NC}"
