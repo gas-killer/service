@@ -1,5 +1,5 @@
 use alloy::primitives::{hex, Address, U256};
-use alloy::providers::ProviderBuilder;
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolCall;
 use bindings::arraysummation::ArraySummation::sumCall;
 use gas_killer_router::usecases::gas_killer::ingress::{
@@ -73,6 +73,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
+    // Debug summary of the request prior to sending
+    let selector_hex = if request.body.call_data.len() >= 4 {
+        hex::encode(&request.body.call_data[0..4])
+    } else {
+        String::from("")
+    };
+    println!(
+        "Debug request summary:\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})\n  storage_updates_len: {}",
+        request.body.target_address,
+        request.body.from_address,
+        request.body.transition_index,
+        request.body.value,
+        request.body.call_data.len(),
+        selector_hex,
+        request.body.storage_updates.len()
+    );
+
     // Prepare provider and contract for verification of currentSum
     let rpc_for_read = env::var("HTTP_RPC").or_else(|_| env::var("GAS_ANALYZER_RPC"))?;
     let rpc_url_for_read = Url::parse(&rpc_for_read)?;
@@ -81,6 +98,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         request.body.target_address,
         provider.clone(),
     );
+
+    // Ensure target has code deployed
+    let code = provider
+        .get_code_at(request.body.target_address)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to read code at target {}: {}",
+                request.body.target_address, e
+            )
+        })?;
+    if code.as_ref().is_empty() {
+        return Err(format!(
+            "Target address {} has no code deployed. Aborting trigger.",
+            request.body.target_address
+        )
+        .into());
+    }
 
     // Capture initial currentSum before posting task
     let initial_sum = array_contract
@@ -103,6 +138,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Response: {}\n{}", status, text);
 
     if !status.is_success() {
+        eprintln!(
+            "Trigger failed with status {}. Reprinting request summary to aid debugging...\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})\n  storage_updates_len: {}",
+            status,
+            request.body.target_address,
+            request.body.from_address,
+            request.body.transition_index,
+            request.body.value,
+            request.body.call_data.len(),
+            selector_hex,
+            request.body.storage_updates.len()
+        );
         Err(format!("Trigger failed with status {}", status).into())
     } else {
         // Poll currentSum until it changes or timeout

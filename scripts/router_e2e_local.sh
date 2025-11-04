@@ -13,19 +13,60 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$PROJECT_ROOT/logs"
 
+# Track if test passed
+TEST_PASSED=false
+
 # Create logs directory
 mkdir -p "$LOG_DIR"
 
 # Cleanup function
 cleanup() {
     echo -e "${YELLOW}Cleaning up Docker containers...${NC}"
+
+    # If test didn't pass, dump all container logs for debugging
+    if [ "$TEST_PASSED" != "true" ]; then
+        echo -e "${YELLOW}=== Dumping all container logs for debugging ===${NC}"
+        echo -e "${YELLOW}Ethereum logs:${NC}"
+        docker compose logs ethereum 2>/dev/null || true
+        echo -e "${YELLOW}Eigenlayer logs:${NC}"
+        docker compose logs eigenlayer 2>/dev/null || true
+        echo -e "${YELLOW}Router logs:${NC}"
+        docker compose logs router 2>/dev/null || true
+        echo -e "${YELLOW}Node-1 logs:${NC}"
+        docker compose logs node-1 2>/dev/null || true
+        echo -e "${YELLOW}Node-2 logs:${NC}"
+        docker compose logs node-2 2>/dev/null || true
+        echo -e "${YELLOW}Node-3 logs:${NC}"
+        docker compose logs node-3 2>/dev/null || true
+        echo -e "${YELLOW}Signer logs:${NC}"
+        docker compose logs signer 2>/dev/null || true
+    fi
+
     cd "$PROJECT_ROOT"
     docker compose down || true
     echo -e "${GREEN}Cleanup completed${NC}"
 }
 
-# Set trap for cleanup
-trap cleanup EXIT INT TERM
+# Parse flags/env for keeping containers up after script finishes
+KEEP_UP=false
+for arg in "$@"; do
+    case "$arg" in
+        --keep-up|--no-cleanup)
+            KEEP_UP=true
+            ;;
+    esac
+done
+
+if [ "${KEEP_CONTAINERS:-}" = "1" ] || [ "${KEEP_CONTAINERS:-}" = "true" ]; then
+    KEEP_UP=true
+fi
+
+# Set trap for cleanup unless explicitly keeping containers up
+if [ "$KEEP_UP" = true ]; then
+    echo -e "${YELLOW}Skipping auto-cleanup; containers will remain running. Use 'docker compose down' to stop.${NC}"
+else
+    trap cleanup EXIT INT TERM
+fi
 
 echo -e "${GREEN}Starting Gas Killer Integration Test${NC}"
 echo "Project root: $PROJECT_ROOT"
@@ -53,15 +94,19 @@ echo "Environment configuration complete"
 echo -e "${YELLOW}Step 3: Pulling Docker images...${NC}"
 docker compose pull
 
-# Step 4: Start Docker Compose services
-echo -e "${YELLOW}Step 4: Starting Docker Compose services...${NC}"
+# Step 4: Build router image
+echo -e "${YELLOW}Step 4: Building router Docker image...${NC}"
+docker compose build router
+
+# Step 5: Start Docker Compose services
+echo -e "${YELLOW}Step 5: Starting Docker Compose services...${NC}"
 docker compose up -d
 
 # Show running containers
 docker compose ps
 
-# Step 5: Wait for EigenLayer setup to complete
-echo -e "${YELLOW}Step 5: Waiting for EigenLayer setup to complete...${NC}"
+# Step 6: Wait for EigenLayer setup to complete
+echo -e "${YELLOW}Step 6: Waiting for EigenLayer setup to complete...${NC}"
 timeout=500
 elapsed=0
 
@@ -84,12 +129,16 @@ if [ $elapsed -ge $timeout ]; then
     exit 1
 fi
 
+# Fix permissions on config/.nodes directory so deploy script can write
+echo "Fixing file permissions..."
+sudo chmod -R 777 config/.nodes || chmod -R 777 config/.nodes
+
 # Give extra time for nodes to initialize
 echo "Waiting for nodes to initialize..."
 sleep 30
 
-# Step 6: Deploy ArraySummation (Gas Killer example contract)
-echo -e "${YELLOW}Step 6: Deploying ArraySummation (Gas Killer example contract)...${NC}"
+# Step 7: Deploy Gas Killer example contract (ArraySummation)
+echo -e "${YELLOW}Step 7: Deploying Gas Killer example contract (ArraySummation)...${NC}"
 cd "$PROJECT_ROOT/scripts"
 
 # Source environment and run deployment
@@ -108,6 +157,10 @@ if [ $? -eq 0 ]; then
     echo -e "${GREEN}ArraySummation deployment completed successfully${NC}"
 else
     echo -e "${RED}ArraySummation deployment failed${NC}"
+    echo -e "${YELLOW}Recent ethereum logs:${NC}"
+    docker compose logs --tail=100 ethereum || true
+    echo -e "${YELLOW}Recent eigenlayer logs:${NC}"
+    docker compose logs --tail=100 eigenlayer || true
     exit 1
 fi
 
@@ -129,8 +182,8 @@ fi
 
 cd "$PROJECT_ROOT"
 
-# Step 7: Check service health
-echo -e "${YELLOW}Step 7: Checking service health...${NC}"
+# Step 8: Check service health
+echo -e "${YELLOW}Step 8: Checking service health...${NC}"
 for service in node-1 node-2 node-3 router; do
     if docker compose ps | grep -q "$service.*Up"; then
         echo "Service $service is running"
@@ -139,12 +192,12 @@ for service in node-1 node-2 node-3 router; do
     fi
 done
 
-# Step 8: Brief wait for services to stabilize
-echo -e "${YELLOW}Step 8: Waiting briefly for services to stabilize...${NC}"
+# Step 9: Brief wait for services to stabilize
+echo -e "${YELLOW}Step 9: Waiting briefly for services to stabilize...${NC}"
 sleep 5
 
-# Step 9: Trigger Gas Killer task (optional if variables are provided)
-echo -e "${YELLOW}Step 9: Trigger Gas Killer task (optional)${NC}"
+# Step 10: Trigger Gas Killer task and verify execution
+echo -e "${YELLOW}Step 10: Triggering task and verifying execution...${NC}"
 echo "Sending a test task to the router..."
 cd "$PROJECT_ROOT/scripts"
 cargo run --release -p avs-scripts --bin trigger_gas_killer
@@ -152,14 +205,38 @@ TRIGGER_STATUS=$?
 cd "$PROJECT_ROOT"
 
 if [ $TRIGGER_STATUS -eq 0 ]; then
-    echo -e "${GREEN}✅ Triggered Gas Killer task successfully.${NC}"
+    echo -e "${GREEN}✅ Array summation verified successfully - state was updated!${NC}"
 else
-    echo -e "${YELLOW}⚠️  Trigger helper returned a non-success status. Check inputs and router logs.${NC}"
+    echo -e "${RED}❌ Array summation verification failed - state was not updated within timeout.${NC}"
+    echo -e "${YELLOW}Recent router logs:${NC}"
+    docker compose logs --tail=100 router || true
+    echo -e "${YELLOW}Recent node logs:${NC}"
+    docker compose logs --tail=50 node-1 node-2 node-3 || true
+    exit 1
 fi
 
 # Show recent router logs for confirmation
 echo -e "${YELLOW}Recent router logs:${NC}"
 docker compose logs --tail=50 router || true
 
-echo -e "${GREEN}✅ Stack is up with Gas Killer ingress enabled and ArraySummation deployed.${NC}"
+# Extract transaction hash from router logs and show execution trace
+echo -e "${YELLOW}Extracting transaction hash and showing execution trace...${NC}"
+TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -oP "transaction_hash=0x[a-fA-F0-9]{64}" | grep -oP "0x[a-fA-F0-9]{64}" | tail -1)
+
+if [ -n "$TX_HASH" ]; then
+    echo -e "${GREEN}Found transaction hash: $TX_HASH${NC}"
+    echo -e "${YELLOW}Running cast trace...${NC}"
+
+    # Check if cast is available
+    if command -v cast >/dev/null 2>&1; then
+        cast run "$TX_HASH" --rpc-url http://localhost:8545 || echo -e "${YELLOW}Cast trace failed, transaction may still be pending${NC}"
+    else
+        echo -e "${YELLOW}Warning: cast (Foundry) not found. Install with: curl -L https://foundry.paradigm.xyz | bash && foundryup${NC}"
+    fi
+else
+    echo -e "${YELLOW}Warning: Could not find transaction hash in router logs${NC}"
+fi
+
+echo -e "${GREEN}✅ E2E test passed - Stack is up and array summation completed successfully!${NC}"
+TEST_PASSED=true
 exit 0
