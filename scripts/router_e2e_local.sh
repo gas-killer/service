@@ -219,6 +219,29 @@ fi
 echo -e "${YELLOW}Recent router logs:${NC}"
 docker compose logs --tail=50 router || true
 
+# Extract transaction hash from router logs and show execution trace
+echo -e "${YELLOW}Extracting transaction hash and showing execution trace...${NC}"
+TX_HASH=$(docker compose logs router 2>/dev/null | grep -oP "verifyAndUpdate.*tx_hash[=:]?\s*[\"']?(0x[a-fA-F0-9]{64})[\"']?" | grep -oP "0x[a-fA-F0-9]{64}" | head -1)
+
+if [ -z "$TX_HASH" ]; then
+    # Try alternative patterns for transaction hash
+    TX_HASH=$(docker compose logs router 2>/dev/null | grep -oP "(transaction|tx).*hash[=:]?\s*[\"']?(0x[a-fA-F0-9]{64})[\"']?" | grep -oP "0x[a-fA-F0-9]{64}" | head -1)
+fi
+
+if [ -n "$TX_HASH" ]; then
+    echo -e "${GREEN}Found transaction hash: $TX_HASH${NC}"
+    echo -e "${YELLOW}Running cast trace...${NC}"
+
+    # Check if cast is available
+    if command -v cast >/dev/null 2>&1; then
+        cast run "$TX_HASH" --rpc-url http://localhost:8545 || echo -e "${YELLOW}Cast trace failed, transaction may still be pending${NC}"
+    else
+        echo -e "${YELLOW}Warning: cast (Foundry) not found. Install with: curl -L https://foundry.paradigm.xyz | bash && foundryup${NC}"
+    fi
+else
+    echo -e "${YELLOW}Warning: Could not find transaction hash in router logs${NC}"
+fi
+
 echo -e "${GREEN}✅ E2E test passed - Stack is up and array summation completed successfully!${NC}"
 TEST_PASSED=true
 exit 0
