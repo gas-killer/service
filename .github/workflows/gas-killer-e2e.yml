@@ -49,13 +49,26 @@ jobs:
       - name: Create .env file
         run: |
           cat > .env << EOF
-          HTTP_RPC=${{ secrets.RPC_URL }}
+          ENVIRONMENT=LOCAL
+          HTTP_RPC=http://localhost:8545
+          WS_RPC=ws://localhost:8545
+          RPC_URL=http://ethereum:8545
+          FORK_URL=${{ secrets.RPC_URL }}
           PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+          FUNDED_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+          TEST_ACCOUNTS=3
+          AVS_DEPLOYMENT_PATH="config/.nodes/avs_deploy.json"
           ARRAY_SUMMATION_FACTORY_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
           ARRAY_SUMMATION_ARRAY_SIZE=100
           ARRAY_SUMMATION_MAX_VALUE=1000
           ARRAY_SUMMATION_SEED=42
+          INGRESS=true
+          INGRESS_ADDRESS=0.0.0.0:8080
+          INGRESS_TIMEOUT_MS=120000
           GAS_KILLER_ROUTER_URL=http://localhost:8080
+          SIGNER_ENDPOINT=http://signer:50051
+          CERBERUS_GRPC_PORT=50051
+          CERBERUS_METRICS_PORT=9081
           EOF
 
       - name: Run E2E test
