@@ -82,10 +82,16 @@ jobs:
       - name: Run E2E test
         run: bash ./scripts/router_e2e_local.sh 2>&1 | tee e2e-test-output.log
 
+      - name: Show router logs
+        if: always()
+        run: |
+          echo "=== Router Logs ==="
+          docker compose logs router || true
+
       - name: Upload test output on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-test-output
           path: e2e-test-output.log
-          retention-days: 7
+          retention-days: 1
