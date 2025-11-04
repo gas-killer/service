@@ -161,8 +161,8 @@ done
 echo -e "${YELLOW}Step 8: Waiting briefly for services to stabilize...${NC}"
 sleep 5
 
-# Step 9: Trigger Gas Killer task (optional if variables are provided)
-echo -e "${YELLOW}Step 9: Trigger Gas Killer task (optional)${NC}"
+# Step 9: Trigger Gas Killer task and verify execution
+echo -e "${YELLOW}Step 9: Trigger Gas Killer task and verify execution${NC}"
 echo "Sending a test task to the router..."
 cd "$PROJECT_ROOT/scripts"
 cargo run --release -p avs-scripts --bin trigger_gas_killer
@@ -170,14 +170,19 @@ TRIGGER_STATUS=$?
 cd "$PROJECT_ROOT"
 
 if [ $TRIGGER_STATUS -eq 0 ]; then
-    echo -e "${GREEN}✅ Triggered Gas Killer task successfully.${NC}"
+    echo -e "${GREEN}✅ Array summation verified successfully - state was updated!${NC}"
 else
-    echo -e "${YELLOW}⚠️  Trigger helper returned a non-success status. Check inputs and router logs.${NC}"
+    echo -e "${RED}❌ Array summation verification failed - state was not updated within timeout.${NC}"
+    echo -e "${YELLOW}Recent router logs:${NC}"
+    docker compose logs --tail=100 router || true
+    echo -e "${YELLOW}Recent node logs:${NC}"
+    docker compose logs --tail=50 node-1 node-2 node-3 || true
+    exit 1
 fi
 
 # Show recent router logs for confirmation
 echo -e "${YELLOW}Recent router logs:${NC}"
 docker compose logs --tail=50 router || true
 
-echo -e "${GREEN}✅ Stack is up with Gas Killer ingress enabled and ArraySummation deployed.${NC}"
+echo -e "${GREEN}✅ E2E test passed - Stack is up and array summation completed successfully!${NC}"
 exit 0
