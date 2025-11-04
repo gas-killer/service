@@ -2,9 +2,9 @@ name: Gas Killer E2E Test
 
 on:
   push:
-    branches: [dev, main]
+    branches: [dev, main, debug/array-summation-integration-test]
   pull_request:
-    branches: [dev, main]
+    branches: [dev, main, debug/array-summation-integration-test]
   workflow_dispatch:
 
 jobs:
