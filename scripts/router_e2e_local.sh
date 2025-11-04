@@ -134,6 +134,10 @@ if [ $? -eq 0 ]; then
     echo -e "${GREEN}ArraySummation deployment completed successfully${NC}"
 else
     echo -e "${RED}ArraySummation deployment failed${NC}"
+    echo -e "${YELLOW}Recent ethereum logs:${NC}"
+    docker compose logs --tail=100 ethereum || true
+    echo -e "${YELLOW}Recent eigenlayer logs:${NC}"
+    docker compose logs --tail=100 eigenlayer || true
     exit 1
 fi
 
