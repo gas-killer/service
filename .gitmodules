@@ -4,4 +4,4 @@
 [submodule "vendor/gas-killer-analyzer"]
 	path = vendor/gas-killer-analyzer
 	url = https://github.com/BreadchainCoop/gas-killer-analyzer
-	branch = encode-stateupdatetype-tuple
+	branch = gas-killer-compatible

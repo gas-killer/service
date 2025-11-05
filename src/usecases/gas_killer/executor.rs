@@ -116,16 +116,7 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         };
 
         // Execute the gas killer verifyAndUpdate
-        info!(
-            target_address = %target_addr,
-            msg_hash = %msg_hash,
-            quorum_numbers = %quorum_numbers,
-            current_block_number = %current_block_number,
-            storage_updates = %storage_updates,
-            transition_index = %transition_index,
-            target_function = %target_function,
-            "Sending verifyAndUpdate transaction"
-        );
+        info!("Sending verifyAndUpdate transaction");
         let call_return = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
