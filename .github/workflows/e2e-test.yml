@@ -1,4 +1,4 @@
-name: Integration Test
+name: E2E Test
 
 on:
   push:
@@ -91,7 +91,7 @@ jobs:
           EOF
 
       - name: Run test
-        run: bash ./scripts/router_e2e_local.sh 2>&1 | tee e2e-test-output.log
+        run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log
 
       - name: Show router logs
         if: always()

@@ -14,15 +14,16 @@ This directory contains scripts for running local version of the BLS signature a
 
 ```bash
 # From the project root
-./scripts/router_e2e_local.sh
+./scripts/run_e2e_test.sh
 ```
 
 ### Expected Output
 
 ```
-✅ SUCCESS: Counter was incremented 2 times (target: 2)
-Total time elapsed: 95.3 seconds
-✅ Integration test PASSED! Counter was incremented and ArraySummation was deployed successfully.
+currentSum: 0, Initial: 0, Elapsed: 0.0s
+currentSum: 1352, Initial: 0, Elapsed: 10.0s
+✅ SUCCESS: currentSum changed from 0 to 1352
+✅ Array summation verified successfully - state was updated!
 ```
 
 ## Troubleshooting

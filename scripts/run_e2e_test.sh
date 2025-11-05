@@ -68,7 +68,7 @@ else
     trap cleanup EXIT INT TERM
 fi
 
-echo -e "${GREEN}Starting Gas Killer Integration Test${NC}"
+echo -e "${GREEN}Starting Gas Killer E2E Test${NC}"
 echo "Project root: $PROJECT_ROOT"
 echo "Logs directory: $LOG_DIR"
 
@@ -237,6 +237,6 @@ else
     echo -e "${YELLOW}Warning: Could not find transaction hash in router logs${NC}"
 fi
 
-echo -e "${GREEN}✅ E2E test passed - Stack is up and array summation completed successfully!${NC}"
+echo -e "${GREEN}✅ Test passed - Stack is up and array summation completed successfully!${NC}"
 TEST_PASSED=true
 exit 0
