@@ -16,12 +16,14 @@ use std::{env, io::Cursor};
 use crate::validator::interface::ValidatorTrait;
 
 /// Counter-specific validator implementation.
+#[allow(dead_code)]
 pub struct CounterValidator {
     counter: Counter::CounterInstance<(), ReadOnlyProvider>,
 }
 
 impl CounterValidator {
     /// Creates a new CounterValidator instance.
+    #[allow(dead_code)]
     pub async fn new() -> Result<Self> {
         let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
         let provider = ProviderBuilder::new().on_http(url::Url::parse(&http_rpc).unwrap());
@@ -37,6 +39,7 @@ impl CounterValidator {
     }
 
     /// Verifies that the message round number matches the current onchain state.
+    #[allow(dead_code)]
     async fn verify_message_round(&self, msg: &[u8]) -> Result<()> {
         let aggregation: wire::Aggregation<CounterTaskData> =
             wire::Aggregation::read(&mut Cursor::new(msg))?;

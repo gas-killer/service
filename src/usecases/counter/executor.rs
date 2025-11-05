@@ -9,11 +9,13 @@ use async_trait::async_trait;
 
 use super::creator::CounterTaskData;
 
+#[allow(dead_code)]
 pub struct CounterHandler {
     counter: Counter::CounterInstance<(), WalletProvider>,
 }
 
 impl CounterHandler {
+    #[allow(dead_code)]
     pub fn new(counter: Counter::CounterInstance<(), WalletProvider>) -> Self {
         Self { counter }
     }

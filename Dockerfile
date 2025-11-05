@@ -1,42 +1,29 @@
 # Build stage
-FROM rust:1.83 AS builder
+FROM rust:1.83-slim AS builder
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy manifest files
+# Copy manifests and sources (vendored deps via submodules)
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-
-# Pre-build deps  
-# Create dummy main files for both workspace members to satisfy Cargo during dependency pre-build
-RUN mkdir src && echo 'fn main(){}' > src/main.rs
-RUN mkdir -p scripts/src && echo 'fn main(){}' > scripts/src/main.rs
-RUN echo '[package]\nname = "scripts"\nversion = "0.1.0"\nedition = "2021"' > scripts/Cargo.toml
-
-RUN mkdir -p /usr/local/cargo && \
-    echo '[net]' > /usr/local/cargo/config.toml && \
-    echo 'git-fetch-with-cli = true' >> /usr/local/cargo/config.toml
-
-# Pre-build dependencies with secret mounted
-RUN --mount=type=secret,id=GIT_AUTH_TOKEN \
-    if [ -f /run/secrets/GIT_AUTH_TOKEN ]; then \
-        TOKEN=$(cat /run/secrets/GIT_AUTH_TOKEN) && \
-        git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"; \
-    fi && \
-    cargo build --release || true
-
-RUN rm -rf src scripts
-
-# Now copy real source
+COPY .cargo ./.cargo
 COPY src ./src
 COPY scripts ./scripts
+COPY vendor ./vendor
 
-# Do the actual build with secret mounted
-RUN --mount=type=secret,id=GIT_AUTH_TOKEN \
-    if [ -f /run/secrets/GIT_AUTH_TOKEN ]; then \
-        TOKEN=$(cat /run/secrets/GIT_AUTH_TOKEN) && \
-        git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"; \
-    fi && \
-    cargo build --release
+# Prefetch dependencies to warm cargo cache
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo fetch
+
+# Build release binary and copy it out of the cache-mounted target dir
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && \
+    cp /app/target/release/gas-killer-router /usr/local/bin/gas-killer-router
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -51,7 +38,7 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -u 1000 -s /bin/bash appuser
 
 # Copy the binary from builder
-COPY --from=builder /app/target/release/gas-killer-router /usr/local/bin/gas-killer-router
+COPY --from=builder /usr/local/bin/gas-killer-router /usr/local/bin/gas-killer-router
 
 # Copy configuration files
 COPY config /app/config

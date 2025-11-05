@@ -1,3 +1,4 @@
+use alloy::primitives::U256;
 use alloy::rpc::types::eth::TransactionRequest as AlloyTransactionRequest;
 use alloy::sol_types::SolValue;
 use anyhow::Result;
@@ -27,7 +28,6 @@ pub struct AnalysisResult {
 //
 
 /// Validator implementation for the gas killer use case
-#[allow(dead_code)]
 pub struct GasKillerValidator {
     /// RPC URL for the gas analyzer
     fork_rpc_url: String,
@@ -35,7 +35,6 @@ pub struct GasKillerValidator {
 
 impl GasKillerValidator {
     /// Creates a new GasKillerValidator with default settings.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         let rpc_url = env::var("RPC_URL")
             .unwrap_or_else(|_| "https://ethereum-holesky.publicnode.com".to_string());
@@ -45,7 +44,6 @@ impl GasKillerValidator {
     }
 
     /// Validates the message format and decodes the aggregation
-    #[allow(dead_code)]
     async fn validate_message_format(
         &self,
         msg: &[u8],
@@ -72,24 +70,40 @@ impl GasKillerValidator {
     ///
     /// This method must produce the same hash as the creator's payload generation
     /// to ensure consensus consistency.
-    #[allow(dead_code)]
     async fn reconstruct_payload_hash(&self, task_data: &GasKillerTaskData) -> Result<Digest> {
-        // Reconstruct the same payload that the creator/nodes would have created
-        // Now includes storage_updates to commit to outputs as well as inputs
+        // IMPORTANT: This hash must match the on-chain expectedHash in GasKillerSDK.verifyAndUpdate:
+        // sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))
+        // We use target_address (which will be address(this) at execution), the 4-byte selector,
+        // and the exact storage_updates bytes.
 
-        // Create payload using the same fields that would be in the analysis result
-        let payload_data = (
-            task_data.transition_index,
-            task_data.target_address,
-            task_data.from_address,
-            task_data.value,
-            task_data.call_data.clone(),
-            task_data.storage_updates.clone(),
-        );
+        let selector = task_data.function_selector();
 
-        let payload = payload_data.abi_encode();
+        // Build flattened ABI encoding matching abi.encode(transitionIndex, address(this), selector, storageUpdates)
+        // Heads (32 bytes each)
+        let head_transition = U256::from(task_data.transition_index).abi_encode();
+        let head_address = task_data.target_address.abi_encode();
+        let head_selector = selector.abi_encode();
+        // Offset to the dynamic bytes tail: 4 words (3 static + 1 offset) = 0x80
+        let head_offset = U256::from(32u64 * 4u64).abi_encode();
 
-        // Hash the payload using the same method as the creator/nodes
+        // Tail for dynamic bytes: length (u256) + data + padding
+        let data_bytes: &[u8] = &task_data.storage_updates;
+        let mut tail = Vec::with_capacity(32 + data_bytes.len() + 31);
+        tail.extend_from_slice(&U256::from(data_bytes.len()).abi_encode());
+        tail.extend_from_slice(data_bytes);
+        let pad_len = (32 - (data_bytes.len() % 32)) % 32;
+        if pad_len > 0 {
+            tail.extend(std::iter::repeat_n(0u8, pad_len));
+        }
+
+        // Concatenate head and tail into final payload
+        let mut payload = Vec::with_capacity(32 * 4 + tail.len());
+        payload.extend_from_slice(&head_transition);
+        payload.extend_from_slice(&head_address);
+        payload.extend_from_slice(&head_selector);
+        payload.extend_from_slice(&head_offset);
+        payload.extend_from_slice(&tail);
+
         let mut hasher = Sha256::new();
         hasher.update(&payload);
         let payload_hash = hasher.finalize();
@@ -140,7 +154,7 @@ impl GasKillerValidator {
                 call_data.to_vec(),
             )),
             value,
-            gas: Some(u32::MAX as u64), // Unlimited gas for simulations
+            gas: None,
             ..Default::default()
         };
 
@@ -174,7 +188,6 @@ impl GasKillerValidator {
     ///
     /// # Returns
     /// * `Result<bool>` - True if storage updates match, false otherwise
-    #[allow(dead_code)]
     async fn validate_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<bool> {
         debug!("Starting storage validation");
 

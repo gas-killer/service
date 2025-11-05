@@ -7,6 +7,7 @@ use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 use alloy_primitives::{Bytes, FixedBytes, U256};
 use anyhow::Result;
 use async_trait::async_trait;
+use tracing::{info, warn};
 
 /// Handler for executing verifyAndUpdate transactions
 #[allow(dead_code)]
@@ -69,23 +70,53 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         let target_function = task_data.function_selector();
         let target_addr = task_data.target_address;
 
-        // Create GasKillerSDK instance dynamically using target_address from task data
         let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
+        // Query the contract's getMessageHash and compare with the provided msg_hash
+        match gas_killer_sdk
+            .getMessageHash(transition_index, target_function, storage_updates.clone())
+            .call()
+            .await
+        {
+            Ok(ret) => {
+                if ret._0 != msg_hash {
+                    warn!(
+                        offchain_msg_hash = %msg_hash,
+                        onchain_expected_hash = %ret._0,
+                        "Message hash mismatch between offchain and onchain"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Message hash mismatch: offchain {} != onchain {}",
+                        msg_hash,
+                        ret._0
+                    ));
+                } else {
+                    info!("Message hash match confirmed");
+                }
+            }
+            Err(e) => {
+                warn!("getMessageHash call failed: {}", e);
+            }
+        }
 
         // Ensure contract implements the GasKiller interface via ERC-165 check
         let interface_id = FixedBytes::<4>::from([0x93, 0xde, 0x45, 0x31]);
-        let supports = gas_killer_sdk
-            .supportsInterface(interface_id)
-            .call()
-            .await
-            .map_err(|e| anyhow::anyhow!("supportsInterface call failed: {}", e))?;
-        if !supports._0 {
-            return Err(anyhow::anyhow!(
-                "Target contract does not support GasKiller interface (0x93de4531)"
-            ));
-        }
+        match gas_killer_sdk.supportsInterface(interface_id).call().await {
+            Ok(result) => {
+                if !result._0 {
+                    warn!("Target contract does not support GasKiller interface (0x93de4531)");
+                    return Err(anyhow::anyhow!(
+                        "Target contract does not support GasKiller interface (0x93de4531)"
+                    ));
+                }
+            }
+            Err(e) => {
+                warn!("supportsInterface call failed: {}", e);
+                return Err(anyhow::anyhow!("supportsInterface call failed: {}", e));
+            }
+        };
 
         // Execute the gas killer verifyAndUpdate
+        info!("Sending verifyAndUpdate transaction");
         let call_return = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
@@ -104,6 +135,13 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             .get_receipt()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get transaction receipt: {}", e))?;
+        info!(
+            tx = %receipt.transaction_hash,
+            block = receipt.block_number,
+            status = ?receipt.status(),
+            gas_used = ?receipt.gas_used,
+            "verifyAndUpdate receipt"
+        );
 
         Ok(ExecutionResult {
             transaction_hash: format!("{:?}", receipt.transaction_hash),

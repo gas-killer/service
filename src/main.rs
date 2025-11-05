@@ -213,7 +213,7 @@ fn main() {
             .with_threshold(threshold)
             .load_from_env(); // Read configuration from environment variables
 
-        let orchestrator = crate::usecases::counter::CounterOrchestratorBuilder::build(builder)
+        let orchestrator = crate::usecases::gas_killer::GasKillerOrchestratorBuilder::build(builder)
             .await
             .expect("Failed to build orchestrator");
 

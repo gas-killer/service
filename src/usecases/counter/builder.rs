@@ -11,6 +11,7 @@ use tracing::info;
 ///
 /// This provides counter-specific building functionality while
 /// maintaining the separation between generic and concrete implementations.
+#[allow(dead_code)]
 pub struct CounterOrchestratorBuilder;
 
 impl CounterOrchestratorBuilder {
@@ -25,6 +26,7 @@ impl CounterOrchestratorBuilder {
     ///
     /// # Returns
     /// * `Result<CounterOrchestrator<C>>` - The constructed counter orchestrator
+    #[allow(dead_code)]
     pub async fn build<C: Clock>(
         builder: OrchestratorBuilder<C>,
     ) -> Result<CounterOrchestrator<C>, Box<dyn std::error::Error>> {

@@ -14,6 +14,7 @@ use commonware_eigenlayer::config::AvsDeployment;
 use std::{env, str::FromStr, sync::Arc};
 
 /// Factory function to create a default creator
+#[allow(dead_code)]
 pub async fn create_creator() -> anyhow::Result<CounterCreatorType> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
@@ -37,6 +38,7 @@ pub async fn create_creator() -> anyhow::Result<CounterCreatorType> {
 }
 
 /// Factory function to create a listening creator with HTTP server
+#[allow(dead_code)]
 pub async fn create_listening_creator_with_server(
     addr: String,
 ) -> anyhow::Result<CounterCreatorType> {
@@ -74,6 +76,7 @@ pub async fn create_listening_creator_with_server(
 }
 
 /// Creates a new BlsEigenlayerExecutor configured for Counter operations
+#[allow(dead_code)]
 pub async fn create_counter_executor() -> Result<BlsEigenlayerExecutor<CounterHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let view_only_provider = ProviderBuilder::new().on_http(url::Url::parse(&http_rpc).unwrap());

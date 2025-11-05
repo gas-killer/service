@@ -19,6 +19,7 @@ use anyhow::Result;
 use commonware_eigenlayer::config::AvsDeployment;
 use std::{env, str::FromStr, sync::Arc};
 
+#[allow(dead_code)]
 type ConnectHTTPDefaultProvider = FillProvider<
     JoinFill<
         JoinFill<
@@ -52,7 +53,6 @@ pub async fn create_listening_creator_with_server(
 }
 
 /// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations
-#[allow(dead_code)]
 pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let view_only_provider = ProviderBuilder::new().on_http(url::Url::parse(&http_rpc).unwrap());
@@ -101,6 +101,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
 }
 
 /// Helper function to create provider
+#[allow(dead_code)]
 pub async fn create_provider() -> anyhow::Result<ConnectHTTPDefaultProvider> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
