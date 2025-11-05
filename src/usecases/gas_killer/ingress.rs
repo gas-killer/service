@@ -4,7 +4,7 @@ use alloy_primitives::{Address, U256};
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GasKillerTaskRequestBody {
@@ -48,15 +48,6 @@ pub async fn trigger_task_handler(
     Json(request): Json<GasKillerTaskRequest>,
 ) -> (StatusCode, Json<GasKillerTaskResponse>) {
     if request.is_valid() {
-        info!(
-            target = format!("{:?}", request.body.target_address),
-            from = format!("{:?}", request.body.from_address),
-            transition_index = request.body.transition_index,
-            value = format!("{}", request.body.value),
-            call_data_len = request.body.call_data.len(),
-            storage_updates_len = request.body.storage_updates.len(),
-            "Accepted GasKiller task; enqueuing"
-        );
         queue.push(request);
         return (
             StatusCode::OK,
@@ -66,7 +57,7 @@ pub async fn trigger_task_handler(
             }),
         );
     }
-    warn!("Rejected GasKiller task: failed basic validation (missing fields or zero values)");
+
     (
         StatusCode::BAD_REQUEST,
         Json(GasKillerTaskResponse {
