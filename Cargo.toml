@@ -1,69 +1,83 @@
-
-[package]
-name = "gas-killer-router"
-version = "0.1.0"
-edition = "2024"
 [workspace]
-members = [".", "scripts"]
+resolver = "2"
+members = ["router", "node", "common", "scripts"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "PPL"
 
 [workspace.dependencies]
-# Core dependencies shared across packages
-alloy = { version = "0.12.6" }
-commonware-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-avs-network-lookup" }
-dotenv = "0.15.0"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-tokio = { version = "1.0", features = ["full"] }
-url = { version = "2.5.4", features = ["serde"] }
+# Upstream commonware-restaking crates (dev branch)
+commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "dev" }
+commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "dev" }
+commonware-avs-usecases = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "dev" }
+commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "dev" }
 
-[dependencies]
-# Workspace dependencies
-alloy = { workspace = true }
-alloy-primitives = "0.8.25"
-alloy-provider = "0.12.6"
-alloy-signer = "0.12.6"
-alloy-signer-local = "0.12.6"
-anyhow = "1.0"
+# Commonware ecosystem crates (0.0.63 to match dev branch)
+commonware-codec = "0.0.63"
+commonware-cryptography = "0.0.63"
+commonware-macros = "0.0.63"
+commonware-p2p = "0.0.63"
+commonware-runtime = "0.0.63"
+commonware-utils = "0.0.63"
+
+# Ethereum / Alloy (1.0 to match commonware-restaking dev)
+alloy = "1.0"
+alloy-network = "1.0"
+alloy-primitives = "1.0"
+alloy-provider = "1.0"
+alloy-signer = "1.0"
+alloy-signer-local = "1.0"
+
+# Cryptography
 ark-bn254 = "0.5.0"
 ark-ec = "0.5.0"
 ark-ff = "0.5.0"
 ark-serialize = "0.5.0"
-
-# Main package specific dependencies
-async-trait = "0.1"
-axum = "0.7"
 bn254 = { git = "https://github.com/BreadchainCoop/bn254.git" }
-bytes = "1.10.1"
-clap = "4.5.37"
-commonware-codec = "0.0.56"
-commonware-cryptography = "0.0.56"
-commonware-eigenlayer = { workspace = true }
-commonware-macros = "0.0.56"
-commonware-p2p = "0.0.56"
-commonware-runtime = "0.0.56"
-commonware-utils = "0.0.56"
-dotenv = { workspace = true }
-eigen-crypto-bls = "0.5.0"
-eigen-crypto-bn254 = "0.5.0"
+
+# EigenLayer SDK (2.0.0 to match dev branch)
+eigen-client-avsregistry = "2.0.0"
+eigen-common = "2.0.0"
+eigen-crypto-bls = "2.0.0"
+eigen-crypto-bn254 = "2.0.0"
 eigen-logging = "0.1.3"
+eigen-services-operatorsinfo = "2.0.0"
+eigen-utils = "2.0.0"
+
+# Async / Runtime
+async-trait = "0.1"
 futures = "0.3.31"
 futures-util = "0.3.31"
-gas-analyzer-rs = { path = "vendor/gas-killer-analyzer" }
+tokio = { version = "1.0", features = ["full"] }
+
+# Web / HTTP
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Serialization
+bytes = "1.10.1"
+prost = "0.13.5"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+serde_yaml = "0.9.34"
+
+# CLI / Config
+clap = "4.5.37"
+dotenv = "0.15.0"
+url = { version = "2.5.4", features = ["serde"] }
+
+# Other utilities
+anyhow = "1.0"
 governor = "0.6.3"
 hex = "0.4"
 num-bigint = "0.4"
 prometheus-client = "0.23.1"
-prost = "0.13.5"
 rand = "0.9.1"
-serde = { workspace = true }
-serde_json = "1.0.140"
-serde_yaml = "0.9.34"
-tokio = { workspace = true }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
-url = { workspace = true }
 
-[build-dependencies]
-prost-build = "0.13.5"
+# Internal crates
+gas-killer-common = { path = "common" }

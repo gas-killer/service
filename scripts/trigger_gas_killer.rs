@@ -1,10 +1,8 @@
-use alloy::primitives::{hex, Address, U256};
+use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolCall;
 use bindings::arraysummation::ArraySummation::sumCall;
-use gas_killer_router::usecases::gas_killer::ingress::{
-    GasKillerTaskRequest, GasKillerTaskRequestBody,
-};
+use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
 use serde_json::json;
 use std::env;
 use std::fs;
@@ -93,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Prepare provider and contract for verification of currentSum
     let rpc_for_read = env::var("HTTP_RPC").or_else(|_| env::var("GAS_ANALYZER_RPC"))?;
     let rpc_url_for_read = Url::parse(&rpc_for_read)?;
-    let provider = ProviderBuilder::new().on_http(rpc_url_for_read);
+    let provider = ProviderBuilder::new().connect_http(rpc_url_for_read);
     let array_contract = bindings::arraysummation::ArraySummation::new(
         request.body.target_address,
         provider.clone(),
@@ -123,7 +121,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .call()
         .await
         .map_err(|e| format!("Failed to read currentSum before trigger: {}", e))?
-        ._0
         .to::<u64>();
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
@@ -152,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err(format!("Trigger failed with status {}", status).into())
     } else {
         // Poll currentSum until it changes or timeout
-        use tokio::time::{sleep, Duration, Instant};
+        use tokio::time::{Duration, Instant, sleep};
         let max_wait_time = Duration::from_secs(150);
         let check_interval = Duration::from_secs(10);
         let start_time = Instant::now();
@@ -163,7 +160,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .call()
                 .await
                 .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
-                ._0
                 .to::<u64>();
 
             println!(
@@ -199,8 +195,8 @@ fn env_var(name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync
     env::var(name).map_err(|_| format!("{} environment variable is required", name).into())
 }
 
-async fn build_mock_request(
-) -> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
+async fn build_mock_request()
+-> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
     // Encode a sample ArraySummation sum(uint256[]) call with indexes [0,1,2]
     let indexes = vec![U256::from(0), U256::from(1), U256::from(2)];
     let call = sumCall { indexes };
@@ -236,9 +232,9 @@ async fn build_mock_request(
     // Derive RPC URL for analyzer; prefer GAS_ANALYZER_RPC or fallback to HTTP_RPC
     let rpc = env::var("GAS_ANALYZER_RPC")
         .or_else(|_| env::var("HTTP_RPC"))
-        .map_err(|_| {
-            "GAS_ANALYZER_RPC or HTTP_RPC environment variable is required for mock mode"
-        })?;
+        .map_err(
+            |_| "GAS_ANALYZER_RPC or HTTP_RPC environment variable is required for mock mode",
+        )?;
     let rpc_url = Url::parse(&rpc)?;
 
     // Build transaction request and compute real storage_updates with gas-analyzer-rs
@@ -263,14 +259,13 @@ async fn build_mock_request(
     let storage_updates = encoded_updates.to_vec();
 
     // Read current stateTransitionCount to compute correct transition_index
-    let provider = ProviderBuilder::new().on_http(rpc_url.clone());
+    let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
     let array_contract = bindings::arraysummation::ArraySummation::new(target_address, provider);
     let current_count = array_contract
         .stateTransitionCount()
         .call()
         .await
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
-        .count
         .to::<u64>();
 
     let body = GasKillerTaskRequestBody {

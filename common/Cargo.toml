@@ -1,0 +1,21 @@
+[package]
+name = "gas-killer-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Ethereum / Alloy (for bindings)
+alloy = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-provider = { workspace = true }
+alloy-signer = { workspace = true }
+alloy-signer-local = { workspace = true }
+
+# Commonware (for codec)
+commonware-codec = { workspace = true }
+
+# Serialization
+anyhow = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

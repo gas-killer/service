@@ -7,12 +7,15 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy manifests and sources (vendored deps via submodules)
+# Copy manifests and cargo config
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY .cargo ./.cargo
-COPY src ./src
+
+# Copy workspace crates
+COPY router ./router
+COPY common ./common
 COPY scripts ./scripts
-COPY vendor ./vendor
+COPY node ./node
 
 # Prefetch dependencies to warm cargo cache
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -22,7 +25,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Build release binary and copy it out of the cache-mounted target dir
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    cargo build --release && \
+    cargo build --release -p gas-killer-router && \
     cp /app/target/release/gas-killer-router /usr/local/bin/gas-killer-router
 
 # Runtime stage
