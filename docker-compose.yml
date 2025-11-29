@@ -35,8 +35,9 @@ services:
     restart: unless-stopped
 
   node-1:
-    image: ghcr.io/breadchaincoop/gas-killer-node:dev
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: Dockerfile.node
     platform: linux/amd64
     depends_on:
       eigenlayer:
@@ -67,8 +68,9 @@ services:
     restart: unless-stopped
 
   node-2:
-    image: ghcr.io/breadchaincoop/gas-killer-node:dev
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: Dockerfile.node
     platform: linux/amd64
     depends_on:
       eigenlayer:
@@ -99,8 +101,9 @@ services:
     restart: unless-stopped
 
   node-3:
-    image: ghcr.io/breadchaincoop/gas-killer-node:dev
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: Dockerfile.node
     platform: linux/amd64
     depends_on:
       eigenlayer:

@@ -1,4 +1,5 @@
-use ark_bn254::Fr;
+use ark_bn254::{Fr, G2Affine};
+use ark_serialize::CanonicalDeserialize;
 use clap::{Arg, Command, value_parser};
 use commonware_avs_core::bn254::{Bn254, PrivateKey, PublicKey};
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
@@ -101,6 +102,15 @@ fn main() {
     let signer = get_signer(key);
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
     tracing::info!(port, "loaded port");
+
+    // Log the router's public key G2 coordinates for config generation
+    let my_pub_key = signer.public_key();
+    let g2_point = G2Affine::deserialize_compressed(my_pub_key.as_ref()).unwrap();
+    println!("Router G2 coordinates for public_orchestrator.json:");
+    println!("  g2_x1: {}", g2_point.x.c0);
+    println!("  g2_x2: {}", g2_point.x.c1);
+    println!("  g2_y1: {}", g2_point.y.c0);
+    println!("  g2_y2: {}", g2_point.y.c1);
 
     // Configure network
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB

@@ -11,6 +11,10 @@ path = "deploy_array_summation.rs"
 name = "trigger_gas_killer"
 path = "trigger_gas_killer.rs"
 
+[[bin]]
+name = "gen_orchestrator_config"
+path = "gen_orchestrator_config.rs"
+
 [lib]
 name = "bindings"
 path = "bindings/mod.rs"
@@ -26,3 +30,7 @@ gas-killer-router = { path = "../router" }
 gas-killer-common = { workspace = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+commonware-avs-core = { workspace = true }

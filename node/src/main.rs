@@ -39,6 +39,8 @@ struct OrchestratorConfig {
     g2_y1: String,
     g2_y2: String,
     port: String,
+    #[serde(default)]
+    address: Option<String>,
 }
 
 fn load_key_from_file(path: &str) -> String {
@@ -142,8 +144,30 @@ fn main() {
                 let verifier = participant.pub_keys.as_ref().unwrap().g2_pub_key.clone();
                 tracing::info!(key = ?verifier, "registered authorized peer");
                 if let Some(socket) = &participant.socket {
-                    let socket_addr = SocketAddr::from_str(socket).expect("Invalid socket address");
-                    recipients.push((verifier, socket_addr));
+                    // Try to resolve hostname:port to socket addresses
+                    use std::net::ToSocketAddrs;
+                    match socket.to_socket_addrs() {
+                        Ok(mut addrs) => {
+                            if let Some(socket_addr) = addrs.next() {
+                                recipients.push((verifier, socket_addr));
+                            } else {
+                                panic!("No addresses found for socket: {socket}");
+                            }
+                        }
+                        Err(e) => {
+                            // If resolution fails, try parsing as direct IP:PORT
+                            match SocketAddr::from_str(socket) {
+                                Ok(socket_addr) => {
+                                    recipients.push((verifier, socket_addr));
+                                }
+                                Err(parse_err) => {
+                                    tracing::error!("Failed to resolve '{}': {:?}, and failed to parse as IP: {:?}",
+                                                  socket, e, parse_err);
+                                    panic!("Socket address not well-formed: {socket}");
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -155,14 +179,25 @@ fn main() {
                 &orchestrator_config.g2_y2,
             )
             .expect("Invalid orchestrator G2 coordinates");
+            tracing::info!(key = ?orchestrator_pub_key, "registered orchestrator key");
 
-            let orchestrator_addr = SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::LOCALHOST),
-                orchestrator_config
-                    .port
-                    .parse::<u16>()
-                    .expect("Invalid orchestrator port"),
+            // Resolve orchestrator address (hostname:port or IP:port)
+            let orchestrator_socket = format!(
+                "{}:{}",
+                orchestrator_config.address.as_deref().unwrap_or("127.0.0.1"),
+                orchestrator_config.port
             );
+            tracing::info!(target = %orchestrator_socket, "resolved orchestrator address");
+
+            use std::net::ToSocketAddrs;
+            let orchestrator_addr = match orchestrator_socket.to_socket_addrs() {
+                Ok(mut addrs) => addrs.next().expect("No addresses found for orchestrator"),
+                Err(_) => {
+                    // Fallback: parse as direct IP:PORT
+                    SocketAddr::from_str(&orchestrator_socket)
+                        .expect("Invalid orchestrator socket address")
+                }
+            };
             recipients.push((orchestrator_pub_key.clone(), orchestrator_addr));
         }
 
@@ -177,14 +212,25 @@ fn main() {
         const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         let my_local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        let p2p_cfg = lookup::Config::recommended(
+        let mut p2p_cfg = lookup::Config::local(
             signer.clone(),
             APPLICATION_NAMESPACE,
             my_addr,
             my_local_addr,
             MAX_MESSAGE_SIZE,
         );
+
+        // Allow handshakes from IPs that aren't yet in the registered peer set
+        // (needed for Docker networking where resolved IPs may differ)
+        p2p_cfg.attempt_unregistered_handshakes = true;
+
         let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
+
+        // Debug: Log all recipients before updating oracle
+        tracing::info!(count = recipients.len(), "registering recipients with oracle");
+        for (key, addr) in &recipients {
+            tracing::info!(key = ?key, addr = ?addr, "oracle recipient");
+        }
 
         // Register authorized peers with the oracle
         oracle
