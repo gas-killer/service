@@ -12,10 +12,9 @@ use commonware_runtime::{Metrics, Runner, Spawner, tokio};
 use commonware_utils::{NZU32, set::OrderedAssociated};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
-    GasKillerTaskData, OrchestratorConfig, get_operator_states, load_key_from_file,
-    load_orchestrator_config,
+    GasKillerTaskData, GasKillerValidator, OrchestratorConfig, get_operator_states,
+    load_key_from_file, load_orchestrator_config,
 };
-use gas_killer_router::GasKillerValidator;
 use governor::Quota;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

@@ -22,7 +22,6 @@ commonware-utils = { workspace = true }
 
 # Internal crates
 gas-killer-common = { workspace = true }
-gas-killer-router = { path = "../router" }
 
 # Logging
 eigen-logging = { workspace = true }

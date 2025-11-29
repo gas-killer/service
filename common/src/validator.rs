@@ -403,7 +403,7 @@ mod tests {
                 // The validation will likely fail since we're using mock storage updates
                 // but the real implementation will extract actual storage updates
                 println!(
-                    "✅ Validator storage validation test completed with real gas-analyzer-rs integration"
+                    "Validator storage validation test completed with real gas-analyzer-rs integration"
                 );
                 println!(
                     "   Validation result: {} (expected to fail with mock data)",
@@ -413,7 +413,7 @@ mod tests {
             Err(e) => {
                 // If it fails due to network issues or the contract not existing, that's acceptable for unit tests
                 println!(
-                    "⚠️  Validator storage validation test skipped due to network/RPC issues or contract not found: {}",
+                    "Validator storage validation test skipped due to network/RPC issues or contract not found: {}",
                     e
                 );
                 println!(

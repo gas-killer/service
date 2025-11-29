@@ -4252,12 +4252,19 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "anyhow",
+ "async-trait",
  "bytes",
+ "commonware-avs-router",
  "commonware-avs-usecases",
  "commonware-codec 0.0.63",
+ "commonware-cryptography 0.0.63",
  "dotenv",
+ "gas-analyzer-rs",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4281,7 +4288,6 @@ dependencies = [
  "eigen-logging",
  "futures",
  "gas-killer-common",
- "gas-killer-router",
  "governor",
  "serde",
  "serde_json",
