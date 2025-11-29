@@ -3,7 +3,6 @@ use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
 use commonware_avs_router::orchestrator::types::Orchestrator;
 
 /// Type alias for counter orchestrator using the generic framework
-#[allow(dead_code)]
 pub type GasKillerOrchestrator<C> = Orchestrator<
     GasKillerCreatorType,
     BlsEigenlayerExecutor<GasKillerHandler>,

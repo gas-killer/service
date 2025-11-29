@@ -10,12 +10,10 @@ use async_trait::async_trait;
 use tracing::{info, warn};
 
 /// Handler for executing verifyAndUpdate transactions
-#[allow(dead_code)]
 pub struct GasKillerHandler {
     provider: WalletProvider,
 }
 
-#[allow(dead_code)]
 impl GasKillerHandler {
     pub fn new(provider: WalletProvider) -> Self {
         Self { provider }

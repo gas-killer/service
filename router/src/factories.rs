@@ -1,15 +1,10 @@
-#![allow(dead_code)]
 use crate::GasKillerHandler;
 use crate::creator::{
     GasKillerConfig, GasKillerCreator, GasKillerCreatorType, ListeningGasKillerCreator,
     SimpleTaskQueue,
 };
 use crate::ingress::start_gas_killer_http_server;
-use alloy::network::EthereumWallet;
-use alloy_provider::fillers::{
-    BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
-};
-use alloy_provider::{Identity, ProviderBuilder, RootProvider};
+use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
 use commonware_avs_router::bindings::blsapkregistry::BLSApkRegistry;
@@ -17,18 +12,6 @@ use commonware_avs_router::bindings::blssigcheckoperatorstateretriever::BLSSigCh
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
 use commonware_avs_usecases::AvsDeployment;
 use std::{env, str::FromStr, sync::Arc};
-
-#[allow(dead_code)]
-type ConnectHTTPDefaultProvider = FillProvider<
-    JoinFill<
-        JoinFill<
-            Identity,
-            JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>,
-        >,
-        WalletFiller<EthereumWallet>,
-    >,
-    RootProvider,
->;
 
 /// Factory function to create a default creator
 pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
@@ -98,17 +81,4 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         registry_coordinator_address,
         gas_killer_handler,
     ))
-}
-
-/// Helper function to create provider
-#[allow(dead_code)]
-pub async fn create_provider() -> anyhow::Result<ConnectHTTPDefaultProvider> {
-    let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
-    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
-    let signer = PrivateKeySigner::from_str(&private_key)?;
-    let provider = ProviderBuilder::new()
-        .wallet(signer)
-        .connect(&http_rpc)
-        .await?;
-    Ok(provider)
 }

@@ -1,7 +1,5 @@
-#![allow(dead_code)]
 use crate::ingress::GasKillerTaskRequest;
 use crate::task_data::GasKillerTaskData;
-use alloy::sol_types::SolValue;
 use commonware_avs_router::creator::Creator;
 
 use anyhow::Result;
@@ -15,7 +13,6 @@ use tracing::{error, info, warn};
 /// A queue that can hold and provide task requests
 pub trait TaskQueue: Send + Sync {
     /// Add a task to the queue
-    #[allow(dead_code)]
     fn push(&self, task: GasKillerTaskRequest);
 
     /// Remove and return the next task from the queue
@@ -39,7 +36,6 @@ impl GasKillerTaskQueue {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_timeout(timeout_ms: u64) -> Self {
         Self {
             queue: Arc::new(Mutex::new(Vec::new())),
@@ -48,7 +44,6 @@ impl GasKillerTaskQueue {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_config(timeout_ms: u64, max_retries: u32) -> Self {
         Self {
             queue: Arc::new(Mutex::new(Vec::new())),
@@ -153,26 +148,6 @@ pub struct GasKillerCreator {}
 impl GasKillerCreator {
     pub fn new() -> Self {
         Self {}
-    }
-    /// Creates payload bytes from the task data
-    ///
-    /// The payload is deterministically encoded from the task data to ensure
-    /// that the same analysis produces the same payload hash for consensus.
-    /// This method is used by validator tests to verify hash consistency.
-    #[allow(dead_code)]
-    pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
-        // Create a deterministic payload by ABI-encoding key fields
-        // This must match the logic in GasKillerValidator::reconstruct_payload_hash
-        let payload_data = (
-            task_data.transition_index,
-            task_data.target_address,
-            task_data.from_address,
-            task_data.value,
-            task_data.call_data.clone(),
-        );
-
-        let payload = payload_data.abi_encode();
-        Ok(payload)
     }
 }
 
@@ -314,24 +289,27 @@ mod tests {
     use alloy::primitives::{Address, U256};
 
     #[tokio::test]
-    async fn test_create_payload_from_task_data() {
-        let task_data = GasKillerTaskData {
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04],
-            transition_index: 1,
-            target_address: Address::from([1u8; 20]),
-            call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
-            from_address: Address::from([2u8; 20]),
-            value: U256::from(1000),
-        };
-
-        let result = GasKillerCreator::create_payload_from_task_data(&task_data);
+    async fn test_creator_get_payload_and_round() {
+        let creator = GasKillerCreator::new();
+        let result = creator.get_payload_and_round().await;
         assert!(result.is_ok());
-        assert!(!result.unwrap().is_empty());
+
+        let (payload, round) = result.unwrap();
+        assert!(!payload.is_empty());
+        assert_eq!(round, 0); // Default round is 0
     }
 
     #[tokio::test]
-    async fn test_creator_validator_hash_consistency() {
+    async fn test_validator_produces_consistent_hash() {
+        // This test verifies the production flow:
+        // 1. Creator produces task data
+        // 2. Task data is serialized via wire protocol
+        // 3. Validator receives and produces a hash
+        // 4. The same task data always produces the same hash
         use crate::validator::GasKillerValidator;
+        use commonware_avs_router::validator::ValidatorTrait;
+        use commonware_avs_router::wire;
+        use commonware_codec::{EncodeSize, Write};
 
         let validator = GasKillerValidator::new();
 
@@ -344,15 +322,7 @@ mod tests {
             value: U256::from(1000),
         };
 
-        // Create payload using creator
-        let creator_payload = GasKillerCreator::create_payload_from_task_data(&task_data);
-        assert!(creator_payload.is_ok());
-
-        // Create a test message to validate with validator
-        use commonware_avs_router::validator::ValidatorTrait;
-        use commonware_avs_router::wire;
-        use commonware_codec::{EncodeSize, Write};
-
+        // Simulate the wire protocol serialization (what happens in production)
         let aggregation = wire::Aggregation::<GasKillerTaskData>::new(
             1, // round
             task_data.clone(),
@@ -362,19 +332,23 @@ mod tests {
         let mut msg_bytes = Vec::with_capacity(aggregation.encode_size());
         aggregation.write(&mut msg_bytes);
 
-        // Get payload hash using validator
-        let validator_payload_hash = validator
+        // Get hash from validator (first call)
+        let hash1 = validator
             .get_payload_from_message(&msg_bytes)
             .await
             .unwrap();
 
-        // Hash the creator payload to compare
-        use commonware_cryptography::{Hasher, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&creator_payload.unwrap());
-        let creator_payload_hash = hasher.finalize();
+        // Get hash from validator (second call with same data)
+        let hash2 = validator
+            .get_payload_from_message(&msg_bytes)
+            .await
+            .unwrap();
 
-        // Both should produce the same hash
-        assert_eq!(creator_payload_hash, validator_payload_hash);
+        // Hashes should be identical for the same input
+        assert_eq!(hash1, hash2);
+
+        // Hash should not be all zeros
+        let zero_hash = commonware_cryptography::sha256::Digest::from([0u8; 32]);
+        assert_ne!(hash1, zero_hash);
     }
 }

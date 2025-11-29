@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use crate::creator::{SimpleTaskQueue, TaskQueue};
 use alloy_primitives::{Address, U256};
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
@@ -21,7 +20,6 @@ pub struct GasKillerTaskRequest {
     pub body: GasKillerTaskRequestBody,
 }
 
-#[allow(dead_code)]
 impl GasKillerTaskRequest {
     pub fn is_valid(&self) -> bool {
         let body = &self.body;
