@@ -4253,7 +4253,9 @@ dependencies = [
  "alloy-signer-local",
  "anyhow",
  "bytes",
+ "commonware-avs-usecases",
  "commonware-codec 0.0.63",
+ "dotenv",
  "serde",
  "serde_json",
 ]
@@ -4279,6 +4281,7 @@ dependencies = [
  "eigen-logging",
  "futures",
  "gas-killer-common",
+ "gas-killer-router",
  "governor",
  "serde",
  "serde_json",

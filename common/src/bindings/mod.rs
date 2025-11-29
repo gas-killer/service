@@ -27,16 +27,6 @@ pub mod blssigcheckoperatorstateretriever;
     missing_docs,
     dead_code
 )]
-pub mod counter;
-#[allow(
-    non_camel_case_types,
-    non_snake_case,
-    clippy::pub_underscore_fields,
-    clippy::style,
-    clippy::empty_structs_with_brackets,
-    missing_docs,
-    dead_code
-)]
 pub mod gaskillersdk;
 
 use alloy::network::EthereumWallet;

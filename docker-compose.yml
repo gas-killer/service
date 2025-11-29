@@ -37,7 +37,7 @@ services:
   node-1:
     build:
       context: .
-      dockerfile: Dockerfile.node
+      dockerfile: docker/Dockerfile.node
     platform: linux/amd64
     depends_on:
       eigenlayer:
@@ -70,7 +70,7 @@ services:
   node-2:
     build:
       context: .
-      dockerfile: Dockerfile.node
+      dockerfile: docker/Dockerfile.node
     platform: linux/amd64
     depends_on:
       eigenlayer:
@@ -103,7 +103,7 @@ services:
   node-3:
     build:
       context: .
-      dockerfile: Dockerfile.node
+      dockerfile: docker/Dockerfile.node
     platform: linux/amd64
     depends_on:
       eigenlayer:
@@ -136,7 +136,7 @@ services:
   router:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile.router
     platform: linux/amd64
     depends_on:
       eigenlayer:

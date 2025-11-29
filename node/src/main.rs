@@ -3,56 +3,24 @@
 //! This node participates in BN254 signature aggregation for gas-efficient
 //! state transitions on EigenLayer.
 
-mod validator;
-
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{Bn254, PublicKey, get_signer};
 use commonware_avs_node::contributor::{AggregationInput, Contribute, Contributor};
-use commonware_avs_usecases::{EigenStakingClient, QuorumInfo};
 use commonware_p2p::Manager;
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_runtime::{Metrics, Runner, Spawner, tokio};
 use commonware_utils::{NZU32, set::OrderedAssociated};
 use eigen_logging::log_level::LogLevel;
-use gas_killer_common::GasKillerTaskData;
+use gas_killer_common::{
+    GasKillerTaskData, OrchestratorConfig, get_operator_states, load_key_from_file,
+    load_orchestrator_config,
+};
+use gas_killer_router::GasKillerValidator;
 use governor::Quota;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::env;
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
-use validator::GasKillerNodeValidator;
-
-#[derive(Debug, Serialize, Deserialize)]
-#[allow(non_snake_case)]
-struct KeyConfig {
-    privateKey: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[allow(non_snake_case)]
-struct OrchestratorConfig {
-    g2_x1: String,
-    g2_x2: String,
-    g2_y1: String,
-    g2_y2: String,
-    port: String,
-    #[serde(default)]
-    address: Option<String>,
-}
-
-fn load_key_from_file(path: &str) -> String {
-    let contents = fs::read_to_string(path).expect("Could not read key file");
-    let config: KeyConfig = serde_json::from_str(&contents).expect("Could not parse key file");
-    config.privateKey
-}
-
-fn load_orchestrator_config(path: &str) -> OrchestratorConfig {
-    let contents = fs::read_to_string(path).expect("Could not read orchestrator config file");
-    serde_json::from_str(&contents).expect("Could not parse orchestrator config file")
-}
 
 /// Unique namespace to avoid message replay attacks
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
@@ -76,18 +44,6 @@ fn configure_orchestrator(matches: &clap::ArgMatches) -> OrchestratorConfig {
         .get_one::<String>("orchestrator")
         .expect("Please provide orchestrator config file");
     load_orchestrator_config(orchestrator_file)
-}
-
-async fn get_operator_states() -> Result<Vec<QuorumInfo>, Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
-
-    let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
-    let ws_rpc = env::var("WS_RPC").expect("WS_RPC must be set");
-    let avs_deployment_path =
-        env::var("AVS_DEPLOYMENT_PATH").expect("AVS_DEPLOYMENT_PATH must be set");
-
-    let client = EigenStakingClient::new(http_rpc, ws_rpc, avs_deployment_path).await?;
-    client.get_operator_states().await
 }
 
 fn main() {
@@ -266,8 +222,8 @@ fn main() {
         let (sender, receiver) =
             network.register(0, Quota::per_second(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
 
-        // Create validator for the gas killer use case
-        let validator = Arc::new(GasKillerNodeValidator::new());
+        // Create validator for the gas killer use case (uses full gas-analyzer validation)
+        let validator = Arc::new(GasKillerValidator::new());
 
         // Create contributor with GasKillerTaskData as the metadata type
         let contributor = Contributor::<GasKillerTaskData>::new(

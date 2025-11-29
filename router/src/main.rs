@@ -1,10 +1,9 @@
-use ark_bn254::{Fr, G2Affine};
+use ark_bn254::G2Affine;
 use ark_serialize::CanonicalDeserialize;
 use clap::{Arg, Command, value_parser};
-use commonware_avs_core::bn254::{Bn254, PrivateKey, PublicKey};
+use commonware_avs_core::bn254::{PublicKey, get_signer};
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
 use commonware_avs_router::orchestrator::traits::OrchestratorTrait;
-use commonware_avs_usecases::{EigenStakingClient, QuorumInfo};
 use commonware_cryptography::Signer;
 use commonware_p2p::Manager;
 use commonware_p2p::authenticated::lookup::{self, Network};
@@ -15,46 +14,15 @@ use commonware_runtime::{
 use commonware_utils::NZU32;
 use commonware_utils::set::OrderedAssociated;
 use eigen_logging::log_level::LogLevel;
+use gas_killer_common::{get_operator_states, load_key_from_file};
 use gas_killer_router::GasKillerOrchestratorBuilder;
 use governor::Quota;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::env;
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 
-#[derive(Debug, Serialize, Deserialize)]
-#[allow(non_snake_case)]
-struct KeyConfig {
-    privateKey: String,
-}
-fn get_signer(key: &str) -> Bn254 {
-    let fr = Fr::from_str(key).expect("Invalid decimal string for private key");
-    let key = PrivateKey::from(fr);
-    Bn254::new(key).expect("Failed to create signer")
-}
-fn load_key_from_file(path: &str) -> String {
-    let contents = fs::read_to_string(path).expect("Could not read key file");
-    let config: KeyConfig = serde_json::from_str(&contents).expect("Could not parse key file");
-    config.privateKey
-}
-
 // Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
-
-async fn get_operator_states() -> Result<Vec<QuorumInfo>, Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
-
-    let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
-    let ws_rpc = env::var("WS_RPC").expect("WS_RPC must be set");
-    let avs_deployment_path =
-        env::var("AVS_DEPLOYMENT_PATH").expect("AVS_DEPLOYMENT_PATH must be set");
-    println!("pre init");
-    let client = EigenStakingClient::new(http_rpc, ws_rpc, avs_deployment_path).await?;
-    println!("init passed");
-    client.get_operator_states().await
-}
 
 fn main() {
     // Initialize runtime

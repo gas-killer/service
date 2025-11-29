@@ -11,11 +11,15 @@ alloy-provider = { workspace = true }
 alloy-signer = { workspace = true }
 alloy-signer-local = { workspace = true }
 
-# Commonware (for codec)
+# Commonware (for codec and usecases)
 commonware-codec = { workspace = true }
+commonware-avs-usecases = { workspace = true }
 
 # Serialization
 anyhow = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Config
+dotenv = { workspace = true }
