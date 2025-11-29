@@ -11,10 +11,6 @@ path = "deploy_array_summation.rs"
 name = "trigger_gas_killer"
 path = "trigger_gas_killer.rs"
 
-[[bin]]
-name = "gen_orchestrator_config"
-path = "gen_orchestrator_config.rs"
-
 [lib]
 name = "bindings"
 path = "bindings/mod.rs"
