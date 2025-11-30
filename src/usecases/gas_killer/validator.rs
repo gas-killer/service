@@ -207,11 +207,7 @@ impl GasKillerValidator {
                 debug!("Storage validation completed: {}", validation_passed);
                 Ok(validation_passed)
             }
-            Err(e) => {
-                // Be tolerant to network/environment issues to keep non-network tests stable
-                debug!("Skipping storage validation due to error: {}", e);
-                Ok(true)
-            }
+            Err(e) => Err(anyhow::anyhow!("Storage validation failed: {}", e)),
         }
     }
 }
