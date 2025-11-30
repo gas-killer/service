@@ -35,9 +35,11 @@ pub struct GasKillerValidator {
 
 impl GasKillerValidator {
     /// Creates a new GasKillerValidator with default settings.
+    ///
+    /// # Panics
+    /// Panics if `RPC_URL` environment variable is not set.
     pub fn new() -> Self {
-        let rpc_url = env::var("RPC_URL")
-            .unwrap_or_else(|_| "https://ethereum-holesky.publicnode.com".to_string());
+        let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
         Self {
             fork_rpc_url: rpc_url,
         }
@@ -271,7 +273,6 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, FixedBytes, U256};
     use commonware_codec::{EncodeSize, Write};
-    use std::env;
 
     fn create_test_task_data() -> GasKillerTaskData {
         GasKillerTaskData {
@@ -286,12 +287,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_validator_creation() {
-        let _validator = GasKillerValidator::new();
+        let _validator =
+            GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
     }
 
     #[tokio::test]
     async fn test_validate_and_return_expected_hash() {
-        let validator = GasKillerValidator::new();
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
         let task_data = create_test_task_data();
 
         // Create a test aggregation
@@ -318,7 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_and_return_expected_hash_invalid_message() {
-        let validator = GasKillerValidator::new();
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
 
         // Test with empty message
         let result = validator.validate_and_return_expected_hash(&[]).await;
@@ -333,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_payload_from_message() {
-        let validator = GasKillerValidator::new();
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
         let task_data = create_test_task_data();
 
         // Create a test aggregation
@@ -358,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconstruct_payload_hash() {
-        let validator = GasKillerValidator::new();
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
         let task_data = create_test_task_data();
 
         let result = validator.reconstruct_payload_hash(&task_data).await;
@@ -373,8 +375,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_storage_updates() {
         // Use with_rpc_url to avoid modifying environment variables (thread-safety)
-        let validator =
-            GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
 
         // Use a real contract address and function call for testing
         let contract_address = Address::from([
@@ -428,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_storage_updates_without_validator() {
-        let validator = GasKillerValidator::new();
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
         let task_data = create_test_task_data();
 
         // Should not panic and should tolerate network issues by returning Ok(true)
