@@ -6,11 +6,13 @@ use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use serde::{Deserialize, Serialize};
 
 /// Task data specific to the gas killer use case
+///
+/// Note: storage_updates is NOT part of the task data. It is computed on-demand
+/// by the validator using gas-analyzer-rs. The task data only contains the
+/// parameters needed to derive storage_updates.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub struct GasKillerTaskData {
-    /// Encoded storage updates to be applied
-    pub storage_updates: Vec<u8>,
     /// Index of the state transition
     pub transition_index: u64,
     /// Target contract address for function call
@@ -37,7 +39,6 @@ impl GasKillerTaskData {
 impl Default for GasKillerTaskData {
     fn default() -> Self {
         Self {
-            storage_updates: vec![],
             transition_index: 0,
             target_address: Address::ZERO,
             call_data: vec![],
@@ -49,20 +50,6 @@ impl Default for GasKillerTaskData {
 
 impl Write for GasKillerTaskData {
     fn write(&self, buf: &mut impl BufMut) {
-        // Write storage updates as length-prefixed bytes
-        // Note: Using u32 for length prefix limits storage_updates to ~4.3GB
-        // This is sufficient for gas killer use cases but could be extended to u64 if needed
-        let len = self.storage_updates.len();
-        if len > u32::MAX as usize {
-            panic!(
-                "storage_updates length ({}) exceeds u32::MAX ({})",
-                len,
-                u32::MAX
-            );
-        }
-        (len as u32).write(buf);
-        buf.put_slice(&self.storage_updates);
-
         // Write transition index as u64
         self.transition_index.write(buf);
 
@@ -93,14 +80,6 @@ impl Read for GasKillerTaskData {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        // Read storage updates (u32 length prefix + bytes)
-        let storage_updates_len = u32::read(buf)? as usize;
-        if buf.remaining() < storage_updates_len {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        let mut storage_updates = vec![0u8; storage_updates_len];
-        buf.copy_to_slice(&mut storage_updates);
-
         // Read transition index (u64)
         let transition_index = u64::read(buf)?;
 
@@ -137,7 +116,6 @@ impl Read for GasKillerTaskData {
         buf.copy_to_slice(&mut call_data);
 
         Ok(Self {
-            storage_updates,
             transition_index,
             target_address,
             call_data,
@@ -150,19 +128,11 @@ impl Read for GasKillerTaskData {
 impl EncodeSize for GasKillerTaskData {
     fn encode_size(&self) -> usize {
         // Calculate serialized size matching the Write implementation exactly
-        // storage_updates: u32 length prefix (4 bytes) + raw bytes
-        const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for storage_updates and call_data
+        const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for call_data
         const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index
         const ADDRESS_SIZE: usize = 20; // target_address and from_address (Ethereum addresses)
         const U256_SIZE: usize = 32; // value (U256)
 
-        U32_SIZE
-            + self.storage_updates.len()
-            + U64_SIZE
-            + ADDRESS_SIZE
-            + ADDRESS_SIZE
-            + U256_SIZE
-            + U32_SIZE
-            + self.call_data.len()
+        U64_SIZE + ADDRESS_SIZE + ADDRESS_SIZE + U256_SIZE + U32_SIZE + self.call_data.len()
     }
 }

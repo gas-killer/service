@@ -1,9 +1,7 @@
 #![allow(dead_code)]
 use crate::creator::core::Creator;
-use crate::services::GasAnalyzer;
 use crate::usecases::gas_killer::ingress::GasKillerTaskRequest;
 use crate::usecases::gas_killer::task_data::GasKillerTaskData;
-use alloy::sol_types::SolValue;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -12,13 +10,6 @@ use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
-
-/// Internal representation of a task with computed storage updates
-#[derive(Clone)]
-struct EnrichedTask {
-    request: GasKillerTaskRequest,
-    computed_storage_updates: Vec<u8>,
-}
 
 /// A queue that can hold and provide task requests
 pub trait TaskQueue: Send + Sync {
@@ -162,47 +153,6 @@ impl GasKillerCreator {
     pub fn new() -> Self {
         Self {}
     }
-    /// Creates payload bytes from the task data
-    ///
-    /// The payload is deterministically encoded from the task data to ensure
-    /// that the same analysis produces the same payload hash for consensus.
-    /// This must match the on-chain expectedHash in GasKillerSDK.verifyAndUpdate:
-    /// sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))
-    #[allow(dead_code)]
-    pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
-        use alloy::primitives::U256;
-
-        // This must match GasKillerValidator::reconstruct_payload_hash exactly
-        let selector = task_data.function_selector();
-
-        // Build flattened ABI encoding matching abi.encode(transitionIndex, address(this), selector, storageUpdates)
-        // Heads (32 bytes each)
-        let head_transition = U256::from(task_data.transition_index).abi_encode();
-        let head_address = task_data.target_address.abi_encode();
-        let head_selector = selector.abi_encode();
-        // Offset to the dynamic bytes tail: 4 words (3 static + 1 offset) = 0x80
-        let head_offset = U256::from(32u64 * 4u64).abi_encode();
-
-        // Tail for dynamic bytes: length (u256) + data + padding
-        let data_bytes: &[u8] = &task_data.storage_updates;
-        let mut tail = Vec::with_capacity(32 + data_bytes.len() + 31);
-        tail.extend_from_slice(&U256::from(data_bytes.len()).abi_encode());
-        tail.extend_from_slice(data_bytes);
-        let pad_len = (32 - (data_bytes.len() % 32)) % 32;
-        if pad_len > 0 {
-            tail.extend(std::iter::repeat_n(0u8, pad_len));
-        }
-
-        // Concatenate head and tail into final payload
-        let mut payload = Vec::with_capacity(32 * 4 + tail.len());
-        payload.extend_from_slice(&head_transition);
-        payload.extend_from_slice(&head_address);
-        payload.extend_from_slice(&head_selector);
-        payload.extend_from_slice(&head_offset);
-        payload.extend_from_slice(&tail);
-
-        Ok(payload)
-    }
 }
 
 #[async_trait]
@@ -225,16 +175,14 @@ impl Creator for GasKillerCreator {
 pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     queue: Arc<Q>,
     config: GasKillerConfig,
-    gas_analyzer: GasAnalyzer,
-    current_task: Mutex<Option<EnrichedTask>>,
+    current_task: Mutex<Option<GasKillerTaskRequest>>,
 }
 
 impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
-    pub fn new(queue: Q, config: GasKillerConfig, gas_analyzer: GasAnalyzer) -> Self {
+    pub fn new(queue: Q, config: GasKillerConfig) -> Self {
         Self {
             queue: Arc::new(queue),
             config,
-            gas_analyzer,
             current_task: Mutex::new(None),
         }
     }
@@ -258,20 +206,6 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
             self.config.timeout_ms
         ))
     }
-
-    /// Computes storage updates for a task using the gas analyzer
-    async fn compute_storage_updates(&self, task: &GasKillerTaskRequest) -> Result<Vec<u8>> {
-        let result = self
-            .gas_analyzer
-            .analyze_transaction(
-                task.body.target_address,
-                &task.body.call_data,
-                Some(task.body.from_address),
-                Some(task.body.value),
-            )
-            .await?;
-        Ok(result.storage_updates)
-    }
 }
 
 #[async_trait]
@@ -281,27 +215,17 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
         let task = self.wait_for_task().await?;
 
-        // Compute storage_updates using gas analyzer
-        let storage_updates = self
-            .compute_storage_updates(&task)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
-
         info!(
             target = format!("{:?}", task.body.target_address),
             from = format!("{:?}", task.body.from_address),
             transition_index = task.body.transition_index,
             call_data_len = task.body.call_data.len(),
-            storage_updates_len = storage_updates.len(),
-            "Creator computed storage updates for task"
+            "Creator received task"
         );
 
-        // Store enriched task for metadata access
+        // Store task for metadata access
         if let Ok(mut current_task) = self.current_task.lock() {
-            *current_task = Some(EnrichedTask {
-                request: task,
-                computed_storage_updates: storage_updates,
-            });
+            *current_task = Some(task);
         } else {
             error!("Failed to acquire lock on current_task mutex");
         }
@@ -313,18 +237,17 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
     fn get_task_metadata(&self) -> Self::TaskData {
         // Try to get metadata from the current task, fall back to defaults if not available
         if let Ok(current_task) = self.current_task.lock()
-            && let Some(ref enriched) = *current_task
+            && let Some(ref task) = *current_task
         {
-            // Extract metadata from the enriched task
+            // Extract metadata from the task request
             info!("Building task metadata from current task");
 
             return GasKillerTaskData {
-                storage_updates: enriched.computed_storage_updates.clone(),
-                transition_index: enriched.request.body.transition_index,
-                target_address: enriched.request.body.target_address,
-                call_data: enriched.request.body.call_data.clone(),
-                from_address: enriched.request.body.from_address,
-                value: enriched.request.body.value,
+                transition_index: task.body.transition_index,
+                target_address: task.body.target_address,
+                call_data: task.body.call_data.clone(),
+                from_address: task.body.from_address,
+                value: task.body.value,
             };
         }
 
@@ -367,68 +290,46 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, U256};
 
-    #[tokio::test]
-    async fn test_create_payload_from_task_data() {
-        let task_data = GasKillerTaskData {
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04],
-            transition_index: 1,
-            target_address: Address::from([1u8; 20]),
-            call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
-            from_address: Address::from([2u8; 20]),
-            value: U256::from(1000),
+    #[test]
+    fn test_task_queue_push_pop() {
+        let queue = GasKillerTaskQueue::new();
+        let task = GasKillerTaskRequest {
+            body: crate::usecases::gas_killer::ingress::GasKillerTaskRequestBody {
+                target_address: Address::from([1u8; 20]),
+                call_data: vec![0x12, 0x34, 0x56, 0x78],
+                transition_index: 1,
+                from_address: Address::from([2u8; 20]),
+                value: U256::from(1000),
+            },
         };
 
-        let result = GasKillerCreator::create_payload_from_task_data(&task_data);
-        assert!(result.is_ok());
-        assert!(!result.unwrap().is_empty());
+        queue.push(task.clone());
+        let popped = queue.pop();
+        assert!(popped.is_some());
+        assert_eq!(popped.unwrap().body.transition_index, 1);
     }
 
-    #[tokio::test]
-    async fn test_creator_validator_hash_consistency() {
-        use crate::usecases::gas_killer::validator::GasKillerValidator;
-
-        let validator = GasKillerValidator::new();
-
-        let task_data = GasKillerTaskData {
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04],
-            transition_index: 1,
-            target_address: Address::from([1u8; 20]),
-            call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
-            from_address: Address::from([2u8; 20]),
-            value: U256::from(1000),
+    #[test]
+    fn test_task_data_from_request() {
+        let task = GasKillerTaskRequest {
+            body: crate::usecases::gas_killer::ingress::GasKillerTaskRequestBody {
+                target_address: Address::from([1u8; 20]),
+                call_data: vec![0x12, 0x34, 0x56, 0x78],
+                transition_index: 42,
+                from_address: Address::from([2u8; 20]),
+                value: U256::from(1000),
+            },
         };
 
-        // Create payload using creator
-        let creator_payload = GasKillerCreator::create_payload_from_task_data(&task_data);
-        assert!(creator_payload.is_ok());
+        let task_data = GasKillerTaskData {
+            transition_index: task.body.transition_index,
+            target_address: task.body.target_address,
+            call_data: task.body.call_data.clone(),
+            from_address: task.body.from_address,
+            value: task.body.value,
+        };
 
-        // Create a test message to validate with validator
-        use crate::validator::interface::ValidatorTrait;
-        use crate::wire;
-        use commonware_codec::{EncodeSize, Write};
-
-        let aggregation = wire::Aggregation::<GasKillerTaskData>::new(
-            1, // round
-            task_data.clone(),
-            None, // payload
-        );
-
-        let mut msg_bytes = Vec::with_capacity(aggregation.encode_size());
-        aggregation.write(&mut msg_bytes);
-
-        // Get payload hash using validator
-        let validator_payload_hash = validator
-            .get_payload_from_message(&msg_bytes)
-            .await
-            .unwrap();
-
-        // Hash the creator payload to compare
-        use commonware_cryptography::{Hasher, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&creator_payload.unwrap());
-        let creator_payload_hash = hasher.finalize();
-
-        // Both should produce the same hash
-        assert_eq!(creator_payload_hash, validator_payload_hash);
+        assert_eq!(task_data.transition_index, 42);
+        assert_eq!(task_data.target_address, Address::from([1u8; 20]));
     }
 }
