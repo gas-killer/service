@@ -24,6 +24,11 @@ pub struct GasKillerTaskData {
     pub value: U256,
 }
 
+/// Maximum calldata size for a single EVM transaction (128 KB)
+/// This is the limit enforced by Geth's txpool (txMaxSize = 4 * txSlotSize).
+/// See: https://github.com/ethereum/go-ethereum/blob/master/core/txpool/legacypool/legacypool.go
+pub const MAX_EVM_TX_CALLDATA_SIZE: usize = 128 * 1024;
+
 impl GasKillerTaskData {
     /// Extracts the function selector (first 4 bytes) from call_data
     pub fn function_selector(&self) -> FixedBytes<4> {
@@ -32,6 +37,30 @@ impl GasKillerTaskData {
         } else {
             FixedBytes::ZERO
         }
+    }
+
+    /// Validates that the task data is within EVM transaction limits.
+    ///
+    /// Call this before encoding to get a proper error instead of a panic.
+    ///
+    /// # Errors
+    /// Returns an error if combined call_data + storage_updates exceeds
+    /// the EVM transaction calldata limit (128 KB).
+    pub fn validate(&self) -> Result<()> {
+        let combined_size = self
+            .call_data
+            .len()
+            .saturating_add(self.storage_updates.len());
+        if combined_size > MAX_EVM_TX_CALLDATA_SIZE {
+            return Err(anyhow::anyhow!(
+                "combined call_data ({} bytes) + storage_updates ({} bytes) = {} bytes exceeds EVM transaction calldata limit ({} bytes / 128 KB)",
+                self.call_data.len(),
+                self.storage_updates.len(),
+                combined_size,
+                MAX_EVM_TX_CALLDATA_SIZE
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -50,18 +79,17 @@ impl Default for GasKillerTaskData {
 
 impl Write for GasKillerTaskData {
     fn write(&self, buf: &mut impl BufMut) {
+        // Note: The Write trait doesn't return Result, so we assert on invalid data.
+        // Call validate() before encoding to get a proper error instead of a panic.
+        let combined = self.storage_updates.len() + self.call_data.len();
+        assert!(
+            combined <= MAX_EVM_TX_CALLDATA_SIZE,
+            "combined data size ({combined} bytes) exceeds EVM tx limit ({MAX_EVM_TX_CALLDATA_SIZE} bytes). \
+             Call validate() before encoding to handle this gracefully."
+        );
+
         // Write storage updates as length-prefixed bytes
-        // Note: Using u32 for length prefix limits storage_updates to ~4.3GB
-        // This is sufficient for gas killer use cases but could be extended to u64 if needed
-        let len = self.storage_updates.len();
-        if len > u32::MAX as usize {
-            panic!(
-                "storage_updates length ({}) exceeds u32::MAX ({})",
-                len,
-                u32::MAX
-            );
-        }
-        (len as u32).write(buf);
+        (self.storage_updates.len() as u32).write(buf);
         buf.put_slice(&self.storage_updates);
 
         // Write transition index as u64
@@ -77,15 +105,7 @@ impl Write for GasKillerTaskData {
         buf.put_slice(&self.value.to_le_bytes::<32>());
 
         // Write call data as length-prefixed bytes
-        let call_data_len = self.call_data.len();
-        if call_data_len > u32::MAX as usize {
-            panic!(
-                "call_data length ({}) exceeds u32::MAX ({})",
-                call_data_len,
-                u32::MAX
-            );
-        }
-        (call_data_len as u32).write(buf);
+        (self.call_data.len() as u32).write(buf);
         buf.put_slice(&self.call_data);
     }
 }
@@ -165,5 +185,101 @@ impl EncodeSize for GasKillerTaskData {
             + U256_SIZE
             + U32_SIZE
             + self.call_data.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_success() {
+        let task_data = GasKillerTaskData::default();
+        assert!(task_data.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_with_normal_data() {
+        let task_data = GasKillerTaskData {
+            storage_updates: vec![0u8; 1024],
+            call_data: vec![0u8; 256],
+            ..Default::default()
+        };
+        assert!(task_data.validate().is_ok());
+    }
+
+    #[test]
+    fn test_function_selector() {
+        let task_data = GasKillerTaskData {
+            call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00],
+            ..Default::default()
+        };
+        assert_eq!(
+            task_data.function_selector(),
+            FixedBytes::from([0x12, 0x34, 0x56, 0x78])
+        );
+    }
+
+    #[test]
+    fn test_function_selector_empty() {
+        let task_data = GasKillerTaskData::default();
+        assert_eq!(task_data.function_selector(), FixedBytes::ZERO);
+    }
+
+    #[test]
+    fn test_validate_exceeds_evm_limit() {
+        let task_data = GasKillerTaskData {
+            call_data: vec![0u8; MAX_EVM_TX_CALLDATA_SIZE + 1],
+            ..Default::default()
+        };
+        let result = task_data.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds EVM transaction calldata limit")
+        );
+    }
+
+    #[test]
+    fn test_validate_combined_exceeds_evm_limit() {
+        // Each field is under the limit individually, but combined they exceed it
+        let half_limit = MAX_EVM_TX_CALLDATA_SIZE / 2 + 1;
+        let task_data = GasKillerTaskData {
+            storage_updates: vec![0u8; half_limit],
+            call_data: vec![0u8; half_limit],
+            ..Default::default()
+        };
+        let result = task_data.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds EVM transaction calldata limit")
+        );
+    }
+
+    #[test]
+    fn test_validate_at_evm_limit() {
+        // Exactly at the limit should pass
+        let task_data = GasKillerTaskData {
+            call_data: vec![0u8; MAX_EVM_TX_CALLDATA_SIZE],
+            ..Default::default()
+        };
+        assert!(task_data.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_combined_at_evm_limit() {
+        // Combined exactly at the limit should pass
+        let half_limit = MAX_EVM_TX_CALLDATA_SIZE / 2;
+        let task_data = GasKillerTaskData {
+            storage_updates: vec![0u8; half_limit],
+            call_data: vec![0u8; half_limit],
+            ..Default::default()
+        };
+        assert!(task_data.validate().is_ok());
     }
 }
