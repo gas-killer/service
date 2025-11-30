@@ -204,8 +204,8 @@ impl GasKillerValidator {
                 Ok(validation_passed)
             }
             Err(e) => {
-                // Be tolerant to network/environment issues to keep non-network tests stable
-                debug!("Skipping storage validation due to error: {}", e);
+                // Log error and continue - validation errors shouldn't block the task
+                tracing::warn!("Storage validation skipped due to error: {}", e);
                 Ok(true)
             }
         }
