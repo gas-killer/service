@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use crate::creator::core::Creator;
+use crate::services::GasAnalyzer;
 use crate::usecases::gas_killer::ingress::GasKillerTaskRequest;
 use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 use alloy::sol_types::SolValue;
@@ -11,6 +12,13 @@ use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
+
+/// Internal representation of a task with computed storage updates
+#[derive(Clone)]
+struct EnrichedTask {
+    request: GasKillerTaskRequest,
+    computed_storage_updates: Vec<u8>,
+}
 
 /// A queue that can hold and provide task requests
 pub trait TaskQueue: Send + Sync {
@@ -158,20 +166,41 @@ impl GasKillerCreator {
     ///
     /// The payload is deterministically encoded from the task data to ensure
     /// that the same analysis produces the same payload hash for consensus.
-    /// This method is used by validator tests to verify hash consistency.
+    /// This must match the on-chain expectedHash in GasKillerSDK.verifyAndUpdate:
+    /// sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))
     #[allow(dead_code)]
     pub fn create_payload_from_task_data(task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
-        // Create a deterministic payload by ABI-encoding key fields
-        // This must match the logic in GasKillerValidator::reconstruct_payload_hash
-        let payload_data = (
-            task_data.transition_index,
-            task_data.target_address,
-            task_data.from_address,
-            task_data.value,
-            task_data.call_data.clone(),
-        );
+        use alloy::primitives::U256;
 
-        let payload = payload_data.abi_encode();
+        // This must match GasKillerValidator::reconstruct_payload_hash exactly
+        let selector = task_data.function_selector();
+
+        // Build flattened ABI encoding matching abi.encode(transitionIndex, address(this), selector, storageUpdates)
+        // Heads (32 bytes each)
+        let head_transition = U256::from(task_data.transition_index).abi_encode();
+        let head_address = task_data.target_address.abi_encode();
+        let head_selector = selector.abi_encode();
+        // Offset to the dynamic bytes tail: 4 words (3 static + 1 offset) = 0x80
+        let head_offset = U256::from(32u64 * 4u64).abi_encode();
+
+        // Tail for dynamic bytes: length (u256) + data + padding
+        let data_bytes: &[u8] = &task_data.storage_updates;
+        let mut tail = Vec::with_capacity(32 + data_bytes.len() + 31);
+        tail.extend_from_slice(&U256::from(data_bytes.len()).abi_encode());
+        tail.extend_from_slice(data_bytes);
+        let pad_len = (32 - (data_bytes.len() % 32)) % 32;
+        if pad_len > 0 {
+            tail.extend(std::iter::repeat_n(0u8, pad_len));
+        }
+
+        // Concatenate head and tail into final payload
+        let mut payload = Vec::with_capacity(32 * 4 + tail.len());
+        payload.extend_from_slice(&head_transition);
+        payload.extend_from_slice(&head_address);
+        payload.extend_from_slice(&head_selector);
+        payload.extend_from_slice(&head_offset);
+        payload.extend_from_slice(&tail);
+
         Ok(payload)
     }
 }
@@ -196,15 +225,17 @@ impl Creator for GasKillerCreator {
 pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     queue: Arc<Q>,
     config: GasKillerConfig,
-    current_task: std::sync::Mutex<Option<GasKillerTaskRequest>>,
+    gas_analyzer: GasAnalyzer,
+    current_task: Mutex<Option<EnrichedTask>>,
 }
 
 impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
-    pub fn new(queue: Q, config: GasKillerConfig) -> Self {
+    pub fn new(queue: Q, config: GasKillerConfig, gas_analyzer: GasAnalyzer) -> Self {
         Self {
             queue: Arc::new(queue),
             config,
-            current_task: std::sync::Mutex::new(None),
+            gas_analyzer,
+            current_task: Mutex::new(None),
         }
     }
 
@@ -214,14 +245,6 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
         let max_attempts = self.config.timeout_ms / self.config.polling_interval_ms;
         loop {
             if let Some(task) = self.queue.pop() {
-                // Store the task for metadata access
-                if let Ok(mut current_task) = self.current_task.lock() {
-                    *current_task = Some(task.clone());
-                } else {
-                    error!(
-                        "Failed to acquire lock on current_task mutex when storing task metadata"
-                    );
-                }
                 return Ok(task);
             }
             attempts += 1;
@@ -235,6 +258,20 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
             self.config.timeout_ms
         ))
     }
+
+    /// Computes storage updates for a task using the gas analyzer
+    async fn compute_storage_updates(&self, task: &GasKillerTaskRequest) -> Result<Vec<u8>> {
+        let result = self
+            .gas_analyzer
+            .analyze_transaction(
+                task.body.target_address,
+                &task.body.call_data,
+                Some(task.body.from_address),
+                Some(task.body.value),
+            )
+            .await?;
+        Ok(result.storage_updates)
+    }
 }
 
 #[async_trait]
@@ -243,34 +280,51 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
         let task = self.wait_for_task().await?;
+
+        // Compute storage_updates using gas analyzer
+        let storage_updates = self
+            .compute_storage_updates(&task)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
+
         info!(
             target = format!("{:?}", task.body.target_address),
             from = format!("{:?}", task.body.from_address),
             transition_index = task.body.transition_index,
             call_data_len = task.body.call_data.len(),
-            storage_updates_len = task.body.storage_updates.len(),
-            "Creator received task"
+            storage_updates_len = storage_updates.len(),
+            "Creator computed storage updates for task"
         );
+
+        // Store enriched task for metadata access
+        if let Ok(mut current_task) = self.current_task.lock() {
+            *current_task = Some(EnrichedTask {
+                request: task,
+                computed_storage_updates: storage_updates,
+            });
+        } else {
+            error!("Failed to acquire lock on current_task mutex");
+        }
+
         let payload = self.get_task_metadata().encode().to_vec();
         Ok((payload, 0)) // set default "round" to 0
     }
 
     fn get_task_metadata(&self) -> Self::TaskData {
         // Try to get metadata from the current task, fall back to defaults if not available
-
         if let Ok(current_task) = self.current_task.lock()
-            && let Some(ref task) = *current_task
+            && let Some(ref enriched) = *current_task
         {
-            // Extract metadata from the task request body
+            // Extract metadata from the enriched task
             info!("Building task metadata from current task");
 
             return GasKillerTaskData {
-                storage_updates: task.body.storage_updates.clone(),
-                transition_index: task.body.transition_index,
-                target_address: task.body.target_address,
-                call_data: task.body.call_data.clone(),
-                from_address: task.body.from_address,
-                value: task.body.value,
+                storage_updates: enriched.computed_storage_updates.clone(),
+                transition_index: enriched.request.body.transition_index,
+                target_address: enriched.request.body.target_address,
+                call_data: enriched.request.body.call_data.clone(),
+                from_address: enriched.request.body.from_address,
+                value: enriched.request.body.value,
             };
         }
 

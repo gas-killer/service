@@ -3,6 +3,7 @@ mod creator;
 mod executor;
 mod ingress;
 mod orchestrator;
+mod services;
 mod usecases;
 mod validator;
 mod wire;

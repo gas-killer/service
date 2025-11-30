@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use crate::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorStateRetriever;
 use crate::executor::bls::BlsEigenlayerExecutor;
+use crate::services::GasAnalyzer;
 use crate::usecases::gas_killer::GasKillerHandler;
 use crate::usecases::gas_killer::creator::{
     GasKillerConfig, GasKillerCreator, ListeningGasKillerCreator, SimpleTaskQueue,
@@ -43,7 +44,8 @@ pub async fn create_listening_creator_with_server(
 ) -> anyhow::Result<GasKillerCreatorType> {
     let queue = SimpleTaskQueue::new();
     let config = GasKillerConfig::default();
-    let creator = ListeningGasKillerCreator::new(queue.clone(), config);
+    let gas_analyzer = GasAnalyzer::from_env();
+    let creator = ListeningGasKillerCreator::new(queue.clone(), config, gas_analyzer);
     // Wrap the queue in Arc for the HTTP server
     let queue_for_server = Arc::new(queue);
     tokio::spawn(async move {

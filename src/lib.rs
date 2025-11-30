@@ -3,6 +3,7 @@ pub mod creator;
 pub mod executor;
 pub mod ingress;
 pub mod orchestrator;
+pub mod services;
 pub mod usecases;
 pub mod validator;
 pub mod wire;
