@@ -1,11 +1,12 @@
 use crate::ingress::GasKillerTaskRequest;
 use commonware_avs_router::creator::Creator;
 use gas_killer_common::task_data::GasKillerTaskData;
-use gas_killer_common::validator::compute_storage_updates;
+use gas_killer_common::GasKillerValidator;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use commonware_codec::Encode;
+use commonware_cryptography::{Hasher, Sha256};
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -178,14 +179,16 @@ struct EnrichedTask {
 pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     queue: Arc<Q>,
     config: GasKillerConfig,
+    validator: Arc<GasKillerValidator>,
     current_task: Mutex<Option<EnrichedTask>>,
 }
 
 impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
-    pub fn new(queue: Q, config: GasKillerConfig) -> Self {
+    pub fn new(queue: Q, config: GasKillerConfig, validator: Arc<GasKillerValidator>) -> Self {
         Self {
             queue: Arc::new(queue),
             config,
+            validator,
             current_task: Mutex::new(None),
         }
     }
@@ -226,18 +229,32 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             "Creator received task"
         );
 
-        // Compute storage updates using gas analyzer
+        // Compute storage updates using the shared validator
         debug!("Computing storage updates for task");
-        let storage_updates = compute_storage_updates(
-            task.body.target_address,
-            &task.body.call_data,
-            Some(task.body.from_address),
-            Some(task.body.value),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
+        let storage_updates = self
+            .validator
+            .compute_storage_updates_for_tx(
+                task.body.target_address,
+                &task.body.call_data,
+                Some(task.body.from_address),
+                Some(task.body.value),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
 
-        info!("Computed storage updates: {} bytes", storage_updates.len());
+        // Debug: Log hash of full storage_updates to detect differences vs validators
+        let mut storage_hasher = Sha256::new();
+        storage_hasher.update(&storage_updates);
+        let storage_hash = storage_hasher.finalize();
+        let storage_hash_hex = hex::encode(&storage_hash[..8]);
+        info!(
+            storage_updates_len = storage_updates.len(),
+            storage_updates_hash = %storage_hash_hex,
+            transition_index = task.body.transition_index,
+            target_address = %task.body.target_address,
+            target_function = %task.body.call_data.get(..4).map(hex::encode).unwrap_or_default(),
+            "Creator computed storage updates"
+        );
 
         // Store enriched task with computed storage updates for metadata access
         let enriched = EnrichedTask {
@@ -257,23 +274,28 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
 
     fn get_task_metadata(&self) -> Self::TaskData {
         // Try to get metadata from the current task, fall back to defaults if not available
-        if let Ok(current_task) = self.current_task.lock()
-            && let Some(ref enriched) = *current_task
-        {
-            // Extract metadata from the enriched task
-            info!("Building task metadata from current task");
+        match self.current_task.lock() {
+            Ok(current_task) => {
+                if let Some(ref enriched) = *current_task {
+                    // Extract metadata from the enriched task
+                    info!("Building task metadata from current task");
 
-            return GasKillerTaskData {
-                storage_updates: enriched.storage_updates.clone(),
-                transition_index: enriched.task.body.transition_index,
-                target_address: enriched.task.body.target_address,
-                call_data: enriched.task.body.call_data.clone(),
-                from_address: enriched.task.body.from_address,
-                value: enriched.task.body.value,
-            };
+                    return GasKillerTaskData {
+                        storage_updates: enriched.storage_updates.clone(),
+                        transition_index: enriched.task.body.transition_index,
+                        target_address: enriched.task.body.target_address,
+                        call_data: enriched.task.body.call_data.clone(),
+                        from_address: enriched.task.body.from_address,
+                        value: enriched.task.body.value,
+                    };
+                }
+                warn!("get_task_metadata called but no current task set - returning default (zeroed) data. This may indicate get_payload_and_round was not called first.");
+            }
+            Err(e) => {
+                error!("Failed to acquire current_task lock: {} - returning default (zeroed) data", e);
+            }
         }
 
-        // Fall back to default metadata if no task data is available
         GasKillerTaskData::default()
     }
 }

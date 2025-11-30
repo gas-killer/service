@@ -1,4 +1,5 @@
 use alloy::primitives::U256;
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolValue;
 use anyhow::Result;
 use commonware_codec::Read;
@@ -25,31 +26,8 @@ pub struct AnalysisResult {
     pub gas_estimate: u64,
 }
 
-/// Computes storage updates for a transaction using gas-analyzer-rs.
-///
-/// Convenience function for the creator which doesn't need full validation.
-pub async fn compute_storage_updates(
-    contract_address: alloy::primitives::Address,
-    call_data: &[u8],
-    from_address: Option<alloy::primitives::Address>,
-    value: Option<alloy::primitives::U256>,
-) -> Result<Vec<u8>> {
-    // TODO: In production, HTTP_RPC and RPC_URL should be unified to a single env var.
-    let rpc_url_str = env::var("RPC_URL")
-        .map_err(|_| anyhow::anyhow!("RPC_URL environment variable is not set"))?;
-
-    let result = GasKillerValidator::analyze_transaction(
-        &rpc_url_str,
-        contract_address,
-        call_data,
-        from_address,
-        value,
-    )
-    .await?;
-    Ok(result.storage_updates)
-}
-
 /// Validator implementation for the gas killer use case
+#[derive(Clone)]
 pub struct GasKillerValidator {
     /// RPC URL for the gas analyzer
     fork_rpc_url: String,
@@ -84,6 +62,28 @@ impl GasKillerValidator {
         &self.fork_rpc_url
     }
 
+    /// Computes storage updates for a transaction using gas-analyzer-rs.
+    ///
+    /// This is the public method for computing storage updates from transaction parameters.
+    /// Used by the creator to compute storage updates before creating tasks.
+    pub async fn compute_storage_updates_for_tx(
+        &self,
+        contract_address: alloy::primitives::Address,
+        call_data: &[u8],
+        from_address: Option<alloy::primitives::Address>,
+        value: Option<alloy::primitives::U256>,
+    ) -> Result<Vec<u8>> {
+        let result = Self::analyze_transaction(
+            &self.fork_rpc_url,
+            contract_address,
+            call_data,
+            from_address,
+            value,
+        )
+        .await?;
+        Ok(result.storage_updates)
+    }
+
     /// Validates the message format and decodes the aggregation
     async fn validate_message_format(
         &self,
@@ -116,6 +116,21 @@ impl GasKillerValidator {
         // sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))
 
         let selector = task_data.function_selector();
+
+        // Debug: Log hash of full storage_updates to detect any differences
+        let mut storage_hasher = Sha256::new();
+        storage_hasher.update(storage_updates);
+        let storage_hash = storage_hasher.finalize();
+        let storage_hash_hex: String = storage_hash.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+
+        debug!(
+            transition_index = task_data.transition_index,
+            target_address = %task_data.target_address,
+            target_function = %selector,
+            storage_updates_len = storage_updates.len(),
+            storage_updates_hash = %storage_hash_hex,
+            "Validator build_payload_hash inputs"
+        );
 
         // Build flattened ABI encoding matching abi.encode(transitionIndex, address(this), selector, storageUpdates)
         // Heads (32 bytes each)
@@ -168,12 +183,18 @@ impl GasKillerValidator {
         let rpc_url =
             Url::parse(rpc_url_str).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
 
+        // Query current block number before forking
+        let provider = ProviderBuilder::new().on_http(rpc_url.clone());
+        let block_number = provider
+            .get_block_number()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?;
+
         debug!(
-            "Analyzing transaction: contract={:?}, call_data_len={}, from={:?}, value={:?}",
-            contract_address,
-            call_data.len(),
-            from_address,
-            value
+            block_number = block_number,
+            contract = %contract_address,
+            call_data_len = call_data.len(),
+            "Analyzing transaction at block"
         );
 
         // Create gas killer analyzer instance (forks blockchain at latest block)
@@ -221,12 +242,11 @@ impl GasKillerValidator {
         .await?;
         Ok(result.storage_updates)
     }
-}
 
-#[async_trait::async_trait]
-impl ValidatorTrait for GasKillerValidator {
-    async fn validate_and_return_expected_hash(&self, msg: &[u8]) -> Result<Digest> {
-        debug!("Starting validation for message of length: {}", msg.len());
+    /// Core validation logic: decodes message, computes storage updates, and builds payload hash.
+    /// This is the single place where storage updates are computed to avoid double computation.
+    async fn validate_and_build_hash(&self, msg: &[u8]) -> Result<Digest> {
+        debug!("Validating message of length: {} bytes", msg.len());
 
         // Validate message format and decode
         let aggregation = self.validate_message_format(msg).await?;
@@ -235,26 +255,23 @@ impl ValidatorTrait for GasKillerValidator {
         let storage_updates = self.compute_storage_updates(&aggregation.metadata).await?;
 
         // Build expected payload hash using computed storage updates
-        let expected_hash = self.build_payload_hash(&aggregation.metadata, &storage_updates);
+        let payload_hash = self.build_payload_hash(&aggregation.metadata, &storage_updates);
 
-        debug!("Validation completed successfully");
-        Ok(expected_hash)
+        debug!("Built payload hash: {:?}", payload_hash);
+        Ok(payload_hash)
+    }
+}
+
+#[async_trait::async_trait]
+impl ValidatorTrait for GasKillerValidator {
+    async fn validate_and_return_expected_hash(&self, msg: &[u8]) -> Result<Digest> {
+        debug!("validate_and_return_expected_hash called");
+        self.validate_and_build_hash(msg).await
     }
 
     async fn get_payload_from_message(&self, msg: &[u8]) -> Result<Digest> {
-        debug!("Extracting payload hash from message");
-
-        // Decode the aggregation
-        let aggregation = self.validate_message_format(msg).await?;
-
-        // Compute storage updates independently
-        let storage_updates = self.compute_storage_updates(&aggregation.metadata).await?;
-
-        // Build the payload hash using computed storage updates
-        let payload_hash = self.build_payload_hash(&aggregation.metadata, &storage_updates);
-
-        debug!("Payload hash extracted: {:?}", payload_hash);
-        Ok(payload_hash)
+        debug!("get_payload_from_message called");
+        self.validate_and_build_hash(msg).await
     }
 }
 
@@ -300,7 +317,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_requires_rpc() {
+    async fn test_message_format_validation() {
+        // Unit test: verify message format validation works without RPC
+        let validator = GasKillerValidator::with_rpc_url("https://example.com");
+        let task_data = create_test_task_data();
+
+        let aggregation = wire::Aggregation::<GasKillerTaskData>::new(1, task_data, None);
+
+        let mut msg_bytes = Vec::with_capacity(aggregation.encode_size());
+        aggregation.write(&mut msg_bytes);
+
+        // Message format validation should succeed (doesn't need RPC)
+        let result = validator.validate_message_format(&msg_bytes).await;
+        assert!(result.is_ok());
+
+        let decoded = result.unwrap();
+        assert_eq!(decoded.round, 1);
+        assert_eq!(decoded.metadata.transition_index, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires RPC and Anvil - run with: cargo test -- --ignored"]
+    async fn test_full_validation_with_rpc() {
+        // Integration test: full validation including storage update computation
+        // This test is ignored by default as it requires RPC access and Anvil
         let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
         let task_data = create_test_task_data();
 
@@ -309,19 +349,14 @@ mod tests {
         let mut msg_bytes = Vec::with_capacity(aggregation.encode_size());
         aggregation.write(&mut msg_bytes);
 
-        // Will fail without RPC/Anvil - that's expected
         let result = validator
             .validate_and_return_expected_hash(&msg_bytes)
             .await;
-        match result {
-            Ok(hash) => {
-                let zero_hash = Digest::from([0u8; 32]);
-                assert_ne!(hash, zero_hash);
-            }
-            Err(_) => {
-                // Expected without RPC
-            }
-        }
+
+        // With proper RPC/Anvil setup, this should succeed
+        let hash = result.expect("Full validation should succeed with RPC access");
+        let zero_hash = Digest::from([0u8; 32]);
+        assert_ne!(hash, zero_hash, "Hash should not be all zeros");
     }
 
     #[test]
