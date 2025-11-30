@@ -311,7 +311,7 @@ mod tests {
         use commonware_avs_router::wire;
         use commonware_codec::{EncodeSize, Write};
 
-        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::new();
 
         let task_data = GasKillerTaskData {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04],

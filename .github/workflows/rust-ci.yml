@@ -67,3 +67,5 @@ jobs:
 
       - name: cargo test
         run: cargo test --all-targets --all-features
+        env:
+          RPC_URL: https://ethereum-holesky.publicnode.com
