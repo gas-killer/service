@@ -64,7 +64,12 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         let task_data = task_data
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
-        // Extract task data parameters
+        info!(
+            "Using storage updates from task data: {} bytes",
+            task_data.storage_updates.len()
+        );
+
+        // Extract task data parameters - use pre-computed storage_updates from task data
         let storage_updates = Bytes::from(task_data.storage_updates.clone());
         let transition_index = U256::from(task_data.transition_index);
         let target_function = task_data.function_selector();

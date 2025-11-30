@@ -9,7 +9,6 @@ use tracing::info;
 pub struct GasKillerTaskRequestBody {
     pub target_address: Address,
     pub call_data: Vec<u8>,
-    pub storage_updates: Vec<u8>,
     pub transition_index: u64,
     pub from_address: Address,
     pub value: U256,
@@ -23,11 +22,7 @@ pub struct GasKillerTaskRequest {
 impl GasKillerTaskRequest {
     pub fn is_valid(&self) -> bool {
         let body = &self.body;
-        if body.target_address.is_zero()
-            || body.call_data.is_empty()
-            || body.storage_updates.is_empty()
-        {
-            // TODO: add additional checks
+        if body.target_address.is_zero() || body.call_data.is_empty() {
             return false;
         }
         true
