@@ -28,11 +28,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Runtime stage
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
+# Install runtime dependencies (git needed for foundryup)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Foundry/Anvil for gas-analyzer-rs
