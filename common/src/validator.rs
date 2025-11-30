@@ -203,11 +203,7 @@ impl GasKillerValidator {
                 debug!("Storage validation completed: {}", validation_passed);
                 Ok(validation_passed)
             }
-            Err(e) => {
-                // Log error and continue - validation errors shouldn't block the task
-                tracing::warn!("Storage validation skipped due to error: {}", e);
-                Ok(true)
-            }
+            Err(e) => Err(anyhow::anyhow!("Storage validation failed: {}", e)),
         }
     }
 }
@@ -295,16 +291,12 @@ mod tests {
         let mut msg_bytes = Vec::with_capacity(aggregation.encode_size());
         aggregation.write(&mut msg_bytes);
 
-        // Validate
+        // Validate - will fail in unit tests without valid RPC/contract
         let result = validator
             .validate_and_return_expected_hash(&msg_bytes)
             .await;
-        assert!(result.is_ok());
-
-        let hash = result.unwrap();
-        // Create a zero hash for comparison
-        let zero_hash = Digest::from([0u8; 32]);
-        assert_ne!(hash, zero_hash); // Not all zeros
+        // Storage validation will fail without a working RPC endpoint
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -435,8 +427,8 @@ mod tests {
         let validator = GasKillerValidator::new();
         let task_data = create_test_task_data();
 
-        // Should not panic and should tolerate network issues by returning Ok(true)
+        // Should return an error when validation fails (e.g., network issues)
         let result = validator.validate_storage_updates(&task_data).await;
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 }
