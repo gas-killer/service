@@ -179,6 +179,7 @@ mod tests {
 
     fn create_test_task_data() -> GasKillerTaskData {
         GasKillerTaskData {
+            storage_updates: vec![0x01, 0x02, 0x03, 0x04], // test storage updates
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01], // function selector + params

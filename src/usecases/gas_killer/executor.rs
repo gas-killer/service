@@ -3,27 +3,22 @@ use crate::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorState
 use crate::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes};
 use crate::executor::bls::{BlsSignatureVerificationHandler, convert_non_signer_data};
 use crate::executor::core::ExecutionResult;
-use crate::services::GasAnalyzer;
 use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 use alloy_primitives::{Bytes, FixedBytes, U256};
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Handler for executing verifyAndUpdate transactions
 #[allow(dead_code)]
 pub struct GasKillerHandler {
     provider: WalletProvider,
-    gas_analyzer: GasAnalyzer,
 }
 
 #[allow(dead_code)]
 impl GasKillerHandler {
     pub fn new(provider: WalletProvider) -> Self {
-        Self {
-            provider,
-            gas_analyzer: GasAnalyzer::from_env(),
-        }
+        Self { provider }
     }
 }
 
@@ -69,29 +64,13 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         let task_data = task_data
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
-        // Compute storage updates using gas analyzer
-        // This must produce the same storage_updates that was used during validation
-        debug!("Computing storage updates for execution");
-        let analysis_result = self
-            .gas_analyzer
-            .analyze_transaction(
-                task_data.target_address,
-                &task_data.call_data,
-                Some(task_data.from_address),
-                Some(task_data.value),
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to compute storage updates for execution: {}", e)
-            })?;
-
         info!(
-            "Computed storage updates for execution: {} bytes",
-            analysis_result.storage_updates.len()
+            "Using storage updates from task data: {} bytes",
+            task_data.storage_updates.len()
         );
 
-        // Extract task data parameters
-        let storage_updates = Bytes::from(analysis_result.storage_updates);
+        // Extract task data parameters - use pre-computed storage_updates from task data
+        let storage_updates = Bytes::from(task_data.storage_updates.clone());
         let transition_index = U256::from(task_data.transition_index);
         let target_function = task_data.function_selector();
         let target_addr = task_data.target_address;

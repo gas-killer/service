@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use crate::creator::core::Creator;
+use crate::services::GasAnalyzer;
 use crate::usecases::gas_killer::ingress::GasKillerTaskRequest;
 use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 
@@ -9,7 +10,7 @@ use commonware_codec::Encode;
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// A queue that can hold and provide task requests
 pub trait TaskQueue: Send + Sync {
@@ -171,11 +172,18 @@ impl Creator for GasKillerCreator {
     }
 }
 
+/// Enriched task data that includes computed storage updates
+struct EnrichedTask {
+    task: GasKillerTaskRequest,
+    storage_updates: Vec<u8>,
+}
+
 /// Creator for the gas killer usecase that listens for external requests
 pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     queue: Arc<Q>,
     config: GasKillerConfig,
-    current_task: Mutex<Option<GasKillerTaskRequest>>,
+    gas_analyzer: GasAnalyzer,
+    current_task: Mutex<Option<EnrichedTask>>,
 }
 
 impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
@@ -183,6 +191,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
         Self {
             queue: Arc::new(queue),
             config,
+            gas_analyzer: GasAnalyzer::from_env(),
             current_task: Mutex::new(None),
         }
     }
@@ -223,9 +232,32 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             "Creator received task"
         );
 
-        // Store task for metadata access
+        // Compute storage updates using gas analyzer
+        debug!("Computing storage updates for task");
+        let analysis_result = self
+            .gas_analyzer
+            .analyze_transaction(
+                task.body.target_address,
+                &task.body.call_data,
+                Some(task.body.from_address),
+                Some(task.body.value),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
+
+        info!(
+            "Computed storage updates: {} bytes",
+            analysis_result.storage_updates.len()
+        );
+
+        // Store enriched task with computed storage updates for metadata access
+        let enriched = EnrichedTask {
+            task,
+            storage_updates: analysis_result.storage_updates,
+        };
+
         if let Ok(mut current_task) = self.current_task.lock() {
-            *current_task = Some(task);
+            *current_task = Some(enriched);
         } else {
             error!("Failed to acquire lock on current_task mutex");
         }
@@ -237,17 +269,18 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
     fn get_task_metadata(&self) -> Self::TaskData {
         // Try to get metadata from the current task, fall back to defaults if not available
         if let Ok(current_task) = self.current_task.lock()
-            && let Some(ref task) = *current_task
+            && let Some(ref enriched) = *current_task
         {
-            // Extract metadata from the task request
+            // Extract metadata from the enriched task
             info!("Building task metadata from current task");
 
             return GasKillerTaskData {
-                transition_index: task.body.transition_index,
-                target_address: task.body.target_address,
-                call_data: task.body.call_data.clone(),
-                from_address: task.body.from_address,
-                value: task.body.value,
+                storage_updates: enriched.storage_updates.clone(),
+                transition_index: enriched.task.body.transition_index,
+                target_address: enriched.task.body.target_address,
+                call_data: enriched.task.body.call_data.clone(),
+                from_address: enriched.task.body.from_address,
+                value: enriched.task.body.value,
             };
         }
 
@@ -322,6 +355,7 @@ mod tests {
         };
 
         let task_data = GasKillerTaskData {
+            storage_updates: vec![0x01, 0x02, 0x03, 0x04], // would be computed by GasAnalyzer
             transition_index: task.body.transition_index,
             target_address: task.body.target_address,
             call_data: task.body.call_data.clone(),
