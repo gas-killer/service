@@ -43,6 +43,15 @@ impl GasKillerValidator {
         }
     }
 
+    /// Creates a new GasKillerValidator with a specific RPC URL.
+    ///
+    /// Useful for testing without modifying environment variables.
+    pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
+        Self {
+            fork_rpc_url: rpc_url.into(),
+        }
+    }
+
     /// Validates the message format and decodes the aggregation
     async fn validate_message_format(
         &self,
@@ -363,15 +372,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_storage_updates() {
-        // Set a test RPC URL if not already set
-        let original_rpc_url = env::var("RPC_URL").ok();
-        if original_rpc_url.is_none() {
-            unsafe {
-                env::set_var("RPC_URL", "https://ethereum-holesky.publicnode.com");
-            }
-        }
-
-        let validator = GasKillerValidator::new();
+        // Use with_rpc_url to avoid modifying environment variables (thread-safety)
+        let validator =
+            GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
 
         // Use a real contract address and function call for testing
         let contract_address = Address::from([
@@ -419,13 +422,6 @@ mod tests {
                 println!(
                     "   This is expected in unit tests when the contract doesn't exist on the testnet"
                 );
-            }
-        }
-
-        // Restore original environment variable
-        if original_rpc_url.is_none() {
-            unsafe {
-                env::remove_var("RPC_URL");
             }
         }
     }
