@@ -34,14 +34,18 @@ pub async fn compute_storage_updates(
     from_address: Option<alloy::primitives::Address>,
     value: Option<alloy::primitives::U256>,
 ) -> Result<Vec<u8>> {
+    // TODO: In production, HTTP_RPC and RPC_URL should be unified to a single env var.
     let rpc_url_str = env::var("RPC_URL")
-        .or_else(|_| env::var("HTTP_RPC"))
-        .unwrap_or_else(|_| "https://ethereum-holesky.publicnode.com".into());
+        .map_err(|_| anyhow::anyhow!("RPC_URL environment variable is not set"))?;
 
-    let validator = GasKillerValidator::with_rpc_url(rpc_url_str);
-    let result = validator
-        .analyze_transaction(contract_address, call_data, from_address, value)
-        .await?;
+    let result = GasKillerValidator::analyze_transaction(
+        &rpc_url_str,
+        contract_address,
+        call_data,
+        from_address,
+        value,
+    )
+    .await?;
     Ok(result.storage_updates)
 }
 
@@ -53,13 +57,17 @@ pub struct GasKillerValidator {
 
 impl GasKillerValidator {
     /// Creates a new GasKillerValidator with default settings.
-    pub fn new() -> Self {
+    ///
+    /// Reads RPC URL from RPC_URL environment variable.
+    /// Returns an error if not set.
+    pub fn new() -> Result<Self> {
+        // TODO: In production, HTTP_RPC and RPC_URL should be unified to a single env var.
+        // Currently nodes use HTTP_RPC while this expects RPC_URL.
         let rpc_url = env::var("RPC_URL")
-            .or_else(|_| env::var("HTTP_RPC"))
-            .unwrap_or_else(|_| "https://ethereum-holesky.publicnode.com".into());
-        Self {
+            .map_err(|_| anyhow::anyhow!("RPC_URL environment variable is not set"))?;
+        Ok(Self {
             fork_rpc_url: rpc_url,
-        }
+        })
     }
 
     /// Creates a new GasKillerValidator with a specific RPC URL.
@@ -69,6 +77,11 @@ impl GasKillerValidator {
         Self {
             fork_rpc_url: rpc_url.into(),
         }
+    }
+
+    /// Returns the RPC URL used by this validator
+    pub fn rpc_url(&self) -> &str {
+        &self.fork_rpc_url
     }
 
     /// Validates the message format and decodes the aggregation
@@ -143,15 +156,17 @@ impl GasKillerValidator {
     /// 1. Forking the blockchain state
     /// 2. Executing the transaction
     /// 3. Extracting storage changes and gas information
+    ///
+    /// Takes an explicit RPC URL parameter for flexibility.
     pub async fn analyze_transaction(
-        &self,
+        rpc_url_str: &str,
         contract_address: alloy::primitives::Address,
         call_data: &[u8],
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
     ) -> Result<AnalysisResult> {
-        let rpc_url = Url::parse(&self.fork_rpc_url)
-            .map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
+        let rpc_url =
+            Url::parse(rpc_url_str).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
 
         debug!(
             "Analyzing transaction: contract={:?}, call_data_len={}, from={:?}, value={:?}",
@@ -194,23 +209,17 @@ impl GasKillerValidator {
         })
     }
 
-    /// Computes storage updates by running local analysis
+    /// Computes storage updates by running local analysis using this validator's RPC URL
     async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
-        let result = self
-            .analyze_transaction(
-                task_data.target_address,
-                &task_data.call_data,
-                Some(task_data.from_address),
-                Some(task_data.value),
-            )
-            .await?;
+        let result = Self::analyze_transaction(
+            &self.fork_rpc_url,
+            task_data.target_address,
+            &task_data.call_data,
+            Some(task_data.from_address),
+            Some(task_data.value),
+        )
+        .await?;
         Ok(result.storage_updates)
-    }
-}
-
-impl Default for GasKillerValidator {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -223,9 +232,7 @@ impl ValidatorTrait for GasKillerValidator {
         let aggregation = self.validate_message_format(msg).await?;
 
         // Compute storage updates independently - don't trust request values
-        let storage_updates = self
-            .compute_storage_updates(&aggregation.metadata)
-            .await?;
+        let storage_updates = self.compute_storage_updates(&aggregation.metadata).await?;
 
         // Build expected payload hash using computed storage updates
         let expected_hash = self.build_payload_hash(&aggregation.metadata, &storage_updates);
@@ -241,9 +248,7 @@ impl ValidatorTrait for GasKillerValidator {
         let aggregation = self.validate_message_format(msg).await?;
 
         // Compute storage updates independently
-        let storage_updates = self
-            .compute_storage_updates(&aggregation.metadata)
-            .await?;
+        let storage_updates = self.compute_storage_updates(&aggregation.metadata).await?;
 
         // Build the payload hash using computed storage updates
         let payload_hash = self.build_payload_hash(&aggregation.metadata, &storage_updates);
@@ -278,8 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_invalid_message() {
-        let validator =
-            GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
 
         assert!(
             validator
@@ -297,8 +301,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_requires_rpc() {
-        let validator =
-            GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
         let task_data = create_test_task_data();
 
         let aggregation = wire::Aggregation::<GasKillerTaskData>::new(1, task_data, None);
@@ -323,8 +326,7 @@ mod tests {
 
     #[test]
     fn test_build_payload_hash_deterministic() {
-        let validator =
-            GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
         let task_data = create_test_task_data();
         let storage_updates = vec![0x01, 0x02, 0x03, 0x04];
 
@@ -337,8 +339,7 @@ mod tests {
 
     #[test]
     fn test_build_payload_hash_different_inputs() {
-        let validator =
-            GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
         let task_data = create_test_task_data();
 
         let hash1 = validator.build_payload_hash(&task_data, &[0x01, 0x02]);

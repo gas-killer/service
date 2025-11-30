@@ -41,7 +41,7 @@ impl GasKillerOrchestratorBuilder {
         };
 
         let executor = create_gas_killer_executor().await?;
-        let validator = GasKillerValidator::new();
+        let validator = GasKillerValidator::new()?;
 
         builder.build(task_creator, executor, validator)
     }

@@ -335,7 +335,8 @@ mod tests {
         use commonware_codec::{EncodeSize, Write};
         use gas_killer_common::validator::GasKillerValidator;
 
-        let validator = GasKillerValidator::new();
+        // Use with_rpc_url for testing - new() requires RPC_URL/HTTP_RPC env var
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
 
         let task_data = GasKillerTaskData {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04],
