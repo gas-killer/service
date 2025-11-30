@@ -169,8 +169,12 @@ fn main() {
             contributors_map.insert(verifier, verifier_g1);
         }
 
-        // Infer threshold
-        let threshold = 3; //hardcoded for now
+        // Configure threshold from environment or derive from operator count (2/3 + 1)
+        let threshold = std::env::var("AGGREGATION_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| (operators.len() * 2 / 3) + 1);
+        tracing::info!(threshold, operator_count = operators.len(), "configured aggregation threshold");
 
         // Run as the orchestrator using the builder pattern
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
