@@ -186,7 +186,7 @@ fn main() {
         }
 
         // TODO: Retrieve threshold from EigenLayer smart contracts after middleware refactor
-        // https://github.com/BreadchainCoop/commonware-restaking/issues/64
+        // https://github.com/BreadchainCoop/commonware-restaking/issues/135
         let threshold = 3; // hardcoded for now
 
         // Run as the orchestrator using the builder pattern
