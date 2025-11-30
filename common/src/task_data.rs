@@ -24,6 +24,9 @@ pub struct GasKillerTaskData {
     pub value: U256,
 }
 
+/// Maximum size for variable-length fields (u32::MAX bytes, ~4.3GB)
+pub const MAX_FIELD_SIZE: usize = u32::MAX as usize;
+
 impl GasKillerTaskData {
     /// Extracts the function selector (first 4 bytes) from call_data
     pub fn function_selector(&self) -> FixedBytes<4> {
@@ -32,6 +35,31 @@ impl GasKillerTaskData {
         } else {
             FixedBytes::ZERO
         }
+    }
+
+    /// Validates that the task data can be encoded.
+    ///
+    /// This checks encoding constraints before attempting to serialize.
+    /// Call this before encoding to get a proper error instead of a panic.
+    ///
+    /// # Errors
+    /// Returns an error if any field exceeds the maximum encodable size (u32::MAX).
+    pub fn validate(&self) -> Result<()> {
+        if self.storage_updates.len() > MAX_FIELD_SIZE {
+            return Err(anyhow::anyhow!(
+                "storage_updates length ({}) exceeds maximum encodable size ({})",
+                self.storage_updates.len(),
+                MAX_FIELD_SIZE
+            ));
+        }
+        if self.call_data.len() > MAX_FIELD_SIZE {
+            return Err(anyhow::anyhow!(
+                "call_data length ({}) exceeds maximum encodable size ({})",
+                self.call_data.len(),
+                MAX_FIELD_SIZE
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -50,17 +78,17 @@ impl Default for GasKillerTaskData {
 
 impl Write for GasKillerTaskData {
     fn write(&self, buf: &mut impl BufMut) {
+        // Note: The Write trait doesn't return Result, so we must panic on encoding errors.
+        // Call validate() before encoding to get a proper error instead of a panic.
+        // In practice, exceeding 4GB for these fields is extremely unlikely.
+
         // Write storage updates as length-prefixed bytes
-        // Note: Using u32 for length prefix limits storage_updates to ~4.3GB
-        // This is sufficient for gas killer use cases but could be extended to u64 if needed
         let len = self.storage_updates.len();
-        if len > u32::MAX as usize {
-            panic!(
-                "storage_updates length ({}) exceeds u32::MAX ({})",
-                len,
-                u32::MAX
-            );
-        }
+        assert!(
+            len <= MAX_FIELD_SIZE,
+            "storage_updates length ({len}) exceeds MAX_FIELD_SIZE ({MAX_FIELD_SIZE}). \
+             Call validate() before encoding to handle this gracefully."
+        );
         (len as u32).write(buf);
         buf.put_slice(&self.storage_updates);
 
@@ -78,13 +106,11 @@ impl Write for GasKillerTaskData {
 
         // Write call data as length-prefixed bytes
         let call_data_len = self.call_data.len();
-        if call_data_len > u32::MAX as usize {
-            panic!(
-                "call_data length ({}) exceeds u32::MAX ({})",
-                call_data_len,
-                u32::MAX
-            );
-        }
+        assert!(
+            call_data_len <= MAX_FIELD_SIZE,
+            "call_data length ({call_data_len}) exceeds MAX_FIELD_SIZE ({MAX_FIELD_SIZE}). \
+             Call validate() before encoding to handle this gracefully."
+        );
         (call_data_len as u32).write(buf);
         buf.put_slice(&self.call_data);
     }
@@ -165,5 +191,44 @@ impl EncodeSize for GasKillerTaskData {
             + U256_SIZE
             + U32_SIZE
             + self.call_data.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_success() {
+        let task_data = GasKillerTaskData::default();
+        assert!(task_data.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_with_normal_data() {
+        let task_data = GasKillerTaskData {
+            storage_updates: vec![0u8; 1024],
+            call_data: vec![0u8; 256],
+            ..Default::default()
+        };
+        assert!(task_data.validate().is_ok());
+    }
+
+    #[test]
+    fn test_function_selector() {
+        let task_data = GasKillerTaskData {
+            call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00],
+            ..Default::default()
+        };
+        assert_eq!(
+            task_data.function_selector(),
+            FixedBytes::from([0x12, 0x34, 0x56, 0x78])
+        );
+    }
+
+    #[test]
+    fn test_function_selector_empty() {
+        let task_data = GasKillerTaskData::default();
+        assert_eq!(task_data.function_selector(), FixedBytes::ZERO);
     }
 }
