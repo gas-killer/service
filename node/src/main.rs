@@ -81,6 +81,12 @@ fn main() {
     runner.start(|context: tokio::Context| async move {
         let mut recipients: Vec<(PublicKey, SocketAddr)> = Vec::new();
 
+        // Configure quorum number from environment (default: 0)
+        let quorum_number: usize = std::env::var("QUORUM_NUMBER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
         // Scoped to avoid configuring two loggers
         let orchestrator_pub_key;
         {
@@ -89,8 +95,17 @@ fn main() {
                 .await
                 .expect("Failed to get operator states");
 
+            if quorum_number >= quorum_infos.len() {
+                panic!(
+                    "QUORUM_NUMBER {} is out of range (available quorums: 0..{})",
+                    quorum_number,
+                    quorum_infos.len()
+                );
+            }
+            tracing::info!(quorum_number, total_quorums = quorum_infos.len(), "using quorum");
+
             // Configure allowed peers from operator states
-            let participants = quorum_infos[0].operators.clone();
+            let participants = quorum_infos[quorum_number].operators.clone();
             if participants.is_empty() {
                 panic!("No operators found in quorum");
             }
@@ -198,7 +213,7 @@ fn main() {
         let quorum_infos = get_operator_states()
             .await
             .expect("Failed to get operator states");
-        let operators = &quorum_infos[0].operators;
+        let operators = &quorum_infos[quorum_number].operators;
 
         if operators.is_empty() {
             panic!("No operators found");
