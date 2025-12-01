@@ -121,7 +121,11 @@ impl GasKillerValidator {
         let mut storage_hasher = Sha256::new();
         storage_hasher.update(storage_updates);
         let storage_hash = storage_hasher.finalize();
-        let storage_hash_hex: String = storage_hash.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+        let storage_hash_hex: String = storage_hash
+            .iter()
+            .take(8)
+            .map(|b| format!("{:02x}", b))
+            .collect();
 
         debug!(
             transition_index = task_data.transition_index,
@@ -184,7 +188,7 @@ impl GasKillerValidator {
             Url::parse(rpc_url_str).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
 
         // Query current block number before forking
-        let provider = ProviderBuilder::new().on_http(rpc_url.clone());
+        let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
         let block_number = provider
             .get_block_number()
             .await

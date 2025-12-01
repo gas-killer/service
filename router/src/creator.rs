@@ -1,7 +1,7 @@
 use crate::ingress::GasKillerTaskRequest;
 use commonware_avs_router::creator::Creator;
-use gas_killer_common::task_data::GasKillerTaskData;
 use gas_killer_common::GasKillerValidator;
+use gas_killer_common::task_data::GasKillerTaskData;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -289,10 +289,15 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                         value: enriched.task.body.value,
                     };
                 }
-                warn!("get_task_metadata called but no current task set - returning default (zeroed) data. This may indicate get_payload_and_round was not called first.");
+                warn!(
+                    "get_task_metadata called but no current task set - returning default (zeroed) data. This may indicate get_payload_and_round was not called first."
+                );
             }
             Err(e) => {
-                error!("Failed to acquire current_task lock: {} - returning default (zeroed) data", e);
+                error!(
+                    "Failed to acquire current_task lock: {} - returning default (zeroed) data",
+                    e
+                );
             }
         }
 
