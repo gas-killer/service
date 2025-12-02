@@ -25,7 +25,7 @@ serde_json = { workspace = true }
 gas-killer-router = { path = "../router" }
 gas-killer-common = { workspace = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
-gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
+gas-analyzer-rs = { workspace = true }
 ark-bn254 = { workspace = true }
 ark-ec = { workspace = true }
 ark-ff = { workspace = true }
