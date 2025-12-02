@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Decode hex inputs to bytes
         let call_data = hex::decode(call_data_hex.trim_start_matches("0x"))?;
 
-        // Build request (no storage_updates - server computes them)
+        // Build request
         let body = GasKillerTaskRequestBody {
             target_address,
             call_data,
@@ -236,7 +236,6 @@ async fn build_mock_request()
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
         .to::<u64>();
 
-    // Server now computes storage_updates, we just send the request params
     let body = GasKillerTaskRequestBody {
         target_address,
         call_data,
