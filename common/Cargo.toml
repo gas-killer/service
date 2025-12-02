@@ -11,28 +11,28 @@ alloy-provider = { workspace = true }
 alloy-signer = { workspace = true }
 alloy-signer-local = { workspace = true }
 
-# Commonware (for codec and usecases)
-commonware-codec = { workspace = true }
-commonware-avs-usecases = { workspace = true }
-commonware-avs-router = { workspace = true }
-commonware-cryptography = { workspace = true }
-
 # Serialization
 anyhow = { workspace = true }
-bytes = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-
-# Config
-dotenv = { workspace = true }
-url = { workspace = true }
 
 # Async
 async-trait = { workspace = true }
+bytes = { workspace = true }
+commonware-avs-router = { workspace = true }
+commonware-avs-usecases = { workspace = true }
+
+# Commonware (for codec and usecases)
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+
+# Config
+dotenv = { workspace = true }
+
+# Gas analysis
+gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
-
-# Gas analysis
-gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
+url = { workspace = true }
