@@ -35,4 +35,4 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 # Gas analysis
-gas-analyzer-rs = { path = "../vendor/gas-killer-analyzer" }
+gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
