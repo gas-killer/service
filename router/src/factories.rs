@@ -11,6 +11,7 @@ use commonware_avs_router::bindings::blsapkregistry::BLSApkRegistry;
 use commonware_avs_router::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorStateRetriever;
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
 use commonware_avs_usecases::AvsDeployment;
+use gas_killer_common::GasKillerValidator;
 use std::{env, str::FromStr, sync::Arc};
 
 /// Factory function to create a default creator
@@ -22,10 +23,11 @@ pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
 /// Factory function to create a listening creator with HTTP server
 pub async fn create_listening_creator_with_server(
     addr: String,
+    validator: Arc<GasKillerValidator>,
 ) -> anyhow::Result<GasKillerCreatorType> {
     let queue = SimpleTaskQueue::new();
     let config = GasKillerConfig::default();
-    let creator = ListeningGasKillerCreator::new(queue.clone(), config);
+    let creator = ListeningGasKillerCreator::new(queue.clone(), config, validator);
     // Wrap the queue in Arc for the HTTP server
     let queue_for_server = Arc::new(queue);
     tokio::spawn(async move {

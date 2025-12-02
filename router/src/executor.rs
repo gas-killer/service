@@ -7,7 +7,7 @@ use crate::task_data::GasKillerTaskData;
 use alloy_primitives::{Bytes, FixedBytes, U256};
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Handler for executing verifyAndUpdate transactions
 pub struct GasKillerHandler {
@@ -64,11 +64,26 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         let task_data = task_data
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
-        // Extract task data parameters
+        info!(
+            "Using storage updates from task data: {} bytes",
+            task_data.storage_updates.len()
+        );
+
+        // Extract task data parameters - use pre-computed storage_updates from task data
         let storage_updates = Bytes::from(task_data.storage_updates.clone());
         let transition_index = U256::from(task_data.transition_index);
         let target_function = task_data.function_selector();
         let target_addr = task_data.target_address;
+
+        // Debug: Log exact inputs for hash comparison
+        debug!(
+            transition_index = %transition_index,
+            target_address = %target_addr,
+            target_function = %target_function,
+            storage_updates_len = storage_updates.len(),
+            storage_updates_first_32 = %hex::encode(&task_data.storage_updates[..std::cmp::min(32, task_data.storage_updates.len())]),
+            "Executor getMessageHash inputs"
+        );
 
         let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
         // Query the contract's getMessageHash and compare with the provided msg_hash
@@ -82,6 +97,10 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
                     warn!(
                         offchain_msg_hash = %msg_hash,
                         onchain_expected_hash = %expected_hash,
+                        transition_index = %transition_index,
+                        target_address = %target_addr,
+                        target_function = %target_function,
+                        storage_updates_len = storage_updates.len(),
                         "Message hash mismatch between offchain and onchain"
                     );
                     return Err(anyhow::anyhow!(

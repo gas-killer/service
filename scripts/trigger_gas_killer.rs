@@ -36,22 +36,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .ok()
             .unwrap_or_else(|| "0".to_string())
             .parse()?;
-        let storage_updates_hex =
-            env::var("GAS_KILLER_STORAGE_UPDATES").unwrap_or_else(|_| "0x".to_string());
 
         // Decode hex inputs to bytes
         let call_data = hex::decode(call_data_hex.trim_start_matches("0x"))?;
-        let storage_updates = if storage_updates_hex.len() > 2 {
-            hex::decode(storage_updates_hex.trim_start_matches("0x"))?
-        } else {
-            Vec::new()
-        };
 
         // Build request
         let body = GasKillerTaskRequestBody {
             target_address,
             call_data,
-            storage_updates,
             transition_index,
             from_address,
             value,
@@ -64,7 +56,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "body": {
             "target_address": format!("{:?}", request.body.target_address),
             "call_data": request.body.call_data,
-            "storage_updates": request.body.storage_updates,
             "transition_index": request.body.transition_index,
             "from_address": format!("{:?}", request.body.from_address),
             "value": format!("{}", request.body.value),
@@ -78,14 +69,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         String::from("")
     };
     println!(
-        "Debug request summary:\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})\n  storage_updates_len: {}",
+        "Debug request summary:\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})",
         request.body.target_address,
         request.body.from_address,
         request.body.transition_index,
         request.body.value,
         request.body.call_data.len(),
-        selector_hex,
-        request.body.storage_updates.len()
+        selector_hex
     );
 
     // Prepare provider and contract for verification of currentSum
@@ -136,15 +126,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     if !status.is_success() {
         eprintln!(
-            "Trigger failed with status {}. Reprinting request summary to aid debugging...\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})\n  storage_updates_len: {}",
+            "Trigger failed with status {}. Reprinting request summary to aid debugging...\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})",
             status,
             request.body.target_address,
             request.body.from_address,
             request.body.transition_index,
             request.body.value,
             request.body.call_data.len(),
-            selector_hex,
-            request.body.storage_updates.len()
+            selector_hex
         );
         Err(format!("Trigger failed with status {}", status).into())
     } else {
@@ -229,34 +218,13 @@ async fn build_mock_request()
     let from_address: Address = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse()?;
     let value = U256::from(0);
 
-    // Derive RPC URL for analyzer; prefer GAS_ANALYZER_RPC or fallback to HTTP_RPC
+    // Derive RPC URL to read current stateTransitionCount
     let rpc = env::var("GAS_ANALYZER_RPC")
         .or_else(|_| env::var("HTTP_RPC"))
         .map_err(
             |_| "GAS_ANALYZER_RPC or HTTP_RPC environment variable is required for mock mode",
         )?;
     let rpc_url = Url::parse(&rpc)?;
-
-    // Build transaction request and compute real storage_updates with gas-analyzer-rs
-    use alloy::rpc::types::eth::TransactionRequest as AlloyTransactionRequest;
-    use gas_analyzer_rs::{call_to_encoded_state_updates_with_gas_estimate, gk::GasKillerDefault};
-
-    let tx_request = AlloyTransactionRequest {
-        from: Some(from_address),
-        to: Some(target_address.into()),
-        input: alloy::rpc::types::TransactionInput::new(alloy::primitives::Bytes::from(
-            call_data.clone(),
-        )),
-        value: Some(value),
-        gas: None,
-        ..Default::default()
-    };
-
-    let gk = GasKillerDefault::new(rpc_url.clone(), None).await?;
-    let (encoded_updates, _gas_estimate, _) =
-        call_to_encoded_state_updates_with_gas_estimate(rpc_url.clone(), tx_request, gk).await?;
-
-    let storage_updates = encoded_updates.to_vec();
 
     // Read current stateTransitionCount to compute correct transition_index
     let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
@@ -271,7 +239,6 @@ async fn build_mock_request()
     let body = GasKillerTaskRequestBody {
         target_address,
         call_data,
-        storage_updates,
         // transitionIndex must equal the current stateTransitionCount() at call time
         transition_index: current_count,
         from_address,

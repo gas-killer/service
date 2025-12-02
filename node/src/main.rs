@@ -237,7 +237,8 @@ fn main() {
             network.register(0, Quota::per_second(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
 
         // Create validator for the gas killer use case (uses full gas-analyzer validation)
-        let validator = Arc::new(GasKillerValidator::new());
+        let validator = Arc::new(GasKillerValidator::new()
+            .expect("RPC_URL or HTTP_RPC environment variable must be set for gas analyzer"));
 
         // Create contributor with GasKillerTaskData as the metadata type
         let contributor = Contributor::<GasKillerTaskData>::new(
