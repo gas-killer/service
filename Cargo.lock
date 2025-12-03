@@ -3949,7 +3949,7 @@ dependencies = [
 [[package]]
 name = "foundry-cheatcodes-spec"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "alloy-sol-types",
  "foundry-macros",
@@ -3959,7 +3959,7 @@ dependencies = [
 [[package]]
 name = "foundry-common"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -4015,7 +4015,7 @@ dependencies = [
 [[package]]
 name = "foundry-common-fmt"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
@@ -4130,7 +4130,7 @@ dependencies = [
 [[package]]
 name = "foundry-config"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "alloy-chains",
  "alloy-primitives",
@@ -4169,7 +4169,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-abi"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -4182,7 +4182,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-core"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -4222,7 +4222,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-networks"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "alloy-chains",
  "alloy-evm 0.24.2",
@@ -4235,7 +4235,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-traces"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-json-abi",
@@ -4292,7 +4292,7 @@ dependencies = [
 [[package]]
 name = "foundry-linking"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "alloy-primitives",
  "foundry-compilers",
@@ -4304,7 +4304,7 @@ dependencies = [
 [[package]]
 name = "foundry-macros"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#e2019919ff6cf2563520c825a9f357108861aa0b"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#ced313e63618884f9d19ee3705f890b739d2c1f0"
 dependencies = [
  "proc-macro-error2",
  "proc-macro2",
@@ -4918,9 +4918,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.18"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52e9a2a24dc5c6821e71a7030e1e14b7b632acac55c40e9d2e082c621261bb56"
+checksum = "727805d60e7938b76b826a6ef209eb70eaa1812794f9424d4a4e2d740662df5f"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -5423,9 +5423,9 @@ dependencies = [
 
 [[package]]
 name = "libz-rs-sys"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "840db8cf39d9ec4dd794376f38acc40d0fc65eec2a8f484f7fd375b84602becd"
+checksum = "8b484ba8d4f775eeca644c452a56650e544bf7e617f1d170fe7298122ead5222"
 dependencies = [
  "zlib-rs",
 ]
@@ -5465,9 +5465,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.28"
+version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
+checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 dependencies = [
  "value-bag",
 ]
@@ -11082,9 +11082,9 @@ dependencies = [
 
 [[package]]
 name = "zlib-rs"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f06ae92f42f5e5c42443fd094f245eb656abf56dd7cce9b8b263236565e00f2"
+checksum = "36134c44663532e6519d7a6dfdbbe06f6f8192bde8ae9ed076e9b213f0e31df7"
 
 [[package]]
 name = "zopfli"

@@ -81,3 +81,6 @@ tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 url = { version = "2.5.4", features = ["serde"] }
+
+# Gas analysis
+gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
