@@ -8,43 +8,26 @@ version = "0.1.0"
 license = "PPL"
 
 [workspace.dependencies]
-
-# Ethereum / Alloy (1.0 to match commonware-restaking dev)
 alloy = "1.0"
 alloy-network = "1.0"
 alloy-primitives = "1.0"
 alloy-provider = "1.0"
 alloy-signer = "1.0"
 alloy-signer-local = "1.0"
-
-# Other utilities
 anyhow = "1.0"
-
-# Cryptography
 ark-bn254 = "0.5.0"
 ark-ec = "0.5.0"
 ark-ff = "0.5.0"
 ark-serialize = "0.5.0"
-
-# Async / Runtime
 async-trait = "0.1"
-
-# Web / HTTP
 axum = "0.7"
 bn254 = { git = "https://github.com/BreadchainCoop/bn254.git" }
-
-# Serialization
 bytes = "1.10.1"
-
-# CLI / Config
 clap = "4.5.37"
-# Upstream commonware-restaking crates (dev branch)
 commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "dev" }
 commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "dev" }
 commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "dev" }
 commonware-avs-usecases = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "dev" }
-
-# Commonware ecosystem crates (0.0.63 to match dev branch)
 commonware-codec = "0.0.63"
 commonware-cryptography = "0.0.63"
 commonware-macros = "0.0.63"
@@ -52,8 +35,6 @@ commonware-p2p = "0.0.63"
 commonware-runtime = "0.0.63"
 commonware-utils = "0.0.63"
 dotenv = "0.15.0"
-
-# EigenLayer SDK (2.0.0 to match dev branch)
 eigen-client-avsregistry = "2.0.0"
 eigen-common = "2.0.0"
 eigen-crypto-bls = "2.0.0"
@@ -63,9 +44,7 @@ eigen-services-operatorsinfo = "2.0.0"
 eigen-utils = "2.0.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
-
-# Internal crates
-gas-killer-common = { path = "common" }
+gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
 governor = "0.6.3"
 hex = "0.4"
 num-bigint = "0.4"
@@ -82,5 +61,6 @@ tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 url = { version = "2.5.4", features = ["serde"] }
 
-# Gas analysis
-gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
+[patch.crates-io]
+svm-rs-builds = { git = "https://github.com/alloy-rs/svm-rs", rev = "ee99800a8a1b803263fcc12fe3ed8c059e2302c4" }
+svm-rs = { git = "https://github.com/alloy-rs/svm-rs", rev = "ee99800a8a1b803263fcc12fe3ed8c059e2302c4" }

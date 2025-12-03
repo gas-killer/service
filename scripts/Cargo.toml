@@ -23,7 +23,7 @@ ark-ff = { workspace = true }
 commonware-avs-core = { workspace = true }
 dotenv = { workspace = true }
 gas-analyzer-rs = { workspace = true }
-gas-killer-common = { workspace = true }
+gas-killer-common = { path = "../common" }
 gas-killer-router = { path = "../router" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde = { workspace = true }

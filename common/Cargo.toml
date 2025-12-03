@@ -4,35 +4,22 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# Ethereum / Alloy (for bindings)
 alloy = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-provider = { workspace = true }
 alloy-signer = { workspace = true }
 alloy-signer-local = { workspace = true }
-
-# Serialization
 anyhow = { workspace = true }
-
-# Async
 async-trait = { workspace = true }
 bytes = { workspace = true }
 commonware-avs-router = { workspace = true }
 commonware-avs-usecases = { workspace = true }
-
-# Commonware (for codec and usecases)
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
-
-# Config
 dotenv = { workspace = true }
-
-# Gas analysis
 gas-analyzer-rs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-
-# Logging
 tracing = { workspace = true }
 url = { workspace = true }
