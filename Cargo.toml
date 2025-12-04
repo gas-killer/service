@@ -84,3 +84,7 @@ gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer
 
 # Internal crates
 gas-killer-common = { path = "common" }
+
+[patch.crates-io]
+svm-rs-builds = { git = "https://github.com/alloy-rs/svm-rs", rev = "ee99800a8a1b803263fcc12fe3ed8c059e2302c4" }
+svm-rs = { git = "https://github.com/alloy-rs/svm-rs", rev = "ee99800a8a1b803263fcc12fe3ed8c059e2302c4" }
