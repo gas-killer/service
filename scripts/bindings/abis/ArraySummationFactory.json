@@ -1,0 +1,321 @@
+[
+    {
+        "type": "function",
+        "name": "contractInfo",
+        "inputs": [
+            {
+                "name": "",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "avsAddress",
+                "type": "address",
+                "internalType": "address"
+            },
+            {
+                "name": "blsSigChecker",
+                "type": "address",
+                "internalType": "address"
+            },
+            {
+                "name": "arraySize",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "maxValue",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "seed",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "deploymentIndex",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "deploymentTimestamp",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
+        "name": "deployArraySummation",
+        "inputs": [
+            {
+                "name": "_avsAddress",
+                "type": "address",
+                "internalType": "address"
+            },
+            {
+                "name": "_blsSigChecker",
+                "type": "address",
+                "internalType": "address"
+            },
+            {
+                "name": "_arraySize",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "_maxValue",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "_seed",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "contractAddress",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "stateMutability": "nonpayable"
+    },
+    {
+        "type": "function",
+        "name": "deployedContracts",
+        "inputs": [
+            {
+                "name": "",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
+        "name": "getAllDeployedContracts",
+        "inputs": [],
+        "outputs": [
+            {
+                "name": "addresses",
+                "type": "address[]",
+                "internalType": "address[]"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
+        "name": "getContractInfo",
+        "inputs": [
+            {
+                "name": "_contractAddress",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "info",
+                "type": "tuple",
+                "internalType": "struct ArraySummationFactory.ContractInfo",
+                "components": [
+                    {
+                        "name": "avsAddress",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "blsSigChecker",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "arraySize",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "maxValue",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "seed",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "deploymentIndex",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "deploymentTimestamp",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    }
+                ]
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
+        "name": "getContractsByAVS",
+        "inputs": [
+            {
+                "name": "_avsAddress",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "addresses",
+                "type": "address[]",
+                "internalType": "address[]"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
+        "name": "getDeployedContractCount",
+        "inputs": [],
+        "outputs": [
+            {
+                "name": "count",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
+        "name": "getDeployedContractsRange",
+        "inputs": [
+            {
+                "name": "_startIndex",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "_endIndex",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "addresses",
+                "type": "address[]",
+                "internalType": "address[]"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
+        "name": "isContractDeployedByFactory",
+        "inputs": [
+            {
+                "name": "_contractAddress",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "deployed",
+                "type": "bool",
+                "internalType": "bool"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
+        "name": "isDeployedContract",
+        "inputs": [
+            {
+                "name": "",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "",
+                "type": "bool",
+                "internalType": "bool"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "event",
+        "name": "ArraySummationDeployed",
+        "inputs": [
+            {
+                "name": "contractAddress",
+                "type": "address",
+                "indexed": true,
+                "internalType": "address"
+            },
+            {
+                "name": "avsAddress",
+                "type": "address",
+                "indexed": true,
+                "internalType": "address"
+            },
+            {
+                "name": "blsSigChecker",
+                "type": "address",
+                "indexed": true,
+                "internalType": "address"
+            },
+            {
+                "name": "arraySize",
+                "type": "uint256",
+                "indexed": false,
+                "internalType": "uint256"
+            },
+            {
+                "name": "maxValue",
+                "type": "uint256",
+                "indexed": false,
+                "internalType": "uint256"
+            },
+            {
+                "name": "seed",
+                "type": "uint256",
+                "indexed": false,
+                "internalType": "uint256"
+            },
+            {
+                "name": "deploymentIndex",
+                "type": "uint256",
+                "indexed": false,
+                "internalType": "uint256"
+            }
+        ],
+        "anonymous": false
+    }
+]

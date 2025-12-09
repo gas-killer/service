@@ -123,7 +123,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .call()
         .await
         .map_err(|e| format!("Failed to read currentSum before trigger: {}", e))?
-        ._0
         .to::<u64>();
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
@@ -163,7 +162,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .call()
                 .await
                 .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
-                ._0
                 .to::<u64>();
 
             println!(
@@ -270,7 +268,6 @@ async fn build_mock_request(
         .call()
         .await
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
-        .count
         .to::<u64>();
 
     let body = GasKillerTaskRequestBody {
