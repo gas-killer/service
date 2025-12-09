@@ -63,7 +63,8 @@ async fn test_orchestrator_metadata_integration() {
         .with_g1_map(g1_map)
         .with_threshold(2);
 
-    let task_creator = MockCreator::<GasKillerTaskData>::new().with_metadata(custom_metadata.clone());
+    let task_creator =
+        MockCreator::<GasKillerTaskData>::new().with_metadata(custom_metadata.clone());
     let executor = MockExecutor::new();
     let validator = MockValidator::new_success(1);
 
@@ -100,7 +101,10 @@ async fn test_orchestrator_component_access_integration() {
     // Test access to all components
     let creator_metadata = orchestrator.task_creator().get_task_metadata();
     assert_eq!(creator_metadata.transition_index, 0);
-    assert_eq!(creator_metadata.target_address, alloy::primitives::Address::ZERO);
+    assert_eq!(
+        creator_metadata.target_address,
+        alloy::primitives::Address::ZERO
+    );
 
     let executor_count = orchestrator.executor().get_execution_count();
     assert_eq!(executor_count, 0);

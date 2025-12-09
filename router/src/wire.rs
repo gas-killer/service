@@ -147,7 +147,8 @@ mod tests {
         let original = Aggregation::new(1, metadata, Some(aggregation::Payload::Start));
         let mut buf = Vec::with_capacity(original.encode_size());
         original.write(&mut buf);
-        let decoded = Aggregation::<GasKillerTaskData>::read(&mut std::io::Cursor::new(buf)).unwrap();
+        let decoded =
+            Aggregation::<GasKillerTaskData>::read(&mut std::io::Cursor::new(buf)).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -171,7 +172,8 @@ mod tests {
         );
         let mut buf = Vec::with_capacity(original.encode_size());
         original.write(&mut buf);
-        let decoded = Aggregation::<GasKillerTaskData>::read(&mut std::io::Cursor::new(buf)).unwrap();
+        let decoded =
+            Aggregation::<GasKillerTaskData>::read(&mut std::io::Cursor::new(buf)).unwrap();
         assert_eq!(original, decoded);
     }
 }
