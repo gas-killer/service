@@ -127,7 +127,7 @@ pub mod aggregation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usecases::counter::creator::CounterTaskData;
+    use crate::usecases::gas_killer::task_data::GasKillerTaskData;
     use alloy::hex;
 
     const SAMPLE_SIGNATURE_HEX: &str =
@@ -135,25 +135,31 @@ mod tests {
 
     #[test]
     fn test_aggregation_start_codec() {
-        let metadata = CounterTaskData {
-            var1: "test1".to_string(),
-            var2: "test2".to_string(),
-            var3: "test3".to_string(),
+        let metadata = GasKillerTaskData {
+            storage_updates: vec![1, 2, 3],
+            transition_index: 1,
+            target_address: alloy::primitives::Address::ZERO,
+            call_data: vec![4, 5, 6],
+            from_address: alloy::primitives::Address::ZERO,
+            value: alloy::primitives::U256::ZERO,
         };
 
         let original = Aggregation::new(1, metadata, Some(aggregation::Payload::Start));
         let mut buf = Vec::with_capacity(original.encode_size());
         original.write(&mut buf);
-        let decoded = Aggregation::<CounterTaskData>::read(&mut std::io::Cursor::new(buf)).unwrap();
+        let decoded = Aggregation::<GasKillerTaskData>::read(&mut std::io::Cursor::new(buf)).unwrap();
         assert_eq!(original, decoded);
     }
 
     #[test]
     fn test_aggregation_signature_codec() {
-        let metadata = CounterTaskData {
-            var1: "test1".to_string(),
-            var2: "test2".to_string(),
-            var3: "test3".to_string(),
+        let metadata = GasKillerTaskData {
+            storage_updates: vec![1, 2, 3],
+            transition_index: 1,
+            target_address: alloy::primitives::Address::ZERO,
+            call_data: vec![4, 5, 6],
+            from_address: alloy::primitives::Address::ZERO,
+            value: alloy::primitives::U256::ZERO,
         };
 
         let original = Aggregation::new(
@@ -165,7 +171,7 @@ mod tests {
         );
         let mut buf = Vec::with_capacity(original.encode_size());
         original.write(&mut buf);
-        let decoded = Aggregation::<CounterTaskData>::read(&mut std::io::Cursor::new(buf)).unwrap();
+        let decoded = Aggregation::<GasKillerTaskData>::read(&mut std::io::Cursor::new(buf)).unwrap();
         assert_eq!(original, decoded);
     }
 }

@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Prepare provider and contract for verification of currentSum
     let rpc_for_read = env::var("HTTP_RPC").or_else(|_| env::var("GAS_ANALYZER_RPC"))?;
     let rpc_url_for_read = Url::parse(&rpc_for_read)?;
-    let provider = ProviderBuilder::new().on_http(rpc_url_for_read);
+    let provider = ProviderBuilder::new().connect_http(rpc_url_for_read);
     let array_contract = bindings::arraysummation::ArraySummation::new(
         request.body.target_address,
         provider.clone(),
@@ -261,7 +261,7 @@ async fn build_mock_request(
     let storage_updates = encoded_updates.to_vec();
 
     // Read current stateTransitionCount to compute correct transition_index
-    let provider = ProviderBuilder::new().on_http(rpc_url.clone());
+    let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
     let array_contract = bindings::arraysummation::ArraySummation::new(target_address, provider);
     let current_count = array_contract
         .stateTransitionCount()

@@ -2,7 +2,7 @@ use crate::creator::MockCreator;
 use crate::creator::core::Creator;
 use crate::executor::MockExecutor;
 use crate::orchestrator::builder::{OrchestratorBuilder, OrchestratorBuilderConfig};
-use crate::usecases::counter::creator::CounterTaskData;
+use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 use crate::validator::MockValidator;
 use std::time::Duration;
 
@@ -214,7 +214,7 @@ async fn test_builder_build() {
         .with_g1_map(g1_map)
         .with_threshold(2);
 
-    let task_creator = MockCreator::<CounterTaskData>::new();
+    let task_creator = MockCreator::<GasKillerTaskData>::new();
     let executor = MockExecutor::new();
     let validator = MockValidator::new_success(1);
 
@@ -225,9 +225,8 @@ async fn test_builder_build() {
     // Verify the orchestrator was created successfully
     // We can't access private fields, but we can verify it was built
     let metadata = orchestrator.task_creator().get_task_metadata();
-    assert!(!metadata.var1.is_empty());
-    assert!(!metadata.var2.is_empty());
-    assert!(!metadata.var3.is_empty());
+    assert_eq!(metadata.transition_index, 0);
+    assert_eq!(metadata.target_address, alloy::primitives::Address::ZERO);
 }
 
 #[tokio::test]

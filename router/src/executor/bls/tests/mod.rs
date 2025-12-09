@@ -1,4 +1,3 @@
-use crate::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorStateRetriever::getNonSignerStakesAndSignatureReturn;
 use crate::executor::bls::{BlsSignatureVerificationHandler, convert_non_signer_data};
 use crate::executor::core::ExecutionResult;
 use alloy::primitives::{Bytes, FixedBytes, U256};
@@ -29,7 +28,7 @@ impl BlsSignatureVerificationHandler for MockVerificationHandler {
         _msg_hash: FixedBytes<32>,
         _quorum_numbers: Bytes,
         _current_block_number: u32,
-        _non_signer_data: getNonSignerStakesAndSignatureReturn,
+        _non_signer_data: crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature,
         _task_data: Option<&Self::TaskData>,
     ) -> Result<ExecutionResult> {
         // Mock implementation returns success with dummy values
@@ -68,7 +67,7 @@ impl BlsSignatureVerificationHandler for TestBlsSignatureVerificationHandler {
         _msg_hash: FixedBytes<32>,
         _quorum_numbers: Bytes,
         _current_block_number: u32,
-        _non_signer_data: getNonSignerStakesAndSignatureReturn,
+        _non_signer_data: crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature,
         _task_data: Option<&Self::TaskData>,
     ) -> Result<ExecutionResult> {
         self.call_count += 1;
@@ -102,8 +101,7 @@ async fn test_mock_verification_handler_success() {
     let current_block_number = 12345;
 
     // Create a mock non-signer data
-    let mock_data = getNonSignerStakesAndSignatureReturn {
-        _0: crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
+    let mock_data = crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
             nonSignerQuorumBitmapIndices: vec![],
             nonSignerPubkeys: vec![],
             quorumApks: vec![],
@@ -118,7 +116,6 @@ async fn test_mock_verification_handler_success() {
             quorumApkIndices: vec![],
             totalStakeIndices: vec![],
             nonSignerStakeIndices: vec![],
-        },
     };
 
     let result = handler
@@ -156,8 +153,7 @@ async fn test_verification_handler_trait_success() {
     let quorum_numbers = Bytes::from_static(b"test");
     let current_block_number = 54321;
 
-    let mock_data = getNonSignerStakesAndSignatureReturn {
-        _0: crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
+    let mock_data = crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
             nonSignerQuorumBitmapIndices: vec![],
             nonSignerPubkeys: vec![],
             quorumApks: vec![],
@@ -172,7 +168,6 @@ async fn test_verification_handler_trait_success() {
             quorumApkIndices: vec![],
             totalStakeIndices: vec![],
             nonSignerStakeIndices: vec![],
-        },
     };
 
     let result = handler
@@ -212,8 +207,7 @@ async fn test_verification_handler_trait_failure() {
     let quorum_numbers = Bytes::from_static(b"test");
     let current_block_number = 54321;
 
-    let mock_data = getNonSignerStakesAndSignatureReturn {
-        _0: crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
+    let mock_data = crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
             nonSignerQuorumBitmapIndices: vec![],
             nonSignerPubkeys: vec![],
             quorumApks: vec![],
@@ -228,7 +222,6 @@ async fn test_verification_handler_trait_failure() {
             quorumApkIndices: vec![],
             totalStakeIndices: vec![],
             nonSignerStakeIndices: vec![],
-        },
     };
 
     let result = handler
@@ -254,8 +247,7 @@ async fn test_verification_handler_trait_failure() {
 #[test]
 fn test_convert_non_signer_data_empty() {
     // Test with empty data
-    let input = getNonSignerStakesAndSignatureReturn {
-        _0: crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
+    let input = crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
             nonSignerQuorumBitmapIndices: vec![],
             nonSignerPubkeys: vec![],
             quorumApks: vec![],
@@ -270,7 +262,6 @@ fn test_convert_non_signer_data_empty() {
             quorumApkIndices: vec![],
             totalStakeIndices: vec![],
             nonSignerStakeIndices: vec![],
-        },
     };
 
     let result = convert_non_signer_data(input);
@@ -296,8 +287,7 @@ fn test_convert_non_signer_data_with_values() {
     let test_x2 = U256::from(11111);
     let test_y2 = U256::from(22222);
 
-    let input = getNonSignerStakesAndSignatureReturn {
-        _0: crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
+    let input = crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
             nonSignerQuorumBitmapIndices: vec![1, 2, 3],
             nonSignerPubkeys: vec![
                 crate::bindings::blssigcheckoperatorstateretriever::BN254::G1Point {
@@ -326,7 +316,6 @@ fn test_convert_non_signer_data_with_values() {
             quorumApkIndices: vec![4, 5],
             totalStakeIndices: vec![6, 7, 8],
             nonSignerStakeIndices: vec![vec![9, 10], vec![11, 12, 13]],
-        },
     };
 
     let result = convert_non_signer_data(input);
@@ -365,8 +354,7 @@ fn test_convert_non_signer_data_preserves_data_integrity() {
     let original_total_indices = vec![600, 700, 800, 900];
     let original_non_signer_indices = vec![vec![1000, 1100], vec![1200]];
 
-    let input = getNonSignerStakesAndSignatureReturn {
-        _0: crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
+    let input = crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
             nonSignerQuorumBitmapIndices: original_indices.clone(),
             nonSignerPubkeys: vec![],
             quorumApks: vec![],
@@ -381,7 +369,6 @@ fn test_convert_non_signer_data_preserves_data_integrity() {
             quorumApkIndices: original_quorum_indices.clone(),
             totalStakeIndices: original_total_indices.clone(),
             nonSignerStakeIndices: original_non_signer_indices.clone(),
-        },
     };
 
     let result = convert_non_signer_data(input);
@@ -415,8 +402,7 @@ fn test_convert_non_signer_data_g1_points_conversion() {
         Y: U256::from(444),
     };
 
-    let input = getNonSignerStakesAndSignatureReturn {
-        _0: crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
+    let input = crate::bindings::blssigcheckoperatorstateretriever::IBLSSignatureCheckerTypes::NonSignerStakesAndSignature {
             nonSignerQuorumBitmapIndices: vec![],
             nonSignerPubkeys: vec![point1.clone()],
             quorumApks: vec![point1.clone(), point2.clone()],
@@ -428,7 +414,6 @@ fn test_convert_non_signer_data_g1_points_conversion() {
             quorumApkIndices: vec![],
             totalStakeIndices: vec![],
             nonSignerStakeIndices: vec![],
-        },
     };
 
     let result = convert_non_signer_data(input);

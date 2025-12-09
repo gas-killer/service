@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map_err(|_| "Invalid private key format")?;
     let provider = ProviderBuilder::new()
         .wallet(signer)
-        .on_http(http_rpc.parse().map_err(|_| "Invalid RPC URL")?);
+        .connect_http(http_rpc.parse().map_err(|_| "Invalid RPC URL")?);
 
     // Sanity checks: ensure target addresses have code deployed
     println!("🔍 Checking deployed code of contracts...");

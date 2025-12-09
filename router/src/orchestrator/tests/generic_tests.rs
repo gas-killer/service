@@ -2,7 +2,7 @@ use crate::creator::MockCreator;
 use crate::creator::core::Creator;
 use crate::executor::MockExecutor;
 use crate::orchestrator::generic::{Orchestrator, OrchestratorConfig};
-use crate::usecases::counter::creator::CounterTaskData;
+use crate::usecases::gas_killer::task_data::GasKillerTaskData;
 use crate::validator::MockValidator;
 use std::time::Duration;
 
@@ -22,7 +22,7 @@ async fn test_orchestrator_new() {
         threshold: 2,
     };
 
-    let task_creator = MockCreator::<CounterTaskData>::new();
+    let task_creator = MockCreator::<GasKillerTaskData>::new();
     let executor = MockExecutor::new();
     let validator = MockValidator::new_success(1);
 
@@ -37,9 +37,8 @@ async fn test_orchestrator_new() {
 
     // Test that we can access the components through public methods
     let metadata = orchestrator.task_creator().get_task_metadata();
-    assert!(!metadata.var1.is_empty());
-    assert!(!metadata.var2.is_empty());
-    assert!(!metadata.var3.is_empty());
+    assert_eq!(metadata.transition_index, 0);
+    assert_eq!(metadata.target_address, alloy::primitives::Address::ZERO);
 
     let executor_count = orchestrator.executor().get_execution_count();
     assert_eq!(executor_count, 0);
@@ -54,10 +53,13 @@ async fn test_orchestrator_task_creator_metadata() {
     let signer = signer::create_test_signer();
     let (contributors, g1_map) = contributor::create_test_contributors();
 
-    let metadata = CounterTaskData {
-        var1: "custom_key".to_string(),
-        var2: "custom_value".to_string(),
-        var3: "42".to_string(),
+    let metadata = GasKillerTaskData {
+        storage_updates: vec![1, 2, 3],
+        transition_index: 1,
+        target_address: alloy::primitives::Address::ZERO,
+        call_data: vec![4, 5, 6],
+        from_address: alloy::primitives::Address::ZERO,
+        value: alloy::primitives::U256::ZERO,
     };
 
     let config = OrchestratorConfig {
@@ -67,7 +69,7 @@ async fn test_orchestrator_task_creator_metadata() {
         threshold: 2,
     };
 
-    let task_creator = MockCreator::<CounterTaskData>::new().with_metadata(metadata.clone());
+    let task_creator = MockCreator::<GasKillerTaskData>::new().with_metadata(metadata.clone());
     let executor = MockExecutor::new();
     let validator = MockValidator::new_success(1);
 
@@ -98,7 +100,7 @@ async fn test_orchestrator_executor_access() {
         threshold: 2,
     };
 
-    let task_creator = MockCreator::<CounterTaskData>::new();
+    let task_creator = MockCreator::<GasKillerTaskData>::new();
     let executor = MockExecutor::new();
     let validator = MockValidator::new_success(1);
 
@@ -129,7 +131,7 @@ async fn test_orchestrator_validator_access() {
         threshold: 2,
     };
 
-    let task_creator = MockCreator::<CounterTaskData>::new();
+    let task_creator = MockCreator::<GasKillerTaskData>::new();
     let executor = MockExecutor::new();
     let validator = MockValidator::new_success(1);
 
@@ -160,7 +162,7 @@ async fn test_orchestrator_config_creation() {
         threshold: 3,
     };
 
-    let task_creator = MockCreator::<CounterTaskData>::new();
+    let task_creator = MockCreator::<GasKillerTaskData>::new();
     let executor = MockExecutor::new();
     let validator = MockValidator::new_success(1);
 
@@ -175,9 +177,8 @@ async fn test_orchestrator_config_creation() {
 
     // Verify we can access components and they work correctly
     let metadata = orchestrator.task_creator().get_task_metadata();
-    assert!(!metadata.var1.is_empty());
-    assert!(!metadata.var2.is_empty());
-    assert!(!metadata.var3.is_empty());
+    assert_eq!(metadata.transition_index, 0);
+    assert_eq!(metadata.target_address, alloy::primitives::Address::ZERO);
 
     let executor_count = orchestrator.executor().get_execution_count();
     assert_eq!(executor_count, 0);
@@ -200,7 +201,7 @@ async fn test_orchestrator_threshold_validation() {
         threshold: 3, // Equal to number of contributors
     };
 
-    let task_creator = MockCreator::<CounterTaskData>::new();
+    let task_creator = MockCreator::<GasKillerTaskData>::new();
     let executor = MockExecutor::new();
     let validator = MockValidator::new_success(1);
 
@@ -215,9 +216,8 @@ async fn test_orchestrator_threshold_validation() {
 
     // Test that components are accessible and working
     let metadata = orchestrator.task_creator().get_task_metadata();
-    assert!(!metadata.var1.is_empty());
-    assert!(!metadata.var2.is_empty());
-    assert!(!metadata.var3.is_empty());
+    assert_eq!(metadata.transition_index, 0);
+    assert_eq!(metadata.target_address, alloy::primitives::Address::ZERO);
 
     let executor_count = orchestrator.executor().get_execution_count();
     assert_eq!(executor_count, 0);
@@ -236,7 +236,7 @@ async fn test_orchestrator_component_interaction() {
         threshold: 2,
     };
 
-    let task_creator = MockCreator::<CounterTaskData>::new();
+    let task_creator = MockCreator::<GasKillerTaskData>::new();
     let executor = MockExecutor::new();
     let validator = MockValidator::new_success(1);
 
@@ -260,9 +260,8 @@ async fn test_orchestrator_component_interaction() {
     assert_eq!(payload, round.to_le_bytes().to_vec());
 
     let metadata = orchestrator.task_creator().get_task_metadata();
-    assert!(!metadata.var1.is_empty());
-    assert!(!metadata.var2.is_empty());
-    assert!(!metadata.var3.is_empty());
+    assert_eq!(metadata.transition_index, 0);
+    assert_eq!(metadata.target_address, alloy::primitives::Address::ZERO);
 
     // Test executor interaction
     let executor_ref = orchestrator.executor();

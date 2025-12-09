@@ -56,7 +56,7 @@ pub async fn create_listening_creator_with_server(
 /// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations
 pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
-    let view_only_provider = ProviderBuilder::new().on_http(Url::parse(&http_rpc).unwrap());
+    let view_only_provider = ProviderBuilder::new().connect_http(Url::parse(&http_rpc).unwrap());
 
     let deployment =
         AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
@@ -81,7 +81,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         Url::parse(&http_rpc).map_err(|e| anyhow::anyhow!("Invalid HTTP RPC URL: {}", e))?;
     let write_provider = ProviderBuilder::new()
         .wallet(ecdsa_signer)
-        .on_http(http_url);
+        .connect_http(http_url);
 
     let bls_apk_registry =
         BLSApkRegistry::new(bls_apk_registry_address, view_only_provider.clone());
@@ -109,6 +109,6 @@ pub async fn create_provider() -> anyhow::Result<ConnectHTTPDefaultProvider> {
     let signer = PrivateKeySigner::from_str(&private_key)?;
     let http_url =
         Url::parse(&http_rpc).map_err(|e| anyhow::anyhow!("Invalid HTTP RPC URL: {}", e))?;
-    let provider = ProviderBuilder::new().wallet(signer).on_http(http_url);
+    let provider = ProviderBuilder::new().wallet(signer).connect_http(http_url);
     Ok(provider)
 }
