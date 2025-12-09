@@ -1,7 +1,6 @@
 mod bindings;
 mod creator;
 mod executor;
-mod ingress;
 mod orchestrator;
 mod usecases;
 mod validator;
