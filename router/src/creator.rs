@@ -169,10 +169,11 @@ impl Creator for GasKillerCreator {
     }
 }
 
-/// Enriched task data that includes computed storage updates
+/// Enriched task data that includes computed storage updates and block height
 struct EnrichedTask {
     task: GasKillerTaskRequest,
     storage_updates: Vec<u8>,
+    block_height: u64,
 }
 
 /// Creator for the gas killer usecase that listens for external requests
@@ -231,7 +232,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
 
         // Compute storage updates using the shared validator
         debug!("Computing storage updates for task");
-        let storage_updates = self
+        let (storage_updates, block_height) = self
             .validator
             .compute_storage_updates_for_tx(
                 task.body.target_address,
@@ -250,16 +251,18 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         info!(
             storage_updates_len = storage_updates.len(),
             storage_updates_hash = %storage_hash_hex,
+            block_height = block_height,
             transition_index = task.body.transition_index,
             target_address = %task.body.target_address,
             target_function = %task.body.call_data.get(..4).map(hex::encode).unwrap_or_default(),
             "Creator computed storage updates"
         );
 
-        // Store enriched task with computed storage updates for metadata access
+        // Store enriched task with computed storage updates and block height for metadata access
         let enriched = EnrichedTask {
             task,
             storage_updates,
+            block_height,
         };
 
         if let Ok(mut current_task) = self.current_task.lock() {
@@ -278,7 +281,10 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             Ok(current_task) => {
                 if let Some(ref enriched) = *current_task {
                     // Extract metadata from the enriched task
-                    info!("Building task metadata from current task");
+                    info!(
+                        block_height = enriched.block_height,
+                        "Building task metadata from current task"
+                    );
 
                     return GasKillerTaskData {
                         storage_updates: enriched.storage_updates.clone(),
@@ -287,6 +293,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                         call_data: enriched.task.body.call_data.clone(),
                         from_address: enriched.task.body.from_address,
                         value: enriched.task.body.value,
+                        block_height: enriched.block_height,
                     };
                 }
                 warn!(
@@ -372,6 +379,7 @@ mod tests {
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
             from_address: Address::from([2u8; 20]),
             value: U256::from(1000),
+            block_height: 12345,
         };
 
         // Simulate the wire protocol serialization (what happens in production)
@@ -439,6 +447,7 @@ mod tests {
             call_data: task.body.call_data.clone(),
             from_address: task.body.from_address,
             value: task.body.value,
+            block_height: 12345,
         };
 
         assert_eq!(task_data.transition_index, 42);

@@ -22,6 +22,8 @@ pub struct GasKillerTaskData {
     pub from_address: Address,
     /// ETH value to send with the transaction
     pub value: U256,
+    /// Block height at which storage_updates were computed (for deterministic validation)
+    pub block_height: u64,
 }
 
 /// Maximum calldata size for a single EVM transaction (128 KB)
@@ -73,6 +75,7 @@ impl Default for GasKillerTaskData {
             call_data: vec![],
             from_address: Address::ZERO,
             value: U256::ZERO,
+            block_height: 0,
         }
     }
 }
@@ -107,6 +110,9 @@ impl Write for GasKillerTaskData {
         // Write call data as length-prefixed bytes
         (self.call_data.len() as u32).write(buf);
         buf.put_slice(&self.call_data);
+
+        // Write block height as u64
+        self.block_height.write(buf);
     }
 }
 
@@ -157,6 +163,9 @@ impl Read for GasKillerTaskData {
         let mut call_data = vec![0u8; call_data_len];
         buf.copy_to_slice(&mut call_data);
 
+        // Read block height (u64)
+        let block_height = u64::read(buf)?;
+
         Ok(Self {
             storage_updates,
             transition_index,
@@ -164,6 +173,7 @@ impl Read for GasKillerTaskData {
             call_data,
             from_address,
             value,
+            block_height,
         })
     }
 }
@@ -173,18 +183,19 @@ impl EncodeSize for GasKillerTaskData {
         // Calculate serialized size matching the Write implementation exactly
         // storage_updates: u32 length prefix (4 bytes) + raw bytes
         const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for storage_updates and call_data
-        const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index
+        const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index and block_height
         const ADDRESS_SIZE: usize = 20; // target_address and from_address (Ethereum addresses)
         const U256_SIZE: usize = 32; // value (U256)
 
         U32_SIZE
             + self.storage_updates.len()
-            + U64_SIZE
+            + U64_SIZE // transition_index
             + ADDRESS_SIZE
             + ADDRESS_SIZE
             + U256_SIZE
             + U32_SIZE
             + self.call_data.len()
+            + U64_SIZE // block_height
     }
 }
 
