@@ -3191,7 +3191,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3745,7 +3745,7 @@ dependencies = [
 [[package]]
 name = "foundry-cheatcodes-spec"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "alloy-sol-types",
  "foundry-macros",
@@ -3755,7 +3755,7 @@ dependencies = [
 [[package]]
 name = "foundry-common"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -3811,7 +3811,7 @@ dependencies = [
 [[package]]
 name = "foundry-common-fmt"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
@@ -3840,7 +3840,7 @@ dependencies = [
  "dyn-clone",
  "foundry-compilers-artifacts",
  "foundry-compilers-core",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "path-slash",
  "rayon",
  "semver 1.0.27",
@@ -3926,7 +3926,7 @@ dependencies = [
 [[package]]
 name = "foundry-config"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "alloy-chains",
  "alloy-primitives",
@@ -3965,7 +3965,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-abi"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -3978,7 +3978,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-core"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -4018,7 +4018,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-networks"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "alloy-chains",
  "alloy-evm",
@@ -4031,7 +4031,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-traces"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-json-abi",
@@ -4088,7 +4088,7 @@ dependencies = [
 [[package]]
 name = "foundry-linking"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "alloy-primitives",
  "foundry-compilers",
@@ -4100,7 +4100,7 @@ dependencies = [
 [[package]]
 name = "foundry-macros"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#fda2b7e02a6d10785c3a73350d702e190f78ebb2"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#a71243b02dc65538063b65f4485c2cd44ffe4246"
 dependencies = [
  "proc-macro-error2",
  "proc-macro2",
@@ -4218,7 +4218,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-rs"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer#6d4ee9e2435ab2dc2c091a08fae82fcc4477e069"
+source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer#da5bf3c096802c4692b71a72aab68d50ab90d008"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -4732,7 +4732,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core",
 ]
 
 [[package]]
@@ -7688,7 +7688,7 @@ dependencies = [
  "derive_more",
  "dunce",
  "inturn",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "itoa",
  "normalize-path",
  "once_map",
@@ -7699,7 +7699,7 @@ dependencies = [
  "solar-config",
  "solar-data-structures",
  "solar-macros",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tracing",
  "unicode-width",
 ]
@@ -7724,7 +7724,7 @@ dependencies = [
  "alloy-primitives",
  "bitflags",
  "bumpalo",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "memchr",
  "num-bigint",
  "num-rational",
@@ -7945,9 +7945,9 @@ dependencies = [
 
 [[package]]
 name = "svm-rs"
-version = "0.5.21"
+version = "0.5.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521753eee64c5f03163f631298ca9184ed4bc6e632d101c781075c5bb4ca755f"
+checksum = "909e8ff825120cd2b34ceb236ab72e2a7f74b1d3a86c247936c8ff7a80c5d408"
 dependencies = [
  "const-hex",
  "dirs",
@@ -7957,16 +7957,16 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "url",
  "zip",
 ]
 
 [[package]]
 name = "svm-rs-builds"
-version = "0.5.21"
+version = "0.5.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c643d522c474be805787a2813b89a179d71afec3540b18d79c5936d9c24bf3e5"
+checksum = "c1ebe77b200f965e8dbec3ef1d8337e974179ca1ecaa9fc28f67288d6b438159"
 dependencies = [
  "const-hex",
  "semver 1.0.27",
@@ -9076,7 +9076,7 @@ version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12342cb4d8e3b046f3d80effd474a7a02447231330ef77d71daa6fbc40681143"
 dependencies = [
- "windows-core 0.57.0",
+ "windows-core",
  "windows-targets 0.52.6",
 ]
 
@@ -9086,23 +9086,10 @@ version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2ed2439a290666cd67ecce2b0ffaad89c2a56b976b736e6ece670297897832d"
 dependencies = [
- "windows-implement 0.57.0",
- "windows-interface 0.57.0",
+ "windows-implement",
+ "windows-interface",
  "windows-result 0.1.2",
  "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.62.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
-dependencies = [
- "windows-implement 0.60.2",
- "windows-interface 0.59.3",
- "windows-link",
- "windows-result 0.4.1",
- "windows-strings",
 ]
 
 [[package]]
@@ -9117,32 +9104,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-implement"
-version = "0.60.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.111",
-]
-
-[[package]]
 name = "windows-interface"
 version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29bee4b38ea3cde66011baa44dba677c432a78593e202392d1e9070cf2a7fca7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.111",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.59.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
 dependencies = [
  "proc-macro2",
  "quote",
