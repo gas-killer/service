@@ -131,7 +131,7 @@ fi
 
 # Fix permissions on config/.nodes directory so deploy script can write
 echo "Fixing file permissions..."
-chmod -R 777 config/.nodes || chmod -R 777 config/.nodes
+sudo chmod -R 777 config/.nodes || chmod -R 777 config/.nodes
 
 # Give extra time for nodes to initialize
 echo "Waiting for nodes to initialize..."
