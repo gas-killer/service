@@ -228,10 +228,16 @@ impl GasKillerValidator {
             .input(alloy::primitives::Bytes::copy_from_slice(call_data).into());
 
         // Call gas-analyzer-rs to get storage updates and gas estimate
+        // Pass the block height to ensure trace is computed at the same block
         let (storage_updates, gas_estimate, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_gas_estimate(rpc_url, tx_request, gas_killer)
-                .await
-                .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+            call_to_encoded_state_updates_with_gas_estimate(
+                rpc_url,
+                tx_request,
+                gas_killer,
+                Some(actual_block_height),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",

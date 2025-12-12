@@ -28,7 +28,7 @@ commonware-cryptography = { workspace = true }
 dotenv = { workspace = true }
 
 # Gas analysis
-gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
+gas-analyzer-rs = { path = "../vendor/gas-killer-analyzer" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
