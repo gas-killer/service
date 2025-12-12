@@ -63,7 +63,7 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 
 # Gas analysis
-gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
+gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer", branch = "specify-block-height" }
 
 # Internal crates
 gas-killer-common = { workspace = true }

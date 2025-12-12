@@ -239,6 +239,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                 &task.body.call_data,
                 Some(task.body.from_address),
                 Some(task.body.value),
+                task.body.block_height,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
@@ -419,6 +420,7 @@ mod tests {
                 transition_index: 1,
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
+                block_height: None,
             },
         };
 
@@ -437,6 +439,7 @@ mod tests {
                 transition_index: 42,
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
+                block_height: None,
             },
         };
 

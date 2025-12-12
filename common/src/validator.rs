@@ -64,6 +64,25 @@ impl GasKillerValidator {
         &self.fork_rpc_url
     }
 
+    /// Returns the actual block number to use:
+    /// - If block_number is Some(n) and n > 0, returns n.
+    /// - If block_number is None or Some(0), fetches latest block number from the node.
+    pub async fn resolve_block_number(&self, block_number: Option<u64>) -> Result<u64> {
+        match block_number {
+            Some(n) if n > 0 => Ok(n),
+            _ => {
+                let rpc_url = Url::parse(&self.fork_rpc_url)
+                    .map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
+                let provider = ProviderBuilder::new().connect_http(rpc_url);
+                let current_block = provider
+                    .get_block_number()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?;
+                Ok(current_block)
+            }
+        }
+    }
+
     /// Computes storage updates for a transaction using gas-analyzer-rs.
     ///
     /// This is the public method for computing storage updates from transaction parameters.
@@ -75,6 +94,7 @@ impl GasKillerValidator {
         call_data: &[u8],
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
+        block_height: Option<u64>,
     ) -> Result<(Vec<u8>, u64)> {
         let result = Self::analyze_transaction(
             &self.fork_rpc_url,
@@ -82,7 +102,7 @@ impl GasKillerValidator {
             call_data,
             from_address,
             value,
-            None, // Router computes at latest block
+            block_height,
         )
         .await?;
         Ok((result.storage_updates, result.block_height))
@@ -194,14 +214,15 @@ impl GasKillerValidator {
         let rpc_url =
             Url::parse(rpc_url_str).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
 
-        // Query current block number if not provided
-        let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
         let actual_block_height = match block_height {
-            Some(height) => height,
-            None => provider
-                .get_block_number()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?,
+            Some(n) => n,
+            None => {
+                let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
+                provider
+                    .get_block_number()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?
+            }
         };
 
         debug!(
@@ -229,9 +250,14 @@ impl GasKillerValidator {
 
         // Call gas-analyzer-rs to get storage updates and gas estimate
         let (storage_updates, gas_estimate, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_gas_estimate(rpc_url, tx_request, gas_killer)
-                .await
-                .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+            call_to_encoded_state_updates_with_gas_estimate(
+                rpc_url,
+                tx_request,
+                gas_killer,
+                Some(actual_block_height),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",

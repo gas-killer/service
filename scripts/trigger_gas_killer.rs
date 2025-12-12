@@ -40,6 +40,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Decode hex inputs to bytes
         let call_data = hex::decode(call_data_hex.trim_start_matches("0x"))?;
 
+        // Get RPC URL for fetching block number if needed
+        let rpc_for_block = env::var("HTTP_RPC")
+            .or_else(|_| env::var("GAS_ANALYZER_RPC"))
+            .map_err(|_| "HTTP_RPC or GAS_ANALYZER_RPC required to fetch block number")?;
+        let rpc_url_for_block = Url::parse(&rpc_for_block)?;
+        let provider_for_block = ProviderBuilder::new().connect_http(rpc_url_for_block);
+
+        // Resolve block_height for deterministic execution
+        let block_height = resolve_block_height(&provider_for_block).await?;
+
         // Build request
         let body = GasKillerTaskRequestBody {
             target_address,
@@ -47,19 +57,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             transition_index,
             from_address,
             value,
+            block_height: Some(block_height),
         };
         GasKillerTaskRequest { body }
     };
 
     // Serialize via serde to match axum Json extractor expectations
+    let body_json = json!({
+        "target_address": format!("{:?}", request.body.target_address),
+        "call_data": request.body.call_data,
+        "transition_index": request.body.transition_index,
+        "from_address": format!("{:?}", request.body.from_address),
+        "value": format!("{}", request.body.value),
+        "block_height": request.body.block_height,
+    });
+
     let payload = json!({
-        "body": {
-            "target_address": format!("{:?}", request.body.target_address),
-            "call_data": request.body.call_data,
-            "transition_index": request.body.transition_index,
-            "from_address": format!("{:?}", request.body.from_address),
-            "value": format!("{}", request.body.value),
-        }
+        "body": body_json
     });
 
     // Debug summary of the request prior to sending
@@ -69,11 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         String::from("")
     };
     println!(
-        "Debug request summary:\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})",
+        "Debug request summary:\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  block_height: {:?}\n  call_data_len: {} (selector: 0x{})",
         request.body.target_address,
         request.body.from_address,
         request.body.transition_index,
         request.body.value,
+        request.body.block_height,
         request.body.call_data.len(),
         selector_hex
     );
@@ -126,12 +141,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     if !status.is_success() {
         eprintln!(
-            "Trigger failed with status {}. Reprinting request summary to aid debugging...\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})",
+            "Trigger failed with status {}. Reprinting request summary to aid debugging...\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  block_height: {:?}\n  call_data_len: {} (selector: 0x{})",
             status,
             request.body.target_address,
             request.body.from_address,
             request.body.transition_index,
             request.body.value,
+            request.body.block_height,
             request.body.call_data.len(),
             selector_hex
         );
@@ -184,6 +200,31 @@ fn env_var(name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync
     env::var(name).map_err(|_| format!("{} environment variable is required", name).into())
 }
 
+/// Resolves the block height to use for deterministic execution.
+///
+/// If GAS_KILLER_BLOCK_HEIGHT env var is set, uses that value.
+/// Otherwise, fetches the current block number from the provider.
+async fn resolve_block_height<P: Provider>(
+    provider: &P,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    if let Ok(block_str) = env::var("GAS_KILLER_BLOCK_HEIGHT") {
+        block_str
+            .parse()
+            .map_err(|e| format!("Invalid GAS_KILLER_BLOCK_HEIGHT: {}", e).into())
+    } else {
+        // Fetch current block number to ensure determinism
+        let current_block = provider
+            .get_block_number()
+            .await
+            .map_err(|e| format!("Failed to get current block number: {}", e))?;
+        println!(
+            "No GAS_KILLER_BLOCK_HEIGHT specified, using current block: {}",
+            current_block
+        );
+        Ok(current_block)
+    }
+}
+
 async fn build_mock_request()
 -> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
     // Encode a sample ArraySummation sum(uint256[]) call with indexes [0,1,2]
@@ -228,13 +269,17 @@ async fn build_mock_request()
 
     // Read current stateTransitionCount to compute correct transition_index
     let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
-    let array_contract = bindings::arraysummation::ArraySummation::new(target_address, provider);
+    let array_contract =
+        bindings::arraysummation::ArraySummation::new(target_address, provider.clone());
     let current_count = array_contract
         .stateTransitionCount()
         .call()
         .await
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
         .to::<u64>();
+
+    // Resolve block_height for deterministic execution
+    let block_height = resolve_block_height(&provider).await?;
 
     let body = GasKillerTaskRequestBody {
         target_address,
@@ -243,6 +288,7 @@ async fn build_mock_request()
         transition_index: current_count,
         from_address,
         value,
+        block_height: Some(block_height),
     };
 
     Ok(GasKillerTaskRequest { body })
