@@ -12,6 +12,8 @@ pub struct GasKillerTaskRequestBody {
     pub transition_index: u64,
     pub from_address: Address,
     pub value: U256,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_height: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
