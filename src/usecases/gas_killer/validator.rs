@@ -58,8 +58,19 @@ impl GasKillerValidator {
     ///
     /// This method forks the blockchain state and simulates the transaction
     /// to extract the storage updates that would result from execution.
+    /// Uses the block_height from task_data to ensure deterministic results matching the router.
     async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
-        debug!("Computing storage updates for task");
+        // Use block_height from task data if non-zero, otherwise fall back to latest
+        let block_height = if task_data.block_height > 0 {
+            Some(task_data.block_height)
+        } else {
+            None
+        };
+
+        debug!(
+            block_height = ?block_height,
+            "Computing storage updates for task"
+        );
 
         let analysis_result = self
             .gas_analyzer
@@ -68,13 +79,15 @@ impl GasKillerValidator {
                 &task_data.call_data,
                 Some(task_data.from_address),
                 Some(task_data.value),
+                block_height,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
 
         debug!(
-            "Computed storage updates: {} bytes",
-            analysis_result.storage_updates.len()
+            "Computed storage updates: {} bytes at block {}",
+            analysis_result.storage_updates.len(),
+            analysis_result.block_height
         );
         Ok(analysis_result.storage_updates)
     }
@@ -185,6 +198,7 @@ mod tests {
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01], // function selector + params
             from_address: Address::from([2u8; 20]),
             value: U256::from(1000),
+            block_height: 12345,
         }
     }
 

@@ -22,6 +22,8 @@ pub struct AnalysisResult {
     /// The gas estimate from gas-analyzer-rs
     #[allow(dead_code)]
     pub gas_estimate: u64,
+    /// The block height at which the analysis was performed
+    pub block_height: u64,
 }
 
 /// Service for analyzing transactions and computing storage updates
@@ -68,25 +70,39 @@ impl GasAnalyzer {
     /// * `call_data` - The transaction call data (function selector + parameters)
     /// * `from_address` - Optional sender address (uses default if None)
     /// * `value` - Optional ETH value to send (uses 0 if None)
+    /// * `block_height` - Optional block height to fork at (uses latest if None)
     ///
     /// # Returns
-    /// * `Result<AnalysisResult>` - Storage updates and gas estimate on success
+    /// * `Result<AnalysisResult>` - Storage updates, gas estimate, and block height on success
     pub async fn analyze_transaction(
         &self,
         contract_address: Address,
         call_data: &[u8],
         from_address: Option<Address>,
         value: Option<U256>,
+        block_height: Option<u64>,
     ) -> Result<AnalysisResult> {
+        use alloy::providers::{Provider, ProviderBuilder};
+
         let rpc_url =
             Url::parse(&self.rpc_url).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
 
+        // Query current block number if not provided
+        let provider = ProviderBuilder::new().on_http(rpc_url.clone());
+        let actual_block_height = match block_height {
+            Some(height) => height,
+            None => provider
+                .get_block_number()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?,
+        };
+
         debug!(
-            "Analyzing transaction: contract={:?}, call_data_len={}, from={:?}, value={:?}",
-            contract_address,
-            call_data.len(),
-            from_address,
-            value
+            block_number = actual_block_height,
+            contract = %contract_address,
+            call_data_len = call_data.len(),
+            pinned = block_height.is_some(),
+            "Analyzing transaction at block"
         );
 
         // Create transaction request for gas-analyzer-rs
@@ -99,8 +115,8 @@ impl GasAnalyzer {
             ..Default::default()
         };
 
-        // Initialize GasKiller instance (spawns new Anvil process)
-        let gk = GasKillerDefault::new(rpc_url.clone(), None)
+        // Initialize GasKiller instance, forking at the specified block
+        let gk = GasKillerDefault::new(rpc_url.clone(), Some(actual_block_height))
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize GasKiller: {}", e))?;
 
@@ -111,14 +127,16 @@ impl GasAnalyzer {
                 .map_err(|e| anyhow::anyhow!("Failed to compute state updates: {}", e))?;
 
         debug!(
-            "Analysis complete: storage_updates_len={}, gas_estimate={}",
+            "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
             encoded_updates.len(),
-            gas_estimate
+            gas_estimate,
+            actual_block_height
         );
 
         Ok(AnalysisResult {
             storage_updates: encoded_updates.to_vec(),
             gas_estimate,
+            block_height: actual_block_height,
         })
     }
 }

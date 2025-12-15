@@ -172,10 +172,11 @@ impl Creator for GasKillerCreator {
     }
 }
 
-/// Enriched task data that includes computed storage updates
+/// Enriched task data that includes computed storage updates and block height
 struct EnrichedTask {
     task: GasKillerTaskRequest,
     storage_updates: Vec<u8>,
+    block_height: u64,
 }
 
 /// Creator for the gas killer usecase that listens for external requests
@@ -241,19 +242,22 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                 &task.body.call_data,
                 Some(task.body.from_address),
                 Some(task.body.value),
+                None, // Router computes at latest block
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
 
         info!(
-            "Computed storage updates: {} bytes",
-            analysis_result.storage_updates.len()
+            storage_updates_len = analysis_result.storage_updates.len(),
+            block_height = analysis_result.block_height,
+            "Computed storage updates"
         );
 
-        // Store enriched task with computed storage updates for metadata access
+        // Store enriched task with computed storage updates and block height for metadata access
         let enriched = EnrichedTask {
             task,
             storage_updates: analysis_result.storage_updates,
+            block_height: analysis_result.block_height,
         };
 
         if let Ok(mut current_task) = self.current_task.lock() {
@@ -272,7 +276,10 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             && let Some(ref enriched) = *current_task
         {
             // Extract metadata from the enriched task
-            info!("Building task metadata from current task");
+            info!(
+                block_height = enriched.block_height,
+                "Building task metadata from current task"
+            );
 
             return GasKillerTaskData {
                 storage_updates: enriched.storage_updates.clone(),
@@ -281,6 +288,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                 call_data: enriched.task.body.call_data.clone(),
                 from_address: enriched.task.body.from_address,
                 value: enriched.task.body.value,
+                block_height: enriched.block_height,
             };
         }
 
@@ -361,6 +369,7 @@ mod tests {
             call_data: task.body.call_data.clone(),
             from_address: task.body.from_address,
             value: task.body.value,
+            block_height: 12345,
         };
 
         assert_eq!(task_data.transition_index, 42);
