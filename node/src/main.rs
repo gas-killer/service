@@ -157,17 +157,46 @@ fn main() {
                 orchestrator_config.address.as_deref().unwrap_or("127.0.0.1"),
                 orchestrator_config.port
             );
-            tracing::info!(target = %orchestrator_socket, "resolved orchestrator address");
+            tracing::info!(target = %orchestrator_socket, "resolving orchestrator address");
 
             use std::net::ToSocketAddrs;
-            let orchestrator_addr = match orchestrator_socket.to_socket_addrs() {
-                Ok(mut addrs) => addrs.next().expect("No addresses found for orchestrator"),
-                Err(_) => {
-                    // Fallback: parse as direct IP:PORT
-                    SocketAddr::from_str(&orchestrator_socket)
-                        .expect("Invalid orchestrator socket address")
+
+            // Retry DNS resolution with exponential backoff for Docker networking
+            let mut orchestrator_addr = None;
+            let max_retries = 10;
+            for attempt in 0..max_retries {
+                match orchestrator_socket.to_socket_addrs() {
+                    Ok(mut addrs) => {
+                        if let Some(addr) = addrs.next() {
+                            tracing::info!(addr = %addr, "resolved orchestrator address");
+                            orchestrator_addr = Some(addr);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            attempt = attempt + 1,
+                            max_retries = max_retries,
+                            "DNS resolution failed, retrying..."
+                        );
+                    }
                 }
-            };
+
+                if attempt < max_retries - 1 {
+                    let delay = std::time::Duration::from_millis(500 * (1 << attempt.min(4)));
+                    std::thread::sleep(delay);
+                }
+            }
+
+            let orchestrator_addr = orchestrator_addr.unwrap_or_else(|| {
+                // Final fallback: try to parse as direct IP:PORT
+                SocketAddr::from_str(&orchestrator_socket)
+                    .expect(&format!(
+                        "Failed to resolve orchestrator address '{}' after {} retries",
+                        orchestrator_socket, max_retries
+                    ))
+            });
             recipients.push((orchestrator_pub_key.clone(), orchestrator_addr));
         }
 
