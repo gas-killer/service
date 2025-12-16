@@ -6,7 +6,6 @@
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{Bn254, PublicKey, get_signer};
 use commonware_avs_node::contributor::{AggregationInput, Contribute, Contributor};
-use commonware_cryptography::Signer;
 use commonware_p2p::Manager;
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_runtime::{Metrics, Runner, Spawner, tokio};
@@ -220,34 +219,13 @@ fn main() {
             panic!("No operators found");
         }
 
-        // Get my own public key for debugging
-        let my_pub_key = signer.public_key();
-        let mut my_contributor_index: Option<usize> = None;
-
-        for (idx, operator) in operators.iter().enumerate() {
+        for operator in operators {
             let g2_key = operator.pub_keys.as_ref().unwrap().g2_pub_key.clone();
             let g1_key = operator.pub_keys.as_ref().unwrap().g1_pub_key.clone();
+            tracing::info!(key = ?g2_key, "registered contributor");
 
-            // Check if this is our key
-            let is_me = g2_key == my_pub_key;
-            if is_me {
-                my_contributor_index = Some(idx);
-            }
-
-            tracing::info!(
-                index = idx,
-                key = ?g2_key,
-                is_me = is_me,
-                "registered contributor"
-            );
             contributors.push(g2_key.clone());
             g1_map.insert(g2_key, g1_key);
-        }
-
-        // Log our own contributor index
-        match my_contributor_index {
-            Some(idx) => tracing::info!(index = idx, "Found my position in contributors list"),
-            None => tracing::error!(my_key = ?my_pub_key, "WARNING: My public key not found in contributors list! Signatures will fail."),
         }
 
         // Calculate threshold (e.g., 2/3 + 1)
