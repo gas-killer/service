@@ -180,7 +180,7 @@ fn main() {
         for operator in operators {
             let verifier = operator.pub_keys.as_ref().unwrap().g2_pub_key.clone();
             let verifier_g1 = operator.pub_keys.as_ref().unwrap().g1_pub_key.clone();
-
+            tracing::info!(key = ?verifier, "registered contributor",);
             contributors.push(verifier.clone());
             contributors_map.insert(verifier, verifier_g1);
         }

@@ -244,6 +244,12 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             .await
             .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
 
+        // Verify block_height matches what was requested
+        debug_assert_eq!(
+            block_height, task.body.block_height,
+            "Block height mismatch"
+        );
+
         // Debug: Log hash of full storage_updates to detect differences vs validators
         let mut storage_hasher = Sha256::new();
         storage_hasher.update(&storage_updates);
@@ -417,7 +423,7 @@ mod tests {
                 transition_index: 1,
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
-                block_height: None,
+                block_height: 12345,
             },
         };
 
@@ -436,7 +442,7 @@ mod tests {
                 transition_index: 42,
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
-                block_height: None,
+                block_height: 12345,
             },
         };
 
@@ -447,7 +453,7 @@ mod tests {
             call_data: task.body.call_data.clone(),
             from_address: task.body.from_address,
             value: task.body.value,
-            block_height: 12345,
+            block_height: task.body.block_height,
         };
 
         assert_eq!(task_data.transition_index, 42);
