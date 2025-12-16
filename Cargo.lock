@@ -3746,7 +3746,7 @@ dependencies = [
 [[package]]
 name = "foundry-cheatcodes-spec"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "alloy-sol-types",
  "foundry-macros",
@@ -3756,7 +3756,7 @@ dependencies = [
 [[package]]
 name = "foundry-common"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -3812,7 +3812,7 @@ dependencies = [
 [[package]]
 name = "foundry-common-fmt"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
@@ -3927,7 +3927,7 @@ dependencies = [
 [[package]]
 name = "foundry-config"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "alloy-chains",
  "alloy-primitives",
@@ -3966,7 +3966,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-abi"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -3979,7 +3979,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-core"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -4020,7 +4020,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-networks"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "alloy-chains",
  "alloy-evm",
@@ -4033,7 +4033,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-traces"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-json-abi",
@@ -4090,7 +4090,7 @@ dependencies = [
 [[package]]
 name = "foundry-linking"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "alloy-primitives",
  "foundry-compilers",
@@ -4102,7 +4102,7 @@ dependencies = [
 [[package]]
 name = "foundry-macros"
 version = "1.5.0"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#1e0184b55ddfd7753035a542d31f84978dbff669"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#8c968d696303dfb0e33e74dcd07db55cc461a912"
 dependencies = [
  "proc-macro-error2",
  "proc-macro2",
@@ -4220,7 +4220,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-rs"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer?branch=specify-block-height#0aa8ad3b433fb92f46892710df9b1cd4d59a9a47"
+source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer?branch=specify-block-height#7f247aa65113cb0df8b85157eb4f6526b35781c8"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -7769,9 +7769,9 @@ dependencies = [
 
 [[package]]
 name = "soldeer-core"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d3cc77f4a8e3c18148e5907b1fbd5de20c05669a3f0497fe37e1ef72b887fd2"
+checksum = "295509f269318c6e3f11ea3bd09b29c974d00403bdf5291577c0bc6adaa9c2fd"
 dependencies = [
  "bon",
  "chrono",
