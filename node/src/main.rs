@@ -223,17 +223,17 @@ fn main() {
         // Get my own public key for debugging
         let my_pub_key = signer.public_key();
         let mut my_contributor_index: Option<usize> = None;
-        
+
         for (idx, operator) in operators.iter().enumerate() {
             let g2_key = operator.pub_keys.as_ref().unwrap().g2_pub_key.clone();
             let g1_key = operator.pub_keys.as_ref().unwrap().g1_pub_key.clone();
-            
+
             // Check if this is our key
             let is_me = g2_key == my_pub_key;
             if is_me {
                 my_contributor_index = Some(idx);
             }
-            
+
             tracing::info!(
                 index = idx,
                 key = ?g2_key,
@@ -243,7 +243,7 @@ fn main() {
             contributors.push(g2_key.clone());
             g1_map.insert(g2_key, g1_key);
         }
-        
+
         // Log our own contributor index
         match my_contributor_index {
             Some(idx) => tracing::info!(index = idx, "Found my position in contributors list"),

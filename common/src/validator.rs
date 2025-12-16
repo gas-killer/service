@@ -234,7 +234,9 @@ impl GasKillerValidator {
         );
 
         // Create gas killer analyzer instance, forking at the specified block
-        let gas_killer = GasKillerDefault::new(rpc_url.clone(), Some(actual_block_height))
+        let gas_killer = GasKillerDefault::builder(rpc_url.clone())
+            .block_number(actual_block_height)
+            .build()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create gas analyzer: {}", e))?;
 
@@ -250,14 +252,9 @@ impl GasKillerValidator {
 
         // Call gas-analyzer-rs to get storage updates and gas estimate
         let (storage_updates, gas_estimate, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_gas_estimate(
-                rpc_url,
-                tx_request,
-                gas_killer,
-                Some(actual_block_height),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+            call_to_encoded_state_updates_with_gas_estimate(tx_request, gas_killer)
+                .await
+                .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
