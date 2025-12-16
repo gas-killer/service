@@ -41,9 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let call_data = hex::decode(call_data_hex.trim_start_matches("0x"))?;
 
         // Get RPC URL for fetching block number if needed
-        let rpc_for_block = env::var("HTTP_RPC")
-            .or_else(|_| env::var("GAS_ANALYZER_RPC"))
-            .map_err(|_| "HTTP_RPC or GAS_ANALYZER_RPC required to fetch block number")?;
+        let rpc_for_block =
+            env::var("HTTP_RPC").map_err(|_| "HTTP_RPC required to fetch block number")?;
         let rpc_url_for_block = Url::parse(&rpc_for_block)?;
         let provider_for_block = ProviderBuilder::new().connect_http(rpc_url_for_block);
 
@@ -94,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     // Prepare provider and contract for verification of currentSum
-    let rpc_for_read = env::var("HTTP_RPC").or_else(|_| env::var("GAS_ANALYZER_RPC"))?;
+    let rpc_for_read = env::var("HTTP_RPC")?;
     let rpc_url_for_read = Url::parse(&rpc_for_read)?;
     let provider = ProviderBuilder::new().connect_http(rpc_url_for_read);
     let array_contract = bindings::arraysummation::ArraySummation::new(
@@ -247,11 +246,8 @@ async fn build_mock_request()
     let value = U256::from(0);
 
     // Derive RPC URL to read current stateTransitionCount
-    let rpc = env::var("GAS_ANALYZER_RPC")
-        .or_else(|_| env::var("HTTP_RPC"))
-        .map_err(
-            |_| "GAS_ANALYZER_RPC or HTTP_RPC environment variable is required for mock mode",
-        )?;
+    let rpc = env::var("HTTP_RPC")
+        .map_err(|_| "HTTP_RPC environment variable is required for mock mode")?;
     let rpc_url = Url::parse(&rpc)?;
 
     // Read current stateTransitionCount to compute correct transition_index
