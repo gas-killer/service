@@ -223,6 +223,7 @@ fn main() {
             let g2_key = operator.pub_keys.as_ref().unwrap().g2_pub_key.clone();
             let g1_key = operator.pub_keys.as_ref().unwrap().g1_pub_key.clone();
             tracing::info!(key = ?g2_key, "registered contributor");
+
             contributors.push(g2_key.clone());
             g1_map.insert(g2_key, g1_key);
         }

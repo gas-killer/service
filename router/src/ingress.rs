@@ -12,6 +12,7 @@ pub struct GasKillerTaskRequestBody {
     pub transition_index: u64,
     pub from_address: Address,
     pub value: U256,
+    pub block_height: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -22,7 +23,7 @@ pub struct GasKillerTaskRequest {
 impl GasKillerTaskRequest {
     pub fn is_valid(&self) -> bool {
         let body = &self.body;
-        if body.target_address.is_zero() || body.call_data.is_empty() {
+        if body.target_address.is_zero() || body.call_data.is_empty() || body.block_height == 0 {
             return false;
         }
         true

@@ -1,5 +1,4 @@
 use alloy::primitives::U256;
-use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolValue;
 use anyhow::Result;
 use commonware_codec::Read;
@@ -24,6 +23,8 @@ pub struct AnalysisResult {
     /// The gas estimate from gas-analyzer-rs
     #[allow(dead_code)]
     pub gas_estimate: u64,
+    /// The block height at which the analysis was performed
+    pub block_height: u64,
 }
 
 /// Validator implementation for the gas killer use case
@@ -66,22 +67,25 @@ impl GasKillerValidator {
     ///
     /// This is the public method for computing storage updates from transaction parameters.
     /// Used by the creator to compute storage updates before creating tasks.
+    /// Returns both the storage updates and the block height at which they were computed.
     pub async fn compute_storage_updates_for_tx(
         &self,
         contract_address: alloy::primitives::Address,
         call_data: &[u8],
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
-    ) -> Result<Vec<u8>> {
+        block_height: u64,
+    ) -> Result<(Vec<u8>, u64)> {
         let result = Self::analyze_transaction(
             &self.fork_rpc_url,
             contract_address,
             call_data,
             from_address,
             value,
+            block_height,
         )
         .await?;
-        Ok(result.storage_updates)
+        Ok((result.storage_updates, result.block_height))
     }
 
     /// Validates the message format and decodes the aggregation
@@ -177,32 +181,29 @@ impl GasKillerValidator {
     /// 3. Extracting storage changes and gas information
     ///
     /// Takes an explicit RPC URL parameter for flexibility.
+    /// Forks at the specified block for deterministic results.
     pub async fn analyze_transaction(
         rpc_url_str: &str,
         contract_address: alloy::primitives::Address,
         call_data: &[u8],
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
+        block_height: u64,
     ) -> Result<AnalysisResult> {
         let rpc_url =
             Url::parse(rpc_url_str).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
 
-        // Query current block number before forking
-        let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
-        let block_number = provider
-            .get_block_number()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?;
-
         debug!(
-            block_number = block_number,
+            block_number = block_height,
             contract = %contract_address,
             call_data_len = call_data.len(),
             "Analyzing transaction at block"
         );
 
-        // Create gas killer analyzer instance (forks blockchain at latest block)
-        let gas_killer = GasKillerDefault::new(rpc_url.clone(), None)
+        // Create gas killer analyzer instance, forking at the specified block
+        let gas_killer = GasKillerDefault::builder(rpc_url.clone())
+            .block_number(block_height)
+            .build()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create gas analyzer: {}", e))?;
 
@@ -218,30 +219,38 @@ impl GasKillerValidator {
 
         // Call gas-analyzer-rs to get storage updates and gas estimate
         let (storage_updates, gas_estimate, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_gas_estimate(rpc_url, tx_request, gas_killer)
+            call_to_encoded_state_updates_with_gas_estimate(tx_request, gas_killer)
                 .await
                 .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
 
         debug!(
-            "Analysis complete: storage_updates_len={}, gas_estimate={}",
+            "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
             storage_updates.len(),
-            gas_estimate
+            gas_estimate,
+            block_height
         );
 
         Ok(AnalysisResult {
             storage_updates: storage_updates.to_vec(),
             gas_estimate,
+            block_height,
         })
     }
 
     /// Computes storage updates by running local analysis using this validator's RPC URL
+    /// Uses the block_height from task_data to ensure deterministic results matching the router
     async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
+        if task_data.block_height == 0 {
+            return Err(anyhow::anyhow!("block_height is required for validation"));
+        }
+
         let result = Self::analyze_transaction(
             &self.fork_rpc_url,
             task_data.target_address,
             &task_data.call_data,
             Some(task_data.from_address),
             Some(task_data.value),
+            task_data.block_height,
         )
         .await?;
         Ok(result.storage_updates)
@@ -293,6 +302,7 @@ mod tests {
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
             from_address: Address::from([2u8; 20]),
             value: U256::from(1000),
+            block_height: 12345,
         }
     }
 
