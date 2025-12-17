@@ -1,7 +1,11 @@
 [package]
 name = "avs-scripts"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+
+[lib]
+name = "bindings"
+path = "bindings/mod.rs"
 
 [[bin]]
 name = "deploy_array_summation"
@@ -11,18 +15,18 @@ path = "deploy_array_summation.rs"
 name = "trigger_gas_killer"
 path = "trigger_gas_killer.rs"
 
-[lib]
-name = "bindings"
-path = "bindings/mod.rs"
-
 [dependencies]
 alloy = { workspace = true }
-tokio = { workspace = true }
-commonware-eigenlayer = { workspace = true }
-url = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+commonware-avs-core = { workspace = true }
 dotenv = { workspace = true }
+gas-analyzer-rs = { workspace = true }
+gas-killer-common = { workspace = true }
+gas-killer-router = { path = "../router" }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-gas-killer-router = { path = ".." }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
-gas-analyzer-rs = { path = "../vendor/gas-killer-analyzer" }
+tokio = { workspace = true }
+url = { workspace = true }

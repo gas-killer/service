@@ -1,10 +1,8 @@
-use alloy::primitives::{hex, Address, U256};
+use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolCall;
 use bindings::arraysummation::ArraySummation::sumCall;
-use gas_killer_router::usecases::gas_killer::ingress::{
-    GasKillerTaskRequest, GasKillerTaskRequestBody,
-};
+use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
 use serde_json::json;
 use std::env;
 use std::fs;
@@ -38,39 +36,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .ok()
             .unwrap_or_else(|| "0".to_string())
             .parse()?;
-        let storage_updates_hex =
-            env::var("GAS_KILLER_STORAGE_UPDATES").unwrap_or_else(|_| "0x".to_string());
 
         // Decode hex inputs to bytes
         let call_data = hex::decode(call_data_hex.trim_start_matches("0x"))?;
-        let storage_updates = if storage_updates_hex.len() > 2 {
-            hex::decode(storage_updates_hex.trim_start_matches("0x"))?
-        } else {
-            Vec::new()
-        };
+
+        // Get RPC URL for fetching block number if needed
+        let rpc_for_block =
+            env::var("HTTP_RPC").map_err(|_| "HTTP_RPC required to fetch block number")?;
+        let rpc_url_for_block = Url::parse(&rpc_for_block)?;
+        let provider_for_block = ProviderBuilder::new().connect_http(rpc_url_for_block);
+
+        // Resolve block_height for deterministic execution
+        let block_height = resolve_block_height(&provider_for_block).await?;
 
         // Build request
         let body = GasKillerTaskRequestBody {
             target_address,
             call_data,
-            storage_updates,
             transition_index,
             from_address,
             value,
+            block_height,
         };
         GasKillerTaskRequest { body }
     };
 
     // Serialize via serde to match axum Json extractor expectations
+    let body_json = json!({
+        "target_address": format!("{:?}", request.body.target_address),
+        "call_data": request.body.call_data,
+        "transition_index": request.body.transition_index,
+        "from_address": format!("{:?}", request.body.from_address),
+        "value": format!("{}", request.body.value),
+        "block_height": request.body.block_height,
+    });
+
     let payload = json!({
-        "body": {
-            "target_address": format!("{:?}", request.body.target_address),
-            "call_data": request.body.call_data,
-            "storage_updates": request.body.storage_updates,
-            "transition_index": request.body.transition_index,
-            "from_address": format!("{:?}", request.body.from_address),
-            "value": format!("{}", request.body.value),
-        }
+        "body": body_json
     });
 
     // Debug summary of the request prior to sending
@@ -80,20 +82,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         String::from("")
     };
     println!(
-        "Debug request summary:\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})\n  storage_updates_len: {}",
+        "Debug request summary:\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  block_height: {}\n  call_data_len: {} (selector: 0x{})",
         request.body.target_address,
         request.body.from_address,
         request.body.transition_index,
         request.body.value,
+        request.body.block_height,
         request.body.call_data.len(),
-        selector_hex,
-        request.body.storage_updates.len()
+        selector_hex
     );
 
     // Prepare provider and contract for verification of currentSum
-    let rpc_for_read = env::var("HTTP_RPC").or_else(|_| env::var("GAS_ANALYZER_RPC"))?;
+    let rpc_for_read = env::var("HTTP_RPC")?;
     let rpc_url_for_read = Url::parse(&rpc_for_read)?;
-    let provider = ProviderBuilder::new().on_http(rpc_url_for_read);
+    let provider = ProviderBuilder::new().connect_http(rpc_url_for_read);
     let array_contract = bindings::arraysummation::ArraySummation::new(
         request.body.target_address,
         provider.clone(),
@@ -123,7 +125,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .call()
         .await
         .map_err(|e| format!("Failed to read currentSum before trigger: {}", e))?
-        ._0
         .to::<u64>();
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
@@ -139,20 +140,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     if !status.is_success() {
         eprintln!(
-            "Trigger failed with status {}. Reprinting request summary to aid debugging...\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  call_data_len: {} (selector: 0x{})\n  storage_updates_len: {}",
+            "Trigger failed with status {}. Reprinting request summary to aid debugging...\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  block_height: {}\n  call_data_len: {} (selector: 0x{})",
             status,
             request.body.target_address,
             request.body.from_address,
             request.body.transition_index,
             request.body.value,
+            request.body.block_height,
             request.body.call_data.len(),
-            selector_hex,
-            request.body.storage_updates.len()
+            selector_hex
         );
         Err(format!("Trigger failed with status {}", status).into())
     } else {
         // Poll currentSum until it changes or timeout
-        use tokio::time::{sleep, Duration, Instant};
+        use tokio::time::{Duration, Instant, sleep};
         let max_wait_time = Duration::from_secs(150);
         let check_interval = Duration::from_secs(10);
         let start_time = Instant::now();
@@ -163,7 +164,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .call()
                 .await
                 .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
-                ._0
                 .to::<u64>();
 
             println!(
@@ -199,8 +199,20 @@ fn env_var(name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync
     env::var(name).map_err(|_| format!("{} environment variable is required", name).into())
 }
 
-async fn build_mock_request(
-) -> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
+/// Resolves the block height to use for deterministic execution.
+async fn resolve_block_height<P: Provider>(
+    provider: &P,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let current_block = provider
+        .get_block_number()
+        .await
+        .map_err(|e| format!("Failed to get current block number: {}", e))?;
+    println!("Using current block: {}", current_block);
+    Ok(current_block)
+}
+
+async fn build_mock_request()
+-> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
     // Encode a sample ArraySummation sum(uint256[]) call with indexes [0,1,2]
     let indexes = vec![U256::from(0), U256::from(1), U256::from(2)];
     let call = sumCall { indexes };
@@ -233,54 +245,33 @@ async fn build_mock_request(
     let from_address: Address = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse()?;
     let value = U256::from(0);
 
-    // Derive RPC URL for analyzer; prefer GAS_ANALYZER_RPC or fallback to HTTP_RPC
-    let rpc = env::var("GAS_ANALYZER_RPC")
-        .or_else(|_| env::var("HTTP_RPC"))
-        .map_err(|_| {
-            "GAS_ANALYZER_RPC or HTTP_RPC environment variable is required for mock mode"
-        })?;
+    // Derive RPC URL to read current stateTransitionCount
+    let rpc = env::var("HTTP_RPC")
+        .map_err(|_| "HTTP_RPC environment variable is required for mock mode")?;
     let rpc_url = Url::parse(&rpc)?;
 
-    // Build transaction request and compute real storage_updates with gas-analyzer-rs
-    use alloy::rpc::types::eth::TransactionRequest as AlloyTransactionRequest;
-    use gas_analyzer_rs::{call_to_encoded_state_updates_with_gas_estimate, gk::GasKillerDefault};
-
-    let tx_request = AlloyTransactionRequest {
-        from: Some(from_address),
-        to: Some(target_address.into()),
-        input: alloy::rpc::types::TransactionInput::new(alloy::primitives::Bytes::from(
-            call_data.clone(),
-        )),
-        value: Some(value),
-        gas: None,
-        ..Default::default()
-    };
-
-    let gk = GasKillerDefault::new(rpc_url.clone(), None).await?;
-    let (encoded_updates, _gas_estimate, _) =
-        call_to_encoded_state_updates_with_gas_estimate(rpc_url.clone(), tx_request, gk).await?;
-
-    let storage_updates = encoded_updates.to_vec();
-
     // Read current stateTransitionCount to compute correct transition_index
-    let provider = ProviderBuilder::new().on_http(rpc_url.clone());
-    let array_contract = bindings::arraysummation::ArraySummation::new(target_address, provider);
+    let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
+    let array_contract =
+        bindings::arraysummation::ArraySummation::new(target_address, provider.clone());
     let current_count = array_contract
         .stateTransitionCount()
         .call()
         .await
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
-        .count
         .to::<u64>();
+
+    // Resolve block_height for deterministic execution
+    let block_height = resolve_block_height(&provider).await?;
 
     let body = GasKillerTaskRequestBody {
         target_address,
         call_data,
-        storage_updates,
         // transitionIndex must equal the current stateTransitionCount() at call time
         transition_index: current_count,
         from_address,
         value,
+        block_height,
     };
 
     Ok(GasKillerTaskRequest { body })

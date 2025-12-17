@@ -42,7 +42,6 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            vendor/gas-killer-analyzer/target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
@@ -67,7 +66,7 @@ jobs:
           fi
 
       - name: Run test
-        run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log
+        run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log; exit ${PIPESTATUS[0]}
 
       - name: Show router logs
         if: always()

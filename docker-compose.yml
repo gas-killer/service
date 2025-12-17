@@ -6,6 +6,13 @@ services:
       - .env
     ports:
       - "8545:8545"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        anvil --fork-url $FORK_URL --host 0.0.0.0 --port 8545 --code-size-limit 65536 \
+          --timeout 120000 \
+          --retries 5 \
+          --compute-units-per-second 300
 
   eigenlayer:
     platform: linux/amd64
@@ -35,8 +42,9 @@ services:
     restart: unless-stopped
 
   node-1:
-    image: ghcr.io/breadchaincoop/gas-killer-node:dev
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: node/Dockerfile
     platform: linux/amd64
     depends_on:
       eigenlayer:
@@ -67,8 +75,9 @@ services:
     restart: unless-stopped
 
   node-2:
-    image: ghcr.io/breadchaincoop/gas-killer-node:dev
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: node/Dockerfile
     platform: linux/amd64
     depends_on:
       eigenlayer:
@@ -99,8 +108,9 @@ services:
     restart: unless-stopped
 
   node-3:
-    image: ghcr.io/breadchaincoop/gas-killer-node:dev
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: node/Dockerfile
     platform: linux/amd64
     depends_on:
       eigenlayer:
@@ -133,7 +143,7 @@ services:
   router:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: router/Dockerfile
     platform: linux/amd64
     depends_on:
       eigenlayer:

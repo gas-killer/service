@@ -1,0 +1,87 @@
+[package]
+name = "gas-killer-router"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "gas-killer-router"
+path = "src/main.rs"
+
+[dependencies]
+
+# Ethereum / Alloy
+alloy = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-provider = { workspace = true }
+alloy-signer = { workspace = true }
+alloy-signer-local = { workspace = true }
+
+# Other utilities
+anyhow = { workspace = true }
+
+# Cryptography
+ark-bn254 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+ark-serialize = { workspace = true }
+
+# Async / Runtime
+async-trait = { workspace = true }
+
+# Web / HTTP
+axum = { workspace = true }
+bn254 = { workspace = true }
+
+# Serialization
+bytes = { workspace = true }
+
+# CLI / Config
+clap = { workspace = true }
+# Upstream AVS crates
+commonware-avs-core = { workspace = true }
+commonware-avs-router = { workspace = true }
+commonware-avs-usecases = { workspace = true }
+
+# Commonware ecosystem
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+dotenv = { workspace = true }
+
+# EigenLayer SDK
+eigen-client-avsregistry = { workspace = true }
+eigen-common = { workspace = true }
+eigen-crypto-bls = { workspace = true }
+eigen-crypto-bn254 = { workspace = true }
+eigen-logging = { workspace = true }
+eigen-services-operatorsinfo = { workspace = true }
+eigen-utils = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+
+# Gas analysis
+gas-analyzer-rs = { workspace = true }
+
+# Internal crates
+gas-killer-common = { workspace = true }
+governor = { workspace = true }
+hex = { workspace = true }
+num-bigint = { workspace = true }
+prometheus-client = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.13.5"

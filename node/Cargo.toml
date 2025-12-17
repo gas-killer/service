@@ -1,0 +1,50 @@
+[package]
+name = "gas-killer-node"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "gas-killer-node"
+path = "src/main.rs"
+
+[dependencies]
+
+# Ethereum / Alloy
+alloy = { workspace = true }
+
+# Other utilities
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+bytes = { workspace = true }
+
+# CLI / Config
+clap = { workspace = true }
+# Upstream AVS crates
+commonware-avs-core = { workspace = true }
+commonware-avs-node = { workspace = true }
+commonware-avs-usecases = { workspace = true }
+
+# Commonware ecosystem
+commonware-codec = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+dotenv = { workspace = true }
+
+# Logging
+eigen-logging = { workspace = true }
+
+# Async / Runtime
+futures = { workspace = true }
+
+# Internal crates
+gas-killer-common = { workspace = true }
+governor = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

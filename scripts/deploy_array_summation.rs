@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map_err(|_| "Invalid private key format")?;
     let provider = ProviderBuilder::new()
         .wallet(signer)
-        .on_http(http_rpc.parse().map_err(|_| "Invalid RPC URL")?);
+        .connect_http(http_rpc.parse().map_err(|_| "Invalid RPC URL")?);
 
     // Sanity checks: ensure target addresses have code deployed
     println!("🔍 Checking deployed code of contracts...");
@@ -144,8 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .getDeployedContractCount()
             .call()
             .await
-            .map_err(|e| format!("Failed to get deployed contract count: {}", e))?
-            .count;
+            .map_err(|e| format!("Failed to get deployed contract count: {}", e))?;
 
         println!(
             "📊 Contract count before deployment: {}",
@@ -189,8 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .deployedContracts(contract_count_before)
             .call()
             .await
-            .map_err(|e| format!("Failed to get deployed contract address: {}", e))?
-            ._0;
+            .map_err(|e| format!("Failed to get deployed contract address: {}", e))?;
 
         if addr == Address::ZERO {
             return Err("Deployed contract address is zero - deployment may have failed".into());

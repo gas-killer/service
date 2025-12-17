@@ -8,6 +8,7 @@
     dead_code
 )]
 pub mod arraysummation;
+
 #[allow(
     non_camel_case_types,
     non_snake_case,
