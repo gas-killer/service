@@ -6,6 +6,13 @@ services:
       - .env
     ports:
       - "8545:8545"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        anvil --fork-url $FORK_URL --host 0.0.0.0 --port 8545 --code-size-limit 65536 \
+          --timeout 120000 \
+          --retries 5 \
+          --compute-units-per-second 300
 
   eigenlayer:
     platform: linux/amd64
