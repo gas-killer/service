@@ -1,6 +1,6 @@
 // Re-export common bindings from commonware-avs-router
 pub use commonware_avs_router::bindings::{
-    blsapkregistry, blssigcheckoperatorstateretriever, ReadOnlyProvider, WalletProvider,
+    ReadOnlyProvider, WalletProvider, blsapkregistry, blssigcheckoperatorstateretriever,
 };
 
 // Gas Killer specific bindings
