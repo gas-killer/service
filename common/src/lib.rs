@@ -4,7 +4,6 @@ pub mod task_data;
 pub mod validator;
 
 // Re-export commonly used types
-pub use bindings::{ReadOnlyProvider, WalletProvider};
 pub use config::{
     KeyConfig, OrchestratorConfig, get_operator_states, load_key_from_file,
     load_orchestrator_config,
@@ -14,3 +13,6 @@ pub use validator::GasKillerValidator;
 
 // Re-export QuorumInfo for convenience
 pub use commonware_avs_usecases::QuorumInfo;
+
+// Re-export provider types for convenience
+pub use commonware_avs_bindings::{ReadOnlyProvider, WalletProvider};

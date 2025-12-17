@@ -1,4 +1,4 @@
-use gas_killer_common::bindings::WalletProvider;
+use gas_killer_common::WalletProvider;
 use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
 use commonware_avs_router::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorStateRetriever::getNonSignerStakesAndSignatureReturn;
 use commonware_avs_router::executor::bls::BlsSignatureVerificationHandler;

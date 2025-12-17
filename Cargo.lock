@@ -4256,6 +4256,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "commonware-avs-bindings",
  "commonware-avs-router",
  "commonware-avs-usecases",
  "commonware-codec 0.0.63",

@@ -3,7 +3,6 @@ pub use commonware_avs_router::bindings::{
     ReadOnlyProvider, WalletProvider, blsapkregistry, blssigcheckoperatorstateretriever,
 };
 
-// Gas Killer specific bindings
 #[allow(
     non_camel_case_types,
     non_snake_case,

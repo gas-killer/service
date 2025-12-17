@@ -18,11 +18,49 @@ use gas_killer_common::{get_operator_states, load_key_from_file};
 use gas_killer_router::GasKillerOrchestratorBuilder;
 use governor::Quota;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
+use std::time::Duration;
 
 // Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
+
+/// Resolve a hostname:port with retry logic for Docker DNS readiness
+fn resolve_with_retry(
+    address: &str,
+    max_retries: u32,
+    retry_delay: Duration,
+) -> Option<SocketAddr> {
+    for attempt in 1..=max_retries {
+        match address.to_socket_addrs() {
+            Ok(mut addrs) => {
+                if let Some(addr) = addrs.next() {
+                    tracing::info!(address, ?addr, attempt, "DNS resolution succeeded");
+                    return Some(addr);
+                }
+            }
+            Err(e) => {
+                if attempt < max_retries {
+                    tracing::warn!(
+                        address,
+                        attempt,
+                        max_retries,
+                        error = %e,
+                        "DNS resolution failed, retrying..."
+                    );
+                    std::thread::sleep(retry_delay);
+                } else {
+                    tracing::error!(
+                        address,
+                        error = %e,
+                        "DNS resolution failed after all retries"
+                    );
+                }
+            }
+        }
+    }
+    None
+}
 
 fn main() {
     // Initialize runtime
@@ -93,6 +131,8 @@ fn main() {
     );
 
     // Allow handshakes from IPs that aren't yet in the registered peer set
+    // TODO: Remove this once we have a proper way to handle handshakes
+    // https://github.com/BreadchainCoop/gas-killer-router/issues/82
     p2p_cfg.attempt_unregistered_handshakes = true;
 
     // Start runtime
@@ -120,7 +160,11 @@ fn main() {
                     quorum_infos.len()
                 );
             }
-            tracing::info!(quorum_number, total_quorums = quorum_infos.len(), "using quorum");
+            tracing::info!(
+                quorum_number,
+                total_quorums = quorum_infos.len(),
+                "using quorum"
+            );
 
             recipients = Vec::new();
             let participants = quorum_infos[quorum_number].operators.clone();
@@ -130,28 +174,24 @@ fn main() {
             for participant in participants {
                 let verifier = participant.pub_keys.unwrap().g2_pub_key;
                 if let Some(socket) = participant.socket {
-
-                    // Try to resolve hostname:port to socket addresses
-                    use std::net::ToSocketAddrs;
-                    match socket.to_socket_addrs() {
-                        Ok(mut addrs) => {
-                            if let Some(socket_addr) = addrs.next() {
+                    // Try to resolve hostname:port with retries (Docker DNS may need time)
+                    if let Some(socket_addr) =
+                        resolve_with_retry(&socket, 30, Duration::from_secs(2))
+                    {
+                        recipients.push((verifier, socket_addr));
+                    } else {
+                        // Last resort: try parsing as direct IP:PORT
+                        match SocketAddr::from_str(&socket) {
+                            Ok(socket_addr) => {
                                 recipients.push((verifier, socket_addr));
-                            } else {
-                                panic!("No addresses found for socket: {socket}");
                             }
-                        }
-                        Err(e) => {
-                            // If resolution fails, try parsing as direct IP:PORT
-                            match SocketAddr::from_str(&socket) {
-                                Ok(socket_addr) => {
-                                    recipients.push((verifier, socket_addr));
-                                }
-                                Err(parse_err) => {
-                                    tracing::error!("Failed to resolve '{}': {:?}, and failed to parse as IP: {:?}",
-                                                  socket, e, parse_err);
-                                    panic!("Bootstrapper address not well-formed: {socket}");
-                                }
+                            Err(parse_err) => {
+                                tracing::error!(
+                                    socket,
+                                    error = %parse_err,
+                                    "Failed to resolve or parse socket address"
+                                );
+                                panic!("Bootstrapper address not well-formed: {socket}");
                             }
                         }
                     }

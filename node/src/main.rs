@@ -17,12 +17,50 @@ use gas_killer_common::{
 };
 use governor::Quota;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Unique namespace to avoid message replay attacks
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
+
+/// Resolve a hostname:port with retry logic for Docker DNS readiness
+fn resolve_with_retry(
+    address: &str,
+    max_retries: u32,
+    retry_delay: Duration,
+) -> Option<SocketAddr> {
+    for attempt in 1..=max_retries {
+        match address.to_socket_addrs() {
+            Ok(mut addrs) => {
+                if let Some(addr) = addrs.next() {
+                    tracing::info!(address, ?addr, attempt, "DNS resolution succeeded");
+                    return Some(addr);
+                }
+            }
+            Err(e) => {
+                if attempt < max_retries {
+                    tracing::warn!(
+                        address,
+                        attempt,
+                        max_retries,
+                        error = %e,
+                        "DNS resolution failed, retrying..."
+                    );
+                    std::thread::sleep(retry_delay);
+                } else {
+                    tracing::error!(
+                        address,
+                        error = %e,
+                        "DNS resolution failed after all retries"
+                    );
+                }
+            }
+        }
+    }
+    None
+}
 
 fn configure_identity(matches: &clap::ArgMatches) -> (Bn254, u16) {
     let key_file = matches
@@ -102,7 +140,11 @@ fn main() {
                     quorum_infos.len()
                 );
             }
-            tracing::info!(quorum_number, total_quorums = quorum_infos.len(), "using quorum");
+            tracing::info!(
+                quorum_number,
+                total_quorums = quorum_infos.len(),
+                "using quorum"
+            );
 
             // Configure allowed peers from operator states
             let participants = quorum_infos[quorum_number].operators.clone();
@@ -114,27 +156,24 @@ fn main() {
                 let verifier = participant.pub_keys.as_ref().unwrap().g2_pub_key.clone();
                 tracing::info!(key = ?verifier, "registered authorized peer");
                 if let Some(socket) = &participant.socket {
-                    // Try to resolve hostname:port to socket addresses
-                    use std::net::ToSocketAddrs;
-                    match socket.to_socket_addrs() {
-                        Ok(mut addrs) => {
-                            if let Some(socket_addr) = addrs.next() {
+                    // Try to resolve hostname:port with retries (Docker DNS may need time)
+                    if let Some(socket_addr) =
+                        resolve_with_retry(socket, 30, Duration::from_secs(2))
+                    {
+                        recipients.push((verifier, socket_addr));
+                    } else {
+                        // Last resort: try parsing as direct IP:PORT
+                        match SocketAddr::from_str(socket) {
+                            Ok(socket_addr) => {
                                 recipients.push((verifier, socket_addr));
-                            } else {
-                                panic!("No addresses found for socket: {socket}");
                             }
-                        }
-                        Err(e) => {
-                            // If resolution fails, try parsing as direct IP:PORT
-                            match SocketAddr::from_str(socket) {
-                                Ok(socket_addr) => {
-                                    recipients.push((verifier, socket_addr));
-                                }
-                                Err(parse_err) => {
-                                    tracing::error!("Failed to resolve '{}': {:?}, and failed to parse as IP: {:?}",
-                                                  socket, e, parse_err);
-                                    panic!("Socket address not well-formed: {socket}");
-                                }
+                            Err(parse_err) => {
+                                tracing::error!(
+                                    socket,
+                                    error = %parse_err,
+                                    "Failed to resolve or parse socket address"
+                                );
+                                panic!("Socket address not well-formed: {socket}");
                             }
                         }
                     }
@@ -151,10 +190,13 @@ fn main() {
             .expect("Invalid orchestrator G2 coordinates");
             tracing::info!(key = ?orchestrator_pub_key, "registered orchestrator key");
 
-            // Resolve orchestrator address (hostname:port or IP:port)
+            // Resolve orchestrator address (hostname:port or IP:port) with retries
             let orchestrator_socket = format!(
                 "{}:{}",
-                orchestrator_config.address.as_deref().unwrap_or("127.0.0.1"),
+                orchestrator_config
+                    .address
+                    .as_deref()
+                    .unwrap_or("127.0.0.1"),
                 orchestrator_config.port
             );
             tracing::info!(target = %orchestrator_socket, "resolving orchestrator address");
@@ -198,6 +240,7 @@ fn main() {
                     )
                 })
             });
+
             recipients.push((orchestrator_pub_key.clone(), orchestrator_addr));
         }
 
@@ -227,7 +270,10 @@ fn main() {
         let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
         // Debug: Log all recipients before updating oracle
-        tracing::info!(count = recipients.len(), "registering recipients with oracle");
+        tracing::info!(
+            count = recipients.len(),
+            "registering recipients with oracle"
+        );
         for (key, addr) in &recipients {
             tracing::info!(key = ?key, addr = ?addr, "oracle recipient");
         }
@@ -268,8 +314,10 @@ fn main() {
             network.register(0, Quota::per_second(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
 
         // Create validator for the gas killer use case (uses full gas-analyzer validation)
-        let validator = Arc::new(GasKillerValidator::new()
-            .expect("RPC_URL or HTTP_RPC environment variable must be set for gas analyzer"));
+        let validator = Arc::new(
+            GasKillerValidator::new()
+                .expect("RPC_URL or HTTP_RPC environment variable must be set for gas analyzer"),
+        );
 
         // Create contributor with GasKillerTaskData as the metadata type
         let contributor = Contributor::<GasKillerTaskData>::new(
