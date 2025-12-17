@@ -64,6 +64,9 @@ eigen-utils = "2.0.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
 
+# Gas Analyzer
+gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
+
 # Internal crates
 gas-killer-common = { path = "common" }
 governor = "0.6.3"
