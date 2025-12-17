@@ -1,6 +1,5 @@
 use alloy::primitives::U256;
 use alloy::sol_types::SolValue;
-use alloy_provider::{Provider, ProviderBuilder};
 use anyhow::Result;
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
