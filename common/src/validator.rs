@@ -64,25 +64,6 @@ impl GasKillerValidator {
         &self.fork_rpc_url
     }
 
-    /// Returns the actual block number to use:
-    /// - If block_number is Some(n) and n > 0, returns n.
-    /// - If block_number is None or Some(0), fetches latest block number from the node.
-    pub async fn resolve_block_number(&self, block_number: Option<u64>) -> Result<u64> {
-        match block_number {
-            Some(n) if n > 0 => Ok(n),
-            _ => {
-                let rpc_url = Url::parse(&self.fork_rpc_url)
-                    .map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
-                let provider = ProviderBuilder::new().connect_http(rpc_url);
-                let current_block = provider
-                    .get_block_number()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?;
-                Ok(current_block)
-            }
-        }
-    }
-
     /// Computes storage updates for a transaction using gas-analyzer-rs.
     ///
     /// This is the public method for computing storage updates from transaction parameters.
