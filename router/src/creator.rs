@@ -282,10 +282,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             Ok(current_task) => {
                 if let Some(ref enriched) = *current_task {
                     // Extract metadata from the enriched task
-                    info!(
-                        block_height = enriched.block_height,
-                        "Building task metadata from current task"
-                    );
+                    info!("Building task metadata from current task");
 
                     return GasKillerTaskData {
                         storage_updates: enriched.storage_updates.clone(),
@@ -420,7 +417,7 @@ mod tests {
                 transition_index: 1,
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
-                block_height: None,
+                block_height: 12345,
             },
         };
 
@@ -439,7 +436,7 @@ mod tests {
                 transition_index: 42,
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
-                block_height: None,
+                block_height: 12345,
             },
         };
 
@@ -450,7 +447,7 @@ mod tests {
             call_data: task.body.call_data.clone(),
             from_address: task.body.from_address,
             value: task.body.value,
-            block_height: 12345,
+            block_height: task.body.block_height,
         };
 
         assert_eq!(task_data.transition_index, 42);

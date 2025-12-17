@@ -1,6 +1,6 @@
 use alloy::primitives::U256;
-use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolValue;
+use alloy_provider::{Provider, ProviderBuilder};
 use anyhow::Result;
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
@@ -94,7 +94,7 @@ impl GasKillerValidator {
         call_data: &[u8],
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
-        block_height: Option<u64>,
+        block_height: u64,
     ) -> Result<(Vec<u8>, u64)> {
         let result = Self::analyze_transaction(
             &self.fork_rpc_url,
@@ -201,40 +201,29 @@ impl GasKillerValidator {
     /// 3. Extracting storage changes and gas information
     ///
     /// Takes an explicit RPC URL parameter for flexibility.
-    /// If `block_height` is Some, forks at that specific block for deterministic results.
-    /// If `block_height` is None, forks at the latest block and returns the block used.
+    /// Forks at the specified block for deterministic results.
     pub async fn analyze_transaction(
         rpc_url_str: &str,
         contract_address: alloy::primitives::Address,
         call_data: &[u8],
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
-        block_height: Option<u64>,
+        block_height: u64,
     ) -> Result<AnalysisResult> {
         let rpc_url =
             Url::parse(rpc_url_str).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
 
-        let actual_block_height = match block_height {
-            Some(n) => n,
-            None => {
-                let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
-                provider
-                    .get_block_number()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?
-            }
-        };
-
         debug!(
-            block_number = actual_block_height,
+            block_number = block_height,
             contract = %contract_address,
             call_data_len = call_data.len(),
-            pinned = block_height.is_some(),
             "Analyzing transaction at block"
         );
 
         // Create gas killer analyzer instance, forking at the specified block
-        let gas_killer = GasKillerDefault::new(rpc_url.clone(), Some(actual_block_height))
+        let gas_killer = GasKillerDefault::builder(rpc_url.clone())
+            .block_number(block_height)
+            .build()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create gas analyzer: {}", e))?;
 
@@ -250,38 +239,30 @@ impl GasKillerValidator {
 
         // Call gas-analyzer-rs to get storage updates and gas estimate
         let (storage_updates, gas_estimate, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_gas_estimate(
-                rpc_url,
-                tx_request,
-                gas_killer,
-                Some(actual_block_height),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+            call_to_encoded_state_updates_with_gas_estimate(tx_request, gas_killer)
+                .await
+                .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
             storage_updates.len(),
             gas_estimate,
-            actual_block_height
+            block_height
         );
 
         Ok(AnalysisResult {
             storage_updates: storage_updates.to_vec(),
             gas_estimate,
-            block_height: actual_block_height,
+            block_height,
         })
     }
 
     /// Computes storage updates by running local analysis using this validator's RPC URL
     /// Uses the block_height from task_data to ensure deterministic results matching the router
     async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
-        // Use block_height from task data if non-zero, otherwise fall back to latest
-        let block_height = if task_data.block_height > 0 {
-            Some(task_data.block_height)
-        } else {
-            None
-        };
+        if task_data.block_height == 0 {
+            return Err(anyhow::anyhow!("block_height is required for validation"));
+        }
 
         let result = Self::analyze_transaction(
             &self.fork_rpc_url,
@@ -289,7 +270,7 @@ impl GasKillerValidator {
             &task_data.call_data,
             Some(task_data.from_address),
             Some(task_data.value),
-            block_height,
+            task_data.block_height,
         )
         .await?;
         Ok(result.storage_updates)

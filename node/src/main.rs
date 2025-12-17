@@ -191,11 +191,12 @@ fn main() {
 
             let orchestrator_addr = orchestrator_addr.unwrap_or_else(|| {
                 // Final fallback: try to parse as direct IP:PORT
-                SocketAddr::from_str(&orchestrator_socket)
-                    .expect(&format!(
+                SocketAddr::from_str(&orchestrator_socket).unwrap_or_else(|_| {
+                    panic!(
                         "Failed to resolve orchestrator address '{}' after {} retries",
                         orchestrator_socket, max_retries
-                    ))
+                    )
+                })
             });
             recipients.push((orchestrator_pub_key.clone(), orchestrator_addr));
         }
@@ -252,6 +253,7 @@ fn main() {
             let g2_key = operator.pub_keys.as_ref().unwrap().g2_pub_key.clone();
             let g1_key = operator.pub_keys.as_ref().unwrap().g1_pub_key.clone();
             tracing::info!(key = ?g2_key, "registered contributor");
+
             contributors.push(g2_key.clone());
             g1_map.insert(g2_key, g1_key);
         }
