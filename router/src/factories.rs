@@ -85,7 +85,12 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         .addresses
         .bls_sig_check_operator_state_retriever
         .parse()
-        .map_err(|e| anyhow::anyhow!("Failed to parse BLS operator state retriever address: {}", e))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse BLS operator state retriever address: {}",
+                e
+            )
+        })?;
 
     let write_provider = ProviderBuilder::new()
         .wallet(ecdsa_signer)
