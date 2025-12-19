@@ -4,6 +4,7 @@ use crate::creator::{
     SimpleTaskQueue,
 };
 use crate::ingress::start_gas_killer_http_server;
+use alloy::primitives::Address;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
@@ -12,7 +13,22 @@ use commonware_avs_router::bindings::blssigcheckoperatorstateretriever::BLSSigCh
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
 use commonware_avs_usecases::AvsDeployment;
 use gas_killer_common::GasKillerValidator;
-use std::{env, str::FromStr, sync::Arc};
+use serde::Deserialize;
+use std::{env, fs, str::FromStr, sync::Arc};
+
+/// Struct to parse avs_deploy.json and extract the BLSSigCheckOperatorStateRetriever address
+/// The IncredibleSquaringTaskManager field contains the BLSSigCheckOperatorStateRetriever
+#[derive(Debug, Deserialize)]
+struct AvsDeploymentJson {
+    addresses: AvsAddresses,
+}
+
+#[derive(Debug, Deserialize)]
+struct AvsAddresses {
+    /// The BLSSigCheckOperatorStateRetriever address (used for both signature checking and operator state retrieval)
+    #[serde(rename = "IncredibleSquaringTaskManager")]
+    bls_sig_check_operator_state_retriever: String,
+}
 
 /// Factory function to create a default creator
 pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
@@ -55,11 +71,21 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     let ecdsa_signer =
         PrivateKeySigner::from_str(&env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set"))
             .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
-    let bls_operator_state_retriever_address = deployment
-        .bls_sig_check_operator_state_retriever_address()
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
-        })?;
+
+    // Read the BLSSigCheckOperatorStateRetriever address directly from avs_deploy.json
+    // The IncredibleSquaringTaskManager field contains the BLSSigCheckOperatorStateRetriever
+    // which implements both signature checking AND operator state retrieval
+    let avs_deployment_path =
+        env::var("AVS_DEPLOYMENT_PATH").expect("AVS_DEPLOYMENT_PATH must be set");
+    let avs_content = fs::read_to_string(&avs_deployment_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read AVS deployment file: {}", e))?;
+    let avs_deployment_json: AvsDeploymentJson = serde_json::from_str(&avs_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse AVS deployment JSON: {}", e))?;
+    let bls_operator_state_retriever_address: Address = avs_deployment_json
+        .addresses
+        .bls_sig_check_operator_state_retriever
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Failed to parse BLS operator state retriever address: {}", e))?;
 
     let write_provider = ProviderBuilder::new()
         .wallet(ecdsa_signer)
