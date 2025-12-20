@@ -1,0 +1,174 @@
+# Default values for gas-killer Helm chart
+
+# Global settings
+global:
+  # Environment mode: LOCAL or TESTNET
+  # LOCAL: Uses Anvil with forked Sepolia, auto-deploys contracts
+  # TESTNET: Connects to real Sepolia testnet
+  environment: LOCAL
+
+  # Number of operator nodes to deploy
+  nodeCount: 3
+
+# Secrets configuration
+# All sensitive values should be provided via --set or existingSecret
+secrets:
+  # Use an existing Kubernetes secret instead of creating one
+  # Required keys: PRIVATE_KEY, FUNDED_KEY, FORK_URL
+  existingSecret: ""
+
+  # Anvil default key - NEVER use in production!
+  # Override with: --set secrets.privateKey=<your-key>
+  privateKey: ""
+  fundedKey: ""
+
+  # Fork URL for Anvil (contains API key - sensitive!)
+  # REQUIRED for LOCAL mode - the chart will not work without this!
+  # Without forkUrl, ethereum and setup jobs are not deployed.
+  # Override with: --set secrets.forkUrl=<your-rpc-url>
+  # Example: --set secrets.forkUrl=https://ethereum-sepolia-rpc.publicnode.com
+  forkUrl: ""
+
+# Ethereum (Anvil) configuration - only used in LOCAL mode
+ethereum:
+  enabled: true
+  image:
+    repository: ghcr.io/breadchaincoop/ethereum
+    tag: dev
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8545
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+
+# EigenLayer setup job configuration
+eigenlayer:
+  image:
+    repository: ghcr.io/breadchaincoop/eigenlayer
+    tag: pr-RonTuretzky-sepolia-support
+    pullPolicy: IfNotPresent
+  # Sepolia testnet contract addresses (forked by Anvil in LOCAL mode)
+  contracts:
+    delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
+    strategyManager: "0x2E3D6c0744b10eb0A4e6F679F71554a39Ec47a5D"
+    lstContract: "0x00c71b0fcadE911B2feeE9912De4Fe19eB04ca56"
+    lstStrategy: "0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574"
+    allocationManager: "0x42583067658071247ec8CE0A516A58f682002d07"
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+
+# Signer (Cerberus) configuration
+signer:
+  enabled: true
+  image:
+    repository: ghcr.io/layr-labs/cerberus
+    tag: "0.0.2"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    grpcPort: 50051
+    metricsPort: 9081
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+
+# Gas Killer Node configuration
+node:
+  image:
+    # For local development, build and load the image into kind:
+    # docker build -t gas-killer-node:local -f node/Dockerfile .
+    # kind load docker-image gas-killer-node:local --name <cluster-name>
+    repository: gas-killer-node
+    tag: local
+    pullPolicy: IfNotPresent
+  # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
+  basePort: 3001
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
+
+# Gas Killer Router configuration
+router:
+  image:
+    # For local development, build and load the image into kind:
+    # docker build -t gas-killer-router:local -f router/Dockerfile .
+    # kind load docker-image gas-killer-router:local --name <cluster-name>
+    repository: gas-killer-router
+    tag: local
+    pullPolicy: IfNotPresent
+  port: 3000
+  ingressPort: 8080
+  ingress:
+    enabled: true
+    timeoutMs: 180000
+  service:
+    type: ClusterIP
+    port: 3000
+    ingressPort: 8080
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
+
+# Orchestrator configuration
+# The orchestrator configs are included in the Docker image at /app/config/
+# You can override them here if needed, otherwise they will be used from the image
+orchestrator:
+  # Public orchestrator config (JSON string) - optional override
+  # If not provided, will use /app/config/public_orchestrator.json from the image
+  # NOTE: The image file has "address": "router" which works for docker-compose.
+  # For K8s, you need to override with the correct service name.
+  # The service name will be: <release-name>-gas-killer-router
+  publicConfig: |
+    {
+      "g2_x1": "20265730220917057623326116620721648047640065506233168445998945605458084341755",
+      "g2_x2": "1537141129484558011683382469842956131676085503509229854572844956364492197092",
+      "g2_y1": "4380068110839997539835821427545270098552639074995346826656804866303457881635",
+      "g2_y2": "479676018937294309080674601592141614301396550682703157902264620243097107417",
+      "port": "3000",
+      "address": "gas-killer-router"
+    }
+  # Router private key (BLS private key) - stored in Secret for security
+  # If not provided, will use /app/config/router_orchestrator.json from the image
+  # WARNING: The image contains a default private key. For production, always provide your own!
+  routerPrivateKey: ""
+
+# Shared data volume for keys and deployment configs
+sharedData:
+  storageClass: ""
+  size: 1Gi
+  accessMode: ReadWriteOnce
+
+# Kubernetes Ingress for external access (optional)
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: gas-killer.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []

@@ -1,0 +1,329 @@
+name: Helm Integration Test
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - staging
+  pull_request:
+    branches:
+      - main
+      - dev
+      - staging
+
+jobs:
+  helm-test:
+    name: Test with Helm Charts
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: gas-killer-test
+          wait: 120s
+          node_image: kindest/node:v1.27.3
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build Docker images
+        run: |
+          echo "Building router image..."
+          docker build -f ./router/Dockerfile -t gas-killer-router:local .
+
+          echo "Building node image..."
+          docker build -f ./node/Dockerfile -t gas-killer-node:local .
+
+      - name: Load images into kind cluster
+        run: |
+          echo "Loading router image into kind..."
+          kind load docker-image gas-killer-router:local --name gas-killer-test
+
+          echo "Loading node image into kind..."
+          kind load docker-image gas-killer-node:local --name gas-killer-test
+
+      - name: Verify cluster is ready
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+          kubectl get pods -A
+
+      - name: Install Helm chart
+        run: |
+          # Set fork URL from secret or use public Sepolia
+          if [ -n "${{ secrets.RPC_URL }}" ]; then
+            FORK_URL="${{ secrets.RPC_URL }}"
+          else
+            FORK_URL="https://ethereum-sepolia-rpc.publicnode.com"
+          fi
+
+          # Use Anvil default keys for testing
+          PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+          FUNDED_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+
+          echo "Installing Helm chart with fork URL: $FORK_URL"
+
+          # Install without --wait to avoid circular dependency
+          # (pods wait for setup job, setup job is post-install hook)
+          helm install gas-killer ./helm/gas-killer \
+            --set global.environment=LOCAL \
+            --set global.nodeCount=3 \
+            --set secrets.forkUrl="$FORK_URL" \
+            --set secrets.privateKey="$PRIVATE_KEY" \
+            --set secrets.fundedKey="$FUNDED_KEY" \
+            --set node.image.repository=gas-killer-node \
+            --set node.image.tag=local \
+            --set node.image.pullPolicy=Never \
+            --set router.image.repository=gas-killer-router \
+            --set router.image.tag=local \
+            --set router.image.pullPolicy=Never \
+            --set sharedData.storageClass=""
+
+      - name: Check deployment status
+        run: |
+          echo "=== Helm Release Status ==="
+          helm status gas-killer
+
+          echo "=== All Pods ==="
+          kubectl get pods -o wide
+
+          echo "=== All Services ==="
+          kubectl get services
+
+      - name: Wait for setup job to complete
+        run: |
+          echo "Waiting for setup job to complete..."
+
+          # Find the actual setup job name (includes chart name)
+          SETUP_JOB=$(kubectl get jobs -o name | grep setup | head -1)
+
+          if [ -z "$SETUP_JOB" ]; then
+            echo "Setup job not found!"
+            kubectl get jobs
+            exit 1
+          fi
+
+          echo "Found setup job: $SETUP_JOB"
+          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=500s
+
+          echo "Setup job completed successfully"
+          kubectl logs "$SETUP_JOB" --tail=30
+
+      - name: Wait for all pods to be ready
+        run: |
+          echo "Waiting for ethereum pod..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=ethereum --timeout=180s
+
+          echo "Waiting for signer pod..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=signer --timeout=180s
+
+          echo "Waiting for node pods..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=node --timeout=300s
+
+          echo "Waiting for router pod..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=router --timeout=300s
+
+          echo "All pods are ready!"
+
+      - name: Setup port forwarding for testing
+        run: |
+          # Find actual service names (they include the chart name)
+          ETHEREUM_SERVICE=$(kubectl get services -o name | grep ethereum | head -1 | sed 's|service/||')
+          ROUTER_SERVICE=$(kubectl get services -o name | grep router | head -1 | sed 's|service/||')
+
+          echo "Ethereum service: $ETHEREUM_SERVICE"
+          echo "Router service: $ROUTER_SERVICE"
+
+          # Port forward ethereum RPC
+          kubectl port-forward service/$ETHEREUM_SERVICE 8545:8545 &
+
+          # Port forward router ingress
+          kubectl port-forward service/$ROUTER_SERVICE 8080:8080 &
+
+          # Wait for port forwards to be ready
+          sleep 10
+
+          echo "Port forwarding established"
+
+      - name: Verify shared data was created
+        run: |
+          echo "Checking if setup job created the required files..."
+
+          # Get the setup job pod name
+          SETUP_POD=$(kubectl get pods -l app.kubernetes.io/component=setup -o jsonpath='{.items[0].metadata.name}')
+
+          echo "Setup pod: $SETUP_POD"
+
+          # Check PVC
+          kubectl get pvc
+
+          echo "Setup job logs:"
+          kubectl logs $SETUP_POD || true
+
+      - name: Build test scripts
+        run: |
+          cd scripts
+          cargo build --release -p avs-scripts --bin deploy_array_summation
+          cargo build --release -p avs-scripts --bin trigger_gas_killer
+          cd ..
+
+      - name: Get AVS deployment file
+        run: |
+          echo "Copying avs_deploy.json from router pod..."
+
+          ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}')
+
+          mkdir -p config/.nodes
+          kubectl cp $ROUTER_POD:/app/.nodes/avs_deploy.json ./config/.nodes/avs_deploy.json
+
+          if [ ! -f "./config/.nodes/avs_deploy.json" ]; then
+            echo "AVS deployment file not found"
+            exit 1
+          fi
+
+          echo "AVS deployment file contents:"
+          cat ./config/.nodes/avs_deploy.json
+
+      - name: Wait for services to stabilize
+        run: |
+          echo "Waiting for services to stabilize..."
+          sleep 30
+
+      - name: Deploy ArraySummation contract
+        run: |
+          echo "Deploying ArraySummation contract..."
+
+          cd scripts
+          export HTTP_RPC=http://localhost:8545
+          export WS_RPC=ws://localhost:8545
+          export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
+          export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+          export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
+          export ARRAY_SUMMATION_ARRAY_SIZE=100
+          export ARRAY_SUMMATION_MAX_VALUE=1000
+          export ARRAY_SUMMATION_SEED=42
+
+          cargo run --release -p avs-scripts --bin deploy_array_summation
+
+          cd ..
+
+          echo "ArraySummation deployment completed"
+
+      - name: Trigger Gas Killer and verify execution
+        run: |
+          echo "Triggering Gas Killer task..."
+
+          cd scripts
+          export HTTP_RPC=http://localhost:8545
+          export WS_RPC=ws://localhost:8545
+          export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
+          export GAS_KILLER_ROUTER_URL=http://localhost:8080
+          export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+
+          cargo run --release -p avs-scripts --bin trigger_gas_killer
+
+          if [ $? -eq 0 ]; then
+            echo "Gas Killer task executed successfully!"
+          else
+            echo "Gas Killer task failed"
+            echo "=== Router logs ==="
+            kubectl logs -l app.kubernetes.io/component=router --tail 100
+            exit 1
+          fi
+
+          cd ..
+
+      - name: Show router logs
+        run: |
+          echo "=== Router logs ==="
+          kubectl logs -l app.kubernetes.io/component=router --tail 50
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Helm Status ==="
+          helm status gas-killer || true
+
+          echo "=== All Pods Status ==="
+          kubectl get pods -o wide
+
+          echo "=== PVC Status ==="
+          kubectl get pvc
+
+          echo "=== Events ==="
+          kubectl get events --sort-by=.metadata.creationTimestamp
+
+          echo "=== Ethereum Logs ==="
+          kubectl logs -l app.kubernetes.io/component=ethereum --tail 50 || true
+
+          echo "=== Setup Job Logs ==="
+          kubectl logs -l app.kubernetes.io/component=setup --tail 100 || true
+
+          echo "=== Router Logs ==="
+          kubectl logs -l app.kubernetes.io/component=router --tail 100 || true
+
+          echo "=== Node-1 Logs ==="
+          NODE1_POD=$(kubectl get pods -l gas-killer/node-index=1 -o jsonpath='{.items[0].metadata.name}')
+          kubectl logs $NODE1_POD --tail 100 || true
+
+          echo "=== Node-2 Logs ==="
+          NODE2_POD=$(kubectl get pods -l gas-killer/node-index=2 -o jsonpath='{.items[0].metadata.name}')
+          kubectl logs $NODE2_POD --tail 100 || true
+
+          echo "=== Node-3 Logs ==="
+          NODE3_POD=$(kubectl get pods -l gas-killer/node-index=3 -o jsonpath='{.items[0].metadata.name}')
+          kubectl logs $NODE3_POD --tail 100 || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Kill port forwarding
+          pkill -f "port-forward" || true
+
+          # Uninstall helm release
+          helm uninstall gas-killer || true
+
+          # Delete the kind cluster
+          kind delete cluster --name gas-killer-test || true

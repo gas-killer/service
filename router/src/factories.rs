@@ -55,6 +55,9 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     let ecdsa_signer =
         PrivateKeySigner::from_str(&env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set"))
             .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
+
+    // Read the BLSSigCheckOperatorStateRetriever address from the deployment config
+    // This is stored in the blsSigCheck field of avs_deploy.json
     let bls_operator_state_retriever_address = deployment
         .bls_sig_check_operator_state_retriever_address()
         .map_err(|e| {
