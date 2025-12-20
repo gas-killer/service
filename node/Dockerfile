@@ -35,6 +35,9 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    curl \
+    git \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user
