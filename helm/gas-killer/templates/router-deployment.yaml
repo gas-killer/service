@@ -130,9 +130,25 @@ spec:
             - name: ingress
               containerPort: {{ .Values.router.ingressPort }}
               protocol: TCP
-          # Note: No liveness/readiness probes on P2P ports
-          # TCP socket probes cause noisy "failed to upgrade connection" logs
-          # The router process will be restarted by Kubernetes if it crashes
+          # Use exec probe to check if process is running without triggering P2P issues
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "pgrep -x gas-killer-router || pgrep -f 'gas-killer-router'"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "pgrep -x gas-killer-router || pgrep -f 'gas-killer-router'"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes
