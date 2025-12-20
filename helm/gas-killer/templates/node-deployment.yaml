@@ -89,22 +89,23 @@ spec:
             - name: node
               containerPort: {{ $nodePort }}
               protocol: TCP
-          # Use exec probe to check if process is running without triggering P2P issues
+          # Use exec probe to check if process is running
+          # Check /proc/1/cmdline since our process is PID 1 in the container
           readinessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - "pgrep -x gas-killer-node || pgrep -f 'gas-killer-node'"
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 30
+                - "cat /proc/1/cmdline | grep -q gas-killer"
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 60
           livenessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - "pgrep -x gas-killer-node || pgrep -f 'gas-killer-node'"
+                - "cat /proc/1/cmdline | grep -q gas-killer"
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 5
