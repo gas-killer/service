@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     curl \
     git \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Foundry/Anvil for gas-analyzer-rs
