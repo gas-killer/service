@@ -157,7 +157,28 @@ jobs:
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=signer --timeout=180s
 
           echo "Waiting for node pods..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=node --timeout=300s
+          # Show pod status before waiting
+          echo "=== Current pod status ==="
+          kubectl get pods -o wide
+
+          # Try waiting, but if it fails, show debug info
+          if ! kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=node --timeout=300s; then
+            echo "=== Node pods failed to become ready ==="
+            kubectl get pods -o wide
+            echo "=== Node-1 describe ==="
+            kubectl describe pod -l gas-killer/node-index=1 || true
+            echo "=== Node-1 logs ==="
+            NODE1_POD=$(kubectl get pods -l gas-killer/node-index=1 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            if [ -n "$NODE1_POD" ]; then
+              echo "Init container wait-for-setup:"
+              kubectl logs $NODE1_POD -c wait-for-setup || true
+              echo "Init container wait-for-ethereum:"
+              kubectl logs $NODE1_POD -c wait-for-ethereum || true
+              echo "Main container node:"
+              kubectl logs $NODE1_POD -c node || true
+            fi
+            exit 1
+          fi
 
           echo "Waiting for router pod..."
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=router --timeout=300s
