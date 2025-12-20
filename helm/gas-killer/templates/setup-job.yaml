@@ -65,8 +65,16 @@ spec:
                 {{- end }}
                 echo "All {{ .Values.global.nodeCount }} operator keys created successfully"
 
+                # Fix permissions so non-root containers can read the files
+                # Node/router containers run as UID 1000 (appuser)
+                chmod -R 755 /root/.nodes
+                chmod 644 /root/.nodes/avs_deploy.json
+                chmod 644 /root/.nodes/operator_keys/*.json
+                echo "Permissions fixed for UID 1000"
+
                 # Create marker file to signal setup completion
                 touch /root/.nodes/.setup_complete
+                chmod 644 /root/.nodes/.setup_complete
                 echo "Setup marker created"
                 exit 0
               else
