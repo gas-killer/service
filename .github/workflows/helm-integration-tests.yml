@@ -286,8 +286,12 @@ jobs:
           echo "=== All Pods Status ==="
           kubectl get pods -o wide
 
+          echo "=== Pod Descriptions ==="
+          kubectl describe pods || true
+
           echo "=== PVC Status ==="
           kubectl get pvc
+          kubectl describe pvc || true
 
           echo "=== Events ==="
           kubectl get events --sort-by=.metadata.creationTimestamp
@@ -301,17 +305,37 @@ jobs:
           echo "=== Router Logs ==="
           kubectl logs -l app.kubernetes.io/component=router --tail 100 || true
 
+          echo "=== Router Init Container Logs ==="
+          ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [ -n "$ROUTER_POD" ]; then
+            kubectl logs $ROUTER_POD -c wait-for-setup || true
+            kubectl logs $ROUTER_POD -c wait-for-ethereum || true
+            kubectl logs $ROUTER_POD -c wait-for-nodes || true
+          fi
+
           echo "=== Node-1 Logs ==="
-          NODE1_POD=$(kubectl get pods -l gas-killer/node-index=1 -o jsonpath='{.items[0].metadata.name}')
-          kubectl logs $NODE1_POD --tail 100 || true
+          NODE1_POD=$(kubectl get pods -l gas-killer/node-index=1 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [ -n "$NODE1_POD" ]; then
+            echo "Node-1 init container logs:"
+            kubectl logs $NODE1_POD -c wait-for-setup || true
+            kubectl logs $NODE1_POD -c wait-for-ethereum || true
+            echo "Node-1 main container logs:"
+            kubectl logs $NODE1_POD -c node || true
+          fi
 
           echo "=== Node-2 Logs ==="
-          NODE2_POD=$(kubectl get pods -l gas-killer/node-index=2 -o jsonpath='{.items[0].metadata.name}')
-          kubectl logs $NODE2_POD --tail 100 || true
+          NODE2_POD=$(kubectl get pods -l gas-killer/node-index=2 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [ -n "$NODE2_POD" ]; then
+            kubectl logs $NODE2_POD -c wait-for-setup || true
+            kubectl logs $NODE2_POD -c node || true
+          fi
 
           echo "=== Node-3 Logs ==="
-          NODE3_POD=$(kubectl get pods -l gas-killer/node-index=3 -o jsonpath='{.items[0].metadata.name}')
-          kubectl logs $NODE3_POD --tail 100 || true
+          NODE3_POD=$(kubectl get pods -l gas-killer/node-index=3 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [ -n "$NODE3_POD" ]; then
+            kubectl logs $NODE3_POD -c wait-for-setup || true
+            kubectl logs $NODE3_POD -c node || true
+          fi
 
       - name: Cleanup
         if: always()
