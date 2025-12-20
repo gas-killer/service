@@ -352,7 +352,7 @@ mod tests {
     #[ignore = "requires RPC - run with: cargo test -- --ignored"]
     async fn test_full_validation_with_rpc() {
         // Integration test: full validation including storage update computation
-        // This test is ignored by default as it requires RPC access
+        // This test is ignored by default as it requires RPC access and Anvil
         let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
         let task_data = create_test_task_data();
 
