@@ -108,6 +108,8 @@ spec:
           env:
             - name: HTTP_RPC
               value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+            - name: RPC_URL
+              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
             - name: WS_RPC
               value: "ws://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
             - name: AVS_DEPLOYMENT_PATH
