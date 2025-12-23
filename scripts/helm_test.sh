@@ -295,6 +295,7 @@ export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A0
 export ARRAY_SUMMATION_ARRAY_SIZE=100
 export ARRAY_SUMMATION_MAX_VALUE=1000
 export ARRAY_SUMMATION_SEED=42
+export PRIVATE_KEY="$PRIVATE_KEY"
 
 cargo run --release -p avs-scripts --bin deploy_array_summation
 cd "$PROJECT_ROOT"
