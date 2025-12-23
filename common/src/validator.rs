@@ -309,12 +309,12 @@ mod tests {
     #[tokio::test]
     async fn test_validator_creation() {
         let _validator =
-            GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+            GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
     }
 
     #[tokio::test]
     async fn test_validate_invalid_message() {
-        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
 
         assert!(
             validator
@@ -355,7 +355,7 @@ mod tests {
     async fn test_full_validation_with_rpc() {
         // Integration test: full validation including storage update computation
         // This test is ignored by default as it requires RPC access and Anvil
-        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
         let task_data = create_test_task_data();
 
         let aggregation = wire::Aggregation::<GasKillerTaskData>::new(1, task_data, None);
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_build_payload_hash_deterministic() {
-        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
         let task_data = create_test_task_data();
         let storage_updates = vec![0x01, 0x02, 0x03, 0x04];
 
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_build_payload_hash_different_inputs() {
-        let validator = GasKillerValidator::with_rpc_url("https://ethereum-holesky.publicnode.com");
+        let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
         let task_data = create_test_task_data();
 
         let hash1 = validator.build_payload_hash(&task_data, &[0x01, 0x02]);

@@ -2289,7 +2289,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-bindings"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=dev#deb6d53a4c82775bcd57359c00a07e2140b55d85"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#da4f7a361d903bffb3cdefb9bfb27a162f2e7cb1"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -2304,7 +2304,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-core"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=dev#deb6d53a4c82775bcd57359c00a07e2140b55d85"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#da4f7a361d903bffb3cdefb9bfb27a162f2e7cb1"
 dependencies = [
  "alloy",
  "anyhow",
@@ -2326,7 +2326,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-node"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=dev#deb6d53a4c82775bcd57359c00a07e2140b55d85"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#da4f7a361d903bffb3cdefb9bfb27a162f2e7cb1"
 dependencies = [
  "alloy",
  "alloy-network",
@@ -2371,7 +2371,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-router"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=dev#deb6d53a4c82775bcd57359c00a07e2140b55d85"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#da4f7a361d903bffb3cdefb9bfb27a162f2e7cb1"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -2422,7 +2422,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-usecases"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=dev#deb6d53a4c82775bcd57359c00a07e2140b55d85"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#da4f7a361d903bffb3cdefb9bfb27a162f2e7cb1"
 dependencies = [
  "alloy",
  "alloy-primitives",
