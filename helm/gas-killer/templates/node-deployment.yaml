@@ -35,11 +35,18 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for setup to complete..."
+              echo "Waiting for setup to complete (timeout: {{ $root.Values.global.initTimeout }}s)..."
               KEY_FILE="/app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json"
+              TIMEOUT={{ $root.Values.global.initTimeout }}
+              ELAPSED=0
               until [ -f /app/.nodes/.setup_complete ] && [ -f "$KEY_FILE" ]; do
-                echo "Setup not complete, waiting for .setup_complete marker and $KEY_FILE..."
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for setup to complete after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Setup not complete, waiting for .setup_complete marker and $KEY_FILE... (${ELAPSED}s elapsed)"
                 sleep 10
+                ELAPSED=$((ELAPSED + 10))
               done
               echo "Setup complete! Key file found at $KEY_FILE"
           volumeMounts:
@@ -54,10 +61,17 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for Ethereum RPC..."
+              echo "Waiting for Ethereum RPC (timeout: {{ $root.Values.global.initTimeout }}s)..."
+              TIMEOUT={{ $root.Values.global.initTimeout }}
+              ELAPSED=0
               until nc -z {{ include "gas-killer.ethereum.fullname" $root }} {{ $root.Values.ethereum.service.port }}; do
-                echo "Ethereum not ready, waiting..."
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for Ethereum RPC after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Ethereum not ready, waiting... (${ELAPSED}s elapsed)"
                 sleep 5
+                ELAPSED=$((ELAPSED + 5))
               done
               echo "Ethereum is ready!"
 
@@ -91,6 +105,8 @@ spec:
             - name: node
               containerPort: {{ $nodePort }}
               protocol: TCP
+          # TODO: Implement a proper readiness endpoint in the node application
+          # that verifies RPC connection, BLS key loaded, and P2P connectivity
           # Use exec probe to check if process is running
           # Check /proc/1/cmdline since our process is PID 1 in the container
           readinessProbe:

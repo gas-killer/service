@@ -10,6 +10,9 @@ global:
   # Number of operator nodes to deploy
   nodeCount: 3
 
+  # Timeout for init containers waiting for dependencies (in seconds)
+  initTimeout: 300
+
 # Secrets configuration
 # All sensitive values should be provided via --set or existingSecret
 secrets:
@@ -36,6 +39,10 @@ ethereum:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: dev
     pullPolicy: IfNotPresent
+  # Priority class for ethereum pod - it holds critical blockchain state
+  # Consider creating a custom priority class instead of using system-cluster-critical
+  # See README.md for details
+  priorityClassName: "system-cluster-critical"
   service:
     type: ClusterIP
     port: 8545
