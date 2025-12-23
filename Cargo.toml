@@ -24,11 +24,11 @@ axum = "0.7"
 bn254 = { git = "https://github.com/BreadchainCoop/bn254.git" }
 bytes = "1.10.1"
 clap = "4.5.37"
-commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "fix/dynamic-operator-state-retriever-address" }
-commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "fix/dynamic-operator-state-retriever-address" }
-commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "fix/dynamic-operator-state-retriever-address" }
-commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "fix/dynamic-operator-state-retriever-address" }
-commonware-avs-usecases = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "fix/dynamic-operator-state-retriever-address" }
+commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-usecases = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-codec = "0.0.63"
 commonware-cryptography = "0.0.63"
 commonware-macros = "0.0.63"
