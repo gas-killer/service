@@ -52,49 +52,49 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 Ethereum service name
 */}}
 {{- define "gas-killer.ethereum.fullname" -}}
-{{- printf "%s-ethereum" (include "gas-killer.fullname" .) }}
+{{- printf "%s-ethereum" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Signer service name
 */}}
 {{- define "gas-killer.signer.fullname" -}}
-{{- printf "%s-signer" (include "gas-killer.fullname" .) }}
+{{- printf "%s-signer" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Router service name
 */}}
 {{- define "gas-killer.router.fullname" -}}
-{{- printf "%s-router" (include "gas-killer.fullname" .) }}
+{{- printf "%s-router" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Node name helper
 */}}
 {{- define "gas-killer.node.fullname" -}}
-{{- printf "%s-node" (include "gas-killer.fullname" .) }}
+{{- printf "%s-node" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Setup job name
 */}}
 {{- define "gas-killer.setup.fullname" -}}
-{{- printf "%s-setup" (include "gas-killer.fullname" .) }}
+{{- printf "%s-setup" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Shared data PVC name
 */}}
 {{- define "gas-killer.shareddata.fullname" -}}
-{{- printf "%s-shared-data" (include "gas-killer.fullname" .) }}
+{{- printf "%s-shared-data" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Config ConfigMap name
 */}}
 {{- define "gas-killer.config.fullname" -}}
-{{- printf "%s-config" (include "gas-killer.fullname" .) }}
+{{- printf "%s-config" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
@@ -104,6 +104,6 @@ Secret name - supports existing secret or creates new one
 {{- if .Values.secrets.existingSecret }}
 {{- .Values.secrets.existingSecret }}
 {{- else }}
-{{- printf "%s-secret" (include "gas-killer.fullname" .) }}
+{{- printf "%s-secret" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}

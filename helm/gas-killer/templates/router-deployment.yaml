@@ -25,10 +25,17 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for setup to complete..."
+              echo "Waiting for setup to complete (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
               until [ -f /app/.nodes/.setup_complete ]; do
-                echo "Setup not complete, waiting for .setup_complete marker..."
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for setup to complete after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Setup not complete, waiting for .setup_complete marker... (${ELAPSED}s elapsed)"
                 sleep 10
+                ELAPSED=$((ELAPSED + 10))
               done
               echo "Setup complete! Contracts deployed and operators registered."
           volumeMounts:
@@ -43,10 +50,17 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for Ethereum RPC..."
+              echo "Waiting for Ethereum RPC (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
               until nc -z {{ include "gas-killer.ethereum.fullname" . }} {{ .Values.ethereum.service.port }}; do
-                echo "Ethereum not ready, waiting..."
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for Ethereum RPC after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Ethereum not ready, waiting... (${ELAPSED}s elapsed)"
                 sleep 5
+                ELAPSED=$((ELAPSED + 5))
               done
               echo "Ethereum is ready!"
 
@@ -57,14 +71,21 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for nodes to be ready..."
+              echo "Waiting for nodes to be ready (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
               {{- $nodeCount := int .Values.global.nodeCount }}
               {{- range $i := until $nodeCount }}
               {{- $nodeIndex := add $i 1 }}
               {{- $nodePort := add (int $.Values.node.basePort) $i }}
               until nc -z {{ include "gas-killer.node.fullname" $ }}-{{ $nodeIndex }} {{ $nodePort }}; do
-                echo "Node {{ $nodeIndex }} not ready, waiting..."
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for Node {{ $nodeIndex }} after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Node {{ $nodeIndex }} not ready, waiting... (${ELAPSED}s elapsed)"
                 sleep 5
+                ELAPSED=$((ELAPSED + 5))
               done
               echo "Node {{ $nodeIndex }} is ready!"
               {{- end }}

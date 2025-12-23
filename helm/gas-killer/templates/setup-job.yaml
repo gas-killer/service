@@ -29,10 +29,17 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for Ethereum RPC..."
+              echo "Waiting for Ethereum RPC (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
               until nc -z {{ include "gas-killer.ethereum.fullname" . }} {{ .Values.ethereum.service.port }}; do
-                echo "Ethereum not ready, waiting..."
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for Ethereum RPC after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Ethereum not ready, waiting... (${ELAPSED}s elapsed)"
                 sleep 5
+                ELAPSED=$((ELAPSED + 5))
               done
               echo "Ethereum is ready!"
 

@@ -27,10 +27,17 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for setup to complete..."
+              echo "Waiting for setup to complete (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
               until [ -f /app/.nodes/.setup_complete ]; do
-                echo "Setup not complete, waiting for .setup_complete marker..."
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for setup to complete after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Setup not complete, waiting for .setup_complete marker... (${ELAPSED}s elapsed)"
                 sleep 10
+                ELAPSED=$((ELAPSED + 10))
               done
               echo "Setup complete! Starting signer..."
           volumeMounts:

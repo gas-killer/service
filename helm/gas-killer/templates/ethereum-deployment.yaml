@@ -19,7 +19,9 @@ spec:
         app.kubernetes.io/component: ethereum
     spec:
       # Prioritize keeping ethereum pod running - it holds critical state
-      priorityClassName: system-cluster-critical
+      {{- if .Values.ethereum.priorityClassName }}
+      priorityClassName: {{ .Values.ethereum.priorityClassName }}
+      {{- end }}
       containers:
         - name: ethereum
           image: "{{ .Values.ethereum.image.repository }}:{{ .Values.ethereum.image.tag }}"
