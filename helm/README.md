@@ -11,7 +11,7 @@ A Helm chart for deploying the Gas Killer Router AVS with EigenLayer integration
 ## Installation
 
 ```bash
-helm install gas-killer ./helm/gas-killer \
+helm install gas-killer ./helm \
   --set secrets.forkUrl="https://your-rpc-url" \
   --set secrets.privateKey="0x..." \
   --set secrets.fundedKey="0x..."
@@ -29,12 +29,12 @@ The setup job (`helm.sh/hook: post-install`) only runs on fresh installs, NOT on
   ```bash
   # Option 1: Uninstall and reinstall
   helm uninstall gas-killer
-  helm install gas-killer ./helm/gas-killer --set ...
+  helm install gas-killer ./helm --set ...
 
   # Option 2: Delete the job and PVC, then upgrade
   kubectl delete job gas-killer-setup
   kubectl delete pvc gas-killer-shared-data
-  helm upgrade gas-killer ./helm/gas-killer --set ...
+  helm upgrade gas-killer ./helm --set ...
   ```
 
 ### DNS Label Length Limits
@@ -73,7 +73,7 @@ The current node readiness probe checks if the `gas-killer` process is running. 
 All init containers have a configurable timeout (default: 300 seconds). If your setup takes longer (e.g., slow RPC, large state), increase the timeout:
 
 ```bash
-helm install gas-killer ./helm/gas-killer \
+helm install gas-killer ./helm \
   --set global.initTimeout=600
 ```
 
