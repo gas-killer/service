@@ -21,6 +21,8 @@ spec:
       # Prioritize keeping ethereum pod running - it holds critical state
       {{- if .Values.ethereum.priorityClassName }}
       priorityClassName: {{ .Values.ethereum.priorityClassName }}
+      {{- else if .Values.priorityClass.create }}
+      priorityClassName: {{ include "gas-killer.fullname" . }}-high
       {{- end }}
       containers:
         - name: ethereum

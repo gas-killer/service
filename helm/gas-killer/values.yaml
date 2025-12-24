@@ -13,6 +13,16 @@ global:
   # Timeout for init containers waiting for dependencies (in seconds)
   initTimeout: 300
 
+# Priority class for infrastructure pods (ethereum)
+# Creates a PriorityClass with elevated priority (above default 0, below system-critical)
+priorityClass:
+  # Set to true to create a PriorityClass resource
+  create: true
+  # Priority value: higher = more important
+  # Default (0), system-cluster-critical (2000000000), system-node-critical (2000001000)
+  # 10000 is a reasonable "important application" priority
+  value: 10000
+
 # Secrets configuration
 # All sensitive values should be provided via --set or existingSecret
 secrets:
@@ -39,13 +49,13 @@ ethereum:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: dev
     pullPolicy: IfNotPresent
-  # Priority class for ethereum pod - it holds critical blockchain state
-  # Consider creating a custom priority class instead of using system-cluster-critical
-  # See README.md for details
-  priorityClassName: "system-cluster-critical"
   service:
     type: ClusterIP
     port: 8545
+  # Priority class for the ethereum pod
+  # By default uses the chart-created priority class (if priorityClass.create=true)
+  # Set to "" to use cluster default, or override with a custom priority class name
+  priorityClassName: ""
   resources:
     requests:
       memory: "1Gi"

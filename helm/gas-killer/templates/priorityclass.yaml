@@ -1,0 +1,13 @@
+{{- if .Values.priorityClass.create }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ include "gas-killer.fullname" . }}-high
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+globalDefault: false
+# Higher than default (0) but well below system-critical (2000000000)
+value: {{ .Values.priorityClass.value }}
+preemptionPolicy: PreemptLowerPriority
+description: "High priority for Gas Killer infrastructure pods (ethereum)"
+{{- end }}
