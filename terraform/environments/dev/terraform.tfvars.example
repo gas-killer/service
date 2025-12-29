@@ -1,0 +1,64 @@
+# =============================================================================
+# Gas Killer Router - Terraform Configuration
+# =============================================================================
+#
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: Never commit terraform.tfvars with real secrets to git!
+# =============================================================================
+
+# AWS Configuration
+aws_region = "us-east-1"
+
+# EKS Configuration (cost-optimized for dev)
+kubernetes_version  = "1.29"
+node_instance_types = ["t3.medium"]
+node_desired_size   = 2
+node_min_size       = 1
+node_max_size       = 3
+
+# Gas Killer Configuration
+environment_mode = "LOCAL" # Use "TESTNET" for direct Sepolia connection
+node_count       = 3
+
+# =============================================================================
+# SECRETS - Fill these in with your actual values
+# =============================================================================
+
+# RPC URL for Anvil to fork from (required for LOCAL mode)
+# Example: https://eth-sepolia.g.alchemy.com/v2/YOUR_API_KEY
+# Example: https://ethereum-sepolia-rpc.publicnode.com (free, rate-limited)
+fork_url = ""
+
+# Deployer private key (without 0x prefix)
+# This key will be used to deploy contracts
+# For testing, you can use an Anvil default key
+private_key = ""
+
+# Funded account private key (without 0x prefix)
+# This account needs ETH for gas (Anvil will auto-fund in LOCAL mode)
+funded_key = ""
+
+# =============================================================================
+# Container Images (optional - defaults to GHCR)
+# =============================================================================
+
+# Use defaults from GHCR
+# node_image_repository   = "ghcr.io/breadchaincoop/gas-killer-node"
+# node_image_tag          = "dev"
+# router_image_repository = "ghcr.io/breadchaincoop/gas-killer-router"
+# router_image_tag        = "dev"
+
+# Or use ECR images (replace with your ECR repo)
+# node_image_repository   = "123456789012.dkr.ecr.us-east-1.amazonaws.com/gas-killer-node"
+# node_image_tag          = "v1.0.0"
+# router_image_repository = "123456789012.dkr.ecr.us-east-1.amazonaws.com/gas-killer-router"
+# router_image_tag        = "v1.0.0"
+
+# =============================================================================
+# Ingress Configuration
+# =============================================================================
+
+enable_ingress = true
+# ingress_host = "gas-killer.example.com"  # Optional: custom hostname
