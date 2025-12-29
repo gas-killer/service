@@ -252,14 +252,14 @@ resource "kubernetes_job" "deploy_and_trigger" {
 
               # Deploy ArraySummation using cast
               # The factory creates a new ArraySummation instance
-              echo "Calling ArraySummation factory at ${ARRAY_SUMMATION_FACTORY_ADDRESS}..."
+              echo "Calling ArraySummation factory at $${ARRAY_SUMMATION_FACTORY_ADDRESS}..."
 
               # createArraySummation(uint256 arraySize, uint256 maxValue, uint256 seed, address counter)
               # Function selector: 0x... (we'll use cast to call it)
               RESULT=$(cast send \
                 --rpc-url $HTTP_RPC \
                 --private-key 0x$PRIVATE_KEY \
-                ${ARRAY_SUMMATION_FACTORY_ADDRESS} \
+                $${ARRAY_SUMMATION_FACTORY_ADDRESS} \
                 "createArraySummation(uint256,uint256,uint256,address)" \
                 100 1000 42 $COUNTER_ADDRESS \
                 --json 2>/dev/null || echo "")
