@@ -22,3 +22,8 @@ output "router_url" {
   description = "Router URL (HTTP)"
   value       = var.enable_ingress && length(data.kubernetes_ingress_v1.gas_killer) > 0 ? "http://${try(data.kubernetes_ingress_v1.gas_killer[0].status[0].load_balancer[0].ingress[0].hostname, "pending...")}" : "ingress disabled"
 }
+
+output "e2e_test_enabled" {
+  description = "Whether E2E test job was run"
+  value       = var.run_e2e_test
+}

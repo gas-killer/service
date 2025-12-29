@@ -62,3 +62,13 @@ funded_key = ""
 
 enable_ingress = true
 # ingress_host = "gas-killer.example.com"  # Optional: custom hostname
+
+# =============================================================================
+# E2E Test Configuration
+# =============================================================================
+
+# Run E2E test after deployment (deploys ArraySummation contract and triggers Gas Killer)
+run_e2e_test = true
+
+# ArraySummation factory address on Sepolia (forked by Anvil in LOCAL mode)
+# array_summation_factory_address = "0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"

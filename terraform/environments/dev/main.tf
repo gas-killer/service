@@ -153,6 +153,10 @@ module "gas_killer" {
   # Storage
   storage_class = module.eks_addons.storage_class_name
 
+  # E2E Test
+  run_e2e_test                    = var.run_e2e_test
+  array_summation_factory_address = var.array_summation_factory_address
+
   # Dependency
   addons_ready = module.eks_addons.ready
 

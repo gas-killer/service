@@ -98,3 +98,16 @@ variable "addons_ready" {
   type        = bool
   default     = true
 }
+
+# E2E Test Configuration
+variable "run_e2e_test" {
+  description = "Run E2E test job after deployment (deploys ArraySummation and triggers Gas Killer)"
+  type        = bool
+  default     = true
+}
+
+variable "array_summation_factory_address" {
+  description = "ArraySummation factory contract address (on Sepolia)"
+  type        = string
+  default     = "0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
+}
