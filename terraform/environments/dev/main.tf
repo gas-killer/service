@@ -18,6 +18,10 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -125,6 +129,46 @@ module "eks_addons" {
 }
 
 # =============================================================================
+# Pre-destroy cleanup for ALB resources
+# =============================================================================
+# This ensures the ALB Controller properly cleans up load balancers before
+# the controller itself is deleted, preventing orphaned finalizers.
+
+resource "null_resource" "alb_cleanup" {
+  triggers = {
+    cluster_name = module.eks.cluster_name
+    namespace    = var.namespace
+    region       = var.aws_region
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      echo "Cleaning up ALB resources before destroy..."
+
+      # Update kubeconfig
+      aws eks update-kubeconfig --name ${self.triggers.cluster_name} --region ${self.triggers.region} 2>/dev/null || true
+
+      # Delete ingress to trigger ALB cleanup
+      kubectl delete ingress --all -n ${self.triggers.namespace} --timeout=60s 2>/dev/null || true
+
+      # Wait for ALB to be deleted
+      echo "Waiting for ALB cleanup..."
+      sleep 30
+
+      # Force remove any stuck finalizers
+      for resource in $(kubectl get targetgroupbindings.elbv2.k8s.aws -n ${self.triggers.namespace} -o name 2>/dev/null); do
+        kubectl patch $resource -n ${self.triggers.namespace} -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+      done
+
+      echo "ALB cleanup complete"
+    EOT
+  }
+
+  depends_on = [module.eks_addons]
+}
+
+# =============================================================================
 # Gas Killer Helm Deployment
 # =============================================================================
 
@@ -160,5 +204,5 @@ module "gas_killer" {
   # Dependency
   addons_ready = module.eks_addons.ready
 
-  depends_on = [module.eks_addons]
+  depends_on = [module.eks_addons, null_resource.alb_cleanup]
 }
