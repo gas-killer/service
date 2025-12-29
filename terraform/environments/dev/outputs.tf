@@ -68,7 +68,7 @@ output "helpful_commands" {
   value       = <<-EOT
 
     # Configure kubectl:
-    ${self.kubeconfig_command}
+    aws eks update-kubeconfig --name ${module.eks.cluster_name} --region ${var.aws_region}
 
     # Check pods:
     kubectl get pods -n ${module.gas_killer.namespace}
