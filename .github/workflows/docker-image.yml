@@ -55,8 +55,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/gas-killer-node:${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/gas-killer-node:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/gas-killer-router:node-${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/gas-killer-router:node-${{ github.sha }}
           cache-from: type=gha,scope=node
           cache-to: type=gha,mode=max,scope=node
           build-args: |
