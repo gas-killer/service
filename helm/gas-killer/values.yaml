@@ -3,8 +3,11 @@
 # Global settings
 global:
   # Environment mode: LOCAL or TESTNET
-  # LOCAL: Uses Anvil with forked Sepolia, auto-deploys contracts
-  # TESTNET: Connects to real Sepolia testnet
+  # LOCAL: Uses Anvil with forked Sepolia, auto-deploys AVS contracts to local fork
+  #        Requires: secrets.forkUrl (Sepolia RPC to fork from)
+  # TESTNET: Connects directly to real Sepolia testnet
+  #          Requires: secrets.rpcUrl (Sepolia RPC endpoint)
+  #          AVS contracts are deployed to real Sepolia
   environment: LOCAL
 
   # Number of operator nodes to deploy
@@ -26,11 +29,16 @@ secrets:
   fundedKey: ""
 
   # Fork URL for Anvil (contains API key - sensitive!)
-  # REQUIRED for LOCAL mode - the chart will not work without this!
-  # Without forkUrl, ethereum and setup jobs are not deployed.
+  # REQUIRED for LOCAL mode - Anvil will fork from this RPC URL
   # Override with: --set secrets.forkUrl=<your-rpc-url>
-  # Example: --set secrets.forkUrl=https://ethereum-sepolia-rpc.publicnode.com
+  # Example: --set secrets.forkUrl=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
   forkUrl: ""
+
+  # Direct RPC URL for Sepolia (contains API key - sensitive!)
+  # REQUIRED for TESTNET mode - nodes/router connect directly to this RPC
+  # Override with: --set secrets.rpcUrl=<your-rpc-url>
+  # Example: --set secrets.rpcUrl=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
+  rpcUrl: ""
 
 # Ethereum (Anvil) configuration - only used in LOCAL mode
 ethereum:

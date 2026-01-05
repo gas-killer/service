@@ -16,8 +16,9 @@ resource "helm_release" "gas_killer" {
   chart     = var.chart_path
   namespace = kubernetes_namespace.gas_killer.metadata[0].name
 
-  # Wait for deployment to be ready
-  wait    = true
+  # Don't wait - the setup job is a post-install hook that needs helm to complete first
+  # Pods will become ready after the hook runs
+  wait    = false
   timeout = 900 # 15 minutes for setup job
 
   # Global settings
@@ -45,6 +46,11 @@ resource "helm_release" "gas_killer" {
   set_sensitive {
     name  = "secrets.forkUrl"
     value = var.fork_url
+  }
+
+  set_sensitive {
+    name  = "secrets.rpcUrl"
+    value = var.rpc_url
   }
 
   # Node image
@@ -202,9 +208,26 @@ resource "kubernetes_job" "deploy_and_trigger" {
             read_only  = true
           }
 
-          env {
-            name  = "HTTP_RPC"
-            value = "http://gas-killer-ethereum:8545"
+          # In TESTNET mode, use RPC_URL from secret; in LOCAL mode, use local ethereum service
+          dynamic "env" {
+            for_each = var.environment_mode == "TESTNET" ? [1] : []
+            content {
+              name = "HTTP_RPC"
+              value_from {
+                secret_key_ref {
+                  name = "gas-killer-secrets"
+                  key  = "RPC_URL"
+                }
+              }
+            }
+          }
+
+          dynamic "env" {
+            for_each = var.environment_mode == "LOCAL" ? [1] : []
+            content {
+              name  = "HTTP_RPC"
+              value = "http://gas-killer-ethereum:8545"
+            }
           }
 
           env {

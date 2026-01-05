@@ -72,6 +72,10 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.signer.resources | nindent 12 }}
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
 
       volumes:
         - name: shared-data

@@ -43,7 +43,8 @@ spec:
               mountPath: /app/.nodes
               readOnly: true
 
-        # Wait for ethereum RPC to be accessible
+        {{- if eq .Values.global.environment "LOCAL" }}
+        # Wait for ethereum RPC to be accessible (LOCAL mode only)
         - name: wait-for-ethereum
           image: busybox:1.36
           command:
@@ -63,6 +64,7 @@ spec:
                 ELAPSED=$((ELAPSED + 5))
               done
               echo "Ethereum is ready!"
+        {{- end }}
 
         # Wait for nodes to be ready
         - name: wait-for-nodes
@@ -127,12 +129,32 @@ spec:
             - "--port"
             - {{ .Values.router.port | quote }}
           env:
+            {{- if eq .Values.global.environment "TESTNET" }}
+            # TESTNET mode: Use external RPC from secret
+            - name: HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: RPC_URL
+            - name: RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: RPC_URL
+            - name: WS_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: WS_RPC_URL
+            {{- else }}
+            # LOCAL mode: Use local Anvil service
             - name: HTTP_RPC
               value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
             - name: RPC_URL
               value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
             - name: WS_RPC
               value: "ws://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+            {{- end }}
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"
             - name: INGRESS

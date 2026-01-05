@@ -139,29 +139,72 @@ resource "null_resource" "alb_cleanup" {
     cluster_name = module.eks.cluster_name
     namespace    = var.namespace
     region       = var.aws_region
+    vpc_id       = module.vpc.vpc_id
   }
 
   provisioner "local-exec" {
     when    = destroy
     command = <<-EOT
-      echo "Cleaning up ALB resources before destroy..."
+      set +e  # Don't exit on errors
+      echo "=== Pre-destroy cleanup for ALB resources ==="
 
       # Update kubeconfig
       aws eks update-kubeconfig --name ${self.triggers.cluster_name} --region ${self.triggers.region} 2>/dev/null || true
 
-      # Delete ingress to trigger ALB cleanup
-      kubectl delete ingress --all -n ${self.triggers.namespace} --timeout=60s 2>/dev/null || true
+      # Step 1: Delete helm release to trigger cleanup
+      echo "Step 1: Deleting helm release..."
+      helm uninstall gas-killer -n ${self.triggers.namespace} --timeout 60s 2>/dev/null || true
 
-      # Wait for ALB to be deleted
-      echo "Waiting for ALB cleanup..."
-      sleep 30
+      # Step 2: Delete all ingresses
+      echo "Step 2: Deleting ingresses..."
+      kubectl delete ingress --all -n ${self.triggers.namespace} --timeout=30s 2>/dev/null || true
 
-      # Force remove any stuck finalizers
-      for resource in $(kubectl get targetgroupbindings.elbv2.k8s.aws -n ${self.triggers.namespace} -o name 2>/dev/null); do
-        kubectl patch $resource -n ${self.triggers.namespace} -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+      # Step 3: Force remove ingress finalizers
+      echo "Step 3: Removing ingress finalizers..."
+      for ing in $(kubectl get ingress -n ${self.triggers.namespace} -o name 2>/dev/null); do
+        kubectl patch $ing -n ${self.triggers.namespace} -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
       done
 
-      echo "ALB cleanup complete"
+      # Step 4: Remove targetgroupbinding finalizers
+      echo "Step 4: Removing targetgroupbinding finalizers..."
+      for tgb in $(kubectl get targetgroupbindings.elbv2.k8s.aws -n ${self.triggers.namespace} -o name 2>/dev/null); do
+        kubectl patch $tgb -n ${self.triggers.namespace} -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+      done
+
+      # Step 5: Wait for ALB controller to clean up (with timeout)
+      echo "Step 5: Waiting for ALB cleanup (60s)..."
+      sleep 60
+
+      # Step 6: Delete namespace (force if stuck)
+      echo "Step 6: Deleting namespace..."
+      kubectl delete namespace ${self.triggers.namespace} --timeout=30s 2>/dev/null || true
+
+      # Force remove namespace finalizers if stuck
+      kubectl get namespace ${self.triggers.namespace} 2>/dev/null && \
+        kubectl patch namespace ${self.triggers.namespace} -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+
+      # Step 7: Clean up orphaned AWS resources in VPC
+      echo "Step 7: Cleaning up orphaned AWS resources in VPC..."
+
+      # Delete k8s-created security groups (they have k8s- prefix or specific tags)
+      for sg in $(aws ec2 describe-security-groups \
+        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
+        --query 'SecurityGroups[?starts_with(GroupName, `k8s-`)].GroupId' \
+        --output text --region ${self.triggers.region} 2>/dev/null); do
+        echo "Deleting security group: $sg"
+        aws ec2 delete-security-group --group-id $sg --region ${self.triggers.region} 2>/dev/null || true
+      done
+
+      # Delete any ENIs that might be stuck
+      for eni in $(aws ec2 describe-network-interfaces \
+        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" "Name=status,Values=available" \
+        --query 'NetworkInterfaces[*].NetworkInterfaceId' \
+        --output text --region ${self.triggers.region} 2>/dev/null); do
+        echo "Deleting ENI: $eni"
+        aws ec2 delete-network-interface --network-interface-id $eni --region ${self.triggers.region} 2>/dev/null || true
+      done
+
+      echo "=== ALB cleanup complete ==="
     EOT
   }
 
@@ -181,6 +224,7 @@ module "gas_killer" {
 
   # Secrets
   fork_url    = var.fork_url
+  rpc_url     = var.rpc_url
   private_key = var.private_key
   funded_key  = var.funded_key
 
