@@ -102,9 +102,17 @@ variable "node_count" {
 # =============================================================================
 
 variable "fork_url" {
-  description = "RPC URL for Anvil fork (e.g., Alchemy/Infura Sepolia URL)"
+  description = "RPC URL for Anvil fork (required for LOCAL mode)"
   type        = string
   sensitive   = true
+  default     = ""
+}
+
+variable "rpc_url" {
+  description = "RPC URL for direct Sepolia connection (required for TESTNET mode)"
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 
 variable "private_key" {
