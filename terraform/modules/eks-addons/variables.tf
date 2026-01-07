@@ -24,11 +24,11 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
-variable "ebs_csi_driver_version" {
-  description = "Version of EBS CSI driver addon"
-  type        = string
-  default     = "v1.28.0-eksbuild.1"
-}
+#variable "ebs_csi_driver_version" {
+#  description = "Version of EBS CSI driver addon"
+#  type        = string
+#  default     = "v1.54.0-eksbuild.1"
+#}
 
 variable "alb_controller_version" {
   description = "Version of AWS Load Balancer Controller Helm chart"

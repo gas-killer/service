@@ -1,20 +1,9 @@
-# Kubernetes namespace
-resource "kubernetes_namespace" "gas_killer" {
-  metadata {
-    name = var.namespace
-
-    labels = {
-      "app.kubernetes.io/name"       = "gas-killer"
-      "app.kubernetes.io/managed-by" = "terraform"
-    }
-  }
-}
-
 # Helm release for gas-killer
 resource "helm_release" "gas_killer" {
-  name      = "gas-killer"
-  chart     = var.chart_path
-  namespace = kubernetes_namespace.gas_killer.metadata[0].name
+  name             = "gas-killer"
+  chart            = var.chart_path
+  namespace        = var.namespace
+  create_namespace = true
 
   # Don't wait - the setup job is a post-install hook that needs helm to complete first
   # Pods will become ready after the hook runs
@@ -131,10 +120,6 @@ resource "helm_release" "gas_killer" {
       value = var.ingress_host
     }
   }
-
-  depends_on = [
-    kubernetes_namespace.gas_killer,
-  ]
 }
 
 # Data source to get the ingress after deployment
@@ -158,7 +143,7 @@ resource "kubernetes_job" "deploy_and_trigger" {
 
   metadata {
     name      = "gas-killer-e2e-test"
-    namespace = kubernetes_namespace.gas_killer.metadata[0].name
+    namespace = var.namespace
     labels = {
       "app.kubernetes.io/name"      = "gas-killer"
       "app.kubernetes.io/component" = "e2e-test"
@@ -215,7 +200,7 @@ resource "kubernetes_job" "deploy_and_trigger" {
               name = "HTTP_RPC"
               value_from {
                 secret_key_ref {
-                  name = "gas-killer-secrets"
+                  name = "gas-killer-secret"
                   key  = "RPC_URL"
                 }
               }
@@ -244,7 +229,7 @@ resource "kubernetes_job" "deploy_and_trigger" {
             name = "PRIVATE_KEY"
             value_from {
               secret_key_ref {
-                name = "gas-killer-secrets"
+                name = "gas-killer-secret"
                 key  = "PRIVATE_KEY"
               }
             }

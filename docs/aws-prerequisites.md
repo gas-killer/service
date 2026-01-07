@@ -499,6 +499,7 @@ Edit `terraform.tfvars`:
 ```hcl
 # AWS Configuration
 aws_region = "us-east-1"
+availability_zones = ["us-east-1a", "us-east-1b"]
 
 # EKS Configuration
 kubernetes_version  = "1.29"
