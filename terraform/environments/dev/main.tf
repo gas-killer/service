@@ -171,29 +171,63 @@ resource "null_resource" "alb_cleanup" {
         kubectl patch $tgb -n ${self.triggers.namespace} -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
       done
 
-      # Step 5: Wait for ALB controller to clean up (with timeout)
-      echo "Step 5: Waiting for ALB cleanup (60s)..."
-      sleep 60
-
-      # Step 6: Delete namespace (force if stuck)
-      echo "Step 6: Deleting namespace..."
+      # Step 5: Delete namespace (force if stuck)
+      echo "Step 5: Deleting namespace..."
       kubectl delete namespace ${self.triggers.namespace} --timeout=30s 2>/dev/null || true
 
       # Force remove namespace finalizers if stuck
       kubectl get namespace ${self.triggers.namespace} 2>/dev/null && \
         kubectl patch namespace ${self.triggers.namespace} -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
 
-      # Step 7: Clean up orphaned AWS resources in VPC
-      echo "Step 7: Cleaning up orphaned AWS resources in VPC..."
+      # Step 6: Clean up orphaned AWS resources in VPC
+      echo "Step 6: Cleaning up orphaned AWS resources in VPC..."
 
-      # Delete k8s-created security groups (they have k8s- prefix or specific tags)
+      echo "Deleting ALBs in VPC..."
+      
+      aws elbv2 describe-load-balancers \
+        --region ${self.triggers.region} \
+        --query 'LoadBalancers[?VpcId==`'"${self.triggers.vpc_id}"'`].LoadBalancerArn' \
+        --output text | while read arn; do
+          echo "Deleting ALB: $arn"
+          aws elbv2 delete-load-balancer \
+            --region ${self.triggers.region} \
+            --load-balancer-arn "$arn" || true
+      done
+      
+      echo "Waiting for ELB ENIs to disappear..."
+      for i in {1..60}; do
+        COUNT=$(aws ec2 describe-network-interfaces \
+          --filters Name=vpc-id,Values=${self.triggers.vpc_id} \
+          --query 'NetworkInterfaces[?contains(Description, `ELB`)] | length(@)' \
+          --output text)
+      
+        echo "Remaining ELB ENIs: $COUNT"
+        [ "$COUNT" = "0" ] && break
+        sleep 20
+      done
+
+      echo "Deleting k8s-managed security groups..."
       for sg in $(aws ec2 describe-security-groups \
+        --region ${self.triggers.region} \
         --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
         --query 'SecurityGroups[?starts_with(GroupName, `k8s-`)].GroupId' \
-        --output text --region ${self.triggers.region} 2>/dev/null); do
-        echo "Deleting security group: $sg"
-        aws ec2 delete-security-group --group-id $sg --region ${self.triggers.region} 2>/dev/null || true
+        --output text); do
+      
+        echo "Waiting to delete security group: $sg"
+      
+        for i in {1..30}; do
+          if aws ec2 delete-security-group \
+            --region ${self.triggers.region} \
+            --group-id "$sg" 2>/dev/null; then
+            echo "Deleted security group: $sg"
+            break
+          fi
+      
+          echo "SG $sg still has dependencies, retrying..."
+          sleep 10
+        done
       done
+
 
       # Delete any ENIs that might be stuck
       for eni in $(aws ec2 describe-network-interfaces \

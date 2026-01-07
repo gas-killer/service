@@ -1,6 +1,6 @@
 output "namespace" {
   description = "Kubernetes namespace"
-  value       = kubernetes_namespace.gas_killer.metadata[0].name
+  value       = var.namespace
 }
 
 output "release_name" {
