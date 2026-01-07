@@ -80,6 +80,8 @@ module "eks" {
   node_max_size       = var.node_max_size
 
   tags = local.tags
+
+  depends_on = [null_resource.vpc_post_cleanup]
 }
 
 # =============================================================================
@@ -206,29 +208,6 @@ resource "null_resource" "alb_cleanup" {
         sleep 20
       done
 
-      echo "Deleting k8s-managed security groups..."
-      for sg in $(aws ec2 describe-security-groups \
-        --region ${self.triggers.region} \
-        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
-        --query 'SecurityGroups[?starts_with(GroupName, `k8s-`)].GroupId' \
-        --output text); do
-      
-        echo "Waiting to delete security group: $sg"
-      
-        for i in {1..30}; do
-          if aws ec2 delete-security-group \
-            --region ${self.triggers.region} \
-            --group-id "$sg" 2>/dev/null; then
-            echo "Deleted security group: $sg"
-            break
-          fi
-      
-          echo "SG $sg still has dependencies, retrying..."
-          sleep 10
-        done
-      done
-
-
       # Delete any ENIs that might be stuck
       for eni in $(aws ec2 describe-network-interfaces \
         --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" "Name=status,Values=available" \
@@ -243,6 +222,63 @@ resource "null_resource" "alb_cleanup" {
   }
 
   depends_on = [module.eks_addons]
+}
+
+resource "null_resource" "vpc_post_cleanup" {
+  triggers = {
+    cluster_name = local.name
+    region       = var.aws_region
+    vpc_id       = module.vpc.vpc_id
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      set +e
+      echo "=== Post-destroy VPC cleanup (after EKS deletion) ==="
+
+      echo "Waiting for EKS cluster to be deleted (best-effort)..."
+      aws eks wait cluster-deleted \
+        --region ${self.triggers.region} \
+        --name ${self.triggers.cluster_name} 2>/dev/null || true
+
+      echo "Waiting for k8s-managed security groups to become deletable..."
+      K8S_SGS=$(aws ec2 describe-security-groups \
+        --region ${self.triggers.region} \
+        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
+        --query 'SecurityGroups[?starts_with(GroupName, `k8s-`)].GroupId' \
+        --output text 2>/dev/null)
+
+      for sg in $K8S_SGS; do
+        echo "Trying to delete SG: $sg"
+        for i in {1..60}; do
+          if aws ec2 delete-security-group \
+            --region ${self.triggers.region} \
+            --group-id "$sg" 2>/dev/null; then
+            echo "Deleted SG: $sg"
+            break
+          fi
+          echo "SG $sg still has dependencies, retrying..."
+          sleep 10
+        done
+      done
+
+      echo "Deleting any leftover AVAILABLE ENIs..."
+      for eni in $(aws ec2 describe-network-interfaces \
+        --region ${self.triggers.region} \
+        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" "Name=status,Values=available" \
+        --query 'NetworkInterfaces[*].NetworkInterfaceId' \
+        --output text 2>/dev/null); do
+        echo "Deleting ENI: $eni"
+        aws ec2 delete-network-interface --region ${self.triggers.region} --network-interface-id "$eni" 2>/dev/null || true
+      done
+
+      echo "=== Post cleanup complete ==="
+    EOT
+  }
+
+  # Must exist while VPC exists → makes this run BEFORE VPC destroy (because destroy is reverse-deps)
+  depends_on = [module.vpc]
 }
 
 # =============================================================================
