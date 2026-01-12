@@ -3946,7 +3946,7 @@ dependencies = [
 [[package]]
 name = "foundry-cheatcodes-spec"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-sol-types",
  "foundry-macros",
@@ -3956,7 +3956,7 @@ dependencies = [
 [[package]]
 name = "foundry-common"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -4012,7 +4012,7 @@ dependencies = [
 [[package]]
 name = "foundry-common-fmt"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
@@ -4128,7 +4128,7 @@ dependencies = [
 [[package]]
 name = "foundry-config"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-chains",
  "alloy-primitives",
@@ -4167,7 +4167,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-abi"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -4180,7 +4180,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-core"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -4221,7 +4221,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-networks"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-chains",
  "alloy-eips",
@@ -4236,7 +4236,7 @@ dependencies = [
 [[package]]
 name = "foundry-evm-traces"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-json-abi",
@@ -4293,7 +4293,7 @@ dependencies = [
 [[package]]
 name = "foundry-linking"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-primitives",
  "foundry-compilers",
@@ -4305,7 +4305,7 @@ dependencies = [
 [[package]]
 name = "foundry-macros"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "proc-macro-error2",
  "proc-macro2",
@@ -4316,7 +4316,7 @@ dependencies = [
 [[package]]
 name = "foundry-primitives"
 version = "1.5.1"
-source = "git+https://github.com/foundry-rs/foundry?branch=master#0bdd2138ddf1b9888f2e98491caf0f5bac1a81a0"
+source = "git+https://github.com/foundry-rs/foundry?branch=master#46f2d8938ea3a07532a370ccbe856c8150d1ae0b"
 dependencies = [
  "alloy-consensus",
  "alloy-evm 0.25.2",
@@ -4446,7 +4446,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-rs"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer?branch=opcode-tracer-compare#9c3a855fc58b566b6500cfd5b516ebea7317ed89"
+source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer#2cd16480b64f30dfad1a6434a241ca064d864155"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
