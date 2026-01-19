@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(round, 0); // Default round is 0
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_validator_produces_consistent_hash() {
         // This test verifies the production flow:
         // 1. Creator produces task data
