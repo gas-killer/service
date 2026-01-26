@@ -134,7 +134,9 @@ router:
   ingressPort: 8080
   ingress:
     enabled: true
-    timeoutMs: 180000
+    # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation (3e+06)
+    # which Rust's u64 parser cannot handle
+    timeoutMs: "3000000"  # 50 minutes
   service:
     type: ClusterIP
     port: 3000
