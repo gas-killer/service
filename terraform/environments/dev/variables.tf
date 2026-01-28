@@ -116,13 +116,13 @@ variable "rpc_url" {
 }
 
 variable "private_key" {
-  description = "Deployer private key (without 0x prefix)"
+  description = "Deployer private key (with 0x prefix)"
   type        = string
   sensitive   = true
 }
 
 variable "funded_key" {
-  description = "Funded account private key (without 0x prefix)"
+  description = "Funded account private key (with 0x prefix)"
   type        = string
   sensitive   = true
 }
