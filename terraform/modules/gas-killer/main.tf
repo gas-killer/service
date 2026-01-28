@@ -173,6 +173,12 @@ resource "kubernetes_job" "deploy_and_trigger" {
           }
         }
 
+        # EmptyDir for communication between foundry and curl containers
+        volume {
+          name = "trigger-data"
+          empty_dir {}
+        }
+
         # Init container: Wait for router to be ready
         init_container {
           name  = "wait-for-router"
@@ -191,6 +197,11 @@ resource "kubernetes_job" "deploy_and_trigger" {
             name       = "shared-data"
             mount_path = "/app/.nodes"
             read_only  = true
+          }
+
+          volume_mount {
+            name       = "trigger-data"
+            mount_path = "/trigger"
           }
 
           # In TESTNET mode, use RPC_URL from secret; in LOCAL mode, use local ethereum service
@@ -371,37 +382,47 @@ resource "kubernetes_job" "deploy_and_trigger" {
               echo "Trigger payload:"
               echo "$TRIGGER_PAYLOAD"
 
-              # Trigger via router HTTP endpoint
-              # Try wget first (more commonly available), fallback to curl
-              echo "Sending trigger request to $ROUTER_URL/trigger..."
-              if command -v wget >/dev/null 2>&1; then
-                echo "Using wget for HTTP request"
-                TRIGGER_RESPONSE=$(wget -q -O - \
-                  --header="Content-Type: application/json" \
-                  --post-data="$TRIGGER_PAYLOAD" \
-                  --timeout=120 \
-                  "$ROUTER_URL/trigger" 2>&1 || echo "HTTP_FAILED")
-              elif command -v curl >/dev/null 2>&1; then
-                echo "Using curl for HTTP request"
-                TRIGGER_RESPONSE=$(curl -s -X POST \
-                  -H "Content-Type: application/json" \
-                  -d "$TRIGGER_PAYLOAD" \
-                  --max-time 120 \
-                  "$ROUTER_URL/trigger" 2>&1 || echo "HTTP_FAILED")
+              # Write trigger payload to shared volume for curl sidecar
+              echo "Writing trigger payload to /trigger/payload.json..."
+              echo "$TRIGGER_PAYLOAD" > /trigger/payload.json
+
+              # Signal that payload is ready
+              touch /trigger/ready
+
+              echo "Waiting for curl sidecar to send trigger request..."
+              # Wait for curl sidecar to complete (max 2 minutes)
+              WAIT_COUNT=0
+              while [ ! -f /trigger/done ] && [ $WAIT_COUNT -lt 120 ]; do
+                sleep 1
+                WAIT_COUNT=$((WAIT_COUNT + 1))
+              done
+
+              if [ -f /trigger/done ]; then
+                echo "Trigger request completed!"
+                TRIGGER_RESPONSE=$(cat /trigger/response.txt 2>/dev/null || echo "NO_RESPONSE")
+                echo "Trigger response: $TRIGGER_RESPONSE"
+
+                if echo "$TRIGGER_RESPONSE" | grep -q '"success":true'; then
+                  echo "SUCCESS: Task queued successfully!"
+                else
+                  echo "WARNING: Unexpected trigger response"
+                fi
               else
-                echo "WARNING: Neither wget nor curl available, skipping trigger"
-                TRIGGER_RESPONSE="NO_HTTP_CLIENT"
-              fi
-
-              echo "Trigger response: $TRIGGER_RESPONSE"
-
-              if echo "$TRIGGER_RESPONSE" | grep -qE "HTTP_FAILED|NO_HTTP_CLIENT"; then
-                echo "WARNING: Trigger request failed or skipped, but deployment was successful"
+                echo "WARNING: Timeout waiting for trigger response"
+                TRIGGER_RESPONSE="TIMEOUT"
               fi
 
               echo ""
-              echo "Step 5: Verifying execution..."
-              sleep 10
+              echo "Step 5: Waiting for aggregation and on-chain execution..."
+              echo "Aggregation frequency is 30s, waiting 45s for completion..."
+              sleep 45
+
+              # Check if stateTransitionCount increased
+              FINAL_TRANSITION=$(cast call \
+                --rpc-url $HTTP_RPC \
+                $ARRAY_SUMMATION_ADDRESS \
+                "stateTransitionCount()(uint256)" 2>/dev/null || echo "0")
+              echo "Final stateTransitionCount: $FINAL_TRANSITION"
 
               # Check if currentSum changed
               FINAL_SUM=$(cast call \
@@ -410,11 +431,89 @@ resource "kubernetes_job" "deploy_and_trigger" {
                 "currentSum()(uint256)" 2>/dev/null || echo "0")
               echo "Final currentSum: $FINAL_SUM"
 
+              # Verify the execution actually happened
+              if [ "$FINAL_TRANSITION" -gt "$TRANSITION_INDEX" ]; then
+                echo ""
+                echo "=== E2E TEST PASSED ==="
+                echo "State transition executed successfully!"
+                echo "  - Transition count: $TRANSITION_INDEX -> $FINAL_TRANSITION"
+                echo "  - Current sum: $FINAL_SUM"
+              else
+                echo ""
+                echo "=== E2E TEST WARNING ==="
+                echo "State transition may not have completed yet."
+                echo "  - Expected transition count > $TRANSITION_INDEX, got $FINAL_TRANSITION"
+                echo "Check router logs for aggregation results:"
+                echo "  kubectl logs -n gas-killer -l app.kubernetes.io/component=router"
+              fi
+
               echo ""
               echo "=== E2E Test Complete ==="
               echo "ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
-              echo "Check router logs for aggregation results:"
-              echo "  kubectl logs -n gas-killer -l app.kubernetes.io/component=router"
+
+              # Signal completion so curl sidecar can exit
+              touch /trigger/main-done
+            EOT
+          ]
+        }
+
+        # Sidecar container: curl for HTTP requests (foundry image doesn't have curl/wget)
+        container {
+          name  = "curl-trigger"
+          image = "curlimages/curl:latest"
+
+          volume_mount {
+            name       = "trigger-data"
+            mount_path = "/trigger"
+          }
+
+          command = [
+            "sh", "-c",
+            <<-EOT
+              echo "=== Curl Sidecar Started ==="
+              echo "Waiting for trigger payload..."
+
+              # Wait for payload to be ready (max 10 minutes)
+              WAIT_COUNT=0
+              while [ ! -f /trigger/ready ] && [ $WAIT_COUNT -lt 600 ]; do
+                sleep 1
+                WAIT_COUNT=$((WAIT_COUNT + 1))
+              done
+
+              if [ ! -f /trigger/ready ]; then
+                echo "ERROR: Timeout waiting for payload"
+                echo "TIMEOUT" > /trigger/response.txt
+                touch /trigger/done
+                exit 1
+              fi
+
+              echo "Payload ready, sending trigger request..."
+              cat /trigger/payload.json
+
+              # Send the trigger request
+              curl -s -X POST \
+                -H "Content-Type: application/json" \
+                -d @/trigger/payload.json \
+                --max-time 120 \
+                http://gas-killer-router:8080/trigger > /trigger/response.txt 2>&1
+
+              CURL_EXIT=$?
+              echo "Curl exit code: $CURL_EXIT"
+              echo "Response:"
+              cat /trigger/response.txt
+
+              # Signal completion
+              touch /trigger/done
+
+              echo "Waiting for main container to finish..."
+              # Wait for main container to signal completion (max 5 minutes)
+              WAIT_COUNT=0
+              while [ ! -f /trigger/main-done ] && [ $WAIT_COUNT -lt 300 ]; do
+                sleep 1
+                WAIT_COUNT=$((WAIT_COUNT + 1))
+              done
+
+              echo "=== Curl Sidecar Exiting ==="
             EOT
           ]
         }
