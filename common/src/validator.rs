@@ -167,62 +167,9 @@ impl GasKillerValidator {
 
     /// Computes storage updates for a transaction using gas-analyzer-rs.
     ///
-    /// This is the public method for computing storage updates from transaction parameters.
-    /// Used by the creator to compute storage updates before creating tasks.
-    /// Returns both the storage updates and the block height at which they were computed.
-    pub async fn compute_storage_updates_for_tx(
-        &self,
-        contract_address: alloy::primitives::Address,
-        call_data: &[u8],
-        from_address: Option<alloy::primitives::Address>,
-        value: Option<alloy::primitives::U256>,
-        block_height: u64,
-    ) -> Result<(Vec<u8>, u64)> {
-        // Default to Sepolia for backwards compatibility
-        self.compute_storage_updates_for_tx_on_chain(
-            contract_address,
-            call_data,
-            from_address,
-            value,
-            block_height,
-            ChainId::Sepolia,
-        )
-        .await
-    }
-
-    /// Computes storage updates for a transaction on a specific chain.
-    ///
-    /// This method allows specifying the target chain for the transaction analysis.
-    pub async fn compute_storage_updates_for_tx_on_chain(
-        &self,
-        contract_address: alloy::primitives::Address,
-        call_data: &[u8],
-        from_address: Option<alloy::primitives::Address>,
-        value: Option<alloy::primitives::U256>,
-        block_height: u64,
-        chain_id: ChainId,
-    ) -> Result<(Vec<u8>, u64)> {
-        let rpc_url = self
-            .rpc_url_for_chain(chain_id)
-            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
-
-        let result = Self::analyze_transaction(
-            rpc_url,
-            contract_address,
-            call_data,
-            from_address,
-            value,
-            block_height,
-        )
-        .await?;
-        Ok((result.storage_updates, result.block_height))
-    }
-
-    /// Computes storage updates for a transaction, automatically detecting the chain.
-    ///
-    /// This method detects which chain the contract is on, then computes storage updates.
+    /// Automatically detects which chain the contract is on, then computes storage updates.
     /// Returns the storage updates, block height, and detected chain ID.
-    pub async fn compute_storage_updates_with_chain_detection(
+    pub async fn compute_storage_updates_for_tx(
         &self,
         contract_address: alloy::primitives::Address,
         call_data: &[u8],

@@ -230,15 +230,14 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             "Creator received task"
         );
 
-        // Compute storage updates using chain detection
-        // The validator will automatically detect which chain has the contract
+        // Compute storage updates - the validator automatically detects which chain has the contract
         debug!(
-            "Computing storage updates with chain detection for target {}",
+            "Computing storage updates for target {}",
             task.body.target_address
         );
         let (storage_updates, block_height, detected_chain) = self
             .validator
-            .compute_storage_updates_with_chain_detection(
+            .compute_storage_updates_for_tx(
                 task.body.target_address,
                 &task.body.call_data,
                 Some(task.body.from_address),
