@@ -202,9 +202,9 @@ impl GasKillerValidator {
         block_height: u64,
         chain_id: ChainId,
     ) -> Result<(Vec<u8>, u64)> {
-        let rpc_url = self.rpc_url_for_chain(chain_id).ok_or_else(|| {
-            anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id)
-        })?;
+        let rpc_url = self
+            .rpc_url_for_chain(chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
 
         let result = Self::analyze_transaction(
             rpc_url,
@@ -239,9 +239,9 @@ impl GasKillerValidator {
             "Detected chain for contract"
         );
 
-        let rpc_url = self.rpc_url_for_chain(chain_id).ok_or_else(|| {
-            anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id)
-        })?;
+        let rpc_url = self
+            .rpc_url_for_chain(chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
 
         let result = Self::analyze_transaction(
             rpc_url,
@@ -413,12 +413,14 @@ impl GasKillerValidator {
         }
 
         // Detect which chain has the contract
-        let chain_id = self.detect_chain_for_address(task_data.target_address).await?;
+        let chain_id = self
+            .detect_chain_for_address(task_data.target_address)
+            .await?;
 
         // Get the RPC URL for the detected chain
-        let rpc_url = self.rpc_url_for_chain(chain_id).ok_or_else(|| {
-            anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id)
-        })?;
+        let rpc_url = self
+            .rpc_url_for_chain(chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
 
         debug!(
             chain_id = %chain_id,

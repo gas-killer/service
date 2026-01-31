@@ -69,10 +69,9 @@ impl ChainConfig {
     pub fn from_env(chain_id: ChainId) -> Result<Self, String> {
         match chain_id {
             ChainId::Sepolia => {
-                let http_rpc = env::var("HTTP_RPC")
-                    .map_err(|_| "HTTP_RPC must be set for Sepolia")?;
-                let ws_rpc = env::var("WS_RPC")
-                    .map_err(|_| "WS_RPC must be set for Sepolia")?;
+                let http_rpc =
+                    env::var("HTTP_RPC").map_err(|_| "HTTP_RPC must be set for Sepolia")?;
+                let ws_rpc = env::var("WS_RPC").map_err(|_| "WS_RPC must be set for Sepolia")?;
                 let avs_deployment_path = env::var("AVS_DEPLOYMENT_PATH")
                     .map_err(|_| "AVS_DEPLOYMENT_PATH must be set for Sepolia")?;
                 Ok(Self {

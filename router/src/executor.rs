@@ -126,12 +126,14 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
         // Detect which chain the contract is on
-        let chain_id = self.detect_chain_for_address(task_data.target_address).await?;
+        let chain_id = self
+            .detect_chain_for_address(task_data.target_address)
+            .await?;
 
         // Get the chain-specific provider
-        let provider = self.get_provider(chain_id).ok_or_else(|| {
-            anyhow::anyhow!("No provider configured for chain: {}", chain_id)
-        })?;
+        let provider = self
+            .get_provider(chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No provider configured for chain: {}", chain_id))?;
 
         info!(
             storage_updates_len = task_data.storage_updates.len(),

@@ -44,12 +44,11 @@ async fn create_wallet_provider_for_chain(
     private_key: &str,
 ) -> Result<WalletProvider> {
     let http_rpc = match chain_id {
-        ChainId::Sepolia => env::var("HTTP_RPC").map_err(|_| {
-            anyhow::anyhow!("HTTP_RPC must be set for Sepolia")
-        })?,
-        ChainId::Gnosis => env::var("GNOSIS_HTTP_RPC").map_err(|_| {
-            anyhow::anyhow!("GNOSIS_HTTP_RPC must be set for Gnosis")
-        })?,
+        ChainId::Sepolia => {
+            env::var("HTTP_RPC").map_err(|_| anyhow::anyhow!("HTTP_RPC must be set for Sepolia"))?
+        }
+        ChainId::Gnosis => env::var("GNOSIS_HTTP_RPC")
+            .map_err(|_| anyhow::anyhow!("GNOSIS_HTTP_RPC must be set for Gnosis"))?,
     };
 
     let ecdsa_signer = PrivateKeySigner::from_str(private_key)
