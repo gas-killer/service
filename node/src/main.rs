@@ -12,7 +12,7 @@ use commonware_runtime::{Metrics, Runner, Spawner, tokio};
 use commonware_utils::{NZU32, set::OrderedAssociated};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
-    GasKillerTaskData, GasKillerValidator, OrchestratorConfig, get_operator_states,
+    ChainId, GasKillerTaskData, GasKillerValidator, OrchestratorConfig, get_operator_states,
     load_key_from_file, load_orchestrator_config,
 };
 use governor::Quota;
@@ -314,9 +314,15 @@ fn main() {
             network.register(0, Quota::per_second(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
 
         // Create validator for the gas killer use case (uses full gas-analyzer validation)
+        // The validator supports multiple chains if GNOSIS_RPC_URL or GNOSIS_HTTP_RPC is set
         let validator = Arc::new(
             GasKillerValidator::new()
                 .expect("RPC_URL or HTTP_RPC environment variable must be set for gas analyzer"),
+        );
+        tracing::info!(
+            supports_sepolia = validator.supports_chain(ChainId::Sepolia),
+            supports_gnosis = validator.supports_chain(ChainId::Gnosis),
+            "Validator chain support"
         );
 
         // Create contributor with GasKillerTaskData as the metadata type
