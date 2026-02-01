@@ -31,8 +31,8 @@ pub struct AnalysisResult {
 /// Validator implementation for the gas killer use case with multi-chain support
 #[derive(Clone)]
 pub struct GasKillerValidator {
-    /// RPC endpoints as (chain_name, rpc_url) pairs
-    rpc_endpoints: Vec<(String, String)>,
+    /// RPC URLs to try (in order)
+    rpc_urls: Vec<String>,
 }
 
 impl GasKillerValidator {
@@ -44,21 +44,21 @@ impl GasKillerValidator {
     ///
     /// Returns an error if Sepolia RPC is not set.
     pub fn new() -> Result<Self> {
-        let mut rpc_endpoints = Vec::new();
+        let mut rpc_urls = Vec::new();
 
         // Load Sepolia RPC URL (required, checked first)
         let sepolia_rpc = env::var("RPC_URL")
             .or_else(|_| env::var("HTTP_RPC"))
             .map_err(|_| anyhow::anyhow!("RPC_URL or HTTP_RPC environment variable is not set"))?;
-        rpc_endpoints.push(("sepolia".to_string(), sepolia_rpc));
+        rpc_urls.push(sepolia_rpc);
 
         // Load Gnosis RPC URL (optional)
         if let Ok(gnosis_rpc) = env::var("GNOSIS_RPC_URL").or_else(|_| env::var("GNOSIS_HTTP_RPC"))
         {
-            rpc_endpoints.push(("gnosis".to_string(), gnosis_rpc));
+            rpc_urls.push(gnosis_rpc);
         }
 
-        Ok(Self { rpc_endpoints })
+        Ok(Self { rpc_urls })
     }
 
     /// Creates a new GasKillerValidator with a specific RPC URL.
@@ -66,31 +66,20 @@ impl GasKillerValidator {
     /// Useful for testing without modifying environment variables.
     pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         Self {
-            rpc_endpoints: vec![("sepolia".to_string(), rpc_url.into())],
+            rpc_urls: vec![rpc_url.into()],
         }
     }
 
     /// Returns the RPC URL for the first (default) chain
     pub fn rpc_url(&self) -> &str {
-        self.rpc_endpoints
-            .first()
-            .map(|(_, url)| url.as_str())
-            .unwrap_or("")
+        self.rpc_urls.first().map(|s| s.as_str()).unwrap_or("")
     }
 
-    /// Detects which chain has code deployed at the given address.
-    ///
-    /// Checks each supported chain to see if the address has contract code.
-    /// Returns the chain name and RPC URL where code is found.
-    async fn detect_chain_for_address(
-        &self,
-        address: alloy::primitives::Address,
-    ) -> Result<(&str, &str)> {
+    /// Finds the RPC URL for the chain where the contract is deployed.
+    async fn find_rpc_for_contract(&self, address: alloy::primitives::Address) -> Result<&str> {
         use alloy_provider::ProviderBuilder;
 
-        debug!(address = %address, "Detecting chain for address");
-
-        for (chain_name, rpc_url) in &self.rpc_endpoints {
+        for rpc_url in &self.rpc_urls {
             let url = match Url::parse(rpc_url) {
                 Ok(u) => u,
                 Err(_) => continue,
@@ -98,21 +87,10 @@ impl GasKillerValidator {
 
             let provider = ProviderBuilder::new().connect_http(url);
 
-            match provider.get_code_at(address).await {
-                Ok(code) => {
-                    if !code.is_empty() {
-                        debug!(
-                            chain = %chain_name,
-                            address = %address,
-                            code_len = code.len(),
-                            "Found contract code on chain"
-                        );
-                        return Ok((chain_name.as_str(), rpc_url.as_str()));
-                    }
-                }
-                Err(e) => {
-                    debug!(chain = %chain_name, error = %e, "Failed to check code on chain");
-                }
+            if let Ok(code) = provider.get_code_at(address).await
+                && !code.is_empty()
+            {
+                return Ok(rpc_url.as_str());
             }
         }
 
@@ -134,8 +112,7 @@ impl GasKillerValidator {
         value: Option<alloy::primitives::U256>,
         block_height: u64,
     ) -> Result<(Vec<u8>, u64)> {
-        // Detect which chain has the contract
-        let (_, rpc_url) = self.detect_chain_for_address(contract_address).await?;
+        let rpc_url = self.find_rpc_for_contract(contract_address).await?;
 
         let result = Self::analyze_transaction(
             rpc_url,
@@ -306,16 +283,7 @@ impl GasKillerValidator {
             return Err(anyhow::anyhow!("block_height is required for validation"));
         }
 
-        // Detect which chain has the contract
-        let (chain_name, rpc_url) = self
-            .detect_chain_for_address(task_data.target_address)
-            .await?;
-
-        debug!(
-            chain = %chain_name,
-            target_address = %task_data.target_address,
-            "Computing storage updates for detected chain"
-        );
+        let rpc_url = self.find_rpc_for_contract(task_data.target_address).await?;
 
         let result = Self::analyze_transaction(
             rpc_url,

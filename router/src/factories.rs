@@ -82,23 +82,22 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         })?;
 
     // Create wallet providers for each supported chain
-    let mut providers: Vec<(String, WalletProvider)> = Vec::new();
+    let mut providers: Vec<WalletProvider> = Vec::new();
 
     // Sepolia provider (required, checked first)
     let sepolia_provider = create_wallet_provider("sepolia", &http_rpc, &private_key).await?;
-    providers.push(("sepolia".to_string(), sepolia_provider));
-    info!(chain = "sepolia", "Created wallet provider");
+    providers.push(sepolia_provider);
+    info!("Created Sepolia wallet provider");
 
     // Gnosis provider (optional - only if GNOSIS_HTTP_RPC is set)
     if let Ok(gnosis_rpc) = env::var("GNOSIS_HTTP_RPC") {
         match create_wallet_provider("gnosis", &gnosis_rpc, &private_key).await {
             Ok(gnosis_provider) => {
-                providers.push(("gnosis".to_string(), gnosis_provider));
-                info!(chain = "gnosis", "Created wallet provider");
+                providers.push(gnosis_provider);
+                info!("Created Gnosis wallet provider");
             }
             Err(e) => {
                 tracing::warn!(
-                    chain = "gnosis",
                     error = %e,
                     "Failed to create Gnosis wallet provider, Gnosis chain will be unavailable"
                 );
