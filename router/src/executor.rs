@@ -4,19 +4,58 @@ use commonware_avs_router::bindings::blssigcheckoperatorstateretriever::BLSSigCh
 use commonware_avs_router::executor::bls::BlsSignatureVerificationHandler;
 use commonware_avs_router::executor::ExecutionResult;
 use crate::task_data::GasKillerTaskData;
-use alloy_primitives::{Bytes, FixedBytes, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, U256};
+use alloy_provider::Provider;
 use anyhow::Result;
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
-/// Handler for executing verifyAndUpdate transactions
+/// Handler for executing verifyAndUpdate transactions with multi-chain support
 pub struct GasKillerHandler {
-    provider: WalletProvider,
+    /// Wallet providers as (chain_name, provider) pairs
+    providers: Vec<(String, WalletProvider)>,
 }
 
 impl GasKillerHandler {
+    /// Creates a new handler with a single provider
     pub fn new(provider: WalletProvider) -> Self {
-        Self { provider }
+        Self {
+            providers: vec![("sepolia".to_string(), provider)],
+        }
+    }
+
+    /// Creates a new handler with providers for multiple chains
+    pub fn with_providers(providers: Vec<(String, WalletProvider)>) -> Self {
+        Self { providers }
+    }
+
+    /// Detects which chain has code deployed at the given address
+    async fn detect_chain_for_address(&self, address: Address) -> Result<(&str, &WalletProvider)> {
+        debug!(address = %address, "Detecting chain for address in executor");
+
+        for (chain_name, provider) in &self.providers {
+            match provider.get_code_at(address).await {
+                Ok(code) => {
+                    if !code.is_empty() {
+                        debug!(
+                            chain = %chain_name,
+                            address = %address,
+                            code_len = code.len(),
+                            "Found contract code on chain"
+                        );
+                        return Ok((chain_name.as_str(), provider));
+                    }
+                }
+                Err(e) => {
+                    debug!(chain = %chain_name, error = %e, "Failed to check code on chain");
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "No contract code found at address {} on any supported chain",
+            address
+        ))
     }
 }
 
@@ -64,9 +103,15 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         let task_data = task_data
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
+        // Detect which chain the contract is on and get the provider
+        let (chain_name, provider) = self
+            .detect_chain_for_address(task_data.target_address)
+            .await?;
+
         info!(
-            "Using storage updates from task data: {} bytes",
-            task_data.storage_updates.len()
+            storage_updates_len = task_data.storage_updates.len(),
+            chain = %chain_name,
+            "Using storage updates from task data on detected chain"
         );
 
         // Extract task data parameters - use pre-computed storage_updates from task data
@@ -82,10 +127,11 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             target_function = %target_function,
             storage_updates_len = storage_updates.len(),
             storage_updates_first_32 = %hex::encode(&task_data.storage_updates[..std::cmp::min(32, task_data.storage_updates.len())]),
+            detected_chain = %chain_name,
             "Executor getMessageHash inputs"
         );
 
-        let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
+        let gas_killer_sdk = GasKillerSDK::new(target_addr, provider.clone());
         // Query the contract's getMessageHash and compare with the provided msg_hash
         match gas_killer_sdk
             .getMessageHash(transition_index, target_function, storage_updates.clone())
