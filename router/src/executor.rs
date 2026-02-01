@@ -4,19 +4,45 @@ use commonware_avs_router::bindings::blssigcheckoperatorstateretriever::BLSSigCh
 use commonware_avs_router::executor::bls::BlsSignatureVerificationHandler;
 use commonware_avs_router::executor::ExecutionResult;
 use crate::task_data::GasKillerTaskData;
-use alloy_primitives::{Bytes, FixedBytes, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, U256};
+use alloy_provider::Provider;
 use anyhow::Result;
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
-/// Handler for executing verifyAndUpdate transactions
+/// Handler for executing verifyAndUpdate transactions with multi-chain support
 pub struct GasKillerHandler {
-    provider: WalletProvider,
+    /// Wallet providers to try (in order)
+    providers: Vec<WalletProvider>,
 }
 
 impl GasKillerHandler {
+    /// Creates a new handler with a single provider
     pub fn new(provider: WalletProvider) -> Self {
-        Self { provider }
+        Self {
+            providers: vec![provider],
+        }
+    }
+
+    /// Creates a new handler with providers for multiple chains
+    pub fn with_providers(providers: Vec<WalletProvider>) -> Self {
+        Self { providers }
+    }
+
+    /// Finds the provider for the chain where the contract is deployed.
+    async fn find_provider_for_contract(&self, address: Address) -> Result<&WalletProvider> {
+        for provider in &self.providers {
+            if let Ok(code) = provider.get_code_at(address).await
+                && !code.is_empty()
+            {
+                return Ok(provider);
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "No contract code found at address {} on any supported chain",
+            address
+        ))
     }
 }
 
@@ -64,9 +90,14 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         let task_data = task_data
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
+        // Find the provider for the chain where the contract is deployed
+        let provider = self
+            .find_provider_for_contract(task_data.target_address)
+            .await?;
+
         info!(
-            "Using storage updates from task data: {} bytes",
-            task_data.storage_updates.len()
+            storage_updates_len = task_data.storage_updates.len(),
+            "Using storage updates from task data"
         );
 
         // Extract task data parameters - use pre-computed storage_updates from task data
@@ -85,7 +116,7 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             "Executor getMessageHash inputs"
         );
 
-        let gas_killer_sdk = GasKillerSDK::new(target_addr, self.provider.clone());
+        let gas_killer_sdk = GasKillerSDK::new(target_addr, provider.clone());
         // Query the contract's getMessageHash and compare with the provided msg_hash
         match gas_killer_sdk
             .getMessageHash(transition_index, target_function, storage_updates.clone())

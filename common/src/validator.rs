@@ -1,5 +1,6 @@
 use alloy::primitives::U256;
 use alloy::sol_types::SolValue;
+use alloy_provider::Provider;
 use anyhow::Result;
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
@@ -27,26 +28,37 @@ pub struct AnalysisResult {
     pub block_height: u64,
 }
 
-/// Validator implementation for the gas killer use case
+/// Validator implementation for the gas killer use case with multi-chain support
 #[derive(Clone)]
 pub struct GasKillerValidator {
-    /// RPC URL for the gas analyzer
-    fork_rpc_url: String,
+    /// RPC URLs to try (in order)
+    rpc_urls: Vec<String>,
 }
 
 impl GasKillerValidator {
-    /// Creates a new GasKillerValidator with default settings.
+    /// Creates a new GasKillerValidator with multi-chain support.
     ///
-    /// Reads RPC URL from RPC_URL environment variable.
-    /// Returns an error if not set.
+    /// Reads RPC URLs from environment variables:
+    /// - RPC_URL or HTTP_RPC for Sepolia (required)
+    /// - GNOSIS_RPC_URL or GNOSIS_HTTP_RPC for Gnosis (optional)
+    ///
+    /// Returns an error if Sepolia RPC is not set.
     pub fn new() -> Result<Self> {
-        // TODO: In production, HTTP_RPC and RPC_URL should be unified to a single env var.
-        // Currently nodes use HTTP_RPC while this expects RPC_URL.
-        let rpc_url = env::var("RPC_URL")
-            .map_err(|_| anyhow::anyhow!("RPC_URL environment variable is not set"))?;
-        Ok(Self {
-            fork_rpc_url: rpc_url,
-        })
+        let mut rpc_urls = Vec::new();
+
+        // Load Sepolia RPC URL (required, checked first)
+        let sepolia_rpc = env::var("RPC_URL")
+            .or_else(|_| env::var("HTTP_RPC"))
+            .map_err(|_| anyhow::anyhow!("RPC_URL or HTTP_RPC environment variable is not set"))?;
+        rpc_urls.push(sepolia_rpc);
+
+        // Load Gnosis RPC URL (optional)
+        if let Ok(gnosis_rpc) = env::var("GNOSIS_RPC_URL").or_else(|_| env::var("GNOSIS_HTTP_RPC"))
+        {
+            rpc_urls.push(gnosis_rpc);
+        }
+
+        Ok(Self { rpc_urls })
     }
 
     /// Creates a new GasKillerValidator with a specific RPC URL.
@@ -54,20 +66,44 @@ impl GasKillerValidator {
     /// Useful for testing without modifying environment variables.
     pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         Self {
-            fork_rpc_url: rpc_url.into(),
+            rpc_urls: vec![rpc_url.into()],
         }
     }
 
-    /// Returns the RPC URL used by this validator
+    /// Returns the RPC URL for the first (default) chain
     pub fn rpc_url(&self) -> &str {
-        &self.fork_rpc_url
+        self.rpc_urls.first().map(|s| s.as_str()).unwrap_or("")
+    }
+
+    /// Finds the RPC URL for the chain where the contract is deployed.
+    async fn find_rpc_for_contract(&self, address: alloy::primitives::Address) -> Result<&str> {
+        use alloy_provider::ProviderBuilder;
+
+        for rpc_url in &self.rpc_urls {
+            let url = match Url::parse(rpc_url) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+
+            let provider = ProviderBuilder::new().connect_http(url);
+
+            if let Ok(code) = provider.get_code_at(address).await
+                && !code.is_empty()
+            {
+                return Ok(rpc_url.as_str());
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "No contract code found at address {} on any supported chain",
+            address
+        ))
     }
 
     /// Computes storage updates for a transaction using gas-analyzer-rs.
     ///
-    /// This is the public method for computing storage updates from transaction parameters.
-    /// Used by the creator to compute storage updates before creating tasks.
-    /// Returns both the storage updates and the block height at which they were computed.
+    /// Automatically detects which chain the contract is on, then computes storage updates.
+    /// Returns the storage updates and block height.
     pub async fn compute_storage_updates_for_tx(
         &self,
         contract_address: alloy::primitives::Address,
@@ -76,8 +112,10 @@ impl GasKillerValidator {
         value: Option<alloy::primitives::U256>,
         block_height: u64,
     ) -> Result<(Vec<u8>, u64)> {
+        let rpc_url = self.find_rpc_for_contract(contract_address).await?;
+
         let result = Self::analyze_transaction(
-            &self.fork_rpc_url,
+            rpc_url,
             contract_address,
             call_data,
             from_address,
@@ -237,15 +275,18 @@ impl GasKillerValidator {
         })
     }
 
-    /// Computes storage updates by running local analysis using this validator's RPC URL
-    /// Uses the block_height from task_data to ensure deterministic results matching the router
+    /// Computes storage updates by running local analysis.
+    /// Automatically detects which chain the target address is on.
+    /// Uses the block_height from task_data to ensure deterministic results matching the router.
     async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
         if task_data.block_height == 0 {
             return Err(anyhow::anyhow!("block_height is required for validation"));
         }
 
+        let rpc_url = self.find_rpc_for_contract(task_data.target_address).await?;
+
         let result = Self::analyze_transaction(
-            &self.fork_rpc_url,
+            rpc_url,
             task_data.target_address,
             &task_data.call_data,
             Some(task_data.from_address),
