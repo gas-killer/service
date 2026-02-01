@@ -161,6 +161,61 @@ resource "kubernetes_secret" "bridge_secrets" {
   depends_on = [helm_release.gas_killer]
 }
 
+# =============================================================================
+# RBAC for Bridge Job to Create ConfigMap
+# =============================================================================
+
+resource "kubernetes_service_account" "bridge" {
+  count = var.run_bridge ? 1 : 0
+
+  metadata {
+    name      = "bridge-sa"
+    namespace = var.namespace
+  }
+
+  depends_on = [helm_release.gas_killer]
+}
+
+resource "kubernetes_role" "bridge" {
+  count = var.run_bridge ? 1 : 0
+
+  metadata {
+    name      = "bridge-role"
+    namespace = var.namespace
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["configmaps"]
+    verbs      = ["create", "update", "patch", "get"]
+  }
+
+  depends_on = [helm_release.gas_killer]
+}
+
+resource "kubernetes_role_binding" "bridge" {
+  count = var.run_bridge ? 1 : 0
+
+  metadata {
+    name      = "bridge-role-binding"
+    namespace = var.namespace
+  }
+
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "Role"
+    name      = "bridge-role"
+  }
+
+  subject {
+    kind      = "ServiceAccount"
+    name      = "bridge-sa"
+    namespace = var.namespace
+  }
+
+  depends_on = [helm_release.gas_killer]
+}
+
 resource "kubernetes_job" "l1_l2_bridge" {
   count = var.run_bridge ? 1 : 0
 
@@ -186,7 +241,8 @@ resource "kubernetes_job" "l1_l2_bridge" {
       }
 
       spec {
-        restart_policy = "Never"
+        service_account_name = "bridge-sa"
+        restart_policy       = "Never"
 
         # Mount the shared PVC to read avs_deploy.json
         volume {
@@ -199,6 +255,12 @@ resource "kubernetes_job" "l1_l2_bridge" {
         # Shared volume for passing extracted config between init and main container
         volume {
           name = "bridge-config"
+          empty_dir {}
+        }
+
+        # Volume for bridge artifacts (l2-deploy.json)
+        volume {
+          name = "bridge-artifacts"
           empty_dir {}
         }
 
@@ -293,6 +355,11 @@ resource "kubernetes_job" "l1_l2_bridge" {
             read_only  = true
           }
 
+          volume_mount {
+            name       = "bridge-artifacts"
+            mount_path = "/app/contracts/artifacts"
+          }
+
           env {
             name = "PRIVATE_KEY"
             value_from {
@@ -334,6 +401,65 @@ resource "kubernetes_job" "l1_l2_bridge" {
             }
           }
         }
+
+        # Sidecar to create ConfigMap from bridge output
+        container {
+          name  = "configmap-writer"
+          image = "bitnami/kubectl:latest"
+
+          volume_mount {
+            name       = "bridge-artifacts"
+            mount_path = "/app/contracts/artifacts"
+          }
+
+          command = [
+            "bash", "-c",
+            <<-EOT
+              echo "=== ConfigMap Writer Started ==="
+              echo "Waiting for bridge to complete and write l2-deploy.json..."
+
+              # Wait for l2-deploy.json to appear (max 12 minutes)
+              WAIT_COUNT=0
+              while [ ! -f /app/contracts/artifacts/l2-deploy.json ] && [ $WAIT_COUNT -lt 720 ]; do
+                sleep 5
+                WAIT_COUNT=$((WAIT_COUNT + 5))
+                echo "Waiting... ($WAIT_COUNT seconds)"
+              done
+
+              if [ ! -f /app/contracts/artifacts/l2-deploy.json ]; then
+                echo "ERROR: Timeout waiting for l2-deploy.json"
+                exit 1
+              fi
+
+              echo "l2-deploy.json found!"
+              cat /app/contracts/artifacts/l2-deploy.json
+
+              # Parse addresses from JSON
+              BLS_CHECKER=$(grep -o '"BLSSignatureChecker": *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
+              REGISTRY_MIMIC=$(grep -o '"RegistryCoordinatorMimic": *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
+
+              echo "Parsed addresses:"
+              echo "  BLSSignatureChecker: $BLS_CHECKER"
+              echo "  RegistryCoordinatorMimic: $REGISTRY_MIMIC"
+
+              if [ -z "$BLS_CHECKER" ] || [ -z "$REGISTRY_MIMIC" ]; then
+                echo "ERROR: Failed to parse addresses from l2-deploy.json"
+                exit 1
+              fi
+
+              # Create ConfigMap with the addresses
+              echo "Creating ConfigMap bridge-addresses..."
+              kubectl create configmap bridge-addresses \
+                --namespace=${var.namespace} \
+                --from-literal=BLS_SIGNATURE_CHECKER="$BLS_CHECKER" \
+                --from-literal=REGISTRY_COORDINATOR_MIMIC="$REGISTRY_MIMIC" \
+                --dry-run=client -o yaml | kubectl apply -f -
+
+              echo "=== ConfigMap Created Successfully ==="
+              kubectl get configmap bridge-addresses -n ${var.namespace} -o yaml
+            EOT
+          ]
+        }
       }
     }
   }
@@ -344,7 +470,164 @@ resource "kubernetes_job" "l1_l2_bridge" {
     create = "15m"
   }
 
-  depends_on = [kubernetes_secret.bridge_secrets]
+  depends_on = [kubernetes_secret.bridge_secrets, kubernetes_role_binding.bridge]
+}
+
+# =============================================================================
+# Gnosis Factory Job (runs after bridge to deploy ArraySummation on Gnosis)
+# =============================================================================
+# Calls the Gnosis ArraySummation factory with:
+# - _avsAddress = RegistryCoordinatorMimic (from bridge)
+# - _blsSigChecker = BLSSignatureChecker (from bridge)
+# - _arraySize = 100, _maxValue = 1000, _seed = 42
+
+resource "kubernetes_job" "gnosis_factory" {
+  count = var.run_bridge && var.run_gnosis_factory ? 1 : 0
+
+  metadata {
+    name      = "gnosis-factory-deploy"
+    namespace = var.namespace
+    labels = {
+      "app.kubernetes.io/name"      = "gas-killer"
+      "app.kubernetes.io/component" = "gnosis-factory"
+    }
+  }
+
+  spec {
+    ttl_seconds_after_finished = 600 # Clean up after 10 minutes
+    backoff_limit              = 2
+
+    template {
+      metadata {
+        labels = {
+          "app.kubernetes.io/name"      = "gas-killer"
+          "app.kubernetes.io/component" = "gnosis-factory"
+        }
+      }
+
+      spec {
+        restart_policy = "Never"
+
+        container {
+          name  = "factory-caller"
+          image = "ghcr.io/foundry-rs/foundry:latest"
+
+          env {
+            name = "L2_RPC_URL"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "L2_RPC_URL"
+              }
+            }
+          }
+
+          env {
+            name = "PRIVATE_KEY"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "PRIVATE_KEY"
+              }
+            }
+          }
+
+          env {
+            name  = "GNOSIS_FACTORY_ADDRESS"
+            value = var.gnosis_factory_address
+          }
+
+          # Read addresses from ConfigMap as env vars
+          env_from {
+            config_map_ref {
+              name = "bridge-addresses"
+            }
+          }
+
+          command = [
+            "bash", "-c",
+            <<-EOT
+              set -ex
+              echo "=== Gnosis Factory Deployment ==="
+              echo "L2 RPC URL: $${L2_RPC_URL:0:50}..."
+              echo "Factory Address: $GNOSIS_FACTORY_ADDRESS"
+              echo "BLS Signature Checker: $BLS_SIGNATURE_CHECKER"
+              echo "Registry Coordinator Mimic (AVS): $REGISTRY_COORDINATOR_MIMIC"
+
+              if [ -z "$BLS_SIGNATURE_CHECKER" ] || [ -z "$REGISTRY_COORDINATOR_MIMIC" ]; then
+                echo "ERROR: Bridge addresses not found in ConfigMap"
+                exit 1
+              fi
+
+              # Call deployArraySummation on Gnosis factory
+              # Parameters: _avsAddress, _blsSigChecker, _arraySize (100), _maxValue (1000), _seed (42)
+              echo "Calling deployArraySummation..."
+              echo "Parameters:"
+              echo "  _avsAddress: $REGISTRY_COORDINATOR_MIMIC"
+              echo "  _blsSigChecker: $BLS_SIGNATURE_CHECKER"
+              echo "  _arraySize: 100"
+              echo "  _maxValue: 1000"
+              echo "  _seed: 42"
+
+              RESULT=$(cast send \
+                --rpc-url "$L2_RPC_URL" \
+                --private-key "$PRIVATE_KEY" \
+                "$GNOSIS_FACTORY_ADDRESS" \
+                "deployArraySummation(address,address,uint256,uint256,uint256)" \
+                "$REGISTRY_COORDINATOR_MIMIC" \
+                "$BLS_SIGNATURE_CHECKER" \
+                100 \
+                1000 \
+                42 \
+                --json 2>&1) || {
+                  echo "ERROR: Factory call failed"
+                  echo "$RESULT"
+                  exit 1
+                }
+
+              echo "Transaction result:"
+              echo "$RESULT"
+
+              TX_HASH=$(echo "$RESULT" | grep -o '"transactionHash":"[^"]*"' | sed 's/.*:"\([^"]*\)"/\1/')
+              echo "Transaction hash: $TX_HASH"
+
+              # Wait for confirmation
+              sleep 5
+
+              # Get deployed contract count to verify
+              echo "Verifying deployment..."
+              CONTRACT_COUNT=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_FACTORY_ADDRESS" \
+                "getDeployedContractCount()(uint256)" 2>/dev/null || echo "unknown")
+              echo "Factory deployed contract count: $CONTRACT_COUNT"
+
+              echo "=== Gnosis Factory Deployment Complete ==="
+            EOT
+          ]
+
+          resources {
+            requests = {
+              cpu    = "100m"
+              memory = "256Mi"
+            }
+            limits = {
+              cpu    = "500m"
+              memory = "512Mi"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  wait_for_completion = true
+
+  timeouts {
+    create = "10m"
+  }
+
+  depends_on = [kubernetes_job.l1_l2_bridge]
 }
 
 # Data source to get the ingress after deployment
