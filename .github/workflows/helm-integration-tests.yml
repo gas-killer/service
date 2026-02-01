@@ -351,7 +351,18 @@ jobs:
           kubectl logs -l app.kubernetes.io/component=setup --tail 100 || true
 
           echo "=== Bridge Job Logs ==="
-          kubectl logs -l app.kubernetes.io/component=bridge --tail 100 || true
+          BRIDGE_POD=$(kubectl get pods -l app.kubernetes.io/component=bridge -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [ -n "$BRIDGE_POD" ]; then
+            echo "Bridge init container (wait-for-setup):"
+            kubectl logs $BRIDGE_POD -c wait-for-setup || true
+            echo "Bridge init container (extract-registry-coordinator):"
+            kubectl logs $BRIDGE_POD -c extract-registry-coordinator || true
+            echo "Bridge main container:"
+            kubectl logs $BRIDGE_POD -c bridge || true
+          else
+            echo "Bridge pod not found"
+            kubectl logs -l app.kubernetes.io/component=bridge --tail 100 || true
+          fi
 
           echo "=== Router Logs ==="
           kubectl logs -l app.kubernetes.io/component=router --tail 100 || true
