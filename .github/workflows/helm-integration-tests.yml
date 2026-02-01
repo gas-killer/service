@@ -199,6 +199,13 @@ jobs:
               kubectl get pods -l app.kubernetes.io/component=bridge || true
             fi
 
+            # Try to read bridge.log from the PVC via another pod
+            echo "=== Attempting to read bridge.log from PVC ==="
+            ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            if [ -n "$ROUTER_POD" ]; then
+              kubectl exec $ROUTER_POD -- cat /app/.nodes/bridge.log 2>/dev/null || echo "bridge.log not found on PVC"
+            fi
+
             exit 1
           fi
 

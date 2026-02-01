@@ -91,34 +91,40 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              set -e
+              # Create a wrapper script that logs everything
+              LOG_FILE="/app/.nodes/bridge.log"
+              echo "=== Bridge Container Starting at $(date) ===" >> "$LOG_FILE"
               echo "=== Bridge Container Starting ==="
-              echo "Checking /bridge-config contents..."
-              ls -la /bridge-config/ || echo "Cannot list /bridge-config"
+
+              echo "Checking /bridge-config contents..." | tee -a "$LOG_FILE"
+              ls -la /bridge-config/ 2>&1 | tee -a "$LOG_FILE" || echo "Cannot list /bridge-config" | tee -a "$LOG_FILE"
 
               if [ ! -f /bridge-config/registry_coordinator_address ]; then
-                echo "ERROR: /bridge-config/registry_coordinator_address not found!"
+                echo "ERROR: /bridge-config/registry_coordinator_address not found!" | tee -a "$LOG_FILE"
                 exit 1
               fi
 
               export REGISTRY_COORDINATOR_ADDRESS=$(cat /bridge-config/registry_coordinator_address)
-              echo "[BRIDGE] REGISTRY_COORDINATOR_ADDRESS: $REGISTRY_COORDINATOR_ADDRESS"
-              echo "[BRIDGE] L1_RPC_URL: $L1_RPC_URL"
-              echo "[BRIDGE] L2_RPC_URL: $L2_RPC_URL"
-              echo "[BRIDGE] PRIVATE_KEY is set: $([ -n \"$PRIVATE_KEY\" ] && echo 'yes' || echo 'no')"
+              echo "[BRIDGE] REGISTRY_COORDINATOR_ADDRESS: $REGISTRY_COORDINATOR_ADDRESS" | tee -a "$LOG_FILE"
+              echo "[BRIDGE] L1_RPC_URL: $L1_RPC_URL" | tee -a "$LOG_FILE"
+              echo "[BRIDGE] L2_RPC_URL: $L2_RPC_URL" | tee -a "$LOG_FILE"
+              echo "[BRIDGE] PRIVATE_KEY is set: $([ -n "$PRIVATE_KEY" ] && echo 'yes' || echo 'no')" | tee -a "$LOG_FILE"
 
-              echo "=== Checking bridge script ==="
-              ls -la /app/scripts/ || echo "Cannot list /app/scripts"
+              echo "=== Checking bridge script ===" | tee -a "$LOG_FILE"
+              ls -la /app/scripts/ 2>&1 | tee -a "$LOG_FILE" || echo "Cannot list /app/scripts" | tee -a "$LOG_FILE"
 
               if [ ! -f /app/scripts/bridge-to-l2.sh ]; then
-                echo "ERROR: /app/scripts/bridge-to-l2.sh not found!"
-                echo "Checking /app directory structure..."
-                find /app -type f 2>/dev/null | head -50 || true
+                echo "ERROR: /app/scripts/bridge-to-l2.sh not found!" | tee -a "$LOG_FILE"
+                echo "Checking /app directory structure..." | tee -a "$LOG_FILE"
+                find /app -type f 2>/dev/null | head -50 | tee -a "$LOG_FILE" || true
                 exit 1
               fi
 
-              echo "=== Executing bridge script ==="
-              exec /app/scripts/bridge-to-l2.sh
+              echo "=== Executing bridge script ===" | tee -a "$LOG_FILE"
+              /app/scripts/bridge-to-l2.sh 2>&1 | tee -a "$LOG_FILE"
+              EXIT_CODE=$?
+              echo "=== Bridge script exited with code: $EXIT_CODE at $(date) ===" | tee -a "$LOG_FILE"
+              exit $EXIT_CODE
           env:
             - name: PRIVATE_KEY
               valueFrom:
@@ -146,6 +152,8 @@ spec:
             - name: bridge-config
               mountPath: /bridge-config
               readOnly: true
+            - name: shared-data
+              mountPath: /app/.nodes
           resources:
             {{- toYaml .Values.bridge.resources | nindent 12 }}
 
