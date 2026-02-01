@@ -90,41 +90,47 @@ jobs:
           kubectl get pods -A
 
       - name: Fund test account on L2 (Gnosis)
+        env:
+          FUNDER_KEY: ${{ secrets.PRIVATE_KEY }}
+          L2_RPC: ${{ secrets.L2_RPC_URL }}
         run: |
           # The Anvil default address (from private key 0xac0974...)
           ANVIL_ADDRESS="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
           # Set L2 RPC URL
-          if [ -n "${{ secrets.L2_RPC_URL }}" ]; then
-            L2_RPC_URL="${{ secrets.L2_RPC_URL }}"
+          if [ -n "$L2_RPC" ]; then
+            L2_RPC_URL="$L2_RPC"
           else
             L2_RPC_URL="https://rpc.gnosischain.com"
           fi
 
-          # Use the funded PRIVATE_KEY from secrets to send xDAI to Anvil address
-          if [ -n "${{ secrets.PRIVATE_KEY }}" ]; then
-            echo "Funding Anvil test account on Gnosis..."
-            echo "Anvil address: $ANVIL_ADDRESS"
-            echo "L2 RPC: $L2_RPC_URL"
-
-            # Check current balance
-            BALANCE_BEFORE=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
-            echo "Balance before: $BALANCE_BEFORE"
-
-            # Send 0.05 xDAI (should be enough for bridge deployment)
-            cast send --rpc-url "$L2_RPC_URL" \
-              --private-key "${{ secrets.PRIVATE_KEY }}" \
-              "$ANVIL_ADDRESS" \
-              --value 0.05ether
-
-            # Verify funding
-            BALANCE_AFTER=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL")
-            echo "Balance after: $BALANCE_AFTER"
-            echo "Successfully funded Anvil address with 0.05 xDAI on Gnosis"
+          # Debug: Check if secret is available (without exposing it)
+          if [ -n "$FUNDER_KEY" ]; then
+            echo "PRIVATE_KEY secret is available (length: ${#FUNDER_KEY})"
           else
-            echo "WARNING: No PRIVATE_KEY secret available, skipping L2 funding"
-            echo "Bridge job may fail due to insufficient funds on L2"
+            echo "ERROR: PRIVATE_KEY secret is NOT available"
+            echo "Please ensure the PRIVATE_KEY secret is set in the repository"
+            exit 1
           fi
+
+          echo "Funding Anvil test account on Gnosis..."
+          echo "Anvil address: $ANVIL_ADDRESS"
+          echo "L2 RPC: $L2_RPC_URL"
+
+          # Check current balance
+          BALANCE_BEFORE=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
+          echo "Balance before: $BALANCE_BEFORE"
+
+          # Send 0.05 xDAI (should be enough for bridge deployment)
+          cast send --rpc-url "$L2_RPC_URL" \
+            --private-key "$FUNDER_KEY" \
+            "$ANVIL_ADDRESS" \
+            --value 0.05ether
+
+          # Verify funding
+          BALANCE_AFTER=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL")
+          echo "Balance after: $BALANCE_AFTER"
+          echo "Successfully funded Anvil address with 0.05 xDAI on Gnosis"
 
       - name: Install Helm chart
         run: |
@@ -246,8 +252,23 @@ jobs:
             exit 1
           fi
 
-          echo "Bridge job completed successfully"
-          kubectl logs "$BRIDGE_JOB" --tail=50
+          echo "Bridge job completed, checking logs for errors..."
+          BRIDGE_LOGS=$(kubectl logs "$BRIDGE_JOB" 2>&1)
+          echo "$BRIDGE_LOGS" | tail -50
+
+          # Check for L2 deployment failure - bridge script exits 0 even on failure
+          if echo "$BRIDGE_LOGS" | grep -q "insufficient funds"; then
+            echo "ERROR: Bridge failed due to insufficient funds on L2"
+            echo "Make sure the test account is funded on Gnosis"
+            exit 1
+          fi
+
+          if echo "$BRIDGE_LOGS" | grep -q "L2 deployment failed"; then
+            echo "ERROR: L2 deployment failed"
+            exit 1
+          fi
+
+          echo "Bridge job completed successfully with no errors"
 
       - name: Wait for all pods to be ready
         run: |
