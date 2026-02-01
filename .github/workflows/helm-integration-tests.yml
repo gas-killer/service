@@ -89,14 +89,12 @@ jobs:
           kubectl get nodes
           kubectl get pods -A
 
-      - name: Fund test account on L2 (Gnosis)
+      - name: Generate ephemeral deployer key and fund on L2
+        id: deployer-key
         env:
           FUNDER_KEY: ${{ secrets.GNOSIS_KEY }}
           L2_RPC: ${{ secrets.L2_RPC_URL }}
         run: |
-          # The Anvil default address (from private key 0xac0974...)
-          ANVIL_ADDRESS="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-
           # Set L2 RPC URL
           if [ -n "$L2_RPC" ]; then
             L2_RPC_URL="$L2_RPC"
@@ -104,82 +102,68 @@ jobs:
             L2_RPC_URL="https://rpc.gnosischain.com"
           fi
 
-          # Debug: Check if secret is available (without exposing it)
-          if [ -n "$FUNDER_KEY" ]; then
-            echo "GNOSIS_KEY secret is available (length: ${#FUNDER_KEY})"
-          else
+          # Check GNOSIS_KEY
+          if [ -z "$FUNDER_KEY" ]; then
             echo "ERROR: GNOSIS_KEY secret is NOT available"
-            echo "Please ensure the GNOSIS_KEY secret is set in the repository"
             exit 1
           fi
+          echo "GNOSIS_KEY secret is available (length: ${#FUNDER_KEY})"
 
-          echo "Funding Anvil test account on Gnosis..."
-          echo "Anvil address: $ANVIL_ADDRESS"
+          # Generate a fresh ephemeral private key for this CI run
+          echo "Generating ephemeral deployer key..."
+          DEPLOYER_KEY=$(cast wallet new --json | jq -r '.[0].private_key')
+          DEPLOYER_ADDRESS=$(cast wallet address --private-key "$DEPLOYER_KEY")
+          echo "Ephemeral deployer address: $DEPLOYER_ADDRESS"
 
-          # Debug: Check chain ID and funder balance
+          # Save to GitHub output for next step
+          echo "DEPLOYER_KEY=$DEPLOYER_KEY" >> $GITHUB_OUTPUT
+          echo "DEPLOYER_ADDRESS=$DEPLOYER_ADDRESS" >> $GITHUB_OUTPUT
+
+          # Debug info
           CHAIN_ID=$(cast chain-id --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "unknown")
-          echo "Chain ID: $CHAIN_ID"
+          echo "Chain ID: $CHAIN_ID (Gnosis mainnet = 100)"
 
-          FUNDER_ADDRESS=$(cast wallet address --private-key "$FUNDER_KEY" 2>/dev/null || echo "unknown")
+          FUNDER_ADDRESS=$(cast wallet address --private-key "$FUNDER_KEY")
           echo "Funder address: $FUNDER_ADDRESS"
 
-          FUNDER_BALANCE=$(cast balance "$FUNDER_ADDRESS" --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
-          echo "Funder balance: $FUNDER_BALANCE"
+          FUNDER_BALANCE=$(cast balance "$FUNDER_ADDRESS" --rpc-url "$L2_RPC_URL" --ether 2>/dev/null || echo "0")
+          echo "Funder balance: $FUNDER_BALANCE xDAI"
 
-          # Check current balance of target
-          BALANCE_BEFORE=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
-          echo "Target balance before: $BALANCE_BEFORE"
-
-          # Send 0.05 xDAI (should be enough for bridge deployment)
-          echo "Sending 0.05 xDAI..."
+          # Fund the ephemeral deployer on Gnosis
+          echo "Funding ephemeral deployer with 0.05 xDAI on Gnosis..."
           TX_OUTPUT=$(cast send --rpc-url "$L2_RPC_URL" \
             --private-key "$FUNDER_KEY" \
-            "$ANVIL_ADDRESS" \
+            "$DEPLOYER_ADDRESS" \
             --value 0.05ether \
             --json 2>&1)
 
-          echo "Transaction output: $TX_OUTPUT"
           TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash // empty')
-
           if [ -z "$TX_HASH" ]; then
-            echo "ERROR: Failed to get transaction hash"
-            echo "Raw output: $TX_OUTPUT"
+            echo "ERROR: Failed to send funding transaction"
+            echo "Output: $TX_OUTPUT"
             exit 1
           fi
-
           echo "Transaction hash: $TX_HASH"
 
-          # Check transaction receipt
-          echo "Checking transaction receipt..."
-          TX_STATUS=$(cast receipt --rpc-url "$L2_RPC_URL" "$TX_HASH" --json 2>/dev/null | jq -r '.status // empty')
-          echo "Transaction status: $TX_STATUS"
-
-          # Wait for RPC to sync and verify funding with retries
-          echo "Waiting for transaction to be indexed..."
+          # Wait and verify
           sleep 5
-
           for i in 1 2 3 4 5; do
-            BALANCE_AFTER=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
-            echo "Balance check $i: $BALANCE_AFTER"
-
-            if [ "$BALANCE_AFTER" != "0" ]; then
-              echo "Successfully funded Anvil address with 0.05 xDAI on Gnosis"
+            BALANCE=$(cast balance "$DEPLOYER_ADDRESS" --rpc-url "$L2_RPC_URL" --ether 2>/dev/null || echo "0")
+            echo "Balance check $i: $BALANCE xDAI"
+            if [ "$BALANCE" != "0" ] && [ "$BALANCE" != "0.000000000000000000" ]; then
+              echo "Successfully funded ephemeral deployer on Gnosis!"
               break
             fi
-
             if [ "$i" -eq 5 ]; then
-              echo "ERROR: Balance is still 0 after funding transaction"
-              echo "Transaction hash: $TX_HASH"
-              echo "Chain ID: $CHAIN_ID"
-              echo "Funder balance: $FUNDER_BALANCE"
+              echo "ERROR: Failed to fund ephemeral deployer"
               exit 1
             fi
-
-            echo "Balance still 0, waiting..."
             sleep 3
           done
 
       - name: Install Helm chart
+        env:
+          DEPLOYER_KEY: ${{ steps.deployer-key.outputs.DEPLOYER_KEY }}
         run: |
           # Set fork URL from secret or use public Sepolia
           if [ -n "${{ secrets.RPC_URL }}" ]; then
@@ -195,11 +179,13 @@ jobs:
             L2_RPC_URL="https://rpc.gnosischain.com"
           fi
 
-          # Use Anvil default keys for testing
-          PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+          # Use ephemeral deployer key (funded on L2) for bridge operations
+          # Use Anvil default key for L1 setup (pre-funded on local Anvil)
+          PRIVATE_KEY="$DEPLOYER_KEY"
           FUNDED_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
           echo "Installing Helm chart with fork URL: $FORK_URL"
+          echo "Using ephemeral deployer key for bridge (funded on L2)"
 
           # Install without --wait to avoid circular dependency
           # (pods wait for setup job, setup job is post-install hook)
