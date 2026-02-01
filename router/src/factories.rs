@@ -11,8 +11,9 @@ use commonware_avs_router::bindings::blsapkregistry::BLSApkRegistry;
 use commonware_avs_router::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorStateRetriever;
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
 use commonware_avs_usecases::AvsDeployment;
-use gas_killer_common::GasKillerValidator;
+use gas_killer_common::{GasKillerValidator, WalletProvider};
 use std::{env, str::FromStr, sync::Arc};
+use tracing::info;
 
 /// Factory function to create a default creator
 pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
@@ -36,7 +37,27 @@ pub async fn create_listening_creator_with_server(
     Ok(GasKillerCreatorType::Listening(creator))
 }
 
-/// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations
+/// Creates a wallet provider for a specific chain
+async fn create_wallet_provider(
+    chain_name: &str,
+    rpc_url: &str,
+    private_key: &str,
+) -> Result<WalletProvider> {
+    let ecdsa_signer = PrivateKeySigner::from_str(private_key)
+        .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
+
+    let provider = ProviderBuilder::new()
+        .wallet(ecdsa_signer)
+        .connect(rpc_url)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to connect write provider for {}: {}", chain_name, e)
+        })?;
+
+    Ok(provider)
+}
+
+/// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations with multi-chain support
 pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let view_only_provider =
@@ -52,9 +73,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         .registry_coordinator_address()
         .map_err(|e| anyhow::anyhow!("Failed to get registry coordinator address: {}", e))?;
 
-    let ecdsa_signer =
-        PrivateKeySigner::from_str(&env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set"))
-            .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
+    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
     let bls_operator_state_retriever_address = deployment
         .bls_sig_check_operator_state_retriever_address()
@@ -62,11 +81,32 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
             anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
         })?;
 
-    let write_provider = ProviderBuilder::new()
-        .wallet(ecdsa_signer)
-        .connect(&http_rpc)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect write provider: {}", e))?;
+    // Create wallet providers for each supported chain
+    let mut providers: Vec<(String, WalletProvider)> = Vec::new();
+
+    // Sepolia provider (required, checked first)
+    let sepolia_provider = create_wallet_provider("sepolia", &http_rpc, &private_key).await?;
+    providers.push(("sepolia".to_string(), sepolia_provider));
+    info!(chain = "sepolia", "Created wallet provider");
+
+    // Gnosis provider (optional - only if GNOSIS_HTTP_RPC is set)
+    if let Ok(gnosis_rpc) = env::var("GNOSIS_HTTP_RPC") {
+        match create_wallet_provider("gnosis", &gnosis_rpc, &private_key).await {
+            Ok(gnosis_provider) => {
+                providers.push(("gnosis".to_string(), gnosis_provider));
+                info!(chain = "gnosis", "Created wallet provider");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    chain = "gnosis",
+                    error = %e,
+                    "Failed to create Gnosis wallet provider, Gnosis chain will be unavailable"
+                );
+            }
+        }
+    } else {
+        info!("GNOSIS_HTTP_RPC not set, Gnosis chain support disabled");
+    }
 
     let bls_apk_registry =
         BLSApkRegistry::new(bls_apk_registry_address, view_only_provider.clone());
@@ -75,7 +115,8 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         view_only_provider.clone(),
     );
 
-    let gas_killer_handler = GasKillerHandler::new(write_provider);
+    // Create handler with multi-chain providers
+    let gas_killer_handler = GasKillerHandler::with_providers(providers);
 
     Ok(BlsEigenlayerExecutor::new(
         view_only_provider,
