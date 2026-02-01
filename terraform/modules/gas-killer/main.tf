@@ -728,5 +728,7 @@ resource "kubernetes_job" "deploy_and_trigger" {
     create = "15m"
   }
 
-  depends_on = [helm_release.gas_killer]
+  # Wait for bridge to complete before running e2e test to avoid nonce collisions
+  # (both use the same wallet for L1 transactions)
+  depends_on = [helm_release.gas_killer, kubernetes_job.l1_l2_bridge]
 }
