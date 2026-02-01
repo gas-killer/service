@@ -88,7 +88,7 @@ spec:
           image: "{{ .Values.bridge.image.repository }}:{{ .Values.bridge.image.tag }}"
           imagePullPolicy: {{ .Values.bridge.image.pullPolicy }}
           # Set REGISTRY_COORDINATOR_ADDRESS from file and run the image's entrypoint
-          command: ["/bin/bash", "-c"]
+          command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
