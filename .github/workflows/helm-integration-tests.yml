@@ -71,6 +71,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # Build test scripts early to avoid delays after router starts
+      # The router has a 180s internal timeout, so we need to minimize time between
+      # router startup and triggering tasks
+      - name: Build test scripts
+        run: |
+          cargo build --release -p avs-scripts --bin deploy_array_summation
+          cargo build --release -p avs-scripts --bin trigger_gas_killer
+
       - name: Build Docker images
         run: |
           echo "Building router image..."
@@ -226,13 +234,6 @@ jobs:
           echo "Setup job logs:"
           kubectl logs $SETUP_POD || true
 
-      - name: Build test scripts
-        run: |
-          cd scripts
-          cargo build --release -p avs-scripts --bin deploy_array_summation
-          cargo build --release -p avs-scripts --bin trigger_gas_killer
-          cd ..
-
       - name: Get AVS deployment file
         run: |
           echo "Copying avs_deploy.json from router pod..."
@@ -250,28 +251,21 @@ jobs:
           echo "AVS deployment file contents:"
           cat ./config/.nodes/avs_deploy.json
 
-      - name: Wait for services to stabilize
-        run: |
-          echo "Waiting for services to stabilize..."
-          sleep 30
-
       - name: Deploy ArraySummation contract
         run: |
           echo "Deploying ArraySummation contract..."
 
-          cd scripts
           export HTTP_RPC=http://localhost:8545
           export WS_RPC=ws://localhost:8545
-          export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
+          export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
           export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
           export ARRAY_SUMMATION_ARRAY_SIZE=100
           export ARRAY_SUMMATION_MAX_VALUE=1000
           export ARRAY_SUMMATION_SEED=42
 
-          cargo run --release -p avs-scripts --bin deploy_array_summation
-
-          cd ..
+          # Use pre-built binary for speed
+          ./target/release/deploy_array_summation
 
           echo "ArraySummation deployment completed"
 
@@ -279,10 +273,9 @@ jobs:
         run: |
           echo "Triggering Gas Killer tasks..."
 
-          cd scripts
           export HTTP_RPC=http://localhost:8545
           export WS_RPC=ws://localhost:8545
-          export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
+          export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
           export GAS_KILLER_TRIGGER_URL=http://localhost:8080/trigger
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
@@ -299,7 +292,8 @@ jobs:
 
           for i in $(seq 1 $NUM_TRIGGERS); do
             echo "=== Triggering task $i of $NUM_TRIGGERS ==="
-            if cargo run --release -p avs-scripts --bin trigger_gas_killer; then
+            # Use pre-built binary for speed
+            if ./target/release/trigger_gas_killer; then
               echo "✅ Task $i completed successfully"
               SUCCESSFUL=$((SUCCESSFUL + 1))
             else
@@ -340,8 +334,6 @@ jobs:
           fi
 
           echo "✅ All $SUCCESSFUL triggers completed successfully!"
-
-          cd ..
 
       - name: Show router logs
         run: |
