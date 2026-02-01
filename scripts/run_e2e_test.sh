@@ -178,6 +178,7 @@ else
     echo "Discovered ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
     # Set as the default target for Gas Killer trigger helper
     export GAS_KILLER_TARGET_ADDRESS="$ARRAY_SUMMATION_ADDRESS"
+    export ARRAY_SUMMATION_ADDRESS
 fi
 
 cd "$PROJECT_ROOT"
@@ -202,6 +203,13 @@ echo -e "${YELLOW}Step 10: Triggering tasks and verifying execution...${NC}"
 NUM_TRIGGERS=${NUM_TRIGGERS:-3}
 echo "Sending $NUM_TRIGGERS test tasks to the router..."
 cd "$PROJECT_ROOT/scripts"
+
+# Verify ArraySummation address is available
+if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
+    echo -e "${RED}Error: ARRAY_SUMMATION_ADDRESS is not set${NC}"
+    exit 1
+fi
+echo "Using ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
 
 # Get initial stateTransitionCount
 source ../.env
