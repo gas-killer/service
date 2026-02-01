@@ -213,7 +213,12 @@ echo "Using ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
 
 # Get initial stateTransitionCount
 source ../.env
-INITIAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 2>/dev/null || echo "0")
+INITIAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 2>/dev/null | tr -d '[:space:]' || echo "0")
+# Ensure it's a valid number, default to 0 if not
+if ! [[ "$INITIAL_COUNT" =~ ^[0-9]+$ ]]; then
+    echo -e "${YELLOW}Warning: Could not parse stateTransitionCount, defaulting to 0${NC}"
+    INITIAL_COUNT=0
+fi
 echo "Initial stateTransitionCount: $INITIAL_COUNT"
 
 SUCCESSFUL_TRIGGERS=0
@@ -244,7 +249,12 @@ done
 cd "$PROJECT_ROOT"
 
 # Verify stateTransitionCount increased by expected amount
-FINAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 2>/dev/null || echo "0")
+FINAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 2>/dev/null | tr -d '[:space:]' || echo "0")
+# Ensure it's a valid number, default to 0 if not
+if ! [[ "$FINAL_COUNT" =~ ^[0-9]+$ ]]; then
+    echo -e "${YELLOW}Warning: Could not parse final stateTransitionCount, defaulting to 0${NC}"
+    FINAL_COUNT=0
+fi
 echo "Final stateTransitionCount: $FINAL_COUNT"
 EXPECTED_FINAL=$((INITIAL_COUNT + NUM_TRIGGERS))
 
