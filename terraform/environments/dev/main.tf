@@ -315,6 +315,13 @@ module "gas_killer" {
   run_e2e_test                    = var.run_e2e_test
   array_summation_factory_address = var.array_summation_factory_address
 
+  # L1-L2 Bridge
+  run_bridge                   = var.run_bridge
+  l1_rpc_url                   = var.l1_rpc_url
+  l2_rpc_url                   = var.l2_rpc_url
+  registry_coordinator_address = var.registry_coordinator_address
+  bridge_image                 = var.bridge_image
+
   # Dependency
   addons_ready = module.eks_addons.ready
 

@@ -1,3 +1,128 @@
+# =============================================================================
+# L1-L2 Bridge Job (runs before gas-killer deployment)
+# =============================================================================
+# Bridges EigenLayer operator state from L1 to L2:
+# 1. Deploys MiddlewareShim on L1
+# 2. Deploys RegistryCoordinatorMimic, BLSSignatureChecker, SP1HeliosMock on L2
+# 3. Snapshots operator state on L1
+# 4. Generates storage proof
+# 5. Bridges state to L2
+
+resource "kubernetes_namespace" "gas_killer" {
+  count = var.run_bridge ? 1 : 0
+
+  metadata {
+    name = var.namespace
+  }
+}
+
+resource "kubernetes_secret" "bridge_secrets" {
+  count = var.run_bridge ? 1 : 0
+
+  metadata {
+    name      = "bridge-secrets"
+    namespace = var.namespace
+  }
+
+  data = {
+    PRIVATE_KEY = var.private_key
+    L1_RPC_URL  = var.l1_rpc_url
+    L2_RPC_URL  = var.l2_rpc_url
+  }
+
+  depends_on = [kubernetes_namespace.gas_killer]
+}
+
+resource "kubernetes_job" "l1_l2_bridge" {
+  count = var.run_bridge ? 1 : 0
+
+  metadata {
+    name      = "l1-l2-bridge"
+    namespace = var.namespace
+    labels = {
+      "app.kubernetes.io/name"      = "gas-killer"
+      "app.kubernetes.io/component" = "bridge"
+    }
+  }
+
+  spec {
+    ttl_seconds_after_finished = 600 # Clean up after 10 minutes
+    backoff_limit              = 2
+
+    template {
+      metadata {
+        labels = {
+          "app.kubernetes.io/name"      = "gas-killer"
+          "app.kubernetes.io/component" = "bridge"
+        }
+      }
+
+      spec {
+        restart_policy = "Never"
+
+        container {
+          name  = "bridge"
+          image = var.bridge_image
+
+          env {
+            name = "PRIVATE_KEY"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "PRIVATE_KEY"
+              }
+            }
+          }
+
+          env {
+            name = "L1_RPC_URL"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "L1_RPC_URL"
+              }
+            }
+          }
+
+          env {
+            name = "L2_RPC_URL"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "L2_RPC_URL"
+              }
+            }
+          }
+
+          env {
+            name  = "REGISTRY_COORDINATOR_ADDRESS"
+            value = var.registry_coordinator_address
+          }
+
+          resources {
+            requests = {
+              cpu    = "100m"
+              memory = "256Mi"
+            }
+            limits = {
+              cpu    = "500m"
+              memory = "512Mi"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  wait_for_completion = true
+
+  timeouts {
+    create = "15m"
+  }
+
+  depends_on = [kubernetes_secret.bridge_secrets]
+}
+
 # Helm release for gas-killer
 resource "helm_release" "gas_killer" {
   name             = "gas-killer"
@@ -120,6 +245,9 @@ resource "helm_release" "gas_killer" {
       value = var.ingress_host
     }
   }
+
+  # Ensure bridge job completes before deploying gas-killer
+  depends_on = [kubernetes_job.l1_l2_bridge]
 }
 
 # Data source to get the ingress after deployment

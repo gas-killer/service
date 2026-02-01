@@ -119,3 +119,36 @@ variable "array_summation_factory_address" {
   type        = string
   default     = "0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
 }
+
+# L1-L2 Bridge Configuration
+variable "run_bridge" {
+  description = "Run L1-L2 bridge job before deploying gas-killer"
+  type        = bool
+  default     = true
+}
+
+variable "l1_rpc_url" {
+  description = "RPC URL for L1 (Sepolia, Holesky, Mainnet)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "l2_rpc_url" {
+  description = "RPC URL for L2 (Gnosis, Arbitrum, etc.)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "registry_coordinator_address" {
+  description = "EigenLayer RegistryCoordinator address on L1"
+  type        = string
+  default     = ""
+}
+
+variable "bridge_image" {
+  description = "Docker image for L1-L2 bridge"
+  type        = string
+  default     = "ghcr.io/ronturetzky/target-contracts/bridge:pr-1"
+}
