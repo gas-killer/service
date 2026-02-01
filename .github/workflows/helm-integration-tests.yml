@@ -273,27 +273,71 @@ jobs:
 
           echo "ArraySummation deployment completed"
 
-      - name: Trigger Gas Killer and verify execution
+      - name: Trigger Gas Killer multiple times and verify execution
         run: |
-          echo "Triggering Gas Killer task..."
+          echo "Triggering Gas Killer tasks..."
 
           cd scripts
           export HTTP_RPC=http://localhost:8545
           export WS_RPC=ws://localhost:8545
           export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
-          export GAS_KILLER_ROUTER_URL=http://localhost:8080
+          export GAS_KILLER_TRIGGER_URL=http://localhost:8080/trigger
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
-          cargo run --release -p avs-scripts --bin trigger_gas_killer
+          # Get ArraySummation address from deployment file
+          ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.arraySummation' "$AVS_DEPLOYMENT_PATH")
+          echo "ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
 
-          if [ $? -eq 0 ]; then
-            echo "Gas Killer task executed successfully!"
+          # Get initial stateTransitionCount
+          INITIAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 | tr -d '[:space:]')
+          echo "Initial stateTransitionCount: $INITIAL_COUNT"
+
+          NUM_TRIGGERS=3
+          SUCCESSFUL=0
+
+          for i in $(seq 1 $NUM_TRIGGERS); do
+            echo "=== Triggering task $i of $NUM_TRIGGERS ==="
+            if cargo run --release -p avs-scripts --bin trigger_gas_killer; then
+              echo "✅ Task $i completed successfully"
+              SUCCESSFUL=$((SUCCESSFUL + 1))
+            else
+              echo "❌ Task $i failed"
+              echo "=== Router logs ==="
+              kubectl logs -l app.kubernetes.io/component=router --tail 100
+              exit 1
+            fi
+
+            # Small delay between triggers
+            if [ $i -lt $NUM_TRIGGERS ]; then
+              echo "Waiting before next trigger..."
+              sleep 2
+            fi
+          done
+
+          # Verify stateTransitionCount increased
+          FINAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 | tr -d '[:space:]')
+          echo "Final stateTransitionCount: $FINAL_COUNT"
+          EXPECTED=$((INITIAL_COUNT + NUM_TRIGGERS))
+
+          if [ "$FINAL_COUNT" -ge "$EXPECTED" ]; then
+            echo "✅ stateTransitionCount increased correctly: $INITIAL_COUNT -> $FINAL_COUNT"
           else
-            echo "Gas Killer task failed"
-            echo "=== Router logs ==="
-            kubectl logs -l app.kubernetes.io/component=router --tail 100
+            echo "❌ stateTransitionCount mismatch: expected at least $EXPECTED, got $FINAL_COUNT"
             exit 1
           fi
+
+          # Check for SumCalculated events
+          EVENT_TOPIC=$(cast keccak 'SumCalculated(uint256,uint256)')
+          EVENT_COUNT=$(cast logs --from-block 0 --address "$ARRAY_SUMMATION_ADDRESS" --topic $EVENT_TOPIC --rpc-url http://localhost:8545 2>/dev/null | grep -c "blockNumber" || echo "0")
+          echo "Found $EVENT_COUNT SumCalculated events"
+
+          if [ "$EVENT_COUNT" -ge "$NUM_TRIGGERS" ]; then
+            echo "✅ Expected number of events found: $EVENT_COUNT >= $NUM_TRIGGERS"
+          else
+            echo "⚠️ Fewer events than expected: $EVENT_COUNT < $NUM_TRIGGERS"
+          fi
+
+          echo "✅ All $SUCCESSFUL triggers completed successfully!"
 
           cd ..
 
