@@ -54,6 +54,34 @@ spec:
               mountPath: /app/.nodes
               readOnly: true
 
+        {{- if $root.Values.bridge.waitForBridge }}
+        # Wait for bridge job to complete before starting the node
+        # The bridge creates a .bridge_complete marker when done
+        - name: wait-for-bridge
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for bridge to complete (timeout: {{ $root.Values.global.initTimeout }}s)..."
+              TIMEOUT={{ $root.Values.global.initTimeout }}
+              ELAPSED=0
+              until [ -f /app/.nodes/.bridge_complete ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for bridge to complete after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Bridge not complete, waiting for .bridge_complete marker... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "Bridge complete!"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+        {{- end }}
+
         {{- if eq $root.Values.global.environment "LOCAL" }}
         # Wait for ethereum RPC to be accessible before starting the node (LOCAL mode only)
         - name: wait-for-ethereum
