@@ -1,128 +1,3 @@
-# =============================================================================
-# L1-L2 Bridge Job (runs before gas-killer deployment)
-# =============================================================================
-# Bridges EigenLayer operator state from L1 to L2:
-# 1. Deploys MiddlewareShim on L1
-# 2. Deploys RegistryCoordinatorMimic, BLSSignatureChecker, SP1HeliosMock on L2
-# 3. Snapshots operator state on L1
-# 4. Generates storage proof
-# 5. Bridges state to L2
-
-resource "kubernetes_namespace" "gas_killer" {
-  count = var.run_bridge ? 1 : 0
-
-  metadata {
-    name = var.namespace
-  }
-}
-
-resource "kubernetes_secret" "bridge_secrets" {
-  count = var.run_bridge ? 1 : 0
-
-  metadata {
-    name      = "bridge-secrets"
-    namespace = var.namespace
-  }
-
-  data = {
-    PRIVATE_KEY = var.private_key
-    L1_RPC_URL  = var.l1_rpc_url
-    L2_RPC_URL  = var.l2_rpc_url
-  }
-
-  depends_on = [kubernetes_namespace.gas_killer]
-}
-
-resource "kubernetes_job" "l1_l2_bridge" {
-  count = var.run_bridge ? 1 : 0
-
-  metadata {
-    name      = "l1-l2-bridge"
-    namespace = var.namespace
-    labels = {
-      "app.kubernetes.io/name"      = "gas-killer"
-      "app.kubernetes.io/component" = "bridge"
-    }
-  }
-
-  spec {
-    ttl_seconds_after_finished = 600 # Clean up after 10 minutes
-    backoff_limit              = 2
-
-    template {
-      metadata {
-        labels = {
-          "app.kubernetes.io/name"      = "gas-killer"
-          "app.kubernetes.io/component" = "bridge"
-        }
-      }
-
-      spec {
-        restart_policy = "Never"
-
-        container {
-          name  = "bridge"
-          image = var.bridge_image
-
-          env {
-            name = "PRIVATE_KEY"
-            value_from {
-              secret_key_ref {
-                name = "bridge-secrets"
-                key  = "PRIVATE_KEY"
-              }
-            }
-          }
-
-          env {
-            name = "L1_RPC_URL"
-            value_from {
-              secret_key_ref {
-                name = "bridge-secrets"
-                key  = "L1_RPC_URL"
-              }
-            }
-          }
-
-          env {
-            name = "L2_RPC_URL"
-            value_from {
-              secret_key_ref {
-                name = "bridge-secrets"
-                key  = "L2_RPC_URL"
-              }
-            }
-          }
-
-          env {
-            name  = "REGISTRY_COORDINATOR_ADDRESS"
-            value = var.registry_coordinator_address
-          }
-
-          resources {
-            requests = {
-              cpu    = "100m"
-              memory = "256Mi"
-            }
-            limits = {
-              cpu    = "500m"
-              memory = "512Mi"
-            }
-          }
-        }
-      }
-    }
-  }
-
-  wait_for_completion = true
-
-  timeouts {
-    create = "15m"
-  }
-
-  depends_on = [kubernetes_secret.bridge_secrets]
-}
-
 # Helm release for gas-killer
 resource "helm_release" "gas_killer" {
   name             = "gas-killer"
@@ -245,9 +120,207 @@ resource "helm_release" "gas_killer" {
       value = var.ingress_host
     }
   }
+}
 
-  # Ensure bridge job completes before deploying gas-killer
-  depends_on = [kubernetes_job.l1_l2_bridge]
+# =============================================================================
+# L1-L2 Bridge Job (runs after setup, before router/nodes are fully operational)
+# =============================================================================
+# Bridges EigenLayer operator state from L1 to L2:
+# 1. Deploys MiddlewareShim on L1 (reads from RegistryCoordinator)
+# 2. Deploys RegistryCoordinatorMimic, BLSSignatureChecker, SP1HeliosMock on L2
+# 3. Snapshots operator state on L1
+# 4. Generates storage proof
+# 5. Bridges state to L2
+
+resource "kubernetes_secret" "bridge_secrets" {
+  count = var.run_bridge ? 1 : 0
+
+  metadata {
+    name      = "bridge-secrets"
+    namespace = var.namespace
+  }
+
+  data = {
+    PRIVATE_KEY = var.private_key
+    L1_RPC_URL  = var.l1_rpc_url
+    L2_RPC_URL  = var.l2_rpc_url
+  }
+
+  depends_on = [helm_release.gas_killer]
+}
+
+resource "kubernetes_job" "l1_l2_bridge" {
+  count = var.run_bridge ? 1 : 0
+
+  metadata {
+    name      = "l1-l2-bridge"
+    namespace = var.namespace
+    labels = {
+      "app.kubernetes.io/name"      = "gas-killer"
+      "app.kubernetes.io/component" = "bridge"
+    }
+  }
+
+  spec {
+    ttl_seconds_after_finished = 600 # Clean up after 10 minutes
+    backoff_limit              = 2
+
+    template {
+      metadata {
+        labels = {
+          "app.kubernetes.io/name"      = "gas-killer"
+          "app.kubernetes.io/component" = "bridge"
+        }
+      }
+
+      spec {
+        restart_policy = "Never"
+
+        # Mount the shared PVC to read avs_deploy.json
+        volume {
+          name = "shared-data"
+          persistent_volume_claim {
+            claim_name = "gas-killer-shared-data"
+          }
+        }
+
+        # Shared volume for passing extracted config between init and main container
+        volume {
+          name = "bridge-config"
+          empty_dir {}
+        }
+
+        # Wait for avs_deploy.json and extract RegistryCoordinator address
+        init_container {
+          name  = "extract-registry-coordinator"
+          image = "busybox:1.36"
+          command = [
+            "sh", "-c",
+            <<-EOT
+              echo "Waiting for avs_deploy.json..."
+              TIMEOUT=600
+              ELAPSED=0
+              while [ ! -f /app/.nodes/avs_deploy.json ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for avs_deploy.json after $${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "avs_deploy.json not ready, waiting... ($${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "avs_deploy.json found!"
+              cat /app/.nodes/avs_deploy.json
+
+              # Extract RegistryCoordinator address from JSON
+              # Try different possible key names
+              REGISTRY_ADDR=$(grep -o '"registryCoordinator": *"[^"]*"' /app/.nodes/avs_deploy.json | sed 's/.*: *"\([^"]*\)"/\1/' || true)
+              if [ -z "$REGISTRY_ADDR" ]; then
+                REGISTRY_ADDR=$(grep -o '"RegistryCoordinator": *"[^"]*"' /app/.nodes/avs_deploy.json | sed 's/.*: *"\([^"]*\)"/\1/' || true)
+              fi
+
+              if [ -z "$REGISTRY_ADDR" ]; then
+                echo "ERROR: Could not find RegistryCoordinator address in avs_deploy.json"
+                echo "Available keys:"
+                cat /app/.nodes/avs_deploy.json
+                exit 1
+              fi
+
+              echo "Found RegistryCoordinator: $REGISTRY_ADDR"
+              echo "$REGISTRY_ADDR" > /bridge-config/registry_coordinator_address
+            EOT
+          ]
+
+          volume_mount {
+            name       = "shared-data"
+            mount_path = "/app/.nodes"
+            read_only  = true
+          }
+
+          volume_mount {
+            name       = "bridge-config"
+            mount_path = "/bridge-config"
+          }
+        }
+
+        container {
+          name  = "bridge"
+          image = var.bridge_image
+
+          # Override command to read the extracted address and run the bridge
+          command = [
+            "sh", "-c",
+            <<-EOT
+              export REGISTRY_COORDINATOR_ADDRESS=$(cat /bridge-config/registry_coordinator_address)
+              echo "Using RegistryCoordinator: $REGISTRY_COORDINATOR_ADDRESS"
+              exec /app/scripts/bridge-to-l2.sh
+            EOT
+          ]
+
+          volume_mount {
+            name       = "shared-data"
+            mount_path = "/app/.nodes"
+            read_only  = true
+          }
+
+          volume_mount {
+            name       = "bridge-config"
+            mount_path = "/bridge-config"
+            read_only  = true
+          }
+
+          env {
+            name = "PRIVATE_KEY"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "PRIVATE_KEY"
+              }
+            }
+          }
+
+          env {
+            name = "L1_RPC_URL"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "L1_RPC_URL"
+              }
+            }
+          }
+
+          env {
+            name = "L2_RPC_URL"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "L2_RPC_URL"
+              }
+            }
+          }
+
+          resources {
+            requests = {
+              cpu    = "100m"
+              memory = "256Mi"
+            }
+            limits = {
+              cpu    = "500m"
+              memory = "512Mi"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  wait_for_completion = true
+
+  timeouts {
+    create = "15m"
+  }
+
+  depends_on = [kubernetes_secret.bridge_secrets]
 }
 
 # Data source to get the ingress after deployment
