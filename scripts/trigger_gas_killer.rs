@@ -119,14 +119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .into());
     }
 
-    // Capture initial stateTransitionCount before posting task
-    // Using stateTransitionCount instead of currentSum because currentSum may not change
-    // when the same indexes are summed multiple times (same result)
-    let initial_count = array_contract
-        .stateTransitionCount()
+    // Capture initial currentSum before posting task
+    // Each trigger uses different indexes, so currentSum will change each time
+    let initial_sum = array_contract
+        .currentSum()
         .call()
         .await
-        .map_err(|e| format!("Failed to read stateTransitionCount before trigger: {}", e))?
+        .map_err(|e| format!("Failed to read currentSum before trigger: {}", e))?
         .to::<u64>();
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
@@ -154,42 +153,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
         Err(format!("Trigger failed with status {}", status).into())
     } else {
-        // Poll stateTransitionCount until it increments or timeout
+        // Poll currentSum until it changes or timeout
         use tokio::time::{Duration, Instant, sleep};
         let max_wait_time = Duration::from_secs(150);
         let check_interval = Duration::from_secs(10);
         let start_time = Instant::now();
 
         loop {
-            let current_count = array_contract
-                .stateTransitionCount()
+            let current_sum = array_contract
+                .currentSum()
                 .call()
                 .await
-                .map_err(|e| format!("Failed to read stateTransitionCount after trigger: {}", e))?
+                .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
                 .to::<u64>();
 
             println!(
-                "stateTransitionCount: {}, Initial: {}, Elapsed: {:.1}s",
-                current_count,
-                initial_count,
+                "currentSum: {}, Initial: {}, Elapsed: {:.1}s",
+                current_sum,
+                initial_sum,
                 start_time.elapsed().as_secs_f64()
             );
 
-            if current_count > initial_count {
+            if current_sum != initial_sum {
                 println!(
-                    "✅ SUCCESS: stateTransitionCount incremented from {} to {}",
-                    initial_count, current_count
+                    "✅ SUCCESS: currentSum changed from {} to {}",
+                    initial_sum, current_sum
                 );
                 return Ok(());
             }
 
             if start_time.elapsed() >= max_wait_time {
                 println!(
-                    "❌ TIMEOUT: stateTransitionCount unchanged ({}), waited {:.1} seconds",
-                    current_count,
+                    "❌ TIMEOUT: currentSum unchanged ({}), waited {:.1} seconds",
+                    current_sum,
                     max_wait_time.as_secs_f64()
                 );
-                return Err("Timeout waiting for stateTransitionCount to increment".into());
+                return Err("Timeout waiting for currentSum to change".into());
             }
 
             sleep(check_interval).await;
@@ -215,11 +214,6 @@ async fn resolve_block_height<P: Provider>(
 
 async fn build_mock_request()
 -> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
-    // Encode a sample ArraySummation sum(uint256[]) call with indexes [0,1,2]
-    let indexes = vec![U256::from(0), U256::from(1), U256::from(2)];
-    let call = sumCall { indexes };
-    let call_data = call.abi_encode().to_vec();
-
     // Try to source a real deployed ArraySummation address from AVS_DEPLOYMENT_PATH; fallback to placeholder
     let target_address: Address = match env::var("AVS_DEPLOYMENT_PATH") {
         Ok(path) => {
@@ -262,6 +256,25 @@ async fn build_mock_request()
         .await
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
         .to::<u64>();
+
+    // Use different indexes based on transition_index to get different sums each time
+    // Offset by 3 for each new trigger: [0,1,2], [3,4,5], [6,7,8], etc.
+    // Array has 100 elements, so we can do ~33 unique triggers
+    let base_idx = (current_count * 3) % 97; // Stay within bounds of 100 element array
+    let indexes = vec![
+        U256::from(base_idx),
+        U256::from(base_idx + 1),
+        U256::from(base_idx + 2),
+    ];
+    println!(
+        "Using indexes [{}, {}, {}] for transition_index={}",
+        base_idx,
+        base_idx + 1,
+        base_idx + 2,
+        current_count
+    );
+    let call = sumCall { indexes };
+    let call_data = call.abi_encode().to_vec();
 
     // Resolve block_height for deterministic execution
     let block_height = resolve_block_height(&provider).await?;
