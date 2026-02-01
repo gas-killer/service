@@ -9,12 +9,6 @@ on:
       - multi-chain-simplified
       - DijarLlozana/terraform-aws-deploy
   pull_request:
-    branches:
-      - main
-      - dev
-      - staging
-      - multi-chain-simplified
-      - DijarLlozana/terraform-aws-deploy
   workflow_dispatch:
 
 jobs:
