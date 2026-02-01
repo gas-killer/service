@@ -196,22 +196,79 @@ done
 echo -e "${YELLOW}Step 9: Waiting briefly for services to stabilize...${NC}"
 sleep 5
 
-# Step 10: Trigger Gas Killer task and verify execution
-echo -e "${YELLOW}Step 10: Triggering task and verifying execution...${NC}"
-echo "Sending a test task to the router..."
+# Step 10: Trigger Gas Killer task multiple times and verify execution
+echo -e "${YELLOW}Step 10: Triggering tasks and verifying execution...${NC}"
+
+NUM_TRIGGERS=${NUM_TRIGGERS:-3}
+echo "Sending $NUM_TRIGGERS test tasks to the router..."
 cd "$PROJECT_ROOT/scripts"
-cargo run --release -p avs-scripts --bin trigger_gas_killer
-TRIGGER_STATUS=$?
+
+# Get initial stateTransitionCount
+source ../.env
+INITIAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 2>/dev/null || echo "0")
+echo "Initial stateTransitionCount: $INITIAL_COUNT"
+
+SUCCESSFUL_TRIGGERS=0
+for i in $(seq 1 $NUM_TRIGGERS); do
+    echo -e "${YELLOW}Triggering task $i of $NUM_TRIGGERS...${NC}"
+    cargo run --release -p avs-scripts --bin trigger_gas_killer
+    TRIGGER_STATUS=$?
+
+    if [ $TRIGGER_STATUS -eq 0 ]; then
+        echo -e "${GREEN}✅ Task $i completed successfully${NC}"
+        SUCCESSFUL_TRIGGERS=$((SUCCESSFUL_TRIGGERS + 1))
+    else
+        echo -e "${RED}❌ Task $i failed${NC}"
+        echo -e "${YELLOW}Recent router logs:${NC}"
+        docker compose logs --tail=50 router || true
+        echo -e "${YELLOW}Recent node logs:${NC}"
+        docker compose logs --tail=30 node-1 node-2 node-3 || true
+        exit 1
+    fi
+
+    # Small delay between triggers to allow state to settle
+    if [ $i -lt $NUM_TRIGGERS ]; then
+        echo "Waiting briefly before next trigger..."
+        sleep 2
+    fi
+done
+
 cd "$PROJECT_ROOT"
 
-if [ $TRIGGER_STATUS -eq 0 ]; then
-    echo -e "${GREEN}✅ Array summation verified successfully - state was updated!${NC}"
+# Verify stateTransitionCount increased by expected amount
+FINAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 2>/dev/null || echo "0")
+echo "Final stateTransitionCount: $FINAL_COUNT"
+EXPECTED_FINAL=$((INITIAL_COUNT + NUM_TRIGGERS))
+
+if [ "$FINAL_COUNT" -ge "$EXPECTED_FINAL" ]; then
+    echo -e "${GREEN}✅ stateTransitionCount increased correctly: $INITIAL_COUNT -> $FINAL_COUNT (expected at least $EXPECTED_FINAL)${NC}"
 else
-    echo -e "${RED}❌ Array summation verification failed - state was not updated within timeout.${NC}"
-    echo -e "${YELLOW}Recent router logs:${NC}"
-    docker compose logs --tail=100 router || true
-    echo -e "${YELLOW}Recent node logs:${NC}"
-    docker compose logs --tail=50 node-1 node-2 node-3 || true
+    echo -e "${RED}❌ stateTransitionCount mismatch: expected at least $EXPECTED_FINAL, got $FINAL_COUNT${NC}"
+    exit 1
+fi
+
+# Verify SumCalculated events were emitted
+echo -e "${YELLOW}Checking for SumCalculated events...${NC}"
+# SumCalculated event signature: SumCalculated(uint256 newSum, uint256 timestamp)
+# Event topic: keccak256("SumCalculated(uint256,uint256)")
+EVENT_TOPIC="0x$(cast keccak 'SumCalculated(uint256,uint256)' 2>/dev/null | cut -c3-)"
+if [ -n "$EVENT_TOPIC" ]; then
+    EVENT_COUNT=$(cast logs --from-block 0 --address "$ARRAY_SUMMATION_ADDRESS" --topic $EVENT_TOPIC --rpc-url http://localhost:8545 2>/dev/null | grep -c "blockNumber" || echo "0")
+    echo "Found $EVENT_COUNT SumCalculated events"
+
+    if [ "$EVENT_COUNT" -ge "$NUM_TRIGGERS" ]; then
+        echo -e "${GREEN}✅ Expected number of SumCalculated events found: $EVENT_COUNT >= $NUM_TRIGGERS${NC}"
+    else
+        echo -e "${YELLOW}⚠️ Fewer SumCalculated events than expected: $EVENT_COUNT < $NUM_TRIGGERS (may include events from previous runs)${NC}"
+    fi
+else
+    echo -e "${YELLOW}Warning: Could not compute event topic, skipping event count verification${NC}"
+fi
+
+if [ $SUCCESSFUL_TRIGGERS -eq $NUM_TRIGGERS ]; then
+    echo -e "${GREEN}✅ All $NUM_TRIGGERS triggers completed successfully!${NC}"
+else
+    echo -e "${RED}❌ Only $SUCCESSFUL_TRIGGERS of $NUM_TRIGGERS triggers succeeded${NC}"
     exit 1
 fi
 
@@ -237,6 +294,6 @@ else
     echo -e "${YELLOW}Warning: Could not find transaction hash in router logs${NC}"
 fi
 
-echo -e "${GREEN}✅ Test passed - Stack is up and array summation completed successfully!${NC}"
+echo -e "${GREEN}✅ Test passed - Stack is up and $NUM_TRIGGERS array summations completed successfully!${NC}"
 TEST_PASSED=true
 exit 0
