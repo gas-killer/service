@@ -120,6 +120,18 @@ resource "helm_release" "gas_killer" {
       value = var.ingress_host
     }
   }
+
+  # Bridge configuration - when enabled, nodes/router wait for bridge to complete
+  set {
+    name  = "bridge.waitForBridge"
+    value = tostring(var.run_bridge)
+  }
+
+  # Increase init timeout when bridge is enabled (bridge deploys contracts, takes longer)
+  set {
+    name  = "global.initTimeout"
+    value = var.run_bridge ? "900" : "300" # 15 minutes if bridge, 5 minutes otherwise
+  }
 }
 
 # =============================================================================
@@ -247,20 +259,32 @@ resource "kubernetes_job" "l1_l2_bridge" {
           name  = "bridge"
           image = var.bridge_image
 
-          # Override command to read the extracted address and run the bridge
+          # Override command to read the extracted address, run the bridge, and signal completion
           command = [
             "sh", "-c",
             <<-EOT
               export REGISTRY_COORDINATOR_ADDRESS=$(cat /bridge-config/registry_coordinator_address)
               echo "Using RegistryCoordinator: $REGISTRY_COORDINATOR_ADDRESS"
-              exec /app/scripts/bridge-to-l2.sh
+
+              # Run the bridge script
+              /app/scripts/bridge-to-l2.sh
+              BRIDGE_EXIT=$?
+
+              if [ $BRIDGE_EXIT -eq 0 ]; then
+                echo "Bridge completed successfully, creating marker file..."
+                touch /app/.nodes/.bridge_complete
+                echo "Bridge marker created at /app/.nodes/.bridge_complete"
+              else
+                echo "Bridge failed with exit code $BRIDGE_EXIT"
+                exit $BRIDGE_EXIT
+              fi
             EOT
           ]
 
           volume_mount {
             name       = "shared-data"
             mount_path = "/app/.nodes"
-            read_only  = true
+            # NOT read-only so we can write .bridge_complete
           }
 
           volume_mount {
@@ -728,7 +752,5 @@ resource "kubernetes_job" "deploy_and_trigger" {
     create = "15m"
   }
 
-  # Wait for bridge to complete before running e2e test to avoid nonce collisions
-  # (both use the same wallet for L1 transactions)
-  depends_on = [helm_release.gas_killer, kubernetes_job.l1_l2_bridge]
+  depends_on = [helm_release.gas_killer]
 }
