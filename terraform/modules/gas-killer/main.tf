@@ -286,21 +286,15 @@ resource "kubernetes_job" "l1_l2_bridge" {
               echo "avs_deploy.json found!"
               cat /app/.nodes/avs_deploy.json
 
-              # Extract RegistryCoordinator address from JSON
-              # Try different possible key names
-              REGISTRY_ADDR=$(grep -o '"registryCoordinator": *"[^"]*"' /app/.nodes/avs_deploy.json | sed 's/.*: *"\([^"]*\)"/\1/' || true)
-              if [ -z "$REGISTRY_ADDR" ]; then
-                REGISTRY_ADDR=$(grep -o '"RegistryCoordinator": *"[^"]*"' /app/.nodes/avs_deploy.json | sed 's/.*: *"\([^"]*\)"/\1/' || true)
-              fi
+              # Extract registryCoordinator address from JSON (under .addresses.registryCoordinator)
+              REGISTRY_ADDR=$(grep -o '"registryCoordinator": *"[^"]*"' /app/.nodes/avs_deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
 
               if [ -z "$REGISTRY_ADDR" ]; then
-                echo "ERROR: Could not find RegistryCoordinator address in avs_deploy.json"
-                echo "Available keys:"
-                cat /app/.nodes/avs_deploy.json
+                echo "ERROR: Could not find registryCoordinator in avs_deploy.json"
                 exit 1
               fi
 
-              echo "Found RegistryCoordinator: $REGISTRY_ADDR"
+              echo "Found registryCoordinator: $REGISTRY_ADDR"
               echo "$REGISTRY_ADDR" > /bridge-config/registry_coordinator_address
             EOT
           ]
