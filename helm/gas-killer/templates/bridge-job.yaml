@@ -55,11 +55,15 @@ spec:
             - sh
             - -c
             - |
+              set -e
               apk add --no-cache jq
-              echo "Extracting RegistryCoordinator address from avs_deploy.json..."
+              echo "=== avs_deploy.json contents ==="
+              cat /app/.nodes/avs_deploy.json
+              echo ""
+              echo "=== Extracting RegistryCoordinator address ==="
 
               # Try different possible field names for registry coordinator
-              REGISTRY_ADDR=$(jq -r '.addresses.RegistryCoordinator // .addresses.registryCoordinator // .addresses.registry_coordinator // empty' /app/.nodes/avs_deploy.json 2>/dev/null)
+              REGISTRY_ADDR=$(jq -r '.addresses.RegistryCoordinator // .addresses.registryCoordinator // .addresses.registry_coordinator // .addresses.registryCoordinatorProxy // empty' /app/.nodes/avs_deploy.json 2>/dev/null)
 
               if [ -z "$REGISTRY_ADDR" ] || [ "$REGISTRY_ADDR" = "null" ]; then
                 echo "ERROR: Could not find RegistryCoordinator address in avs_deploy.json"
@@ -70,6 +74,8 @@ spec:
 
               echo "Found RegistryCoordinator: $REGISTRY_ADDR"
               echo "$REGISTRY_ADDR" > /bridge-config/registry_coordinator_address
+              echo "Wrote to /bridge-config/registry_coordinator_address"
+              cat /bridge-config/registry_coordinator_address
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes
@@ -85,12 +91,33 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
+              set -e
+              echo "=== Bridge Container Starting ==="
+              echo "Checking /bridge-config contents..."
+              ls -la /bridge-config/ || echo "Cannot list /bridge-config"
+
+              if [ ! -f /bridge-config/registry_coordinator_address ]; then
+                echo "ERROR: /bridge-config/registry_coordinator_address not found!"
+                exit 1
+              fi
+
               export REGISTRY_COORDINATOR_ADDRESS=$(cat /bridge-config/registry_coordinator_address)
               echo "[BRIDGE] REGISTRY_COORDINATOR_ADDRESS: $REGISTRY_COORDINATOR_ADDRESS"
               echo "[BRIDGE] L1_RPC_URL: $L1_RPC_URL"
               echo "[BRIDGE] L2_RPC_URL: $L2_RPC_URL"
               echo "[BRIDGE] PRIVATE_KEY is set: $([ -n \"$PRIVATE_KEY\" ] && echo 'yes' || echo 'no')"
-              # Execute the original Docker entrypoint
+
+              echo "=== Checking bridge script ==="
+              ls -la /app/scripts/ || echo "Cannot list /app/scripts"
+
+              if [ ! -f /app/scripts/bridge-to-l2.sh ]; then
+                echo "ERROR: /app/scripts/bridge-to-l2.sh not found!"
+                echo "Checking /app directory structure..."
+                find /app -type f 2>/dev/null | head -50 || true
+                exit 1
+              fi
+
+              echo "=== Executing bridge script ==="
               exec /app/scripts/bridge-to-l2.sh
           env:
             - name: PRIVATE_KEY
