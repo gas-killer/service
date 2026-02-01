@@ -89,6 +89,43 @@ jobs:
           kubectl get nodes
           kubectl get pods -A
 
+      - name: Fund test account on L2 (Gnosis)
+        run: |
+          # The Anvil default address (from private key 0xac0974...)
+          ANVIL_ADDRESS="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+
+          # Set L2 RPC URL
+          if [ -n "${{ secrets.L2_RPC_URL }}" ]; then
+            L2_RPC_URL="${{ secrets.L2_RPC_URL }}"
+          else
+            L2_RPC_URL="https://rpc.gnosischain.com"
+          fi
+
+          # Use the funded PRIVATE_KEY from secrets to send xDAI to Anvil address
+          if [ -n "${{ secrets.PRIVATE_KEY }}" ]; then
+            echo "Funding Anvil test account on Gnosis..."
+            echo "Anvil address: $ANVIL_ADDRESS"
+            echo "L2 RPC: $L2_RPC_URL"
+
+            # Check current balance
+            BALANCE_BEFORE=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
+            echo "Balance before: $BALANCE_BEFORE"
+
+            # Send 0.05 xDAI (should be enough for bridge deployment)
+            cast send --rpc-url "$L2_RPC_URL" \
+              --private-key "${{ secrets.PRIVATE_KEY }}" \
+              "$ANVIL_ADDRESS" \
+              --value 0.05ether
+
+            # Verify funding
+            BALANCE_AFTER=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL")
+            echo "Balance after: $BALANCE_AFTER"
+            echo "Successfully funded Anvil address with 0.05 xDAI on Gnosis"
+          else
+            echo "WARNING: No PRIVATE_KEY secret available, skipping L2 funding"
+            echo "Bridge job may fail due to insufficient funds on L2"
+          fi
+
       - name: Install Helm chart
         run: |
           # Set fork URL from secret or use public Sepolia
@@ -158,43 +195,6 @@ jobs:
 
           echo "Setup job completed successfully"
           kubectl logs "$SETUP_JOB" --tail=30
-
-      - name: Fund test account on L2 (Gnosis)
-        run: |
-          # The Anvil default address (from private key 0xac0974...)
-          ANVIL_ADDRESS="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-
-          # Set L2 RPC URL
-          if [ -n "${{ secrets.L2_RPC_URL }}" ]; then
-            L2_RPC_URL="${{ secrets.L2_RPC_URL }}"
-          else
-            L2_RPC_URL="https://rpc.gnosischain.com"
-          fi
-
-          # Use the funded PRIVATE_KEY from secrets to send xDAI to Anvil address
-          if [ -n "${{ secrets.PRIVATE_KEY }}" ]; then
-            echo "Funding Anvil test account on Gnosis..."
-            echo "Anvil address: $ANVIL_ADDRESS"
-            echo "L2 RPC: $L2_RPC_URL"
-
-            # Check current balance
-            BALANCE_BEFORE=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
-            echo "Balance before: $BALANCE_BEFORE"
-
-            # Send 0.05 xDAI (should be enough for bridge deployment)
-            cast send --rpc-url "$L2_RPC_URL" \
-              --private-key "${{ secrets.PRIVATE_KEY }}" \
-              "$ANVIL_ADDRESS" \
-              --value 0.05ether
-
-            # Verify funding
-            BALANCE_AFTER=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL")
-            echo "Balance after: $BALANCE_AFTER"
-            echo "Successfully funded Anvil address with 0.05 xDAI on Gnosis"
-          else
-            echo "WARNING: No PRIVATE_KEY secret available, skipping L2 funding"
-            echo "Bridge job may fail due to insufficient funds on L2"
-          fi
 
       - name: Wait for bridge job to complete
         run: |
