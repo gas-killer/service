@@ -91,7 +91,7 @@ jobs:
 
       - name: Fund test account on L2 (Gnosis)
         env:
-          FUNDER_KEY: ${{ secrets.PRIVATE_KEY }}
+          FUNDER_KEY: ${{ secrets.GNOSIS_KEY }}
           L2_RPC: ${{ secrets.L2_RPC_URL }}
         run: |
           # The Anvil default address (from private key 0xac0974...)
@@ -106,10 +106,10 @@ jobs:
 
           # Debug: Check if secret is available (without exposing it)
           if [ -n "$FUNDER_KEY" ]; then
-            echo "PRIVATE_KEY secret is available (length: ${#FUNDER_KEY})"
+            echo "GNOSIS_KEY secret is available (length: ${#FUNDER_KEY})"
           else
-            echo "ERROR: PRIVATE_KEY secret is NOT available"
-            echo "Please ensure the PRIVATE_KEY secret is set in the repository"
+            echo "ERROR: GNOSIS_KEY secret is NOT available"
+            echo "Please ensure the GNOSIS_KEY secret is set in the repository"
             exit 1
           fi
 
