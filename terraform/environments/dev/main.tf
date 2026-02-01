@@ -322,6 +322,10 @@ module "gas_killer" {
   registry_coordinator_address = var.registry_coordinator_address
   bridge_image                 = var.bridge_image
 
+  # Gnosis Factory
+  run_gnosis_factory     = var.run_gnosis_factory
+  gnosis_factory_address = var.gnosis_factory_address
+
   # Dependency
   addons_ready = module.eks_addons.ready
 
