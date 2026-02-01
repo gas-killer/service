@@ -207,9 +207,22 @@ cd "$PROJECT_ROOT/scripts"
 # Verify ArraySummation address is available
 if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
     echo -e "${RED}Error: ARRAY_SUMMATION_ADDRESS is not set${NC}"
+    echo "Checking if GAS_KILLER_TARGET_ADDRESS is set: ${GAS_KILLER_TARGET_ADDRESS:-<not set>}"
     exit 1
 fi
 echo "Using ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
+
+# Verify cast is available and can connect
+echo "Testing RPC connection..."
+if ! cast block-number --rpc-url http://localhost:8545 >/dev/null 2>&1; then
+    echo -e "${YELLOW}Warning: Cannot connect to RPC at http://localhost:8545, retrying...${NC}"
+    sleep 5
+    if ! cast block-number --rpc-url http://localhost:8545 >/dev/null 2>&1; then
+        echo -e "${RED}Error: Cannot connect to RPC${NC}"
+        exit 1
+    fi
+fi
+echo "RPC connection OK"
 
 # Get initial stateTransitionCount
 source ../.env
