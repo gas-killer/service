@@ -100,6 +100,13 @@ jobs:
             FORK_URL="https://ethereum-sepolia-rpc.publicnode.com"
           fi
 
+          # Set L2 RPC URL from secret or use public Gnosis
+          if [ -n "${{ secrets.L2_RPC_URL }}" ]; then
+            L2_RPC_URL="${{ secrets.L2_RPC_URL }}"
+          else
+            L2_RPC_URL="https://rpc.gnosischain.com"
+          fi
+
           # Use Anvil default keys for testing
           PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
           FUNDED_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -114,6 +121,8 @@ jobs:
             --set secrets.forkUrl="$FORK_URL" \
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
+            --set secrets.l2RpcUrl="$L2_RPC_URL" \
+            --set bridge.enabled=true \
             --set node.image.repository=gas-killer-node \
             --set node.image.tag=local \
             --set node.image.pullPolicy=Never \
@@ -151,6 +160,25 @@ jobs:
 
           echo "Setup job completed successfully"
           kubectl logs "$SETUP_JOB" --tail=30
+
+      - name: Wait for bridge job to complete
+        run: |
+          echo "Waiting for bridge job to complete..."
+
+          # Find the actual bridge job name (includes chart name)
+          BRIDGE_JOB=$(kubectl get jobs -o name | grep bridge | head -1)
+
+          if [ -z "$BRIDGE_JOB" ]; then
+            echo "Bridge job not found - this is expected if bridge.enabled=false"
+            kubectl get jobs
+            exit 0
+          fi
+
+          echo "Found bridge job: $BRIDGE_JOB"
+          kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=600s
+
+          echo "Bridge job completed successfully"
+          kubectl logs "$BRIDGE_JOB" --tail=50
 
       - name: Wait for all pods to be ready
         run: |
@@ -326,6 +354,9 @@ jobs:
 
           echo "=== Setup Job Logs ==="
           kubectl logs -l app.kubernetes.io/component=setup --tail 100 || true
+
+          echo "=== Bridge Job Logs ==="
+          kubectl logs -l app.kubernetes.io/component=bridge --tail 100 || true
 
           echo "=== Router Logs ==="
           kubectl logs -l app.kubernetes.io/component=router --tail 100 || true

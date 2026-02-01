@@ -107,3 +107,10 @@ Secret name - supports existing secret or creates new one
 {{- printf "%s-secret" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
+
+{{/*
+Bridge job name
+*/}}
+{{- define "gas-killer.bridge.fullname" -}}
+{{- printf "%s-bridge" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
