@@ -178,7 +178,7 @@ orchestrator:
 bridge:
   # Wait for bridge job to complete before starting nodes/router
   # Set to true when running the L1-L2 bridge job via terraform
-  waitForBridge: false
+  waitForBridge: true
 
 # Shared data volume for keys and deployment configs
 sharedData:
