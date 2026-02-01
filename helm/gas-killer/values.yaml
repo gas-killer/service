@@ -126,7 +126,7 @@ router:
   ingressPort: 8080
   ingress:
     enabled: true
-    timeoutMs: 180000
+    timeoutMs: 600000  # 10 minutes
   service:
     type: ClusterIP
     port: 3000
