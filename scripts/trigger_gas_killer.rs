@@ -119,12 +119,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .into());
     }
 
-    // Capture initial currentSum before posting task
-    let initial_sum = array_contract
-        .currentSum()
+    // Capture initial stateTransitionCount before posting task
+    // Using stateTransitionCount instead of currentSum because currentSum may not change
+    // when the same indexes are summed multiple times (same result)
+    let initial_count = array_contract
+        .stateTransitionCount()
         .call()
         .await
-        .map_err(|e| format!("Failed to read currentSum before trigger: {}", e))?
+        .map_err(|e| format!("Failed to read stateTransitionCount before trigger: {}", e))?
         .to::<u64>();
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
@@ -152,42 +154,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
         Err(format!("Trigger failed with status {}", status).into())
     } else {
-        // Poll currentSum until it changes or timeout
+        // Poll stateTransitionCount until it increments or timeout
         use tokio::time::{Duration, Instant, sleep};
         let max_wait_time = Duration::from_secs(150);
         let check_interval = Duration::from_secs(10);
         let start_time = Instant::now();
 
         loop {
-            let current_sum = array_contract
-                .currentSum()
+            let current_count = array_contract
+                .stateTransitionCount()
                 .call()
                 .await
-                .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
+                .map_err(|e| format!("Failed to read stateTransitionCount after trigger: {}", e))?
                 .to::<u64>();
 
             println!(
-                "currentSum: {}, Initial: {}, Elapsed: {:.1}s",
-                current_sum,
-                initial_sum,
+                "stateTransitionCount: {}, Initial: {}, Elapsed: {:.1}s",
+                current_count,
+                initial_count,
                 start_time.elapsed().as_secs_f64()
             );
 
-            if current_sum != initial_sum {
+            if current_count > initial_count {
                 println!(
-                    "✅ SUCCESS: currentSum changed from {} to {}",
-                    initial_sum, current_sum
+                    "✅ SUCCESS: stateTransitionCount incremented from {} to {}",
+                    initial_count, current_count
                 );
                 return Ok(());
             }
 
             if start_time.elapsed() >= max_wait_time {
                 println!(
-                    "❌ TIMEOUT: currentSum unchanged ({}), waited {:.1} seconds",
-                    current_sum,
+                    "❌ TIMEOUT: stateTransitionCount unchanged ({}), waited {:.1} seconds",
+                    current_count,
                     max_wait_time.as_secs_f64()
                 );
-                return Err("Timeout waiting for currentSum to change".into());
+                return Err("Timeout waiting for stateTransitionCount to increment".into());
             }
 
             sleep(check_interval).await;
