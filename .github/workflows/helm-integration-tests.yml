@@ -115,20 +115,44 @@ jobs:
 
           echo "Funding Anvil test account on Gnosis..."
           echo "Anvil address: $ANVIL_ADDRESS"
-          echo "L2 RPC: $L2_RPC_URL"
 
-          # Check current balance
+          # Debug: Check chain ID and funder balance
+          CHAIN_ID=$(cast chain-id --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "unknown")
+          echo "Chain ID: $CHAIN_ID"
+
+          FUNDER_ADDRESS=$(cast wallet address --private-key "$FUNDER_KEY" 2>/dev/null || echo "unknown")
+          echo "Funder address: $FUNDER_ADDRESS"
+
+          FUNDER_BALANCE=$(cast balance "$FUNDER_ADDRESS" --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
+          echo "Funder balance: $FUNDER_BALANCE"
+
+          # Check current balance of target
           BALANCE_BEFORE=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
-          echo "Balance before: $BALANCE_BEFORE"
+          echo "Target balance before: $BALANCE_BEFORE"
 
           # Send 0.05 xDAI (should be enough for bridge deployment)
-          TX_HASH=$(cast send --rpc-url "$L2_RPC_URL" \
+          echo "Sending 0.05 xDAI..."
+          TX_OUTPUT=$(cast send --rpc-url "$L2_RPC_URL" \
             --private-key "$FUNDER_KEY" \
             "$ANVIL_ADDRESS" \
             --value 0.05ether \
-            --json | jq -r '.transactionHash')
+            --json 2>&1)
+
+          echo "Transaction output: $TX_OUTPUT"
+          TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash // empty')
+
+          if [ -z "$TX_HASH" ]; then
+            echo "ERROR: Failed to get transaction hash"
+            echo "Raw output: $TX_OUTPUT"
+            exit 1
+          fi
 
           echo "Transaction hash: $TX_HASH"
+
+          # Check transaction receipt
+          echo "Checking transaction receipt..."
+          TX_STATUS=$(cast receipt --rpc-url "$L2_RPC_URL" "$TX_HASH" --json 2>/dev/null | jq -r '.status // empty')
+          echo "Transaction status: $TX_STATUS"
 
           # Wait for RPC to sync and verify funding with retries
           echo "Waiting for transaction to be indexed..."
@@ -145,8 +169,9 @@ jobs:
 
             if [ "$i" -eq 5 ]; then
               echo "ERROR: Balance is still 0 after funding transaction"
-              echo "Transaction may have failed or RPC is not synced"
-              echo "Check transaction: $TX_HASH"
+              echo "Transaction hash: $TX_HASH"
+              echo "Chain ID: $CHAIN_ID"
+              echo "Funder balance: $FUNDER_BALANCE"
               exit 1
             fi
 
