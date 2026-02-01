@@ -81,29 +81,17 @@ spec:
         - name: bridge
           image: "{{ .Values.bridge.image.repository }}:{{ .Values.bridge.image.tag }}"
           imagePullPolicy: {{ .Values.bridge.image.pullPolicy }}
-          # Use sh -c to set REGISTRY_COORDINATOR_ADDRESS from file and run original entrypoint
-          command: ["/bin/sh", "-c"]
+          # Set REGISTRY_COORDINATOR_ADDRESS from file and run the image's entrypoint
+          command: ["/bin/bash", "-c"]
           args:
             - |
               export REGISTRY_COORDINATOR_ADDRESS=$(cat /bridge-config/registry_coordinator_address)
               echo "[BRIDGE] REGISTRY_COORDINATOR_ADDRESS: $REGISTRY_COORDINATOR_ADDRESS"
               echo "[BRIDGE] L1_RPC_URL: $L1_RPC_URL"
               echo "[BRIDGE] L2_RPC_URL: $L2_RPC_URL"
-              # Execute the original Docker entrypoint/cmd
-              # Try common patterns for Foundry/Forge images
-              if [ -x /entrypoint.sh ]; then
-                exec /entrypoint.sh
-              elif [ -x /app/run.sh ]; then
-                exec /app/run.sh
-              elif [ -x /run.sh ]; then
-                exec /run.sh
-              else
-                # Fallback: run forge script if available
-                echo "[BRIDGE] Looking for executables..."
-                find / -maxdepth 2 -type f -executable 2>/dev/null || true
-                echo "[BRIDGE] Trying forge..."
-                forge script Bridge --broadcast --rpc-url "$L1_RPC_URL" || echo "[BRIDGE] forge failed, trying other options..."
-              fi
+              echo "[BRIDGE] PRIVATE_KEY is set: $([ -n \"$PRIVATE_KEY\" ] && echo 'yes' || echo 'no')"
+              # Execute the original Docker entrypoint
+              exec /app/scripts/bridge-to-l2.sh
           env:
             - name: PRIVATE_KEY
               valueFrom:
