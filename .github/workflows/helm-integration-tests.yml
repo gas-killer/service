@@ -122,15 +122,37 @@ jobs:
           echo "Balance before: $BALANCE_BEFORE"
 
           # Send 0.05 xDAI (should be enough for bridge deployment)
-          cast send --rpc-url "$L2_RPC_URL" \
+          TX_HASH=$(cast send --rpc-url "$L2_RPC_URL" \
             --private-key "$FUNDER_KEY" \
             "$ANVIL_ADDRESS" \
-            --value 0.05ether
+            --value 0.05ether \
+            --json | jq -r '.transactionHash')
 
-          # Verify funding
-          BALANCE_AFTER=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL")
-          echo "Balance after: $BALANCE_AFTER"
-          echo "Successfully funded Anvil address with 0.05 xDAI on Gnosis"
+          echo "Transaction hash: $TX_HASH"
+
+          # Wait for RPC to sync and verify funding with retries
+          echo "Waiting for transaction to be indexed..."
+          sleep 5
+
+          for i in 1 2 3 4 5; do
+            BALANCE_AFTER=$(cast balance $ANVIL_ADDRESS --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
+            echo "Balance check $i: $BALANCE_AFTER"
+
+            if [ "$BALANCE_AFTER" != "0" ]; then
+              echo "Successfully funded Anvil address with 0.05 xDAI on Gnosis"
+              break
+            fi
+
+            if [ "$i" -eq 5 ]; then
+              echo "ERROR: Balance is still 0 after funding transaction"
+              echo "Transaction may have failed or RPC is not synced"
+              echo "Check transaction: $TX_HASH"
+              exit 1
+            fi
+
+            echo "Balance still 0, waiting..."
+            sleep 3
+          done
 
       - name: Install Helm chart
         run: |
