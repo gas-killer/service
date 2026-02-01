@@ -125,7 +125,7 @@ impl GasKillerValidator {
     /// Computes storage updates for a transaction using gas-analyzer-rs.
     ///
     /// Automatically detects which chain the contract is on, then computes storage updates.
-    /// Returns the storage updates, block height, and detected chain name.
+    /// Returns the storage updates and block height.
     pub async fn compute_storage_updates_for_tx(
         &self,
         contract_address: alloy::primitives::Address,
@@ -133,15 +133,9 @@ impl GasKillerValidator {
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
         block_height: u64,
-    ) -> Result<(Vec<u8>, u64, String)> {
+    ) -> Result<(Vec<u8>, u64)> {
         // Detect which chain has the contract
-        let (chain_name, rpc_url) = self.detect_chain_for_address(contract_address).await?;
-
-        debug!(
-            chain = %chain_name,
-            address = %contract_address,
-            "Detected chain for contract"
-        );
+        let (_, rpc_url) = self.detect_chain_for_address(contract_address).await?;
 
         let result = Self::analyze_transaction(
             rpc_url,
@@ -152,11 +146,7 @@ impl GasKillerValidator {
             block_height,
         )
         .await?;
-        Ok((
-            result.storage_updates,
-            result.block_height,
-            chain_name.to_string(),
-        ))
+        Ok((result.storage_updates, result.block_height))
     }
 
     /// Validates the message format and decodes the aggregation
