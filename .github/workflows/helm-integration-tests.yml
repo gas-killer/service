@@ -6,11 +6,13 @@ on:
       - main
       - dev
       - staging
+      - multi-chain-simplified
   pull_request:
     branches:
       - main
       - dev
       - staging
+      - multi-chain-simplified
   workflow_dispatch:
 
 jobs:
