@@ -152,3 +152,16 @@ variable "bridge_image" {
   type        = string
   default     = "ghcr.io/ronturetzky/target-contracts/bridge:pr-1"
 }
+
+# Gnosis Factory Configuration
+variable "run_gnosis_factory" {
+  description = "Run Gnosis factory job after bridge to deploy ArraySummation"
+  type        = bool
+  default     = true
+}
+
+variable "gnosis_factory_address" {
+  description = "Gnosis ArraySummation factory contract address"
+  type        = string
+  default     = "0xCF2e7d5673Ec1b3F174f25A45ddd6d8b2923ca2e"
+}
