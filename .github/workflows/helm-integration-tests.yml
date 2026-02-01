@@ -173,7 +173,34 @@ jobs:
           fi
 
           echo "Found bridge job: $BRIDGE_JOB"
-          kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=600s
+
+          # Wait for bridge job, but capture logs immediately on failure
+          if ! kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=600s; then
+            echo "=== Bridge job failed! Capturing logs immediately ==="
+
+            BRIDGE_POD=$(kubectl get pods -l app.kubernetes.io/component=bridge -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            if [ -n "$BRIDGE_POD" ]; then
+              echo "=== Bridge pod: $BRIDGE_POD ==="
+              kubectl describe pod $BRIDGE_POD || true
+
+              echo "=== Bridge init container (wait-for-setup) logs ==="
+              kubectl logs $BRIDGE_POD -c wait-for-setup || true
+
+              echo "=== Bridge init container (extract-registry-coordinator) logs ==="
+              kubectl logs $BRIDGE_POD -c extract-registry-coordinator || true
+
+              echo "=== Bridge main container logs ==="
+              kubectl logs $BRIDGE_POD -c bridge || true
+
+              echo "=== Bridge pod events ==="
+              kubectl get events --field-selector involvedObject.name=$BRIDGE_POD || true
+            else
+              echo "Bridge pod not found!"
+              kubectl get pods -l app.kubernetes.io/component=bridge || true
+            fi
+
+            exit 1
+          fi
 
           echo "Bridge job completed successfully"
           kubectl logs "$BRIDGE_JOB" --tail=50
