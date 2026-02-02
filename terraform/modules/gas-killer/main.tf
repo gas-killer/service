@@ -428,9 +428,9 @@ resource "kubernetes_job" "l1_l2_bridge" {
               echo "l2-deploy.json found!"
               cat /app/contracts/artifacts/l2-deploy.json
 
-              # Parse addresses from JSON (keys are camelCase)
-              BLS_CHECKER=$(grep -o '"blsSignatureChecker": *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
-              REGISTRY_MIMIC=$(grep -o '"registryCoordinatorMimic": *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
+              # Parse addresses from JSON (keys are camelCase, JSON may be minified with no spaces)
+              BLS_CHECKER=$(grep -o '"blsSignatureChecker" *: *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
+              REGISTRY_MIMIC=$(grep -o '"registryCoordinatorMimic" *: *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
 
               echo "Parsed addresses:"
               echo "  BLSSignatureChecker: $BLS_CHECKER"
