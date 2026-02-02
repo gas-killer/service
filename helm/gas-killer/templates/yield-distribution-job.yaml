@@ -1,0 +1,252 @@
+{{- /* Yield distribution test job - runs after bridge in LOCAL mode with Gnosis fork */ -}}
+{{- if and .Values.gnosis.enabled (eq .Values.global.environment "LOCAL") .Values.yieldDistribution.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gas-killer.yield-distribution.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: yield-distribution
+  annotations:
+    # Run after the bridge job completes (bridge is weight 10)
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "gas-killer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: yield-distribution
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        # Wait for bridge job to complete
+        - name: wait-for-bridge
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for bridge to complete (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until [ -f /app/.nodes/.bridge_complete ] && [ -f /app/.nodes/l2-deploy.json ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for bridge to complete after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Bridge not complete, waiting for .bridge_complete and l2-deploy.json... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "Bridge complete! l2-deploy.json found."
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+
+        # Extract bridge addresses from l2-deploy.json
+        - name: extract-addresses
+          image: alpine:3.19
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              apk add --no-cache jq
+
+              echo "=== Reading l2-deploy.json ==="
+              cat /app/.nodes/l2-deploy.json
+
+              # Parse addresses (keys are camelCase)
+              BLS_CHECKER=$(jq -r '.blsSignatureChecker' /app/.nodes/l2-deploy.json)
+              REG_COORD=$(jq -r '.registryCoordinatorMimic' /app/.nodes/l2-deploy.json)
+
+              echo "BLSSignatureChecker: $BLS_CHECKER"
+              echo "RegistryCoordinatorMimic: $REG_COORD"
+
+              if [ -z "$BLS_CHECKER" ] || [ "$BLS_CHECKER" = "null" ] || [ -z "$REG_COORD" ] || [ "$REG_COORD" = "null" ]; then
+                echo "ERROR: Failed to parse addresses from l2-deploy.json"
+                exit 1
+              fi
+
+              echo "$BLS_CHECKER" > /yield-config/bls_checker
+              echo "$REG_COORD" > /yield-config/registry_coordinator
+
+              echo "Addresses written to /yield-config/"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+            - name: yield-config
+              mountPath: /yield-config
+
+      containers:
+        - name: yield-distribution-test
+          image: ghcr.io/foundry-rs/foundry:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -ex
+              LOG_FILE="/app/.nodes/yield-distribution.log"
+              exec > >(tee -a "$LOG_FILE") 2>&1
+
+              echo "=== Yield Distribution Test Starting ==="
+
+              # Read addresses from init container
+              BLS_CHECKER=$(cat /yield-config/bls_checker)
+              REG_COORD=$(cat /yield-config/registry_coordinator)
+
+              YIELD_DISTRIBUTOR="{{ .Values.yieldDistribution.contractAddress }}"
+              L2_RPC_URL="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+              ROUTER_URL="http://{{ include "gas-killer.router.fullname" . }}:{{ .Values.router.service.port }}"
+
+              echo "BLS Signature Checker: $BLS_CHECKER"
+              echo "Registry Coordinator Mimic: $REG_COORD"
+              echo "Yield Distributor: $YIELD_DISTRIBUTOR"
+              echo "L2 RPC URL: $L2_RPC_URL"
+              echo "Router URL: $ROUTER_URL"
+
+              # Step 1: Get owner of the YieldDistributor
+              echo ""
+              echo "=== Step 1: Getting contract owner ==="
+              OWNER=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "owner()(address)")
+              echo "Owner: $OWNER"
+
+              # Impersonate owner and fund the account
+              echo "Impersonating owner..."
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$OWNER"
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$OWNER" "0x56BC75E2D63100000"
+
+              # Step 2: Initialize GasKiller on YieldDistributor
+              echo ""
+              echo "=== Step 2: Calling initializeGasKiller ==="
+              # initializeGasKiller(address _avsAddress, address _blsSignatureChecker)
+              cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
+                "$YIELD_DISTRIBUTOR" \
+                "initializeGasKiller(address,address)" \
+                "$REG_COORD" "$BLS_CHECKER" || {
+                  echo "initializeGasKiller may already be initialized, continuing..."
+                }
+
+              # Stop impersonating
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
+              echo "GasKiller initialized on YieldDistributor"
+
+              # Step 3: Check distribution timing
+              echo ""
+              echo "=== Step 3: Checking distribution timing ==="
+              CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)")
+              LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)")
+              CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL")
+
+              echo "Cycle length: $CYCLE_LENGTH"
+              echo "Last claimed block: $LAST_CLAIMED"
+              echo "Current block: $CURRENT"
+
+              # Step 4: Mine blocks until distribution time
+              echo ""
+              echo "=== Step 4: Mining blocks to reach distribution time ==="
+              TARGET=$((LAST_CLAIMED + CYCLE_LENGTH + 1))
+              if [ "$CURRENT" -lt "$TARGET" ]; then
+                BLOCKS=$((TARGET - CURRENT))
+                echo "Mining $BLOCKS blocks..."
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_mine $(printf '0x%x' "$BLOCKS")
+              else
+                echo "Already past distribution time"
+              fi
+
+              NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
+              echo "New block number: $NEW_BLOCK"
+
+              # Step 5: Check resolver
+              echo ""
+              echo "=== Step 5: Checking resolver ==="
+              RESOLVER_RESULT=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" || echo "false,0x")
+              echo "Resolver result: $RESOLVER_RESULT"
+
+              # Step 6: Get initial state
+              echo ""
+              echo "=== Step 6: Getting initial state ==="
+              INITIAL_COUNT=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null || echo "0")
+              echo "Initial transition count: $INITIAL_COUNT"
+
+              # Step 7: Build and send trigger request to router
+              echo ""
+              echo "=== Step 7: Building and sending trigger request ==="
+              CALL_DATA=$(cast calldata "distributeYieldGK()")
+              echo "Call data: $CALL_DATA"
+
+              # Convert call_data to JSON array format
+              CALL_DATA_HEX="${CALL_DATA#0x}"
+              BYTES_ARRAY="["
+              FIRST=true
+              for ((i=0; i<${#CALL_DATA_HEX}; i+=2)); do
+                if [ "$FIRST" = "true" ]; then
+                  FIRST=false
+                else
+                  BYTES_ARRAY+=","
+                fi
+                BYTES_ARRAY+="$((16#${CALL_DATA_HEX:$i:2}))"
+              done
+              BYTES_ARRAY+="]"
+
+              FROM_ADDRESS="0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+
+              PAYLOAD="{\"body\":{\"target_address\":\"$YIELD_DISTRIBUTOR\",\"call_data\":$BYTES_ARRAY,\"transition_index\":$INITIAL_COUNT,\"from_address\":\"$FROM_ADDRESS\",\"value\":\"0\",\"block_height\":$NEW_BLOCK}}"
+              echo "Payload: $PAYLOAD"
+
+              echo "Triggering router..."
+              curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" \
+                "$ROUTER_URL/trigger" || echo "Router trigger sent (may timeout waiting for aggregation)"
+
+              # Step 8: Wait for aggregation
+              echo ""
+              echo "=== Step 8: Waiting for signature aggregation (90s) ==="
+              sleep 90
+
+              # Step 9: Verify distribution
+              echo ""
+              echo "=== Step 9: Verifying distribution ==="
+              FINAL_COUNT=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null || echo "0")
+              FINAL_LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo "0")
+
+              echo "Final transition count: $FINAL_COUNT"
+              echo "Final last claimed block: $FINAL_LAST_CLAIMED"
+
+              if [ "$FINAL_COUNT" -gt "$INITIAL_COUNT" ]; then
+                echo ""
+                echo "=========================================="
+                echo "=== YIELD DISTRIBUTION TEST PASSED ==="
+                echo "=========================================="
+                echo "Transition count increased: $INITIAL_COUNT -> $FINAL_COUNT"
+                touch /app/.nodes/.yield_distribution_complete
+                exit 0
+              else
+                echo ""
+                echo "=========================================="
+                echo "=== YIELD DISTRIBUTION TEST FAILED ==="
+                echo "=========================================="
+                echo "Transition count unchanged: $INITIAL_COUNT"
+                exit 1
+              fi
+
+          volumeMounts:
+            - name: yield-config
+              mountPath: /yield-config
+              readOnly: true
+            - name: shared-data
+              mountPath: /app/.nodes
+          resources:
+            {{- toYaml .Values.yieldDistribution.resources | nindent 12 }}
+
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: {{ include "gas-killer.shareddata.fullname" . }}
+        - name: yield-config
+          emptyDir: {}
+{{- end }}
