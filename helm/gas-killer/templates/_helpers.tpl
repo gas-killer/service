@@ -114,3 +114,10 @@ Bridge job name
 {{- define "gas-killer.bridge.fullname" -}}
 {{- printf "%s-bridge" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
+
+{{/*
+Gnosis (L2) service name
+*/}}
+{{- define "gas-killer.gnosis.fullname" -}}
+{{- printf "%s-gnosis" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}

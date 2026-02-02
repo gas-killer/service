@@ -41,10 +41,15 @@ secrets:
   rpcUrl: ""
 
   # L2 RPC URL for bridge (Gnosis, Arbitrum, etc.)
-  # REQUIRED when bridge.enabled=true
+  # REQUIRED when bridge.enabled=true (in TESTNET mode or when not using local Gnosis fork)
   # Override with: --set secrets.l2RpcUrl=<your-l2-rpc-url>
   # Example: --set secrets.l2RpcUrl=https://gnosis-mainnet.g.alchemy.com/v2/YOUR_KEY
   l2RpcUrl: ""
+
+  # L2 Fork URL for local Gnosis Anvil (only used in LOCAL mode with gnosis.enabled=true)
+  # Override with: --set secrets.l2ForkUrl=<your-gnosis-rpc-url>
+  # Example: --set secrets.l2ForkUrl=https://rpc.gnosischain.com
+  l2ForkUrl: ""
 
 # Ethereum (Anvil) configuration - only used in LOCAL mode
 ethereum:
@@ -60,6 +65,24 @@ ethereum:
   service:
     type: ClusterIP
     port: 8545
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+
+# Gnosis (Anvil fork for L2) configuration - only used in LOCAL mode
+gnosis:
+  enabled: false
+  image:
+    repository: ghcr.io/breadchaincoop/ethereum
+    tag: dev
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8546
   resources:
     requests:
       memory: "1Gi"

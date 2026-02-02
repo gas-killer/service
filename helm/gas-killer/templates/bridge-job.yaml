@@ -83,55 +83,6 @@ spec:
             - name: bridge-config
               mountPath: /bridge-config
 
-        # Fund the deployer key on L1 (local Anvil) from pre-funded Anvil account
-        - name: fund-l1
-          image: ghcr.io/foundry-rs/foundry:latest
-          command:
-            - sh
-            - -c
-            - |
-              set -e
-              echo "=== Funding deployer on L1 (local Anvil) ==="
-
-              # Anvil default private key (pre-funded with 10000 ETH)
-              ANVIL_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-
-              # Derive deployer address from PRIVATE_KEY
-              DEPLOYER_ADDR=$(cast wallet address --private-key "$PRIVATE_KEY")
-              echo "Deployer address: $DEPLOYER_ADDR"
-
-              # Check current balance
-              BALANCE_BEFORE=$(cast balance "$DEPLOYER_ADDR" --rpc-url "$L1_RPC_URL" --ether 2>/dev/null || echo "0")
-              echo "Deployer L1 balance before: $BALANCE_BEFORE ETH"
-
-              # Send 10 ETH from Anvil account to deployer
-              echo "Sending 10 ETH to deployer..."
-              cast send --rpc-url "$L1_RPC_URL" \
-                --private-key "$ANVIL_KEY" \
-                "$DEPLOYER_ADDR" \
-                --value 10ether
-
-              # Verify
-              BALANCE_AFTER=$(cast balance "$DEPLOYER_ADDR" --rpc-url "$L1_RPC_URL" --ether 2>/dev/null || echo "0")
-              echo "Deployer L1 balance after: $BALANCE_AFTER ETH"
-              echo "L1 funding complete!"
-          env:
-            - name: PRIVATE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gas-killer.secret.fullname" . }}
-                  key: PRIVATE_KEY
-            {{- if eq .Values.global.environment "TESTNET" }}
-            - name: L1_RPC_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gas-killer.secret.fullname" . }}
-                  key: RPC_URL
-            {{- else }}
-            - name: L1_RPC_URL
-              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
-            {{- end }}
-
       containers:
         - name: bridge
           image: "{{ .Values.bridge.image.repository }}:{{ .Values.bridge.image.tag }}"
@@ -187,16 +138,28 @@ spec:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: RPC_URL
-            {{- else }}
-            # LOCAL mode: Use local Anvil service
-            - name: L1_RPC_URL
-              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
-            {{- end }}
             - name: L2_RPC_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: L2_RPC_URL
+            {{- else }}
+            # LOCAL mode: Use local Anvil services
+            - name: L1_RPC_URL
+              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+            {{- if .Values.gnosis.enabled }}
+            # Use local Gnosis Anvil fork
+            - name: L2_RPC_URL
+              value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+            {{- else }}
+            # Use external L2 RPC
+            - name: L2_RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_RPC_URL
+            {{- end }}
+            {{- end }}
           volumeMounts:
             - name: bridge-config
               mountPath: /bridge-config
