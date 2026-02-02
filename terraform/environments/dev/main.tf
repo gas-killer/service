@@ -242,33 +242,64 @@ resource "null_resource" "vpc_post_cleanup" {
         --region ${self.triggers.region} \
         --name ${self.triggers.cluster_name} 2>/dev/null || true
 
-      echo "Waiting for k8s-managed security groups to become deletable..."
-      K8S_SGS=$(aws ec2 describe-security-groups \
+      # Extra wait for async EKS resource cleanup
+      echo "Waiting 30s for EKS async cleanup..."
+      sleep 30
+
+      echo "Cleaning up all non-default security groups in VPC..."
+      # Get ALL security groups except default (covers k8s-*, eks-cluster-sg-*, etc.)
+      ALL_SGS=$(aws ec2 describe-security-groups \
         --region ${self.triggers.region} \
         --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
-        --query 'SecurityGroups[?starts_with(GroupName, `k8s-`)].GroupId' \
+        --query "SecurityGroups[?GroupName!='default'].GroupId" \
         --output text 2>/dev/null)
 
-      for sg in $K8S_SGS; do
+      # First pass: remove all ingress/egress rules that reference other SGs
+      for sg in $ALL_SGS; do
+        echo "Clearing rules from SG: $sg"
+        # Get and revoke ingress rules
+        aws ec2 describe-security-groups --group-ids "$sg" --region ${self.triggers.region} \
+          --query 'SecurityGroups[0].IpPermissions' --output json 2>/dev/null | \
+          jq -c 'if . then . else [] end' | \
+          xargs -I {} aws ec2 revoke-security-group-ingress --group-id "$sg" --ip-permissions '{}' --region ${self.triggers.region} 2>/dev/null || true
+        # Get and revoke egress rules
+        aws ec2 describe-security-groups --group-ids "$sg" --region ${self.triggers.region} \
+          --query 'SecurityGroups[0].IpPermissionsEgress' --output json 2>/dev/null | \
+          jq -c 'if . then . else [] end' | \
+          xargs -I {} aws ec2 revoke-security-group-egress --group-id "$sg" --ip-permissions '{}' --region ${self.triggers.region} 2>/dev/null || true
+      done
+
+      # Second pass: delete the security groups
+      for sg in $ALL_SGS; do
         echo "Trying to delete SG: $sg"
-        for i in {1..60}; do
+        for i in {1..30}; do
           if aws ec2 delete-security-group \
             --region ${self.triggers.region} \
             --group-id "$sg" 2>/dev/null; then
             echo "Deleted SG: $sg"
             break
           fi
-          echo "SG $sg still has dependencies, retrying..."
-          sleep 10
+          echo "SG $sg still has dependencies, retrying ($i/30)..."
+          sleep 5
         done
       done
 
-      echo "Deleting any leftover AVAILABLE ENIs..."
+      echo "Deleting any leftover ENIs..."
       for eni in $(aws ec2 describe-network-interfaces \
         --region ${self.triggers.region} \
-        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" "Name=status,Values=available" \
+        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
         --query 'NetworkInterfaces[*].NetworkInterfaceId' \
         --output text 2>/dev/null); do
+        echo "Processing ENI: $eni"
+        # Try to detach first if attached
+        ATTACHMENT=$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" \
+          --region ${self.triggers.region} \
+          --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null)
+        if [ -n "$ATTACHMENT" ] && [ "$ATTACHMENT" != "None" ]; then
+          echo "Detaching ENI: $eni"
+          aws ec2 detach-network-interface --attachment-id "$ATTACHMENT" --force --region ${self.triggers.region} 2>/dev/null || true
+          sleep 5
+        fi
         echo "Deleting ENI: $eni"
         aws ec2 delete-network-interface --region ${self.triggers.region} --network-interface-id "$eni" 2>/dev/null || true
       done
