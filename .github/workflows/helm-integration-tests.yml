@@ -6,11 +6,14 @@ on:
       - main
       - dev
       - staging
+      - RonTuretzky/gnosis-factory-call
+      - RonTuretzky/yield-dist-e2e
   pull_request:
     branches:
       - main
       - dev
       - staging
+      - RonTuretzky/gnosis-factory-call
   workflow_dispatch:
 
 jobs:
@@ -106,6 +109,13 @@ jobs:
 
           echo "Installing Helm chart with fork URL: $FORK_URL"
 
+          # Set L2 fork URL for Gnosis Anvil
+          if [ -n "${{ secrets.GNOSIS_RPC_URL }}" ]; then
+            L2_FORK_URL="${{ secrets.GNOSIS_RPC_URL }}"
+          else
+            L2_FORK_URL="https://rpc.gnosischain.com"
+          fi
+
           # Install without --wait to avoid circular dependency
           # (pods wait for setup job, setup job is post-install hook)
           helm install gas-killer ./helm/gas-killer \
@@ -114,13 +124,18 @@ jobs:
             --set secrets.forkUrl="$FORK_URL" \
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
+            --set secrets.l2ForkUrl="$L2_FORK_URL" \
             --set node.image.repository=gas-killer-node \
             --set node.image.tag=local \
             --set node.image.pullPolicy=Never \
             --set router.image.repository=gas-killer-router \
             --set router.image.tag=local \
             --set router.image.pullPolicy=Never \
-            --set sharedData.storageClass=""
+            --set sharedData.storageClass="" \
+            --set gnosis.enabled=true \
+            --set bridge.enabled=true \
+            --set bridge.waitForBridge=true \
+            --set yieldDistribution.enabled=true
 
       - name: Check deployment status
         run: |
@@ -152,8 +167,51 @@ jobs:
           echo "Setup job completed successfully"
           kubectl logs "$SETUP_JOB" --tail=30
 
+      - name: Wait for bridge job to complete
+        run: |
+          echo "Waiting for bridge job to complete..."
+
+          # Find the bridge job
+          BRIDGE_JOB=$(kubectl get jobs -o name | grep bridge | head -1)
+
+          if [ -n "$BRIDGE_JOB" ]; then
+            echo "Found bridge job: $BRIDGE_JOB"
+            kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=600s || {
+              echo "Bridge job failed or timed out"
+              kubectl logs "$BRIDGE_JOB" --tail=100 || true
+              exit 1
+            }
+            echo "Bridge job completed successfully"
+            kubectl logs "$BRIDGE_JOB" --tail=30
+          else
+            echo "No bridge job found (bridge may be disabled)"
+          fi
+
+      - name: Wait for yield distribution job to complete
+        run: |
+          echo "Waiting for yield distribution job to complete..."
+
+          # Find the yield distribution job
+          YIELD_JOB=$(kubectl get jobs -o name | grep yield-distribution | head -1)
+
+          if [ -n "$YIELD_JOB" ]; then
+            echo "Found yield distribution job: $YIELD_JOB"
+            kubectl wait --for=condition=complete "$YIELD_JOB" --timeout=600s || {
+              echo "Yield distribution job failed or timed out"
+              kubectl logs "$YIELD_JOB" --tail=100 || true
+              exit 1
+            }
+            echo "Yield distribution job completed successfully"
+            kubectl logs "$YIELD_JOB" --tail=50
+          else
+            echo "No yield distribution job found (yieldDistribution may be disabled)"
+          fi
+
       - name: Wait for all pods to be ready
         run: |
+          echo "Waiting for gnosis pod..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=gnosis --timeout=180s || echo "No gnosis pod found"
+
           echo "Waiting for ethereum pod..."
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=ethereum --timeout=180s
 
@@ -326,6 +384,15 @@ jobs:
 
           echo "=== Setup Job Logs ==="
           kubectl logs -l app.kubernetes.io/component=setup --tail 100 || true
+
+          echo "=== Bridge Job Logs ==="
+          kubectl logs -l app.kubernetes.io/component=bridge --tail 100 || true
+
+          echo "=== Yield Distribution Job Logs ==="
+          kubectl logs -l app.kubernetes.io/component=yield-distribution --tail 100 || true
+
+          echo "=== Gnosis Logs ==="
+          kubectl logs -l app.kubernetes.io/component=gnosis --tail 50 || true
 
           echo "=== Router Logs ==="
           kubectl logs -l app.kubernetes.io/component=router --tail 100 || true
