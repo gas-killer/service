@@ -191,8 +191,8 @@ spec:
               echo ""
               echo "=== Step 4: Advancing time and blocks to reach distribution time ==="
 
-              # Get current timestamp
-              CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest --json | jq -r '.timestamp' | xargs printf '%d')
+              # Get current timestamp (using cast to parse, no jq needed)
+              CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp)
               echo "Current timestamp: $CURRENT_TIMESTAMP"
 
               # Advance time by 8 days (cycle is typically 7 days = 604800 seconds)
