@@ -187,17 +187,34 @@ spec:
               echo "Last claimed block: $LAST_CLAIMED"
               echo "Current block: $CURRENT"
 
-              # Step 4: Mine blocks until distribution time
+              # Step 4: Advance time and blocks to reach distribution time
               echo ""
-              echo "=== Step 4: Mining blocks to reach distribution time ==="
+              echo "=== Step 4: Advancing time and blocks to reach distribution time ==="
+
+              # Get current timestamp
+              CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest --json | jq -r '.timestamp' | xargs printf '%d')
+              echo "Current timestamp: $CURRENT_TIMESTAMP"
+
+              # Advance time by 8 days (cycle is typically 7 days = 604800 seconds)
+              # Adding extra buffer to ensure we're past the cycle
+              TIME_ADVANCE=$((8 * 24 * 60 * 60))
+              NEW_TIMESTAMP=$((CURRENT_TIMESTAMP + TIME_ADVANCE))
+              echo "Advancing time by $TIME_ADVANCE seconds to timestamp $NEW_TIMESTAMP"
+
+              # Set the next block timestamp
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setNextBlockTimestamp $(printf '0x%x' "$NEW_TIMESTAMP")
+
+              # Mine a block to apply the timestamp
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_mine 0x1
+
+              # Also mine enough blocks if needed
               TARGET=$((LAST_CLAIMED + CYCLE_LENGTH + 1))
               echo "Target block: $TARGET"
+              CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
               if [ "$CURRENT" -lt "$TARGET" ]; then
                 BLOCKS=$((TARGET - CURRENT))
-                echo "Mining $BLOCKS blocks..."
+                echo "Mining $BLOCKS additional blocks..."
                 cast rpc --rpc-url "$L2_RPC_URL" anvil_mine $(printf '0x%x' "$BLOCKS")
-              else
-                echo "Already past distribution time"
               fi
 
               NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
