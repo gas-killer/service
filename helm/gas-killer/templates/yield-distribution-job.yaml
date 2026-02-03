@@ -21,7 +21,7 @@ spec:
         {{- include "gas-killer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: yield-distribution
     spec:
-      restartPolicy: OnFailure
+      restartPolicy: Never
       initContainers:
         # Wait for bridge job to complete
         - name: wait-for-bridge
@@ -178,17 +178,13 @@ spec:
               # Step 3: Check distribution timing
               echo ""
               echo "=== Step 3: Checking distribution timing ==="
-              CYCLE_LENGTH_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)")
-              LAST_CLAIMED_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)")
-              CURRENT_RAW=$(cast block-number --rpc-url "$L2_RPC_URL")
+              # Cast outputs decimal by default for uint256
+              CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" | tr -d '[:space:]')
+              LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" | tr -d '[:space:]')
+              CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
 
-              # Convert to decimal (cast output may have various formats)
-              CYCLE_LENGTH=$(echo "$CYCLE_LENGTH_RAW" | tr -d '[:space:]' | sed 's/^0x//' | xargs -I{} printf '%d' 0x{} 2>/dev/null || echo "$CYCLE_LENGTH_RAW" | tr -d '[:space:]')
-              LAST_CLAIMED=$(echo "$LAST_CLAIMED_RAW" | tr -d '[:space:]' | sed 's/^0x//' | xargs -I{} printf '%d' 0x{} 2>/dev/null || echo "$LAST_CLAIMED_RAW" | tr -d '[:space:]')
-              CURRENT=$(echo "$CURRENT_RAW" | tr -d '[:space:]')
-
-              echo "Cycle length (raw): $CYCLE_LENGTH_RAW -> $CYCLE_LENGTH"
-              echo "Last claimed block (raw): $LAST_CLAIMED_RAW -> $LAST_CLAIMED"
+              echo "Cycle length: $CYCLE_LENGTH"
+              echo "Last claimed block: $LAST_CLAIMED"
               echo "Current block: $CURRENT"
 
               # Step 4: Mine blocks until distribution time
