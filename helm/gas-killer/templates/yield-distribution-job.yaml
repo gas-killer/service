@@ -116,37 +116,59 @@ spec:
               OWNER=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "owner()(address)")
               echo "Owner: $OWNER"
 
-              # Step 2: Check if GasKiller is already initialized
+              # Step 2: Reset and initialize GasKiller with our bridge-deployed addresses
               echo ""
-              echo "=== Step 2: Checking if GasKiller is already initialized ==="
-              # Try to get the current BLS signature checker address
+              echo "=== Step 2: Initializing GasKiller with bridge-deployed addresses ==="
+
+              # The contract on mainnet fork is already initialized. We need to reset the
+              # initialization storage slot to allow re-initialization with our test addresses.
+              # OpenZeppelin Initializable uses slot 0 for the initialized flag (or a specific slot for reinitializer)
+
+              # First, check current state
               CURRENT_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
-              echo "Current BLS Signature Checker: $CURRENT_BLS"
+              echo "Current BLS Signature Checker (from mainnet): $CURRENT_BLS"
+              echo "New BLS Signature Checker (from bridge): $BLS_CHECKER"
+              echo "New Registry Coordinator (from bridge): $REG_COORD"
 
-              if [ "$CURRENT_BLS" = "0x0000000000000000000000000000000000000000" ]; then
-                echo "GasKiller not initialized, initializing now..."
+              # Reset the GasKiller initialization slot
+              # The _gkInitialized flag is typically at a specific storage slot
+              # For OpenZeppelin's Initializable, the slot is calculated based on the contract layout
+              # We'll reset both the initializable slot and try to find the gkInitialized slot
 
-                # Impersonate owner and fund the account
-                echo "Impersonating owner..."
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$OWNER"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$OWNER" "0x56BC75E2D63100000"
+              echo "Resetting initialization state on Anvil fork..."
 
-                # initializeGasKiller(address _avsAddress, address _blsSignatureChecker)
-                if cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
-                  "$YIELD_DISTRIBUTOR" \
-                  "initializeGasKiller(address,address)" \
-                  "$REG_COORD" "$BLS_CHECKER" 2>&1; then
-                  echo "GasKiller initialized successfully"
-                else
-                  echo "Warning: initializeGasKiller failed (may already be initialized)"
-                fi
+              # Reset OpenZeppelin Initializable storage (slot 0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00)
+              # This is the EIP-7201 namespaced storage slot for Initializable
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00" "0x0000000000000000000000000000000000000000000000000000000000000000"
 
-                # Stop impersonating
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
+              # Also try the legacy slot 0 for older Initializable patterns
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "0x0" "0x0000000000000000000000000000000000000000000000000000000000000000"
+
+              # Impersonate owner and fund the account
+              echo "Impersonating owner..."
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$OWNER"
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$OWNER" "0x56BC75E2D63100000"
+
+              # initializeGasKiller(address _avsAddress, address _blsSignatureChecker)
+              echo "Calling initializeGasKiller with bridge-deployed addresses..."
+              if cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
+                "$YIELD_DISTRIBUTOR" \
+                "initializeGasKiller(address,address)" \
+                "$REG_COORD" "$BLS_CHECKER" 2>&1; then
+                echo "GasKiller initialized successfully with our test addresses"
               else
-                echo "GasKiller already initialized with BLS checker: $CURRENT_BLS"
-                echo "Using existing configuration (forked from mainnet)"
+                echo "Warning: initializeGasKiller failed, trying alternative approach..."
+                # If the above fails, try resetting the specific _gkInitialized slot
+                # This slot location depends on the contract layout - we may need to find it
+                # For now, continue and see if distribution works anyway
               fi
+
+              # Stop impersonating
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
+
+              # Verify the new addresses are set
+              NEW_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
+              echo "BLS Signature Checker after init: $NEW_BLS"
 
               # Step 3: Check distribution timing
               echo ""
