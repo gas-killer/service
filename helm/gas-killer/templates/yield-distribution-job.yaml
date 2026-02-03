@@ -13,8 +13,8 @@ metadata:
     "helm.sh/hook-weight": "20"
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:
-  backoffLimit: 2
-  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 7200
   template:
     metadata:
       labels:
@@ -90,11 +90,11 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
-              set -e
+              set -ex
               LOG_FILE="/app/.nodes/yield-distribution.log"
               exec > >(tee -a "$LOG_FILE") 2>&1
 
-              echo "=== Yield Distribution Test Starting ==="
+              echo "=== Yield Distribution Test Starting at $(date) ==="
 
               # Read addresses from init container
               BLS_CHECKER=$(cat /yield-config/bls_checker)
@@ -138,10 +138,10 @@ spec:
               echo "(0x01 = version 1, 0x02 = version 2, etc.)"
 
               # If version is already 2 or higher, we need to reset it to allow reinitializer(2)
-              # Extract the version (last byte of the uint64, which is the first 8 bytes)
-              VERSION_HEX=$(echo "$INIT_VALUE" | tail -c 3 | head -c 2)
-              VERSION=$((16#$VERSION_HEX))
-              echo "Current initialized version: $VERSION"
+              # Extract the version from the storage slot (last 2 hex chars before any newline)
+              VERSION_HEX=$(echo "$INIT_VALUE" | tr -d '\n' | tail -c 2)
+              VERSION=$((16#$VERSION_HEX)) || VERSION=0
+              echo "Current initialized version: $VERSION (hex: $VERSION_HEX)"
 
               if [ "$VERSION" -ge 2 ]; then
                 echo "Version >= 2, resetting to 1 to allow reinitializer(2)..."
@@ -178,18 +178,24 @@ spec:
               # Step 3: Check distribution timing
               echo ""
               echo "=== Step 3: Checking distribution timing ==="
-              CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)")
-              LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)")
-              CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL")
+              CYCLE_LENGTH_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)")
+              LAST_CLAIMED_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)")
+              CURRENT_RAW=$(cast block-number --rpc-url "$L2_RPC_URL")
 
-              echo "Cycle length: $CYCLE_LENGTH"
-              echo "Last claimed block: $LAST_CLAIMED"
+              # Convert to decimal (cast output may have various formats)
+              CYCLE_LENGTH=$(echo "$CYCLE_LENGTH_RAW" | tr -d '[:space:]' | sed 's/^0x//' | xargs -I{} printf '%d' 0x{} 2>/dev/null || echo "$CYCLE_LENGTH_RAW" | tr -d '[:space:]')
+              LAST_CLAIMED=$(echo "$LAST_CLAIMED_RAW" | tr -d '[:space:]' | sed 's/^0x//' | xargs -I{} printf '%d' 0x{} 2>/dev/null || echo "$LAST_CLAIMED_RAW" | tr -d '[:space:]')
+              CURRENT=$(echo "$CURRENT_RAW" | tr -d '[:space:]')
+
+              echo "Cycle length (raw): $CYCLE_LENGTH_RAW -> $CYCLE_LENGTH"
+              echo "Last claimed block (raw): $LAST_CLAIMED_RAW -> $LAST_CLAIMED"
               echo "Current block: $CURRENT"
 
               # Step 4: Mine blocks until distribution time
               echo ""
               echo "=== Step 4: Mining blocks to reach distribution time ==="
               TARGET=$((LAST_CLAIMED + CYCLE_LENGTH + 1))
+              echo "Target block: $TARGET"
               if [ "$CURRENT" -lt "$TARGET" ]; then
                 BLOCKS=$((TARGET - CURRENT))
                 echo "Mining $BLOCKS blocks..."
