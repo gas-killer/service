@@ -116,31 +116,20 @@ spec:
               OWNER=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "owner()(address)")
               echo "Owner: $OWNER"
 
-              # Step 2: Reset and initialize GasKiller with our bridge-deployed addresses
+              # Step 2: Initialize GasKiller with our bridge-deployed addresses
               echo ""
               echo "=== Step 2: Initializing GasKiller with bridge-deployed addresses ==="
 
-              # The contract on mainnet fork is already initialized. We need to reset the
-              # initialization storage slot to allow re-initialization with our test addresses.
-              # OpenZeppelin Initializable uses slot 0 for the initialized flag (or a specific slot for reinitializer)
+              # The contract uses OpenZeppelin's reinitializer pattern:
+              # - initializeVotingMultipliers uses reinitializer(1)
+              # - initializeGasKiller uses reinitializer(2)
+              # On mainnet, version 1 is initialized but version 2 is not, so initializeGasKiller should work
 
               # First, check current state
               CURRENT_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
               echo "Current BLS Signature Checker (from mainnet): $CURRENT_BLS"
               echo "New BLS Signature Checker (from bridge): $BLS_CHECKER"
               echo "New Registry Coordinator (from bridge): $REG_COORD"
-
-              # Reset the GasKiller initialization slot
-              # The _gkInitialized flag is typically at a specific storage slot
-              # For OpenZeppelin's Initializable, the slot is calculated based on the contract layout
-              # We'll reset both the initializable slot and try to find the gkInitialized slot
-
-              echo "Resetting initialization state on Anvil fork..."
-
-              # Reset OpenZeppelin Initializable storage (slot 0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00)
-              # This is the EIP-7201 namespaced storage slot for Initializable
-              # DO NOT reset slot 0 - it contains actual contract state variables, not the Initializable flag
-              cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00" "0x0000000000000000000000000000000000000000000000000000000000000000"
 
               # Impersonate owner and fund the account
               echo "Impersonating owner..."
