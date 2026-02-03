@@ -90,7 +90,7 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
-              set -ex
+              set -e
               LOG_FILE="/app/.nodes/yield-distribution.log"
               exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -116,25 +116,37 @@ spec:
               OWNER=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "owner()(address)")
               echo "Owner: $OWNER"
 
-              # Impersonate owner and fund the account
-              echo "Impersonating owner..."
-              cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$OWNER"
-              cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$OWNER" "0x56BC75E2D63100000"
-
-              # Step 2: Initialize GasKiller on YieldDistributor
+              # Step 2: Check if GasKiller is already initialized
               echo ""
-              echo "=== Step 2: Calling initializeGasKiller ==="
-              # initializeGasKiller(address _avsAddress, address _blsSignatureChecker)
-              cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
-                "$YIELD_DISTRIBUTOR" \
-                "initializeGasKiller(address,address)" \
-                "$REG_COORD" "$BLS_CHECKER" || {
-                  echo "initializeGasKiller may already be initialized, continuing..."
-                }
+              echo "=== Step 2: Checking if GasKiller is already initialized ==="
+              # Try to get the current BLS signature checker address
+              CURRENT_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
+              echo "Current BLS Signature Checker: $CURRENT_BLS"
 
-              # Stop impersonating
-              cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
-              echo "GasKiller initialized on YieldDistributor"
+              if [ "$CURRENT_BLS" = "0x0000000000000000000000000000000000000000" ]; then
+                echo "GasKiller not initialized, initializing now..."
+
+                # Impersonate owner and fund the account
+                echo "Impersonating owner..."
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$OWNER"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$OWNER" "0x56BC75E2D63100000"
+
+                # initializeGasKiller(address _avsAddress, address _blsSignatureChecker)
+                if cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" \
+                  "initializeGasKiller(address,address)" \
+                  "$REG_COORD" "$BLS_CHECKER" 2>&1; then
+                  echo "GasKiller initialized successfully"
+                else
+                  echo "Warning: initializeGasKiller failed (may already be initialized)"
+                fi
+
+                # Stop impersonating
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
+              else
+                echo "GasKiller already initialized with BLS checker: $CURRENT_BLS"
+                echo "Using existing configuration (forked from mainnet)"
+              fi
 
               # Step 3: Check distribution timing
               echo ""
