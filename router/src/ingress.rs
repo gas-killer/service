@@ -23,10 +23,7 @@ pub struct GasKillerTaskRequest {
 impl GasKillerTaskRequest {
     pub fn is_valid(&self) -> bool {
         let body = &self.body;
-        if body.target_address.is_zero() || body.call_data.is_empty() || body.block_height == 0 {
-            return false;
-        }
-        true
+        !body.target_address.is_zero() && !body.call_data.is_empty() && body.block_height != 0
     }
 }
 

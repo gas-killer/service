@@ -48,8 +48,7 @@ impl GasKillerOrchestratorBuilder {
 
         // Unwrap the Arc to get the validator for the orchestrator
         // This is safe because we control all references
-        let validator_for_orchestrator =
-            Arc::try_unwrap(validator).unwrap_or_else(|arc| (*arc).clone());
+        let validator_for_orchestrator = Arc::unwrap_or_clone(validator);
 
         builder.build(task_creator, executor, validator_for_orchestrator)
     }

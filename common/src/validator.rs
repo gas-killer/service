@@ -13,7 +13,8 @@ use commonware_avs_router::validator::ValidatorTrait;
 use commonware_avs_router::wire;
 
 use alloy::rpc::types::TransactionRequest;
-use gas_analyzer_rs::{call_to_encoded_state_updates_with_gas_estimate, gk::GasKillerDefault};
+use alloy_eips::BlockNumberOrTag;
+use gas_analyzer_rs::call_to_encoded_state_updates_with_evmsketch;
 
 /// Result of gas analysis containing storage updates and gas information
 #[derive(Debug, Clone)]
@@ -200,13 +201,6 @@ impl GasKillerValidator {
             "Analyzing transaction at block"
         );
 
-        // Create gas killer analyzer instance, forking at the specified block
-        let gas_killer = GasKillerDefault::builder(rpc_url.clone())
-            .block_number(block_height)
-            .build()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create gas analyzer: {}", e))?;
-
         // Build transaction request
         let from = from_address.unwrap_or(alloy::primitives::Address::ZERO);
         let tx_value = value.unwrap_or(alloy::primitives::U256::ZERO);
@@ -217,11 +211,15 @@ impl GasKillerValidator {
             .value(tx_value)
             .input(alloy::primitives::Bytes::copy_from_slice(call_data).into());
 
-        // Call gas-analyzer-rs to get storage updates and gas estimate
-        let (storage_updates, gas_estimate, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_gas_estimate(tx_request, gas_killer)
-                .await
-                .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+        // Call gas-analyzer-rs to get storage updates and gas estimate using EvmSketch
+        let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
+            call_to_encoded_state_updates_with_evmsketch(
+                rpc_url,
+                tx_request,
+                BlockNumberOrTag::Number(block_height),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
@@ -350,11 +348,11 @@ mod tests {
         assert_eq!(decoded.metadata.transition_index, 1);
     }
 
-    #[tokio::test]
-    #[ignore = "requires RPC and Anvil - run with: cargo test -- --ignored"]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires RPC - run with: cargo test -- --ignored"]
     async fn test_full_validation_with_rpc() {
         // Integration test: full validation including storage update computation
-        // This test is ignored by default as it requires RPC access and Anvil
+        // This test is ignored by default as it requires RPC access
         let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
         let task_data = create_test_task_data();
 

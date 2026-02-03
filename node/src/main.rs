@@ -249,7 +249,7 @@ fn main() {
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(std::io::stdout)
             .finish();
-        let _ = tracing::subscriber::set_default(subscriber);
+        _ = tracing::subscriber::set_default(subscriber);
 
         // Configure P2P network
         const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
@@ -336,6 +336,6 @@ fn main() {
         });
 
         // Start network
-        let _ = network.start().await;
+        _ = network.start().await;
     });
 }
