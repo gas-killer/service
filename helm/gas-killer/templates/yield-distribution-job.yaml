@@ -139,10 +139,8 @@ spec:
 
               # Reset OpenZeppelin Initializable storage (slot 0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00)
               # This is the EIP-7201 namespaced storage slot for Initializable
+              # DO NOT reset slot 0 - it contains actual contract state variables, not the Initializable flag
               cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00" "0x0000000000000000000000000000000000000000000000000000000000000000"
-
-              # Also try the legacy slot 0 for older Initializable patterns
-              cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "0x0" "0x0000000000000000000000000000000000000000000000000000000000000000"
 
               # Impersonate owner and fund the account
               echo "Impersonating owner..."

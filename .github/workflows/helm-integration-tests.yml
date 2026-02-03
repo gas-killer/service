@@ -1,13 +1,6 @@
 name: Helm Integration Test
 
 on:
-  push:
-    branches:
-      - main
-      - dev
-      - staging
-      - RonTuretzky/gnosis-factory-call
-      - RonTuretzky/yield-dist-e2e
   pull_request:
     branches:
       - main
