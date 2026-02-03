@@ -503,9 +503,20 @@ resource "kubernetes_job" "gnosis_factory" {
         service_account_name = "bridge-sa"
         restart_policy       = "Never"
 
+        # Shared volume for passing data between containers
+        volume {
+          name = "factory-data"
+          empty_dir {}
+        }
+
         container {
           name  = "factory-caller"
-          image = "bitnami/kubectl:latest"
+          image = "ghcr.io/foundry-rs/foundry:latest"
+
+          volume_mount {
+            name       = "factory-data"
+            mount_path = "/factory-data"
+          }
 
           env {
             name = "L2_RPC_URL"
@@ -532,11 +543,6 @@ resource "kubernetes_job" "gnosis_factory" {
             value = var.gnosis_factory_address
           }
 
-          env {
-            name  = "NAMESPACE"
-            value = var.namespace
-          }
-
           # Read addresses from ConfigMap as env vars
           env_from {
             config_map_ref {
@@ -558,12 +564,6 @@ resource "kubernetes_job" "gnosis_factory" {
                 echo "ERROR: Bridge addresses not found in ConfigMap"
                 exit 1
               fi
-
-              # Install cast (foundry)
-              curl -L https://foundry.paradigm.xyz | bash
-              source /root/.bashrc
-              ~/.foundry/bin/foundryup
-              export PATH="$PATH:/root/.foundry/bin"
 
               # Get contract count before deployment
               CONTRACT_COUNT_BEFORE=$(cast call \
@@ -624,17 +624,25 @@ resource "kubernetes_job" "gnosis_factory" {
                 "getDeployedContractCount()(uint256)" 2>/dev/null || echo "unknown")
               echo "Factory deployed contract count: $CONTRACT_COUNT"
 
-              # Update the bridge-addresses ConfigMap with Gnosis ArraySummation address
-              echo "Updating bridge-addresses ConfigMap..."
-              kubectl patch configmap bridge-addresses \
-                --namespace=$NAMESPACE \
-                --type=merge \
-                -p "{\"data\":{\"GNOSIS_ARRAY_SUMMATION\":\"$GNOSIS_ARRAY_SUMMATION\"}}"
-
-              echo "ConfigMap updated with GNOSIS_ARRAY_SUMMATION=$GNOSIS_ARRAY_SUMMATION"
-              kubectl get configmap bridge-addresses -n $NAMESPACE -o yaml
+              # Write the address to shared volume for kubectl sidecar
+              echo "$GNOSIS_ARRAY_SUMMATION" > /factory-data/gnosis_array_summation_address
+              touch /factory-data/deploy_complete
 
               echo "=== Gnosis Factory Deployment Complete ==="
+              echo "Waiting for kubectl sidecar to update ConfigMap..."
+
+              # Wait for kubectl sidecar to finish
+              WAIT_COUNT=0
+              while [ ! -f /factory-data/configmap_updated ] && [ $WAIT_COUNT -lt 60 ]; do
+                sleep 2
+                WAIT_COUNT=$((WAIT_COUNT + 2))
+              done
+
+              if [ -f /factory-data/configmap_updated ]; then
+                echo "ConfigMap updated successfully!"
+              else
+                echo "WARNING: ConfigMap update may not have completed"
+              fi
             EOT
           ]
 
@@ -646,6 +654,78 @@ resource "kubernetes_job" "gnosis_factory" {
             limits = {
               cpu    = "500m"
               memory = "512Mi"
+            }
+          }
+        }
+
+        # Sidecar to update ConfigMap with kubectl
+        container {
+          name  = "configmap-updater"
+          image = "bitnami/kubectl:latest"
+
+          volume_mount {
+            name       = "factory-data"
+            mount_path = "/factory-data"
+          }
+
+          env {
+            name  = "NAMESPACE"
+            value = var.namespace
+          }
+
+          command = [
+            "bash", "-c",
+            <<-EOT
+              echo "=== ConfigMap Updater Started ==="
+              echo "Waiting for factory deployment to complete..."
+
+              # Wait for deploy_complete marker
+              WAIT_COUNT=0
+              while [ ! -f /factory-data/deploy_complete ] && [ $WAIT_COUNT -lt 300 ]; do
+                sleep 2
+                WAIT_COUNT=$((WAIT_COUNT + 2))
+                echo "Waiting... ($WAIT_COUNT seconds)"
+              done
+
+              if [ ! -f /factory-data/deploy_complete ]; then
+                echo "ERROR: Timeout waiting for factory deployment"
+                exit 1
+              fi
+
+              # Read the deployed address
+              GNOSIS_ARRAY_SUMMATION=$(cat /factory-data/gnosis_array_summation_address)
+              echo "Gnosis ArraySummation: $GNOSIS_ARRAY_SUMMATION"
+
+              if [ -z "$GNOSIS_ARRAY_SUMMATION" ]; then
+                echo "ERROR: Empty ArraySummation address"
+                exit 1
+              fi
+
+              # Update the ConfigMap
+              echo "Updating bridge-addresses ConfigMap..."
+              kubectl patch configmap bridge-addresses \
+                --namespace=$NAMESPACE \
+                --type=merge \
+                -p "{\"data\":{\"GNOSIS_ARRAY_SUMMATION\":\"$GNOSIS_ARRAY_SUMMATION\"}}"
+
+              echo "ConfigMap updated!"
+              kubectl get configmap bridge-addresses -n $NAMESPACE -o yaml
+
+              # Signal completion
+              touch /factory-data/configmap_updated
+
+              echo "=== ConfigMap Updater Complete ==="
+            EOT
+          ]
+
+          resources {
+            requests = {
+              cpu    = "50m"
+              memory = "64Mi"
+            }
+            limits = {
+              cpu    = "200m"
+              memory = "128Mi"
             }
           }
         }
