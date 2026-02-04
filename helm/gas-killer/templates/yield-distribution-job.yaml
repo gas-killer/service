@@ -86,8 +86,8 @@ spec:
 
       containers:
         - name: yield-distribution-test
-          image: ghcr.io/foundry-rs/foundry:latest
-          command: ["/bin/bash", "-c"]
+          image: alpine:3.19
+          command: ["/bin/sh", "-c"]
           args:
             - |
               set -x
@@ -95,6 +95,18 @@ spec:
               exec > >(tee -a "$LOG_FILE") 2>&1
 
               echo "=== Yield Distribution Test Starting at $(date) ==="
+
+              # Install required tools
+              echo "Installing curl and foundry (cast)..."
+              apk add --no-cache curl bash
+
+              # Install foundry cast binary
+              curl -L https://foundry.paradigm.xyz | bash
+              export PATH="$HOME/.foundry/bin:$PATH"
+              foundryup
+
+              # Verify cast is available
+              cast --version || { echo "ERROR: cast not installed"; exit 1; }
 
               # Read addresses from init container
               BLS_CHECKER=$(cat /yield-config/bls_checker)
@@ -295,28 +307,8 @@ spec:
               echo "Payload: $PAYLOAD"
 
               echo "Triggering router..."
-              # Use wget if available, otherwise use bash /dev/tcp
-              ROUTER_HOST="{{ include "gas-killer.router.fullname" . }}"
-              ROUTER_PORT="{{ .Values.router.service.port }}"
-              if command -v curl &> /dev/null; then
-                curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" \
-                  "$ROUTER_URL/trigger" || echo "Router trigger sent (may timeout waiting for aggregation)"
-              elif command -v wget &> /dev/null; then
-                wget -q -O - --post-data="$PAYLOAD" --header="Content-Type: application/json" \
-                  "$ROUTER_URL/trigger" || echo "Router trigger sent (may timeout waiting for aggregation)"
-              else
-                # Pure bash HTTP POST using /dev/tcp
-                echo "Using bash /dev/tcp for HTTP request..."
-                {
-                  echo -e "POST /trigger HTTP/1.1\r"
-                  echo -e "Host: $ROUTER_HOST:$ROUTER_PORT\r"
-                  echo -e "Content-Type: application/json\r"
-                  echo -e "Content-Length: ${#PAYLOAD}\r"
-                  echo -e "Connection: close\r"
-                  echo -e "\r"
-                  echo -n "$PAYLOAD"
-                } > /dev/tcp/$ROUTER_HOST/$ROUTER_PORT 2>/dev/null && echo "Router trigger sent via /dev/tcp" || echo "Warning: Could not send trigger request"
-              fi
+              RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$ROUTER_URL/trigger" 2>&1)
+              echo "Router response: $RESPONSE"
 
               # Step 8: Wait for aggregation
               echo ""
