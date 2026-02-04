@@ -426,13 +426,13 @@ jobs:
           kubectl logs -l app.kubernetes.io/component=bridge --tail 100 || true
 
           echo "=== Yield Distribution Job Logs ==="
-          kubectl logs -l app.kubernetes.io/component=yield-distribution --tail 100 || true
+          kubectl logs -l app.kubernetes.io/component=yield-distribution --tail 300 || true
 
           echo "=== Gnosis Logs ==="
-          kubectl logs -l app.kubernetes.io/component=gnosis --tail 50 || true
+          kubectl logs -l app.kubernetes.io/component=gnosis --tail 200 || true
 
           echo "=== Router Logs ==="
-          kubectl logs -l app.kubernetes.io/component=router --tail 100 || true
+          kubectl logs -l app.kubernetes.io/component=router --tail 500 || true
 
           echo "=== Router Init Container Logs ==="
           ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)

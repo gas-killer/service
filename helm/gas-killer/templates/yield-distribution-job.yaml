@@ -310,16 +310,42 @@ spec:
               RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$ROUTER_URL/trigger" 2>&1)
               echo "Router response: $RESPONSE"
 
-              # Step 8: Wait for aggregation
+              # Step 8: Wait for aggregation with periodic health checks
               echo ""
               echo "=== Step 8: Waiting for signature aggregation (90s) ==="
-              sleep 90
+              for i in $(seq 1 9); do
+                sleep 10
+                echo "[$((i*10))s] Checking Gnosis RPC..."
+                BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" 2>&1) || true
+                echo "  Current block: $BLOCK"
+                COUNT=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>&1) || true
+                echo "  Transition count: $COUNT"
+              done
 
               # Step 9: Verify distribution
               echo ""
               echo "=== Step 9: Verifying distribution ==="
-              FINAL_COUNT=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null || echo "0")
-              FINAL_LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo "0")
+
+              # First check Gnosis connectivity
+              echo "Checking Gnosis RPC connectivity..."
+              if ! cast block-number --rpc-url "$L2_RPC_URL" 2>&1; then
+                echo "ERROR: Cannot reach Gnosis RPC at $L2_RPC_URL"
+                echo "Attempting DNS resolution..."
+                getent hosts gas-killer-gnosis || echo "DNS resolution failed"
+                exit 1
+              fi
+
+              # Get final state (show errors instead of swallowing them)
+              echo "Querying final stateTransitionCount..."
+              FINAL_COUNT_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>&1)
+              FINAL_COUNT_EXIT=$?
+              echo "Raw output: $FINAL_COUNT_RAW (exit code: $FINAL_COUNT_EXIT)"
+              FINAL_COUNT=$(echo "$FINAL_COUNT_RAW" | grep -oE '^[0-9]+' | head -1 || echo "0")
+
+              echo "Querying final lastClaimedBlockNumber..."
+              FINAL_LAST_CLAIMED_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>&1)
+              echo "Raw output: $FINAL_LAST_CLAIMED_RAW"
+              FINAL_LAST_CLAIMED=$(echo "$FINAL_LAST_CLAIMED_RAW" | grep -oE '^[0-9]+' | head -1 || echo "0")
 
               echo "Final transition count: $FINAL_COUNT"
               echo "Final last claimed block: $FINAL_LAST_CLAIMED"
