@@ -97,8 +97,8 @@ spec:
               echo "=== Yield Distribution Test Starting at $(date) ==="
 
               # Install required tools
-              echo "Installing curl, bash, git and foundry (cast)..."
-              apk add --no-cache curl bash git
+              echo "Installing curl, bash, git, gcompat (glibc compat) and foundry (cast)..."
+              apk add --no-cache curl bash git gcompat
 
               # Install foundry cast binary
               curl -L https://foundry.paradigm.xyz | bash
