@@ -114,7 +114,7 @@ spec:
 
               YIELD_DISTRIBUTOR="{{ .Values.yieldDistribution.contractAddress }}"
               L2_RPC_URL="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
-              ROUTER_URL="http://{{ include "gas-killer.router.fullname" . }}:{{ .Values.router.service.port }}"
+              ROUTER_URL="http://{{ include "gas-killer.router.fullname" . }}:{{ .Values.router.service.ingressPort }}"
 
               echo "BLS Signature Checker: $BLS_CHECKER"
               echo "Registry Coordinator Mimic: $REG_COORD"
