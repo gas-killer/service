@@ -96,6 +96,10 @@ spec:
 
               echo "=== Yield Distribution Test Starting at $(date) ==="
 
+              # Install curl (foundry image is Alpine-based but minimal)
+              echo "Installing curl..."
+              apk add --no-cache curl || apt-get update && apt-get install -y curl || echo "Warning: could not install curl"
+
               # Read addresses from init container
               BLS_CHECKER=$(cat /yield-config/bls_checker)
               REG_COORD=$(cat /yield-config/registry_coordinator)
