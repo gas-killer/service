@@ -208,58 +208,70 @@ spec:
               echo "Last claimed block: $LAST_CLAIMED"
               echo "Current block: $CURRENT"
 
-              # Step 4: Advance time and blocks to reach distribution time
+              # Step 4: Advance time and manipulate storage to reach distribution time
               echo ""
-              echo "=== Step 4: Advancing time and blocks to reach distribution time ==="
+              echo "=== Step 4: Setting up distribution timing ==="
 
-              # Get current timestamp (using cast to parse, no jq needed)
-              CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp 2>&1) || CURRENT_TIMESTAMP=""
-              echo "Raw timestamp output: $CURRENT_TIMESTAMP"
-              # Extract just the number
-              CURRENT_TIMESTAMP=$(echo "$CURRENT_TIMESTAMP" | grep -oE '^[0-9]+' | head -1)
-              if [ -z "$CURRENT_TIMESTAMP" ] || [ "$CURRENT_TIMESTAMP" -lt 1000000000 ]; then
-                echo "Warning: Invalid timestamp, using fallback"
-                # Use a reasonable current timestamp (Feb 2026)
-                CURRENT_TIMESTAMP=1770000000
-              fi
+              # Get current timestamp and block
+              CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp 2>&1 | grep -oE '^[0-9]+' | head -1) || CURRENT_TIMESTAMP="1770000000"
+              CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
               echo "Current timestamp: $CURRENT_TIMESTAMP"
+              echo "Current block: $CURRENT"
 
-              # Advance time by 8 days (cycle is typically 7 days = 604800 seconds)
-              # Adding extra buffer to ensure we're past the cycle
+              # Advance time by 8 days
               TIME_ADVANCE=$((8 * 24 * 60 * 60))
               NEW_TIMESTAMP=$((CURRENT_TIMESTAMP + TIME_ADVANCE))
               echo "Advancing time by $TIME_ADVANCE seconds to timestamp $NEW_TIMESTAMP"
-
-              # Set the next block timestamp
               cast rpc --rpc-url "$L2_RPC_URL" anvil_setNextBlockTimestamp $(printf '0x%x' "$NEW_TIMESTAMP")
-
-              # Mine a block to apply the timestamp
               cast rpc --rpc-url "$L2_RPC_URL" anvil_mine 0x1
 
-              # Also mine enough blocks if needed (in batches to avoid timeout)
-              TARGET=$((LAST_CLAIMED + CYCLE_LENGTH + 1))
-              echo "Target block: $TARGET"
-              CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
-              if [ "$CURRENT" -lt "$TARGET" ]; then
-                BLOCKS=$((TARGET - CURRENT))
-                echo "Need to mine $BLOCKS blocks to reach target..."
-                # Mine in batches of 10000 to avoid Anvil timeout
-                BATCH_SIZE=10000
-                while [ "$CURRENT" -lt "$TARGET" ]; do
-                  REMAINING=$((TARGET - CURRENT))
-                  if [ "$REMAINING" -gt "$BATCH_SIZE" ]; then
-                    MINE_COUNT=$BATCH_SIZE
-                  else
-                    MINE_COUNT=$REMAINING
-                  fi
-                  echo "Mining batch of $MINE_COUNT blocks..."
-                  cast rpc --rpc-url "$L2_RPC_URL" anvil_mine $(printf '0x%x' "$MINE_COUNT") || {
-                    echo "Warning: Mining batch failed, continuing..."
-                    sleep 2
-                  }
-                  CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
-                  echo "Current block: $CURRENT"
-                done
+              # Instead of mining 50k+ blocks, manipulate lastClaimedBlockNumber storage
+              # Set it to (currentBlock - cycleLength - 100) so distribution is ready
+              # Storage slot for lastClaimedBlockNumber - find it dynamically
+              echo "Finding storage slot for lastClaimedBlockNumber..."
+
+              # The storage slot can be found by checking where the current value is stored
+              # For a simple uint256, we check sequential slots. lastClaimedBlockNumber is typically
+              # in the first few slots of the contract.
+              LAST_CLAIMED_SLOT=""
+              for SLOT in 0 1 2 3 4 5 6 7 8 9 10; do
+                SLOT_HEX=$(printf '0x%x' "$SLOT")
+                SLOT_VALUE=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$SLOT_HEX" 2>/dev/null)
+                # Convert to decimal for comparison
+                SLOT_DEC=$(printf '%d' "$SLOT_VALUE" 2>/dev/null || echo "0")
+                if [ "$SLOT_DEC" = "$LAST_CLAIMED" ]; then
+                  LAST_CLAIMED_SLOT="$SLOT_HEX"
+                  echo "Found lastClaimedBlockNumber at slot $SLOT_HEX (value: $SLOT_DEC)"
+                  break
+                fi
+              done
+
+              if [ -n "$LAST_CLAIMED_SLOT" ]; then
+                # Set lastClaimedBlockNumber to make distribution ready
+                # New value = currentBlock - cycleLength - 100 (buffer)
+                NEW_LAST_CLAIMED=$((CURRENT - CYCLE_LENGTH - 100))
+                NEW_LAST_CLAIMED_HEX=$(printf '0x%064x' "$NEW_LAST_CLAIMED")
+                echo "Setting lastClaimedBlockNumber to $NEW_LAST_CLAIMED (slot $LAST_CLAIMED_SLOT)"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$LAST_CLAIMED_SLOT" "$NEW_LAST_CLAIMED_HEX"
+
+                # Verify the change
+                VERIFY=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null)
+                echo "Verified lastClaimedBlockNumber: $VERIFY"
+              else
+                echo "Warning: Could not find lastClaimedBlockNumber storage slot"
+                echo "Falling back to mining blocks..."
+                # Fallback: mine blocks in batches (but limit to avoid timeout)
+                TARGET=$((LAST_CLAIMED + CYCLE_LENGTH + 1))
+                MAX_BLOCKS=20000
+                BLOCKS_NEEDED=$((TARGET - CURRENT))
+                if [ "$BLOCKS_NEEDED" -gt "$MAX_BLOCKS" ]; then
+                  echo "Would need $BLOCKS_NEEDED blocks, limiting to $MAX_BLOCKS"
+                  BLOCKS_NEEDED=$MAX_BLOCKS
+                fi
+                if [ "$BLOCKS_NEEDED" -gt 0 ]; then
+                  echo "Mining $BLOCKS_NEEDED blocks..."
+                  cast rpc --rpc-url "$L2_RPC_URL" anvil_mine $(printf '0x%x' "$BLOCKS_NEEDED") || echo "Mining failed"
+                fi
               fi
 
               NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
