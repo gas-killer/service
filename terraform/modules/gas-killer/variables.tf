@@ -52,13 +52,13 @@ variable "funded_key" {
 variable "node_image_repository" {
   description = "Node container image repository"
   type        = string
-  default     = "ghcr.io/breadchaincoop/gas-killer-node"
+  default     = "ghcr.io/breadchaincoop/gas-killer-router"
 }
 
 variable "node_image_tag" {
   description = "Node container image tag"
   type        = string
-  default     = "dev"
+  default     = "node-pr-87"
 }
 
 variable "router_image_repository" {
@@ -70,7 +70,7 @@ variable "router_image_repository" {
 variable "router_image_tag" {
   description = "Router container image tag"
   type        = string
-  default     = "dev"
+  default     = "pr-87"
 }
 
 # Ingress

@@ -33,7 +33,7 @@ variable "vpc_cidr" {
 variable "availability_zones" {
   description = "Availability zones to use"
   type        = list(string)
-  default     = ["us-east-1a", "us-east-1b"]
+  default     = ["us-east-1a", "us-east-1b", "us-east-1c"]
 }
 
 # =============================================================================
@@ -116,13 +116,13 @@ variable "rpc_url" {
 }
 
 variable "private_key" {
-  description = "Deployer private key (without 0x prefix)"
+  description = "Deployer private key (with 0x prefix)"
   type        = string
   sensitive   = true
 }
 
 variable "funded_key" {
-  description = "Funded account private key (without 0x prefix)"
+  description = "Funded account private key (with 0x prefix)"
   type        = string
   sensitive   = true
 }
@@ -134,13 +134,13 @@ variable "funded_key" {
 variable "node_image_repository" {
   description = "Node container image repository"
   type        = string
-  default     = "ghcr.io/breadchaincoop/gas-killer-node"
+  default     = "ghcr.io/breadchaincoop/gas-killer-router"
 }
 
 variable "node_image_tag" {
   description = "Node container image tag"
   type        = string
-  default     = "dev"
+  default     = "node-pr-87"
 }
 
 variable "router_image_repository" {
@@ -152,7 +152,7 @@ variable "router_image_repository" {
 variable "router_image_tag" {
   description = "Router container image tag"
   type        = string
-  default     = "dev"
+  default     = "pr-87"
 }
 
 # =============================================================================
