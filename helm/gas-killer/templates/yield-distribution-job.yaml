@@ -226,6 +226,23 @@ spec:
               RESOLVER_RESULT=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" || echo "false,0x")
               echo "Resolver result: $RESOLVER_RESULT"
 
+              # Debug: trace the resolver call to understand why it returns false
+              echo ""
+              echo "=== Debug: Tracing resolveYieldDistribution call ==="
+              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" --trace 2>&1 || true
+
+              # Check related state variables
+              echo ""
+              echo "=== Debug: Checking related state variables ==="
+              echo "lastClaimedTimestamp:"
+              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedTimestamp()(uint256)" 2>/dev/null || echo "N/A"
+              echo "Current block timestamp:"
+              cast block --rpc-url "$L2_RPC_URL" latest -f timestamp
+              echo "breadToken:"
+              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "breadToken()(address)" 2>/dev/null || echo "N/A"
+              echo "yieldClaimer:"
+              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "yieldClaimer()(address)" 2>/dev/null || echo "N/A"
+
               # Step 6: Get initial state
               echo ""
               echo "=== Step 6: Getting initial state ==="
