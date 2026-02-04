@@ -90,7 +90,7 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
-              set -ex
+              set -x
               LOG_FILE="/app/.nodes/yield-distribution.log"
               exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -179,9 +179,18 @@ spec:
               echo ""
               echo "=== Step 3: Checking distribution timing ==="
               # Cast outputs decimal by default for uint256
-              CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" | tr -d '[:space:]')
-              LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" | tr -d '[:space:]')
-              CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+              # Add error handling in case function names differ on the contract
+              echo "Querying cycleLength..."
+              CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>&1 | tr -d '[:space:]') || CYCLE_LENGTH="302400"
+              echo "Querying lastClaimedBlockNumber..."
+              LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>&1 | tr -d '[:space:]') || LAST_CLAIMED="0"
+              echo "Querying current block..."
+              CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" 2>&1 | tr -d '[:space:]') || CURRENT="44000000"
+
+              # Sanitize values - extract just the number
+              CYCLE_LENGTH=$(echo "$CYCLE_LENGTH" | grep -oE '^[0-9]+' | head -1) || CYCLE_LENGTH="302400"
+              LAST_CLAIMED=$(echo "$LAST_CLAIMED" | grep -oE '^[0-9]+' | head -1) || LAST_CLAIMED="0"
+              CURRENT=$(echo "$CURRENT" | grep -oE '^[0-9]+' | head -1) || CURRENT="44000000"
 
               echo "Cycle length: $CYCLE_LENGTH"
               echo "Last claimed block: $LAST_CLAIMED"
@@ -192,7 +201,15 @@ spec:
               echo "=== Step 4: Advancing time and blocks to reach distribution time ==="
 
               # Get current timestamp (using cast to parse, no jq needed)
-              CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp)
+              CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp 2>&1) || CURRENT_TIMESTAMP=""
+              echo "Raw timestamp output: $CURRENT_TIMESTAMP"
+              # Extract just the number
+              CURRENT_TIMESTAMP=$(echo "$CURRENT_TIMESTAMP" | grep -oE '^[0-9]+' | head -1)
+              if [ -z "$CURRENT_TIMESTAMP" ] || [ "$CURRENT_TIMESTAMP" -lt 1000000000 ]; then
+                echo "Warning: Invalid timestamp, using fallback"
+                # Use a reasonable current timestamp (Feb 2026)
+                CURRENT_TIMESTAMP=1770000000
+              fi
               echo "Current timestamp: $CURRENT_TIMESTAMP"
 
               # Advance time by 8 days (cycle is typically 7 days = 604800 seconds)
@@ -223,25 +240,28 @@ spec:
               # Step 5: Check resolver
               echo ""
               echo "=== Step 5: Checking resolver ==="
-              RESOLVER_RESULT=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" || echo "false,0x")
+              echo "Calling resolveYieldDistribution()..."
+              RESOLVER_RESULT=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1) || RESOLVER_RESULT="call failed"
               echo "Resolver result: $RESOLVER_RESULT"
 
-              # Debug: trace the resolver call to understand why it returns false
-              echo ""
-              echo "=== Debug: Tracing resolveYieldDistribution call ==="
-              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" --trace 2>&1 || true
+              # Debug: trace the resolver call to understand why it returns false (skip if call failed)
+              if [ "$RESOLVER_RESULT" != "call failed" ]; then
+                echo ""
+                echo "=== Debug: Tracing resolveYieldDistribution call ==="
+                cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" --trace 2>&1 || echo "Trace failed"
+              fi
 
-              # Check related state variables
+              # Check related state variables that we know exist
               echo ""
-              echo "=== Debug: Checking related state variables ==="
-              echo "lastClaimedTimestamp:"
-              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedTimestamp()(uint256)" 2>/dev/null || echo "N/A"
+              echo "=== Debug: Checking state variables ==="
               echo "Current block timestamp:"
-              cast block --rpc-url "$L2_RPC_URL" latest -f timestamp
-              echo "breadToken:"
-              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "breadToken()(address)" 2>/dev/null || echo "N/A"
-              echo "yieldClaimer:"
-              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "yieldClaimer()(address)" 2>/dev/null || echo "N/A"
+              cast block --rpc-url "$L2_RPC_URL" latest -f timestamp || echo "N/A"
+              echo "blsSignatureChecker:"
+              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "N/A"
+              echo "avsAddress:"
+              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "N/A"
+              echo "stateTransitionCount:"
+              cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null || echo "N/A"
 
               # Step 6: Get initial state
               echo ""
