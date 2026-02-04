@@ -86,8 +86,8 @@ spec:
 
       containers:
         - name: yield-distribution-test
-          image: alpine:3.19
-          command: ["/bin/sh", "-c"]
+          image: debian:bookworm-slim
+          command: ["/bin/bash", "-c"]
           args:
             - |
               set -x
@@ -97,8 +97,8 @@ spec:
               echo "=== Yield Distribution Test Starting at $(date) ==="
 
               # Install required tools
-              echo "Installing curl, bash, git, gcompat (glibc compat), libgcc and foundry (cast)..."
-              apk add --no-cache curl bash git gcompat libgcc
+              echo "Installing curl, git and foundry (cast)..."
+              apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates
 
               # Install foundry cast binary
               curl -L https://foundry.paradigm.xyz | bash
