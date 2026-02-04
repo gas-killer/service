@@ -183,6 +183,11 @@ spec:
             - name: WS_RPC
               value: "ws://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
             {{- end }}
+            {{- if .Values.gnosis.enabled }}
+            # Gnosis RPC for cross-chain execution (yield distribution)
+            - name: GNOSIS_HTTP_RPC
+              value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+            {{- end }}
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"
             - name: INGRESS
