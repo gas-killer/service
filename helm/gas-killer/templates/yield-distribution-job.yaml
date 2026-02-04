@@ -236,14 +236,30 @@ spec:
               # Mine a block to apply the timestamp
               cast rpc --rpc-url "$L2_RPC_URL" anvil_mine 0x1
 
-              # Also mine enough blocks if needed
+              # Also mine enough blocks if needed (in batches to avoid timeout)
               TARGET=$((LAST_CLAIMED + CYCLE_LENGTH + 1))
               echo "Target block: $TARGET"
               CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
               if [ "$CURRENT" -lt "$TARGET" ]; then
                 BLOCKS=$((TARGET - CURRENT))
-                echo "Mining $BLOCKS additional blocks..."
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_mine $(printf '0x%x' "$BLOCKS")
+                echo "Need to mine $BLOCKS blocks to reach target..."
+                # Mine in batches of 10000 to avoid Anvil timeout
+                BATCH_SIZE=10000
+                while [ "$CURRENT" -lt "$TARGET" ]; do
+                  REMAINING=$((TARGET - CURRENT))
+                  if [ "$REMAINING" -gt "$BATCH_SIZE" ]; then
+                    MINE_COUNT=$BATCH_SIZE
+                  else
+                    MINE_COUNT=$REMAINING
+                  fi
+                  echo "Mining batch of $MINE_COUNT blocks..."
+                  cast rpc --rpc-url "$L2_RPC_URL" anvil_mine $(printf '0x%x' "$MINE_COUNT") || {
+                    echo "Warning: Mining batch failed, continuing..."
+                    sleep 2
+                  }
+                  CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+                  echo "Current block: $CURRENT"
+                done
               fi
 
               NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
