@@ -212,6 +212,16 @@ bridge:
       memory: "1Gi"
       cpu: "500m"
 
+# L2 Configuration (for Gnosis/multi-chain operation in TESTNET mode)
+# When enabled, router/nodes will connect to real L2 RPC for AVS operations
+l2:
+  # Enable L2 AVS mode - router will use L2 RPC for AVS lookups (TESTNET only)
+  enabled: false
+  # L2 RPC URL (e.g., Gnosis mainnet)
+  rpcUrl: ""
+  # Path to L2 AVS deployment JSON (created by l2-avs-config job)
+  avsDeploymentPath: "/app/.nodes/l2_avs_deploy.json"
+
 # Yield Distribution test configuration - only used in LOCAL mode with gnosis.enabled
 yieldDistribution:
   enabled: true

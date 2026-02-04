@@ -1,6 +1,11 @@
 name: Helm Integration Test
 
 on:
+  push:
+    branches:
+      - main
+      - dev
+      - staging
   pull_request:
     branches:
       - main
@@ -102,7 +107,7 @@ jobs:
 
           echo "Installing Helm chart with fork URL: $FORK_URL"
 
-          # Set L2 fork URL for Gnosis Anvil
+          # Set L2 fork URL for Gnosis Anvil (LOCAL mode)
           if [ -n "${{ secrets.GNOSIS_RPC_URL }}" ]; then
             L2_FORK_URL="${{ secrets.GNOSIS_RPC_URL }}"
           else

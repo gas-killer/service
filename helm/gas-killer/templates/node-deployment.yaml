@@ -123,8 +123,31 @@ spec:
             - "/app/config/public_orchestrator.json"
             {{- end }}
           env:
-            {{- if eq $root.Values.global.environment "TESTNET" }}
-            # TESTNET mode: Use external RPC from secret
+            {{- if and $root.Values.l2 $root.Values.l2.enabled }}
+            # TESTNET + L2 mode: Use L2 RPC for AVS operations (e.g., Gnosis mainnet)
+            - name: HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" $root }}
+                  key: L2_RPC_URL
+            - name: RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" $root }}
+                  key: L2_RPC_URL
+            - name: WS_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" $root }}
+                  key: L2_WS_RPC_URL
+            # Gnosis RPC for multi-chain support (PR 87 compatibility)
+            - name: GNOSIS_HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" $root }}
+                  key: L2_RPC_URL
+            {{- else if eq $root.Values.global.environment "TESTNET" }}
+            # TESTNET mode (no L2): Use external RPC from secret
             - name: HTTP_RPC
               valueFrom:
                 secretKeyRef:
@@ -149,8 +172,14 @@ spec:
             - name: WS_RPC
               value: "ws://{{ include "gas-killer.ethereum.fullname" $root }}:{{ $root.Values.ethereum.service.port }}"
             {{- end }}
+            {{- if and $root.Values.l2 $root.Values.l2.enabled }}
+            # TESTNET + L2 mode: Use L2 AVS deployment path
+            - name: AVS_DEPLOYMENT_PATH
+              value: {{ $root.Values.l2.avsDeploymentPath | quote }}
+            {{- else }}
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"
+            {{- end }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}

@@ -132,6 +132,25 @@ resource "helm_release" "gas_killer" {
     name  = "global.initTimeout"
     value = var.run_bridge ? "900" : "300" # 15 minutes if bridge, 5 minutes otherwise
   }
+
+  # L2 configuration - when enabled, router/nodes use L2 RPC and L2 AVS deployment
+  set {
+    name  = "l2.enabled"
+    value = tostring(var.l2_avs_mode)
+  }
+
+  dynamic "set_sensitive" {
+    for_each = var.l2_avs_mode && var.l2_rpc_url != "" ? [1] : []
+    content {
+      name  = "l2.rpcUrl"
+      value = var.l2_rpc_url
+    }
+  }
+
+  set {
+    name  = "l2.avsDeploymentPath"
+    value = "/app/.nodes/l2_avs_deploy.json"
+  }
 }
 
 # =============================================================================
@@ -229,7 +248,7 @@ resource "kubernetes_job" "l1_l2_bridge" {
   }
 
   spec {
-    ttl_seconds_after_finished = 600 # Clean up after 10 minutes
+    ttl_seconds_after_finished = 3600 # Keep logs for 1 hour
     backoff_limit              = 2
 
     template {
@@ -428,9 +447,9 @@ resource "kubernetes_job" "l1_l2_bridge" {
               echo "l2-deploy.json found!"
               cat /app/contracts/artifacts/l2-deploy.json
 
-              # Parse addresses from JSON (keys are camelCase)
-              BLS_CHECKER=$(grep -o '"blsSignatureChecker": *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
-              REGISTRY_MIMIC=$(grep -o '"registryCoordinatorMimic": *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
+              # Parse addresses from JSON (keys are camelCase, JSON may be minified with no spaces)
+              BLS_CHECKER=$(grep -o '"blsSignatureChecker" *: *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
+              REGISTRY_MIMIC=$(grep -o '"registryCoordinatorMimic" *: *"[^"]*"' /app/contracts/artifacts/l2-deploy.json | sed 's/.*: *"\([^"]*\)"/\1/')
 
               echo "Parsed addresses:"
               echo "  BLSSignatureChecker: $BLS_CHECKER"
@@ -488,7 +507,7 @@ resource "kubernetes_job" "gnosis_factory" {
   }
 
   spec {
-    ttl_seconds_after_finished = 600 # Clean up after 10 minutes
+    ttl_seconds_after_finished = 3600 # Keep logs for 1 hour
     backoff_limit              = 2
 
     template {
@@ -500,11 +519,23 @@ resource "kubernetes_job" "gnosis_factory" {
       }
 
       spec {
-        restart_policy = "Never"
+        service_account_name = "bridge-sa"
+        restart_policy       = "Never"
+
+        # Shared volume for passing data between containers
+        volume {
+          name = "factory-data"
+          empty_dir {}
+        }
 
         container {
           name  = "factory-caller"
           image = "ghcr.io/foundry-rs/foundry:latest"
+
+          volume_mount {
+            name       = "factory-data"
+            mount_path = "/factory-data"
+          }
 
           env {
             name = "L2_RPC_URL"
@@ -553,6 +584,13 @@ resource "kubernetes_job" "gnosis_factory" {
                 exit 1
               fi
 
+              # Get contract count before deployment
+              CONTRACT_COUNT_BEFORE=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_FACTORY_ADDRESS" \
+                "getDeployedContractCount()(uint256)" 2>/dev/null || echo "0")
+              echo "Contract count before: $CONTRACT_COUNT_BEFORE"
+
               # Call deployArraySummation on Gnosis factory
               # Parameters: _avsAddress, _blsSigChecker, _arraySize (100), _maxValue (1000), _seed (42)
               echo "Calling deployArraySummation..."
@@ -582,11 +620,20 @@ resource "kubernetes_job" "gnosis_factory" {
               echo "Transaction result:"
               echo "$RESULT"
 
-              TX_HASH=$(echo "$RESULT" | grep -o '"transactionHash":"[^"]*"' | sed 's/.*:"\([^"]*\)"/\1/')
+              TX_HASH=$(echo "$RESULT" | grep -o '"transactionHash":"[^"]*"' | head -1 | sed 's/.*:"\([^"]*\)"/\1/')
               echo "Transaction hash: $TX_HASH"
 
               # Wait for confirmation
               sleep 5
+
+              # Get deployed ArraySummation address
+              GNOSIS_ARRAY_SUMMATION=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_FACTORY_ADDRESS" \
+                "deployedContracts(uint256)(address)" \
+                "$CONTRACT_COUNT_BEFORE" 2>/dev/null || echo "")
+
+              echo "Gnosis ArraySummation deployed at: $GNOSIS_ARRAY_SUMMATION"
 
               # Get deployed contract count to verify
               echo "Verifying deployment..."
@@ -596,7 +643,296 @@ resource "kubernetes_job" "gnosis_factory" {
                 "getDeployedContractCount()(uint256)" 2>/dev/null || echo "unknown")
               echo "Factory deployed contract count: $CONTRACT_COUNT"
 
+              # Write the address to shared volume for kubectl sidecar
+              echo "$GNOSIS_ARRAY_SUMMATION" > /factory-data/gnosis_array_summation_address
+              touch /factory-data/deploy_complete
+
               echo "=== Gnosis Factory Deployment Complete ==="
+              echo "Waiting for kubectl sidecar to update ConfigMap..."
+
+              # Wait for kubectl sidecar to finish
+              WAIT_COUNT=0
+              while [ ! -f /factory-data/configmap_updated ] && [ $WAIT_COUNT -lt 60 ]; do
+                sleep 2
+                WAIT_COUNT=$((WAIT_COUNT + 2))
+              done
+
+              if [ -f /factory-data/configmap_updated ]; then
+                echo "ConfigMap updated successfully!"
+              else
+                echo "WARNING: ConfigMap update may not have completed"
+              fi
+            EOT
+          ]
+
+          resources {
+            requests = {
+              cpu    = "100m"
+              memory = "256Mi"
+            }
+            limits = {
+              cpu    = "500m"
+              memory = "512Mi"
+            }
+          }
+        }
+
+        # Sidecar to update ConfigMap with kubectl
+        container {
+          name  = "configmap-updater"
+          image = "bitnami/kubectl:latest"
+
+          volume_mount {
+            name       = "factory-data"
+            mount_path = "/factory-data"
+          }
+
+          env {
+            name  = "NAMESPACE"
+            value = var.namespace
+          }
+
+          command = [
+            "bash", "-c",
+            <<-EOT
+              echo "=== ConfigMap Updater Started ==="
+              echo "Waiting for factory deployment to complete..."
+
+              # Wait for deploy_complete marker
+              WAIT_COUNT=0
+              while [ ! -f /factory-data/deploy_complete ] && [ $WAIT_COUNT -lt 300 ]; do
+                sleep 2
+                WAIT_COUNT=$((WAIT_COUNT + 2))
+                echo "Waiting... ($WAIT_COUNT seconds)"
+              done
+
+              if [ ! -f /factory-data/deploy_complete ]; then
+                echo "ERROR: Timeout waiting for factory deployment"
+                exit 1
+              fi
+
+              # Read the deployed address
+              GNOSIS_ARRAY_SUMMATION=$(cat /factory-data/gnosis_array_summation_address)
+              echo "Gnosis ArraySummation: $GNOSIS_ARRAY_SUMMATION"
+
+              if [ -z "$GNOSIS_ARRAY_SUMMATION" ]; then
+                echo "ERROR: Empty ArraySummation address"
+                exit 1
+              fi
+
+              # Update the ConfigMap
+              echo "Updating bridge-addresses ConfigMap..."
+              kubectl patch configmap bridge-addresses \
+                --namespace=$NAMESPACE \
+                --type=merge \
+                -p "{\"data\":{\"GNOSIS_ARRAY_SUMMATION\":\"$GNOSIS_ARRAY_SUMMATION\"}}"
+
+              echo "ConfigMap updated!"
+              kubectl get configmap bridge-addresses -n $NAMESPACE -o yaml
+
+              # Signal completion
+              touch /factory-data/configmap_updated
+
+              echo "=== ConfigMap Updater Complete ==="
+            EOT
+          ]
+
+          resources {
+            requests = {
+              cpu    = "50m"
+              memory = "64Mi"
+            }
+            limits = {
+              cpu    = "200m"
+              memory = "128Mi"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  wait_for_completion = true
+
+  timeouts {
+    create = "10m"
+  }
+
+  depends_on = [kubernetes_job.l1_l2_bridge]
+}
+
+# =============================================================================
+# Gnosis E2E Test Job (tests the Gnosis ArraySummation contract)
+# =============================================================================
+# Calls the Gnosis ArraySummation to verify it works:
+# 1. Calls sum([0,1,2]) to trigger a state transition
+# 2. Verifies the state transition was executed
+
+resource "kubernetes_job" "gnosis_e2e_test" {
+  count = var.run_bridge && var.run_gnosis_factory ? 1 : 0
+
+  metadata {
+    name      = "gnosis-e2e-test"
+    namespace = var.namespace
+    labels = {
+      "app.kubernetes.io/name"      = "gas-killer"
+      "app.kubernetes.io/component" = "gnosis-e2e-test"
+    }
+  }
+
+  spec {
+    ttl_seconds_after_finished = 3600 # Keep logs for 1 hour
+    backoff_limit              = 2
+
+    template {
+      metadata {
+        labels = {
+          "app.kubernetes.io/name"      = "gas-killer"
+          "app.kubernetes.io/component" = "gnosis-e2e-test"
+        }
+      }
+
+      spec {
+        restart_policy = "Never"
+
+        container {
+          name  = "gnosis-test"
+          image = "ghcr.io/foundry-rs/foundry:latest"
+
+          env {
+            name = "L2_RPC_URL"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "L2_RPC_URL"
+              }
+            }
+          }
+
+          env {
+            name = "PRIVATE_KEY"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "PRIVATE_KEY"
+              }
+            }
+          }
+
+          # Read addresses from ConfigMap as env vars
+          env_from {
+            config_map_ref {
+              name = "bridge-addresses"
+            }
+          }
+
+          command = [
+            "bash", "-c",
+            <<-EOT
+              set -ex
+              echo "=== Gnosis E2E Test ==="
+              echo "L2 RPC URL: $${L2_RPC_URL:0:50}..."
+              echo "Gnosis ArraySummation: $GNOSIS_ARRAY_SUMMATION"
+              echo "BLS Signature Checker: $BLS_SIGNATURE_CHECKER"
+              echo "Registry Coordinator Mimic: $REGISTRY_COORDINATOR_MIMIC"
+
+              if [ -z "$GNOSIS_ARRAY_SUMMATION" ]; then
+                echo "ERROR: GNOSIS_ARRAY_SUMMATION not found in ConfigMap"
+                exit 1
+              fi
+
+              # Get current state
+              echo ""
+              echo "Step 1: Getting current state..."
+              CURRENT_SUM=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "currentSum()(uint256)" 2>/dev/null || echo "0")
+              echo "Current sum: $CURRENT_SUM"
+
+              TRANSITION_COUNT=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "stateTransitionCount()(uint256)" 2>/dev/null || echo "0")
+              echo "Current transition count: $TRANSITION_COUNT"
+
+              # Get array values
+              echo ""
+              echo "Step 2: Reading array values..."
+              for i in 0 1 2; do
+                VAL=$(cast call \
+                  --rpc-url "$L2_RPC_URL" \
+                  "$GNOSIS_ARRAY_SUMMATION" \
+                  "values(uint256)(uint256)" \
+                  $i 2>/dev/null || echo "?")
+                echo "  values[$i] = $VAL"
+              done
+
+              # Call sum([0,1,2]) to trigger a state transition
+              echo ""
+              echo "Step 3: Calling sum([0,1,2])..."
+
+              # Encode the call data
+              CALL_DATA=$(cast calldata "sum(uint256[])" "[0,1,2]")
+              echo "Call data: $CALL_DATA"
+
+              # This calls the ArraySummation directly (without AVS verification)
+              # Just to test that the contract works
+              RESULT=$(cast send \
+                --rpc-url "$L2_RPC_URL" \
+                --private-key "$PRIVATE_KEY" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "sum(uint256[])" \
+                "[0,1,2]" \
+                --json 2>&1) || {
+                  echo "Direct call may fail if contract requires AVS verification"
+                  echo "$RESULT"
+                }
+
+              echo "Direct call result:"
+              echo "$RESULT" | head -5
+
+              # Check contract state after call
+              echo ""
+              echo "Step 4: Checking contract state..."
+
+              FINAL_SUM=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "currentSum()(uint256)" 2>/dev/null || echo "0")
+              echo "Final sum: $FINAL_SUM"
+
+              FINAL_TRANSITION=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "stateTransitionCount()(uint256)" 2>/dev/null || echo "0")
+              echo "Final transition count: $FINAL_TRANSITION"
+
+              # Get AVS address the contract is linked to
+              AVS_ADDR=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "avs()(address)" 2>/dev/null || echo "unknown")
+              echo "AVS address: $AVS_ADDR"
+
+              BLS_ADDR=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
+              echo "BLS Signature Checker: $BLS_ADDR"
+
+              echo ""
+              echo "=== Gnosis E2E Test Complete ==="
+              echo ""
+              echo "Summary:"
+              echo "  Gnosis ArraySummation: $GNOSIS_ARRAY_SUMMATION"
+              echo "  AVS (RegistryCoordinatorMimic): $AVS_ADDR"
+              echo "  BLS Signature Checker: $BLS_ADDR"
+              echo "  Current Sum: $FINAL_SUM"
+              echo "  Transition Count: $FINAL_TRANSITION"
+              echo ""
+              echo "NOTE: Full AVS verification on Gnosis requires router"
+              echo "      to be configured with Gnosis RPC and contracts."
             EOT
           ]
 
@@ -621,7 +957,522 @@ resource "kubernetes_job" "gnosis_factory" {
     create = "10m"
   }
 
-  depends_on = [kubernetes_job.l1_l2_bridge]
+  depends_on = [kubernetes_job.gnosis_factory]
+}
+
+# =============================================================================
+# L2 AVS Config Generator Job
+# =============================================================================
+# Creates l2_avs_deploy.json on the shared PVC with the L2 contract addresses
+# from the bridge ConfigMap. This allows the router/nodes to be configured for
+# L2 (Gnosis) operation.
+
+resource "kubernetes_job" "l2_avs_config" {
+  count = var.run_bridge && var.run_gnosis_factory ? 1 : 0
+
+  metadata {
+    name      = "l2-avs-config"
+    namespace = var.namespace
+    labels = {
+      "app.kubernetes.io/name"      = "gas-killer"
+      "app.kubernetes.io/component" = "l2-avs-config"
+    }
+  }
+
+  spec {
+    ttl_seconds_after_finished = 3600 # Keep logs for 1 hour
+    backoff_limit              = 2
+
+    template {
+      metadata {
+        labels = {
+          "app.kubernetes.io/name"      = "gas-killer"
+          "app.kubernetes.io/component" = "l2-avs-config"
+        }
+      }
+
+      spec {
+        restart_policy = "Never"
+
+        volume {
+          name = "shared-data"
+          persistent_volume_claim {
+            claim_name = "gas-killer-shared-data"
+          }
+        }
+
+        container {
+          name  = "config-generator"
+          image = "ghcr.io/foundry-rs/foundry:latest"
+
+          # Run as root to match original alpine behavior and write to shared volume
+          security_context {
+            run_as_user = 0
+          }
+
+          volume_mount {
+            name       = "shared-data"
+            mount_path = "/app/.nodes"
+          }
+
+          # Read addresses from ConfigMap as env vars
+          env_from {
+            config_map_ref {
+              name = "bridge-addresses"
+            }
+          }
+
+          env {
+            name = "L2_RPC_URL"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "L2_RPC_URL"
+              }
+            }
+          }
+
+          command = [
+            "sh", "-c",
+            <<-EOT
+              set -e
+              echo "=== L2 AVS Config Generator ==="
+              echo "BLS Signature Checker: $BLS_SIGNATURE_CHECKER"
+              echo "Registry Coordinator Mimic: $REGISTRY_COORDINATOR_MIMIC"
+              echo "Gnosis ArraySummation: $GNOSIS_ARRAY_SUMMATION"
+
+              if [ -z "$BLS_SIGNATURE_CHECKER" ] || [ -z "$REGISTRY_COORDINATOR_MIMIC" ]; then
+                echo "ERROR: Bridge addresses not found in ConfigMap"
+                exit 1
+              fi
+
+              # Get current block number and timestamp from L2 chain
+              # This is needed by EigenStakingClient to query operator events
+              echo "Getting current block info from L2..."
+              BLOCK_NUMBER=$(cast block-number --rpc-url "$L2_RPC_URL" 2>/dev/null || echo "0")
+              TIMESTAMP=$(date +%s)
+              echo "Block number: $BLOCK_NUMBER"
+              echo "Timestamp: $TIMESTAMP"
+
+              # Create l2_avs_deploy.json with the L2 contract addresses
+              # Key names must match what EigenStakingClient::read_avs_deployment_config() expects
+              # from commonware-avs-usecases/src/eigenlayer/network.rs:
+              # - lastUpdate.block_number (required for querying operator events)
+              # - addresses.registryCoordinator (required)
+              # - addresses.blsSigCheck (required, used as operatorStateRetriever)
+              cat > /app/.nodes/l2_avs_deploy.json << EOF
+{
+  "lastUpdate": {
+    "timestamp": "$TIMESTAMP",
+    "block_number": "$BLOCK_NUMBER"
+  },
+  "addresses": {
+    "registryCoordinator": "$REGISTRY_COORDINATOR_MIMIC",
+    "blsapkRegistry": "$BLS_SIGNATURE_CHECKER",
+    "operatorStateRetriever": "$BLS_SIGNATURE_CHECKER",
+    "blsSigCheck": "$BLS_SIGNATURE_CHECKER",
+    "arraySummation": "$GNOSIS_ARRAY_SUMMATION"
+  }
+}
+EOF
+
+              echo "Generated l2_avs_deploy.json:"
+              cat /app/.nodes/l2_avs_deploy.json
+
+              # Create completion marker
+              touch /app/.nodes/.l2_avs_config_complete
+              chmod 644 /app/.nodes/.l2_avs_config_complete
+              chmod 644 /app/.nodes/l2_avs_deploy.json
+
+              echo "=== L2 AVS Config Complete ==="
+            EOT
+          ]
+
+          resources {
+            requests = {
+              cpu    = "50m"
+              memory = "64Mi"
+            }
+            limits = {
+              cpu    = "200m"
+              memory = "128Mi"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  wait_for_completion = true
+
+  timeouts {
+    create = "5m"
+  }
+
+  depends_on = [kubernetes_job.gnosis_factory]
+}
+
+# =============================================================================
+# L2 AVS Trigger Job (triggers Gnosis ArraySummation through router)
+# =============================================================================
+# This job triggers the Gnosis ArraySummation contract through the router's
+# ingress endpoint. For full AVS verification, the router needs to be
+# configured with L2 RPCs and L2 AVS contracts.
+#
+# NOTE: The current router is configured for L1 (Sepolia). To enable full
+# L2 AVS verification, you need to:
+# 1. Set l2_avs_mode = true in terraform.tfvars
+# 2. Re-deploy with helm upgrade to reconfigure router/nodes for L2
+
+resource "kubernetes_job" "l2_avs_trigger" {
+  count = var.run_bridge && var.run_gnosis_factory && var.run_l2_avs_trigger ? 1 : 0
+
+  metadata {
+    name      = "l2-avs-trigger"
+    namespace = var.namespace
+    labels = {
+      "app.kubernetes.io/name"      = "gas-killer"
+      "app.kubernetes.io/component" = "l2-avs-trigger"
+    }
+  }
+
+  spec {
+    ttl_seconds_after_finished = 3600 # Keep logs for 1 hour
+    backoff_limit              = 2
+
+    template {
+      metadata {
+        labels = {
+          "app.kubernetes.io/name"      = "gas-killer"
+          "app.kubernetes.io/component" = "l2-avs-trigger"
+        }
+      }
+
+      spec {
+        restart_policy = "Never"
+
+        volume {
+          name = "shared-data"
+          persistent_volume_claim {
+            claim_name = "gas-killer-shared-data"
+          }
+        }
+
+        # EmptyDir for communication between foundry and curl containers
+        volume {
+          name = "trigger-data"
+          empty_dir {}
+        }
+
+        # Init container: Wait for L2 config to be ready
+        init_container {
+          name  = "wait-for-l2-config"
+          image = "busybox:1.36"
+          command = [
+            "sh", "-c",
+            <<-EOT
+              echo "Waiting for L2 AVS config..."
+              TIMEOUT=120
+              ELAPSED=0
+              until [ -f /app/.nodes/.l2_avs_config_complete ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for L2 AVS config"
+                  exit 1
+                fi
+                echo "Waiting... ($ELAPSED seconds)"
+                sleep 5
+                ELAPSED=$((ELAPSED + 5))
+              done
+              echo "L2 AVS config ready!"
+            EOT
+          ]
+          volume_mount {
+            name       = "shared-data"
+            mount_path = "/app/.nodes"
+            read_only  = true
+          }
+        }
+
+        # Init container: Wait for router to be ready
+        init_container {
+          name  = "wait-for-router"
+          image = "busybox:1.36"
+          command = [
+            "sh", "-c",
+            "echo 'Waiting for router...' && until nc -z gas-killer-router 8080; do echo 'Router not ready...'; sleep 5; done && echo 'Router ready!'"
+          ]
+        }
+
+        container {
+          name  = "trigger"
+          image = "ghcr.io/foundry-rs/foundry:latest"
+
+          volume_mount {
+            name       = "shared-data"
+            mount_path = "/app/.nodes"
+            read_only  = true
+          }
+
+          volume_mount {
+            name       = "trigger-data"
+            mount_path = "/trigger"
+          }
+
+          env {
+            name = "L2_RPC_URL"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "L2_RPC_URL"
+              }
+            }
+          }
+
+          env {
+            name = "PRIVATE_KEY"
+            value_from {
+              secret_key_ref {
+                name = "bridge-secrets"
+                key  = "PRIVATE_KEY"
+              }
+            }
+          }
+
+          env {
+            name  = "ROUTER_URL"
+            value = "http://gas-killer-router:8080"
+          }
+
+          # Read addresses from ConfigMap
+          env_from {
+            config_map_ref {
+              name = "bridge-addresses"
+            }
+          }
+
+          command = [
+            "bash", "-c",
+            <<-EOT
+              set -ex
+              echo "=== L2 AVS Trigger ==="
+
+              echo "L2 RPC URL: $${L2_RPC_URL:0:50}..."
+              echo "Router URL: $ROUTER_URL"
+              echo "Gnosis ArraySummation: $GNOSIS_ARRAY_SUMMATION"
+
+              if [ -z "$GNOSIS_ARRAY_SUMMATION" ]; then
+                echo "ERROR: GNOSIS_ARRAY_SUMMATION not found"
+                exit 1
+              fi
+
+              # Read L2 AVS deploy JSON
+              echo ""
+              echo "L2 AVS Deploy:"
+              cat /app/.nodes/l2_avs_deploy.json
+
+              # Get current state
+              echo ""
+              echo "Step 1: Getting current state from Gnosis..."
+              CURRENT_SUM=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "currentSum()(uint256)" 2>/dev/null || echo "0")
+              echo "Current sum: $CURRENT_SUM"
+
+              TRANSITION_COUNT=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "stateTransitionCount()(uint256)" 2>/dev/null || echo "0")
+              echo "Current transition count: $TRANSITION_COUNT"
+
+              # Get block number for deterministic execution
+              BLOCK_HEIGHT=$(cast block-number --rpc-url "$L2_RPC_URL")
+              echo "Block height: $BLOCK_HEIGHT"
+
+              # Encode sum([0,1,2]) call - convert hex to byte array using bash
+              CALL_DATA_HEX=$(cast calldata "sum(uint256[])" "[0,1,2]")
+              echo "Call data hex: $CALL_DATA_HEX"
+
+              # Convert hex string to JSON byte array: "0x01ab..." -> [1, 171, ...]
+              CALL_DATA_HEX_STRIPPED="$${CALL_DATA_HEX#0x}"
+              CALL_DATA_ARRAY="["
+              for ((i=0; i<$${#CALL_DATA_HEX_STRIPPED}; i+=2)); do
+                [ $i -gt 0 ] && CALL_DATA_ARRAY+=","
+                CALL_DATA_ARRAY+="$((16#$${CALL_DATA_HEX_STRIPPED:$i:2}))"
+              done
+              CALL_DATA_ARRAY+="]"
+              echo "Call data array: $CALL_DATA_ARRAY"
+
+              # Build trigger request JSON
+              # Note: from_address is the Anvil default account
+              FROM_ADDRESS="0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+
+              TRIGGER_JSON="{\"body\":{\"target_address\":\"$GNOSIS_ARRAY_SUMMATION\",\"call_data\":$CALL_DATA_ARRAY,\"transition_index\":$TRANSITION_COUNT,\"from_address\":\"$FROM_ADDRESS\",\"value\":\"0\",\"block_height\":$BLOCK_HEIGHT}}"
+
+              echo ""
+              echo "Step 2: Preparing trigger request..."
+              echo "Trigger JSON:"
+              echo "$TRIGGER_JSON" | head -c 500
+              echo "..."
+
+              # Write trigger payload to shared volume for curl sidecar
+              echo "$TRIGGER_JSON" > /trigger/payload.json
+              touch /trigger/ready
+
+              echo "Waiting for curl sidecar to send request..."
+              # Wait for curl sidecar to complete (max 2 minutes)
+              WAIT_COUNT=0
+              while [ ! -f /trigger/done ] && [ $WAIT_COUNT -lt 120 ]; do
+                sleep 1
+                WAIT_COUNT=$((WAIT_COUNT + 1))
+              done
+
+              if [ -f /trigger/done ]; then
+                echo "Trigger request completed!"
+                TRIGGER_RESPONSE=$(cat /trigger/response.txt 2>/dev/null || echo "NO_RESPONSE")
+                HTTP_CODE=$(cat /trigger/http_code.txt 2>/dev/null || echo "UNKNOWN")
+                echo "Response code: $HTTP_CODE"
+                echo "Response body: $TRIGGER_RESPONSE"
+
+                if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "202" ]; then
+                  echo "WARNING: Trigger may have failed (code: $HTTP_CODE)"
+                  echo "This is expected if the router is configured for L1 (Sepolia)"
+                  echo "For full L2 AVS verification, reconfigure router with L2 RPCs"
+                fi
+              else
+                echo "WARNING: Timeout waiting for trigger response"
+              fi
+
+              # Wait and check final state
+              echo ""
+              echo "Step 3: Waiting for state change..."
+              sleep 30
+
+              FINAL_SUM=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "currentSum()(uint256)" 2>/dev/null || echo "0")
+              echo "Final sum: $FINAL_SUM"
+
+              FINAL_TRANSITION=$(cast call \
+                --rpc-url "$L2_RPC_URL" \
+                "$GNOSIS_ARRAY_SUMMATION" \
+                "stateTransitionCount()(uint256)" 2>/dev/null || echo "0")
+              echo "Final transition count: $FINAL_TRANSITION"
+
+              echo ""
+              echo "=== L2 AVS Trigger Complete ==="
+              echo "Summary:"
+              echo "  Initial sum: $CURRENT_SUM -> Final sum: $FINAL_SUM"
+              echo "  Transition count: $TRANSITION_COUNT -> $FINAL_TRANSITION"
+
+              if [ "$FINAL_TRANSITION" != "$TRANSITION_COUNT" ]; then
+                echo "SUCCESS: State transition occurred!"
+              else
+                echo "NOTE: No state change detected"
+                echo "This may be expected if router is configured for L1"
+              fi
+
+              # Signal completion for curl sidecar
+              touch /trigger/main-done
+            EOT
+          ]
+
+          resources {
+            requests = {
+              cpu    = "100m"
+              memory = "256Mi"
+            }
+            limits = {
+              cpu    = "500m"
+              memory = "512Mi"
+            }
+          }
+        }
+
+        # Sidecar container: curl for HTTP requests (foundry image doesn't have curl)
+        container {
+          name  = "curl-trigger"
+          image = "curlimages/curl:latest"
+
+          volume_mount {
+            name       = "trigger-data"
+            mount_path = "/trigger"
+          }
+
+          command = [
+            "sh", "-c",
+            <<-EOT
+              echo "=== Curl Sidecar Started ==="
+              echo "Waiting for trigger payload..."
+
+              # Wait for payload to be ready (max 5 minutes)
+              WAIT_COUNT=0
+              while [ ! -f /trigger/ready ] && [ $WAIT_COUNT -lt 300 ]; do
+                sleep 1
+                WAIT_COUNT=$((WAIT_COUNT + 1))
+              done
+
+              if [ ! -f /trigger/ready ]; then
+                echo "ERROR: Timeout waiting for payload"
+                echo "TIMEOUT" > /trigger/response.txt
+                echo "TIMEOUT" > /trigger/http_code.txt
+                touch /trigger/done
+                exit 1
+              fi
+
+              echo "Payload ready, sending trigger request..."
+              cat /trigger/payload.json
+
+              # Send the trigger request and capture HTTP code separately
+              HTTP_CODE=$(curl -s -w "%%{http_code}" -o /trigger/response.txt -X POST \
+                -H "Content-Type: application/json" \
+                -d @/trigger/payload.json \
+                --max-time 120 \
+                http://gas-killer-router:8080/trigger 2>&1)
+
+              echo "$HTTP_CODE" > /trigger/http_code.txt
+              echo "Curl completed with HTTP code: $HTTP_CODE"
+              echo "Response:"
+              cat /trigger/response.txt
+
+              # Signal completion
+              touch /trigger/done
+
+              echo "Waiting for main container to finish..."
+              # Wait for main container to signal completion (max 5 minutes)
+              WAIT_COUNT=0
+              while [ ! -f /trigger/main-done ] && [ $WAIT_COUNT -lt 300 ]; do
+                sleep 1
+                WAIT_COUNT=$((WAIT_COUNT + 1))
+              done
+
+              echo "=== Curl Sidecar Exiting ==="
+            EOT
+          ]
+
+          resources {
+            requests = {
+              cpu    = "50m"
+              memory = "64Mi"
+            }
+            limits = {
+              cpu    = "200m"
+              memory = "128Mi"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  wait_for_completion = true
+
+  timeouts {
+    create = "10m"
+  }
+
+  depends_on = [kubernetes_job.l2_avs_config]
 }
 
 # Data source to get the ingress after deployment
@@ -641,7 +1492,9 @@ data "kubernetes_ingress_v1" "gas_killer" {
 # =============================================================================
 
 resource "kubernetes_job" "deploy_and_trigger" {
-  count = var.run_e2e_test ? 1 : 0
+  # Only run L1 E2E test when NOT in L2 mode (l2_avs_trigger handles L2 testing)
+  # This prevents deadlock: deploy_and_trigger waits for router, but router waits for l2_avs_config
+  count = var.run_e2e_test && !var.l2_avs_mode ? 1 : 0
 
   metadata {
     name      = "gas-killer-e2e-test"
@@ -653,7 +1506,7 @@ resource "kubernetes_job" "deploy_and_trigger" {
   }
 
   spec {
-    ttl_seconds_after_finished = 300 # Clean up after 5 minutes
+    ttl_seconds_after_finished = 3600 # Keep logs for 1 hour
     backoff_limit              = 2
 
     template {

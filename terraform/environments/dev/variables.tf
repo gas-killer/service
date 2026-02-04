@@ -238,3 +238,19 @@ variable "gnosis_factory_address" {
   type        = string
   default     = "0xCF2e7d5673Ec1b3F174f25A45ddd6d8b2923ca2e"
 }
+
+# =============================================================================
+# L2 AVS Trigger Configuration
+# =============================================================================
+
+variable "run_l2_avs_trigger" {
+  description = "Run L2 AVS trigger job to test Gnosis ArraySummation through router"
+  type        = bool
+  default     = false
+}
+
+variable "l2_avs_mode" {
+  description = "Enable L2 AVS mode - router/nodes will use L2 RPC and L2 AVS contracts"
+  type        = bool
+  default     = false
+}
