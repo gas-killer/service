@@ -180,6 +180,16 @@ bridge:
   # Set to true when running the L1-L2 bridge job via terraform
   waitForBridge: true
 
+# L2 Configuration (for Gnosis/multi-chain operation)
+# When enabled, router/nodes will also connect to L2 for AVS operations
+l2:
+  # Enable L2 AVS mode - router will use L2 RPC for AVS lookups
+  enabled: false
+  # L2 RPC URL (e.g., Gnosis mainnet)
+  rpcUrl: ""
+  # Path to L2 AVS deployment JSON (created by l2-avs-config job)
+  avsDeploymentPath: "/app/.nodes/l2_avs_deploy.json"
+
 # Shared data volume for keys and deployment configs
 sharedData:
   storageClass: ""
