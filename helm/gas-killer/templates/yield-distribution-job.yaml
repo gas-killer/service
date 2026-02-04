@@ -226,78 +226,19 @@ spec:
               cast rpc --rpc-url "$L2_RPC_URL" anvil_mine 0x1
 
               # Instead of mining 50k+ blocks, manipulate lastClaimedBlockNumber storage
-              # Set it to (currentBlock - cycleLength - 100) so distribution is ready
-              # Storage slot for lastClaimedBlockNumber - find it dynamically
-              echo "Finding storage slot for lastClaimedBlockNumber..."
-              echo "Looking for value: $LAST_CLAIMED"
+              # Storage slot 0x5 contains lastClaimedBlockNumber (verified on Gnosis mainnet)
+              LAST_CLAIMED_SLOT="0x5"
 
-              # Convert LAST_CLAIMED to padded hex for comparison (32 bytes = 64 hex chars)
-              LAST_CLAIMED_HEX=$(printf '0x%064x' "$LAST_CLAIMED")
-              echo "As hex: $LAST_CLAIMED_HEX"
+              # Set lastClaimedBlockNumber to make distribution ready
+              # New value = currentBlock - cycleLength - 100 (buffer)
+              NEW_LAST_CLAIMED=$((CURRENT - CYCLE_LENGTH - 100))
+              NEW_LAST_CLAIMED_HEX=$(printf '0x%064x' "$NEW_LAST_CLAIMED")
+              echo "Setting lastClaimedBlockNumber to $NEW_LAST_CLAIMED (slot $LAST_CLAIMED_SLOT)"
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$LAST_CLAIMED_SLOT" "$NEW_LAST_CLAIMED_HEX"
 
-              # Search through slots 0-50 (upgradeable contracts may have inherited storage)
-              LAST_CLAIMED_SLOT=""
-              for SLOT in $(seq 0 50); do
-                SLOT_HEX=$(printf '0x%x' "$SLOT")
-                SLOT_VALUE=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$SLOT_HEX" 2>/dev/null || echo "error")
-                # Debug: show first few slots
-                if [ "$SLOT" -lt 10 ]; then
-                  echo "  Slot $SLOT_HEX: $SLOT_VALUE"
-                fi
-                # Compare hex values directly (both are 0x-prefixed 32-byte values)
-                if [ "$SLOT_VALUE" = "$LAST_CLAIMED_HEX" ]; then
-                  LAST_CLAIMED_SLOT="$SLOT_HEX"
-                  echo "Found lastClaimedBlockNumber at slot $SLOT_HEX!"
-                  break
-                fi
-              done
-
-              if [ -n "$LAST_CLAIMED_SLOT" ]; then
-                # Set lastClaimedBlockNumber to make distribution ready
-                # New value = currentBlock - cycleLength - 100 (buffer)
-                NEW_LAST_CLAIMED=$((CURRENT - CYCLE_LENGTH - 100))
-                NEW_LAST_CLAIMED_HEX=$(printf '0x%064x' "$NEW_LAST_CLAIMED")
-                echo "Setting lastClaimedBlockNumber to $NEW_LAST_CLAIMED (slot $LAST_CLAIMED_SLOT)"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$LAST_CLAIMED_SLOT" "$NEW_LAST_CLAIMED_HEX"
-
-                # Verify the change
-                VERIFY=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null)
-                echo "Verified lastClaimedBlockNumber: $VERIFY"
-              else
-                echo "WARNING: Could not find lastClaimedBlockNumber storage slot in slots 0-50"
-                echo "Dumping all storage slots 0-20 for debugging:"
-                for SLOT in $(seq 0 20); do
-                  SLOT_HEX=$(printf '0x%x' "$SLOT")
-                  SLOT_VALUE=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$SLOT_HEX" 2>/dev/null || echo "error")
-                  echo "  Slot $SLOT_HEX: $SLOT_VALUE"
-                done
-
-                # Try to find slot by using cast's storage layout feature
-                echo ""
-                echo "Trying alternative: compute slot from variable name..."
-                # For YieldDistributor, lastClaimedBlockNumber is a uint256 state variable
-                # Try common slots for upgradeable contracts
-                for KNOWN_SLOT in 0 1 2 3 4 5 51 52 53 54 55 100 101 102 103 104 105; do
-                  SLOT_HEX=$(printf '0x%x' "$KNOWN_SLOT")
-                  SLOT_VALUE=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$SLOT_HEX" 2>/dev/null || echo "error")
-                  # Check if this slot has a reasonable block number (40M-50M range for Gnosis)
-                  # Convert last 8 hex digits to decimal
-                  LAST_8=${SLOT_VALUE: -16}
-                  SLOT_DEC=$((16#${LAST_8})) 2>/dev/null || SLOT_DEC=0
-                  if [ "$SLOT_DEC" -gt 40000000 ] && [ "$SLOT_DEC" -lt 50000000 ]; then
-                    echo "Slot $SLOT_HEX looks like a block number: $SLOT_DEC"
-                    LAST_CLAIMED_SLOT="$SLOT_HEX"
-                    # Try setting it
-                    NEW_LAST_CLAIMED=$((CURRENT - CYCLE_LENGTH - 100))
-                    NEW_LAST_CLAIMED_HEX=$(printf '0x%064x' "$NEW_LAST_CLAIMED")
-                    echo "Attempting to set slot $SLOT_HEX to $NEW_LAST_CLAIMED"
-                    cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$SLOT_HEX" "$NEW_LAST_CLAIMED_HEX"
-                    VERIFY=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null)
-                    echo "Verified lastClaimedBlockNumber: $VERIFY"
-                    break
-                  fi
-                done
-              fi
+              # Verify the change
+              VERIFY=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null)
+              echo "Verified lastClaimedBlockNumber: $VERIFY"
 
               NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
               echo "New block number: $NEW_BLOCK"
