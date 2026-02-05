@@ -45,7 +45,7 @@ eigen-services-operatorsinfo = "2.0.0"
 eigen-utils = "2.0.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
-gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer" }
+gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer", branch = "RonTuretzky/gas-killer-analyzer" }
 gas-killer-common = { path = "common" }
 governor = "0.6.3"
 hex = "0.4"
