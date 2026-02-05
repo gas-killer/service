@@ -301,6 +301,13 @@ jobs:
           # Port forward router ingress
           kubectl port-forward service/$ROUTER_SERVICE 8080:8080 &
 
+          # Port forward gnosis RPC (for yield distribution verification)
+          GNOSIS_SERVICE=$(kubectl get services -o name | grep gnosis | head -1 | sed 's|service/||')
+          if [ -n "$GNOSIS_SERVICE" ]; then
+            echo "Gnosis service: $GNOSIS_SERVICE"
+            kubectl port-forward service/$GNOSIS_SERVICE 8546:8546 &
+          fi
+
           # Wait for port forwards to be ready
           sleep 10
 
@@ -393,6 +400,74 @@ jobs:
           fi
 
           cd ..
+
+      - name: Trigger Yield Distribution via router
+        run: |
+          echo "=== Triggering Yield Distribution through router ==="
+
+          YIELD_DISTRIBUTOR="0xeE95A62b749d8a2520E0128D9b3aCa241269024b"
+          L2_RPC="http://localhost:8546"
+          ROUTER_URL="http://localhost:8080"
+
+          # Get current state
+          INITIAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
+          BLOCK=$(cast block-number --rpc-url "$L2_RPC" | tr -d '[:space:]')
+          echo "Initial stateTransitionCount: $INITIAL_COUNT"
+          echo "Gnosis block: $BLOCK"
+
+          # Verify distribution is ready
+          RESOLVER=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1)
+          echo "resolveYieldDistribution: $RESOLVER"
+
+          # Build distributeYieldGK() calldata
+          CALL_DATA=$(cast calldata "distributeYieldGK()")
+          echo "Calldata: $CALL_DATA"
+
+          # Convert calldata hex to JSON byte array
+          CALL_DATA_HEX="${CALL_DATA#0x}"
+          BYTES_ARRAY="["
+          for ((i=0; i<${#CALL_DATA_HEX}; i+=2)); do
+            [ $i -gt 0 ] && BYTES_ARRAY+=","
+            BYTES_ARRAY+="$((16#${CALL_DATA_HEX:$i:2}))"
+          done
+          BYTES_ARRAY+="]"
+
+          # Build and send trigger payload
+          PAYLOAD="{\"body\":{\"target_address\":\"$YIELD_DISTRIBUTOR\",\"call_data\":$BYTES_ARRAY,\"transition_index\":$INITIAL_COUNT,\"from_address\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\",\"value\":\"0\",\"block_height\":$BLOCK}}"
+          echo "Payload: $PAYLOAD"
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$ROUTER_URL/trigger")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -1)
+          echo "Router response ($HTTP_CODE): $BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Router rejected the trigger request"
+            echo "=== Router logs ==="
+            kubectl logs -l app.kubernetes.io/component=router --tail 50
+            exit 1
+          fi
+
+          # Wait for BLS aggregation
+          echo "Waiting 120s for BLS aggregation and on-chain execution..."
+          sleep 120
+
+          # Verify stateTransitionCount increased
+          FINAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
+          echo "Final stateTransitionCount: $FINAL_COUNT"
+
+          if [ "$FINAL_COUNT" -gt "$INITIAL_COUNT" ] 2>/dev/null; then
+            echo "=== YIELD DISTRIBUTION TRIGGER PASSED ==="
+            echo "stateTransitionCount increased from $INITIAL_COUNT to $FINAL_COUNT"
+          else
+            echo "=== YIELD DISTRIBUTION TRIGGER FAILED ==="
+            echo "stateTransitionCount did not increase (initial: $INITIAL_COUNT, final: $FINAL_COUNT)"
+            echo "=== Router logs ==="
+            kubectl logs -l app.kubernetes.io/component=router --tail 100
+            echo "=== Node-1 logs ==="
+            kubectl logs -l gas-killer/node-index=1 -c node --tail 100 || true
+            exit 1
+          fi
 
       - name: Show router logs
         run: |
