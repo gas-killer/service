@@ -409,7 +409,26 @@ jobs:
           L2_RPC="http://localhost:8546"
           ROUTER_URL="http://localhost:8080"
 
-          # Build distributeYieldGK() calldata once
+          # Capture router state before trigger
+          echo "=== Router pod status before trigger ==="
+          kubectl get pods -l app.kubernetes.io/component=router -o wide
+          ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          echo "Router pod: $ROUTER_POD"
+          echo "Restart count: $(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)"
+          echo "=== Router logs before trigger (last 50 lines) ==="
+          kubectl logs $ROUTER_POD --tail=50 || true
+
+          # Get current state
+          INITIAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
+          BLOCK=$(cast block-number --rpc-url "$L2_RPC" | tr -d '[:space:]')
+          echo "Initial stateTransitionCount: $INITIAL_COUNT"
+          echo "Gnosis block: $BLOCK"
+
+          # Verify distribution is ready
+          RESOLVER=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1)
+          echo "resolveYieldDistribution: $RESOLVER"
+
+          # Build distributeYieldGK() calldata
           CALL_DATA=$(cast calldata "distributeYieldGK()")
           echo "Calldata: $CALL_DATA"
 
@@ -422,73 +441,48 @@ jobs:
           done
           BYTES_ARRAY+="]"
 
-          INITIAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
-          echo "Initial stateTransitionCount: $INITIAL_COUNT"
+          # Build and send trigger payload
+          PAYLOAD="{\"body\":{\"target_address\":\"$YIELD_DISTRIBUTOR\",\"call_data\":$BYTES_ARRAY,\"transition_index\":$INITIAL_COUNT,\"from_address\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\",\"value\":\"0\",\"block_height\":$BLOCK}}"
+          echo "Payload: $PAYLOAD"
 
-          # Retry loop: router may restart after ArraySummation execution, losing queued tasks
-          MAX_ATTEMPTS=3
-          for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$ROUTER_URL/trigger")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -1)
+          echo "Router response ($HTTP_CODE): $BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Router rejected the trigger request"
+            echo "=== Router logs ==="
+            kubectl logs -l app.kubernetes.io/component=router --tail 50
+            exit 1
+          fi
+
+          # Capture logs periodically during the wait to catch crashes
+          echo "Waiting 120s for BLS aggregation and on-chain execution..."
+          for i in 30 60 90 120; do
+            sleep 30
             echo ""
-            echo "=== Attempt $ATTEMPT/$MAX_ATTEMPTS ==="
-
-            # Wait for router to be healthy before triggering
-            echo "Waiting for router to be ready..."
-            for i in $(seq 1 30); do
-              if curl -s -o /dev/null -w "%{http_code}" "$ROUTER_URL/trigger" 2>/dev/null | grep -qE "4[0-9][0-9]|200"; then
-                echo "Router is accepting connections"
-                break
-              fi
-              sleep 2
-            done
-
-            # Get fresh block number for each attempt
-            BLOCK=$(cast block-number --rpc-url "$L2_RPC" | tr -d '[:space:]')
-            CURRENT_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
-            echo "Current stateTransitionCount: $CURRENT_COUNT, Gnosis block: $BLOCK"
-
-            # Check if already succeeded from a previous attempt
-            if [ "$CURRENT_COUNT" -gt "$INITIAL_COUNT" ] 2>/dev/null; then
-              echo "stateTransitionCount already increased!"
-              break
+            echo "=== ${i}s checkpoint ==="
+            RESTART_COUNT=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)
+            PHASE=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.phase}' 2>/dev/null || echo unknown)
+            echo "Router pod phase: $PHASE, restart count: $RESTART_COUNT"
+            if [ "$RESTART_COUNT" != "0" ] && [ "$RESTART_COUNT" != "unknown" ]; then
+              echo "=== ROUTER RESTARTED! Previous container logs: ==="
+              kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous logs available"
+              echo "=== Current container logs (after restart): ==="
+              kubectl logs $ROUTER_POD --tail=100 2>/dev/null || true
             fi
-
-            # Verify distribution is still ready
-            RESOLVER=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1)
-            echo "resolveYieldDistribution: $RESOLVER"
-
-            # Build and send trigger payload
-            PAYLOAD="{\"body\":{\"target_address\":\"$YIELD_DISTRIBUTOR\",\"call_data\":$BYTES_ARRAY,\"transition_index\":$CURRENT_COUNT,\"from_address\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\",\"value\":\"0\",\"block_height\":$BLOCK}}"
-            echo "Payload: $PAYLOAD"
-
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$ROUTER_URL/trigger")
-            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-            BODY=$(echo "$RESPONSE" | head -1)
-            echo "Router response ($HTTP_CODE): $BODY"
-
-            if [ "$HTTP_CODE" != "200" ]; then
-              echo "Router rejected the trigger request, will retry..."
-              sleep 10
-              continue
-            fi
-
-            # Wait for BLS aggregation (aggregation_frequency=30s + processing time)
-            echo "Waiting 90s for BLS aggregation and on-chain execution..."
-            sleep 90
-
-            # Check if stateTransitionCount increased
-            CURRENT_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
-            echo "stateTransitionCount after attempt $ATTEMPT: $CURRENT_COUNT"
-
-            if [ "$CURRENT_COUNT" -gt "$INITIAL_COUNT" ] 2>/dev/null; then
-              break
-            fi
-
-            echo "stateTransitionCount unchanged, retrying..."
           done
 
-          # Final check
-          FINAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
+          # Final state
           echo ""
+          echo "=== Final router state ==="
+          kubectl get pods -l app.kubernetes.io/component=router -o wide
+          FINAL_RESTART=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)
+          echo "Final restart count: $FINAL_RESTART"
+
+          # Verify stateTransitionCount increased
+          FINAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
           echo "Final stateTransitionCount: $FINAL_COUNT"
 
           if [ "$FINAL_COUNT" -gt "$INITIAL_COUNT" ] 2>/dev/null; then
@@ -497,10 +491,21 @@ jobs:
           else
             echo "=== YIELD DISTRIBUTION TRIGGER FAILED ==="
             echo "stateTransitionCount did not increase (initial: $INITIAL_COUNT, final: $FINAL_COUNT)"
-            echo "=== Router logs ==="
-            kubectl logs -l app.kubernetes.io/component=router --tail 100
+            echo ""
+            echo "=== FULL Router logs ==="
+            kubectl logs $ROUTER_POD --tail=500 2>/dev/null || true
+            echo ""
+            echo "=== Previous container logs (if restarted) ==="
+            kubectl logs $ROUTER_POD --previous --tail=500 2>/dev/null || echo "No previous container logs"
+            echo ""
             echo "=== Node-1 logs ==="
-            kubectl logs -l gas-killer/node-index=1 -c node --tail 100 || true
+            kubectl logs -l gas-killer/node-index=1 -c node --tail 200 || true
+            echo ""
+            echo "=== Node-2 logs ==="
+            kubectl logs -l gas-killer/node-index=2 -c node --tail 200 || true
+            echo ""
+            echo "=== Node-3 logs ==="
+            kubectl logs -l gas-killer/node-index=3 -c node --tail 200 || true
             exit 1
           fi
 
@@ -543,11 +548,17 @@ jobs:
           echo "=== Gnosis Logs ==="
           kubectl logs -l app.kubernetes.io/component=gnosis --tail 200 || true
 
-          echo "=== Router Logs ==="
-          kubectl logs -l app.kubernetes.io/component=router --tail 500 || true
+          echo "=== Router Logs (current) ==="
+          ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [ -n "$ROUTER_POD" ]; then
+            echo "Restart count: $(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)"
+            kubectl logs $ROUTER_POD --tail=500 || true
+            echo ""
+            echo "=== Router Logs (previous container, if crashed/restarted) ==="
+            kubectl logs $ROUTER_POD --previous --tail=500 2>/dev/null || echo "No previous container logs available"
+          fi
 
           echo "=== Router Init Container Logs ==="
-          ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
           if [ -n "$ROUTER_POD" ]; then
             kubectl logs $ROUTER_POD -c wait-for-setup || true
             kubectl logs $ROUTER_POD -c wait-for-ethereum || true
