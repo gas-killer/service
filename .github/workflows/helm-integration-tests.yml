@@ -467,10 +467,10 @@ jobs:
             PHASE=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.phase}' 2>/dev/null || echo unknown)
             echo "Router pod phase: $PHASE, restart count: $RESTART_COUNT"
             if [ "$RESTART_COUNT" != "0" ] && [ "$RESTART_COUNT" != "unknown" ]; then
-              echo "=== ROUTER RESTARTED! Previous container logs: ==="
-              kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous logs available"
+              echo "=== ROUTER RESTARTED! Previous container logs (last 2000 lines): ==="
+              kubectl logs $ROUTER_POD --previous --tail=2000 2>/dev/null || echo "No previous logs available"
               echo "=== Current container logs (after restart): ==="
-              kubectl logs $ROUTER_POD --tail=100 2>/dev/null || true
+              kubectl logs $ROUTER_POD --tail=200 2>/dev/null || true
             fi
           done
 
@@ -493,10 +493,10 @@ jobs:
             echo "stateTransitionCount did not increase (initial: $INITIAL_COUNT, final: $FINAL_COUNT)"
             echo ""
             echo "=== FULL Router logs ==="
-            kubectl logs $ROUTER_POD --tail=500 2>/dev/null || true
+            kubectl logs $ROUTER_POD --tail=1000 2>/dev/null || true
             echo ""
             echo "=== Previous container logs (if restarted) ==="
-            kubectl logs $ROUTER_POD --previous --tail=500 2>/dev/null || echo "No previous container logs"
+            kubectl logs $ROUTER_POD --previous --tail=2000 2>/dev/null || echo "No previous container logs"
             echo ""
             echo "=== Node-1 logs ==="
             kubectl logs -l gas-killer/node-index=1 -c node --tail 200 || true
@@ -552,10 +552,10 @@ jobs:
           ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
           if [ -n "$ROUTER_POD" ]; then
             echo "Restart count: $(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)"
-            kubectl logs $ROUTER_POD --tail=500 || true
+            kubectl logs $ROUTER_POD --tail=1000 || true
             echo ""
             echo "=== Router Logs (previous container, if crashed/restarted) ==="
-            kubectl logs $ROUTER_POD --previous --tail=500 2>/dev/null || echo "No previous container logs available"
+            kubectl logs $ROUTER_POD --previous --tail=2000 2>/dev/null || echo "No previous container logs available"
           fi
 
           echo "=== Router Init Container Logs ==="
