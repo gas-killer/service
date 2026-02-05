@@ -123,8 +123,11 @@ node:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "512Mi"
-      cpu: "250m"
+      # Nodes spawn local Anvil forks for gas analysis during validation.
+      # Tracing complex mainnet fork state (e.g. Gnosis YieldDistributor)
+      # requires significantly more memory than the process itself.
+      memory: "2Gi"
+      cpu: "500m"
 
 # Gas Killer Router configuration
 router:
@@ -148,11 +151,14 @@ router:
     ingressPort: 8080
   resources:
     requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
       memory: "512Mi"
       cpu: "250m"
+    limits:
+      # Router spawns local Anvil forks for gas analysis (creator phase).
+      # debug_traceTransaction on complex mainnet fork state (e.g. Gnosis
+      # YieldDistributor) requires several GB of memory for the child Anvil process.
+      memory: "4Gi"
+      cpu: "1000m"
 
 # Orchestrator configuration
 # The orchestrator configs are included in the Docker image at /app/config/

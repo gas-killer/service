@@ -267,6 +267,8 @@ spec:
               value: {{ .Values.router.ingress.enabled | quote }}
             - name: INGRESS_ADDRESS
               value: "0.0.0.0:{{ .Values.router.ingressPort }}"
+            - name: RUST_BACKTRACE
+              value: "1"
             - name: INGRESS_TIMEOUT_MS
               value: {{ .Values.router.ingress.timeoutMs | quote }}
             - name: PRIVATE_KEY
