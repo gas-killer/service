@@ -172,6 +172,11 @@ spec:
             - name: WS_RPC
               value: "ws://{{ include "gas-killer.ethereum.fullname" $root }}:{{ $root.Values.ethereum.service.port }}"
             {{- end }}
+            {{- if and (eq $root.Values.global.environment "LOCAL") $root.Values.gnosis.enabled }}
+            # LOCAL mode: Gnosis RPC for cross-chain validation (PR 87 multi-chain support)
+            - name: GNOSIS_HTTP_RPC
+              value: "http://{{ include "gas-killer.gnosis.fullname" $root }}:{{ $root.Values.gnosis.service.port }}"
+            {{- end }}
             {{- if and $root.Values.l2 $root.Values.l2.enabled }}
             # TESTNET + L2 mode: Use L2 AVS deployment path
             - name: AVS_DEPLOYMENT_PATH

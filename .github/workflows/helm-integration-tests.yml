@@ -257,9 +257,6 @@ jobs:
           echo "Waiting for ethereum pod..."
           kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=ethereum --timeout=180s
 
-          echo "Waiting for signer pod..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=signer --timeout=180s
-
           echo "Waiting for node pods..."
           # Show pod status before waiting
           echo "=== Current pod status ==="
