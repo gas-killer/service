@@ -467,10 +467,10 @@ jobs:
             PHASE=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.phase}' 2>/dev/null || echo unknown)
             echo "Router pod phase: $PHASE, restart count: $RESTART_COUNT"
             if [ "$RESTART_COUNT" != "0" ] && [ "$RESTART_COUNT" != "unknown" ]; then
-              echo "=== ROUTER RESTARTED! Previous container logs (last 2000 lines): ==="
-              kubectl logs $ROUTER_POD --previous --tail=2000 2>/dev/null || echo "No previous logs available"
+              echo "=== ROUTER RESTARTED! Previous container logs (last 200 lines): ==="
+              kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous logs available"
               echo "=== Current container logs (after restart): ==="
-              kubectl logs $ROUTER_POD --tail=200 2>/dev/null || true
+              kubectl logs $ROUTER_POD --tail=100 2>/dev/null || true
             fi
           done
 
@@ -492,20 +492,20 @@ jobs:
             echo "=== YIELD DISTRIBUTION TRIGGER FAILED ==="
             echo "stateTransitionCount did not increase (initial: $INITIAL_COUNT, final: $FINAL_COUNT)"
             echo ""
-            echo "=== FULL Router logs ==="
-            kubectl logs $ROUTER_POD --tail=1000 2>/dev/null || true
+            echo "=== Router logs (last 100) ==="
+            kubectl logs $ROUTER_POD --tail=100 2>/dev/null || true
             echo ""
-            echo "=== Previous container logs (if restarted) ==="
-            kubectl logs $ROUTER_POD --previous --tail=2000 2>/dev/null || echo "No previous container logs"
+            echo "=== Previous container logs (if restarted, last 200) ==="
+            kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous container logs"
             echo ""
-            echo "=== Node-1 logs ==="
-            kubectl logs -l gas-killer/node-index=1 -c node --tail 200 || true
+            echo "=== Node-1 logs (last 50) ==="
+            kubectl logs -l gas-killer/node-index=1 -c node --tail 50 || true
             echo ""
-            echo "=== Node-2 logs ==="
-            kubectl logs -l gas-killer/node-index=2 -c node --tail 200 || true
+            echo "=== Node-2 logs (last 50) ==="
+            kubectl logs -l gas-killer/node-index=2 -c node --tail 50 || true
             echo ""
-            echo "=== Node-3 logs ==="
-            kubectl logs -l gas-killer/node-index=3 -c node --tail 200 || true
+            echo "=== Node-3 logs (last 50) ==="
+            kubectl logs -l gas-killer/node-index=3 -c node --tail 50 || true
             exit 1
           fi
 
@@ -517,77 +517,33 @@ jobs:
       - name: Collect logs on failure
         if: failure()
         run: |
-          echo "=== Helm Status ==="
-          helm status gas-killer || true
-
           echo "=== All Pods Status ==="
           kubectl get pods -o wide
 
-          echo "=== Pod Descriptions ==="
-          kubectl describe pods || true
-
-          echo "=== PVC Status ==="
-          kubectl get pvc
-          kubectl describe pvc || true
-
-          echo "=== Events ==="
-          kubectl get events --sort-by=.metadata.creationTimestamp
-
-          echo "=== Ethereum Logs ==="
-          kubectl logs -l app.kubernetes.io/component=ethereum --tail 50 || true
-
-          echo "=== Setup Job Logs ==="
-          kubectl logs -l app.kubernetes.io/component=setup --tail 100 || true
-
-          echo "=== Bridge Job Logs ==="
-          kubectl logs -l app.kubernetes.io/component=bridge --tail 100 || true
+          echo "=== Events (last 30) ==="
+          kubectl get events --sort-by=.metadata.creationTimestamp | tail -30
 
           echo "=== Yield Distribution Job Logs ==="
-          kubectl logs -l app.kubernetes.io/component=yield-distribution --tail 300 || true
+          kubectl logs -l app.kubernetes.io/component=yield-distribution --tail 100 || true
 
-          echo "=== Gnosis Logs ==="
-          kubectl logs -l app.kubernetes.io/component=gnosis --tail 200 || true
-
-          echo "=== Router Logs (current) ==="
+          echo "=== Router Logs (current, last 200) ==="
           ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
           if [ -n "$ROUTER_POD" ]; then
             echo "Restart count: $(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)"
-            kubectl logs $ROUTER_POD --tail=1000 || true
+            kubectl logs $ROUTER_POD --tail=200 || true
             echo ""
             echo "=== Router Logs (previous container, if crashed/restarted) ==="
-            kubectl logs $ROUTER_POD --previous --tail=2000 2>/dev/null || echo "No previous container logs available"
+            kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous container logs available"
           fi
 
-          echo "=== Router Init Container Logs ==="
-          if [ -n "$ROUTER_POD" ]; then
-            kubectl logs $ROUTER_POD -c wait-for-setup || true
-            kubectl logs $ROUTER_POD -c wait-for-ethereum || true
-            kubectl logs $ROUTER_POD -c wait-for-nodes || true
-          fi
+          echo "=== Node-1 Logs (last 100) ==="
+          kubectl logs -l gas-killer/node-index=1 -c node --tail 100 || true
 
-          echo "=== Node-1 Logs ==="
-          NODE1_POD=$(kubectl get pods -l gas-killer/node-index=1 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-          if [ -n "$NODE1_POD" ]; then
-            echo "Node-1 init container logs:"
-            kubectl logs $NODE1_POD -c wait-for-setup || true
-            kubectl logs $NODE1_POD -c wait-for-ethereum || true
-            echo "Node-1 main container logs:"
-            kubectl logs $NODE1_POD -c node || true
-          fi
+          echo "=== Node-2 Logs (last 100) ==="
+          kubectl logs -l gas-killer/node-index=2 -c node --tail 100 || true
 
-          echo "=== Node-2 Logs ==="
-          NODE2_POD=$(kubectl get pods -l gas-killer/node-index=2 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-          if [ -n "$NODE2_POD" ]; then
-            kubectl logs $NODE2_POD -c wait-for-setup || true
-            kubectl logs $NODE2_POD -c node || true
-          fi
-
-          echo "=== Node-3 Logs ==="
-          NODE3_POD=$(kubectl get pods -l gas-killer/node-index=3 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-          if [ -n "$NODE3_POD" ]; then
-            kubectl logs $NODE3_POD -c wait-for-setup || true
-            kubectl logs $NODE3_POD -c node || true
-          fi
+          echo "=== Node-3 Logs (last 100) ==="
+          kubectl logs -l gas-killer/node-index=3 -c node --tail 100 || true
 
       - name: Cleanup
         if: always()

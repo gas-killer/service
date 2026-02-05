@@ -126,8 +126,9 @@ node:
       # Nodes spawn local Anvil forks for gas analysis during validation.
       # Tracing complex mainnet fork state (e.g. Gnosis YieldDistributor)
       # requires significantly more memory than the process itself.
-      memory: "2Gi"
-      cpu: "500m"
+      # Must match router memory limit since nodes run the same gas analysis.
+      memory: "4Gi"
+      cpu: "1000m"
 
 # Gas Killer Router configuration
 router:
