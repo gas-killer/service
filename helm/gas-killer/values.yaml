@@ -123,13 +123,12 @@ node:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      # Nodes spawn local Anvil forks for gas analysis during validation.
-      # Tracing complex mainnet fork state (e.g. Gnosis YieldDistributor)
-      # requires significantly more memory than the process itself.
-      # Keep below 4Gi to avoid system-wide OOM when 3 nodes + router
-      # run gas analysis on a CI runner with limited total RAM.
-      memory: "3Gi"
-      cpu: "1000m"
+      # With PR-87, nodes send debug_traceCall directly to the target
+      # chain RPC (e.g. gas-killer-gnosis:8546) instead of spawning
+      # local Anvil forks.  The heavy memory usage is on the Gnosis
+      # Anvil pod; nodes themselves are lightweight HTTP clients.
+      memory: "1Gi"
+      cpu: "500m"
 
 # Gas Killer Router configuration
 router:
@@ -156,10 +155,11 @@ router:
       memory: "512Mi"
       cpu: "250m"
     limits:
-      # Router spawns local Anvil forks for gas analysis (creator phase).
-      # debug_traceTransaction on complex mainnet fork state (e.g. Gnosis
-      # YieldDistributor) requires several GB of memory for the child Anvil process.
-      memory: "4Gi"
+      # With PR-87, the router sends debug_traceCall directly to the
+      # target chain RPC (e.g. gas-killer-gnosis:8546) instead of
+      # spawning a local Anvil fork.  It still orchestrates the Creator
+      # phase but does not need multi-GB headroom itself.
+      memory: "2Gi"
       cpu: "1000m"
 
 # Orchestrator configuration
@@ -200,9 +200,11 @@ gnosis:
       memory: "1Gi"
       cpu: "500m"
     limits:
-      # Gnosis Anvil serves as the fork source for all node inner Anvils.
-      # Under concurrent fork requests from 3 nodes it needs extra headroom.
-      memory: "3Gi"
+      # With PR-87, router + all 3 nodes send debug_traceCall directly
+      # to this Anvil (no inner forks).  Tracing the YieldDistributor on
+      # a Gnosis mainnet fork requires several GB per concurrent request.
+      # This is now the primary memory bottleneck for gas analysis.
+      memory: "6Gi"
       cpu: "1000m"
 
 # Bridge configuration - bridges EigenLayer operator state from L1 to L2
