@@ -115,7 +115,7 @@ node:
     # kind load docker-image gas-killer-node:local --name <cluster-name>
     repository: gas-killer-router
     tag: node-pr-87
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
   resources:
@@ -137,7 +137,7 @@ router:
     # kind load docker-image gas-killer-router:local --name <cluster-name>
     repository: gas-killer-router
     tag: pr-87
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   port: 3000
   ingressPort: 8080
   ingress:
