@@ -98,8 +98,10 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         (http_rpc.clone(), dep)
     };
 
-    let view_only_provider =
-        ProviderBuilder::new().connect_http(url::Url::parse(&rpc_for_reads).unwrap());
+    let view_only_provider = ProviderBuilder::new().connect_http(
+        url::Url::parse(&rpc_for_reads)
+            .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", rpc_for_reads, e))?,
+    );
 
     let bls_apk_registry_address = deployment
         .bls_apk_registry_address()
@@ -121,7 +123,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     providers.push(sepolia_provider);
     info!("Created Sepolia wallet provider");
 
-    // Gnosis provider (optional - only if GNOSIS_HTTP_RPC is set)
+    // Gnosis provider — required in L2 mode, optional otherwise
     if let Some(ref gnosis_rpc) = gnosis_rpc {
         match create_wallet_provider("gnosis", gnosis_rpc, &private_key).await {
             Ok(gnosis_provider) => {
@@ -129,6 +131,12 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
                 info!("Created Gnosis wallet provider");
             }
             Err(e) => {
+                if use_l2 {
+                    return Err(anyhow::anyhow!(
+                        "L2 mode requires a Gnosis wallet provider but it failed to initialize: {}",
+                        e
+                    ));
+                }
                 tracing::warn!(
                     error = %e,
                     "Failed to create Gnosis wallet provider, Gnosis chain will be unavailable"
