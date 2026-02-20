@@ -66,7 +66,8 @@ async fn create_wallet_provider_for_chain(
 /// Loads the L2 AVS deployment from `L2_AVS_DEPLOYMENT_PATH`.
 /// Mirrors `AvsDeployment::load()` which reads from `AVS_DEPLOYMENT_PATH`.
 fn load_l2_avs_deployment() -> Result<AvsDeployment> {
-    let path = env::var("L2_AVS_DEPLOYMENT_PATH").expect("L2_AVS_DEPLOYMENT_PATH must be set");
+    let path = env::var("L2_AVS_DEPLOYMENT_PATH")
+        .map_err(|_| anyhow::anyhow!("L2_AVS_DEPLOYMENT_PATH must be set"))?;
     let content = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("Failed to read L2 deployment file {}: {}", path, e))?;
     let deployment: AvsDeployment = serde_json::from_str(&content)

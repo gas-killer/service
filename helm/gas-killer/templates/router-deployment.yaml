@@ -160,8 +160,10 @@ spec:
             {{- if .Values.router.gnosisHttpRpc }}
             - name: GNOSIS_HTTP_RPC
               value: {{ .Values.router.gnosisHttpRpc | quote }}
+            {{- if .Values.router.l2AvsDeployment }}
             - name: L2_AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/l2_avs_deploy.json"
+            {{- end }}
             {{- end }}
             - name: INGRESS
               value: {{ .Values.router.ingress.enabled | quote }}
@@ -211,6 +213,12 @@ spec:
               subPath: router_orchestrator.json
               readOnly: true
             {{- end }}
+            {{- if .Values.router.l2AvsDeployment }}
+            - name: config
+              mountPath: /app/.nodes/l2_avs_deploy.json
+              subPath: l2_avs_deploy.json
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.router.resources | nindent 12 }}
 
@@ -221,6 +229,11 @@ spec:
         {{- if .Values.orchestrator.routerPrivateKey }}
         - name: router-key
           emptyDir: {}
+        {{- end }}
+        {{- if .Values.router.l2AvsDeployment }}
+        - name: config
+          configMap:
+            name: {{ include "gas-killer.config.fullname" . }}
         {{- end }}
 ---
 apiVersion: v1
