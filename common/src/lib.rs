@@ -5,7 +5,7 @@ pub mod validator;
 
 // Re-export commonly used types
 pub use config::{
-    KeyConfig, OrchestratorConfig, get_operator_states, load_key_from_file,
+    ChainId, KeyConfig, OrchestratorConfig, get_operator_states, load_key_from_file,
     load_orchestrator_config,
 };
 pub use task_data::GasKillerTaskData;
