@@ -230,9 +230,12 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             "Creator received task"
         );
 
-        // Compute storage updates using the shared validator
-        debug!("Computing storage updates for task");
-        let (storage_updates, block_height) = self
+        // Compute storage updates - the validator automatically detects which chain has the contract
+        debug!(
+            "Computing storage updates for target {}",
+            task.body.target_address
+        );
+        let (storage_updates, block_height, detected_chain) = self
             .validator
             .compute_storage_updates_for_tx(
                 task.body.target_address,
@@ -256,7 +259,8 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             transition_index = task.body.transition_index,
             target_address = %task.body.target_address,
             target_function = %task.body.call_data.get(..4).map(hex::encode).unwrap_or_default(),
-            "Creator computed storage updates"
+            chain = %detected_chain,
+            "Creator computed storage updates on detected chain"
         );
 
         // Store enriched task with computed storage updates and block height for metadata access
