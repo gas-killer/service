@@ -15,3 +15,9 @@ test_processes.pids
 
 # Script build artifacts
 scripts/target
+
+# Terraform state (should use remote backend)
+terraform.tfstate
+terraform.tfstate.*
+*.tfstate
+*.tfstate.*

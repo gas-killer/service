@@ -1,4 +1,6 @@
-{{- if and .Values.ethereum.enabled .Values.secrets.forkUrl }}
+{{- /* Setup job runs in both LOCAL and TESTNET modes */ -}}
+{{- $runSetup := or (and .Values.secrets.forkUrl (eq .Values.global.environment "LOCAL")) (and .Values.secrets.rpcUrl (eq .Values.global.environment "TESTNET")) -}}
+{{- if $runSetup }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -21,8 +23,9 @@ spec:
         app.kubernetes.io/component: setup
     spec:
       restartPolicy: OnFailure
+      {{- if eq .Values.global.environment "LOCAL" }}
       initContainers:
-        # Wait for ethereum to be ready
+        # Wait for ethereum to be ready (LOCAL mode only)
         - name: wait-for-ethereum
           image: busybox:1.36
           command:
@@ -42,6 +45,7 @@ spec:
                 ELAPSED=$((ELAPSED + 5))
               done
               echo "Ethereum is ready!"
+      {{- end }}
 
       containers:
         # Run EigenLayer setup (creates operator keys and avs_deploy.json)
@@ -55,8 +59,37 @@ spec:
             - -c
             - |
               set +e
-              # Run the eigenlayer setup (it may exit with non-zero even on success)
-              /main.sh || true
+              # Write all logs to both stdout AND a file on the PVC
+              # This ensures logs survive even if the pod crashes
+              LOG_FILE="/root/.nodes/setup.log"
+              exec > >(tee -a "$LOG_FILE") 2>&1
+              echo "=== Setup Job Starting at $(date -Iseconds) ==="
+              echo "Logs being written to: $LOG_FILE"
+              echo ""
+              echo "=== Setup Job Starting ==="
+              echo "ENVIRONMENT: $ENVIRONMENT"
+              echo "TEST_ACCOUNTS: $TEST_ACCOUNTS"
+              echo "RPC_URL: ${RPC_URL:0:50}..."
+              echo "DELEGATION_MANAGER_ADDRESS: $DELEGATION_MANAGER_ADDRESS"
+              echo "STRATEGY_MANAGER_ADDRESS: $STRATEGY_MANAGER_ADDRESS"
+              echo "ALLOCATION_MANAGER_ADDRESS: $ALLOCATION_MANAGER_ADDRESS"
+              echo ""
+              echo "=== Running /main.sh ==="
+
+              # Run the eigenlayer setup and capture output
+              /main.sh 2>&1
+              MAIN_EXIT_CODE=$?
+
+              echo ""
+              echo "=== /main.sh completed with exit code: $MAIN_EXIT_CODE ==="
+              echo ""
+              echo "=== Checking created files ==="
+              echo "Contents of /root/.nodes:"
+              ls -la /root/.nodes/ 2>/dev/null || echo "Directory does not exist or is empty"
+              echo ""
+              echo "Contents of /root/.nodes/operator_keys:"
+              ls -la /root/.nodes/operator_keys/ 2>/dev/null || echo "Directory does not exist or is empty"
+              echo ""
 
               # Verify that required files were created
               if [ -f /root/.nodes/avs_deploy.json ]; then
@@ -83,16 +116,28 @@ spec:
                 touch /root/.nodes/.setup_complete
                 chmod 644 /root/.nodes/.setup_complete
                 echo "Setup marker created"
+                echo "=== Setup Job SUCCEEDED at $(date -Iseconds) ==="
                 exit 0
               else
                 echo "Error: avs_deploy.json not found"
+                echo "=== Setup Job FAILED at $(date -Iseconds) ==="
                 exit 1
               fi
           env:
             - name: ENVIRONMENT
               value: {{ .Values.global.environment | quote }}
+            {{- if eq .Values.global.environment "TESTNET" }}
+            # TESTNET mode: Use external RPC from secret
+            - name: RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: RPC_URL
+            {{- else }}
+            # LOCAL mode: Use local Anvil service
             - name: RPC_URL
               value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+            {{- end }}
             - name: TEST_ACCOUNTS
               value: {{ .Values.global.nodeCount | quote }}
             - name: PRIVATE_KEY
