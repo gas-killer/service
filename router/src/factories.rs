@@ -11,7 +11,8 @@ use commonware_avs_router::bindings::blsapkregistry::BLSApkRegistry;
 use commonware_avs_router::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorStateRetriever;
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
 use commonware_avs_usecases::AvsDeployment;
-use gas_killer_common::{GasKillerValidator, WalletProvider};
+use gas_killer_common::{ChainId, GasKillerValidator, WalletProvider};
+use std::collections::HashMap;
 use std::{env, str::FromStr, sync::Arc};
 use tracing::info;
 
@@ -38,21 +39,26 @@ pub async fn create_listening_creator_with_server(
 }
 
 /// Creates a wallet provider for a specific chain
-async fn create_wallet_provider(
-    chain_name: &str,
-    rpc_url: &str,
+async fn create_wallet_provider_for_chain(
+    chain_id: ChainId,
     private_key: &str,
 ) -> Result<WalletProvider> {
+    let http_rpc = match chain_id {
+        ChainId::Sepolia => {
+            env::var("HTTP_RPC").map_err(|_| anyhow::anyhow!("HTTP_RPC must be set for Sepolia"))?
+        }
+        ChainId::Gnosis => env::var("GNOSIS_HTTP_RPC")
+            .map_err(|_| anyhow::anyhow!("GNOSIS_HTTP_RPC must be set for Gnosis"))?,
+    };
+
     let ecdsa_signer = PrivateKeySigner::from_str(private_key)
         .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
 
     let provider = ProviderBuilder::new()
         .wallet(ecdsa_signer)
-        .connect(rpc_url)
+        .connect(&http_rpc)
         .await
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to connect write provider for {}: {}", chain_name, e)
-        })?;
+        .map_err(|e| anyhow::anyhow!("Failed to connect write provider for {}: {}", chain_id, e))?;
 
     Ok(provider)
 }
@@ -113,22 +119,23 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         })?;
 
     // Create wallet providers for each supported chain
-    let mut providers: Vec<WalletProvider> = Vec::new();
+    let mut providers: HashMap<ChainId, WalletProvider> = HashMap::new();
 
-    // Sepolia provider (required, checked first)
-    let sepolia_provider = create_wallet_provider("sepolia", &http_rpc, &private_key).await?;
-    providers.push(sepolia_provider);
-    info!("Created Sepolia wallet provider");
+    // Sepolia provider (required)
+    let sepolia_provider = create_wallet_provider_for_chain(ChainId::Sepolia, &private_key).await?;
+    providers.insert(ChainId::Sepolia, sepolia_provider);
+    info!(chain = %ChainId::Sepolia, "Created wallet provider");
 
     // Gnosis provider (optional - only if GNOSIS_HTTP_RPC is set)
-    if let Some(ref gnosis_rpc) = gnosis_rpc {
-        match create_wallet_provider("gnosis", gnosis_rpc, &private_key).await {
+    if gnosis_rpc.is_some() {
+        match create_wallet_provider_for_chain(ChainId::Gnosis, &private_key).await {
             Ok(gnosis_provider) => {
-                providers.push(gnosis_provider);
-                info!("Created Gnosis wallet provider");
+                providers.insert(ChainId::Gnosis, gnosis_provider);
+                info!(chain = %ChainId::Gnosis, "Created wallet provider");
             }
             Err(e) => {
                 tracing::warn!(
+                    chain = %ChainId::Gnosis,
                     error = %e,
                     "Failed to create Gnosis wallet provider, Gnosis chain will be unavailable"
                 );
