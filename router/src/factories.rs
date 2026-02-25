@@ -66,7 +66,8 @@ async fn create_wallet_provider_for_chain(
 /// Loads the L2 AVS deployment from `L2_AVS_DEPLOYMENT_PATH`.
 /// Mirrors `AvsDeployment::load()` which reads from `AVS_DEPLOYMENT_PATH`.
 fn load_l2_avs_deployment() -> Result<AvsDeployment> {
-    let path = env::var("L2_AVS_DEPLOYMENT_PATH").expect("L2_AVS_DEPLOYMENT_PATH must be set");
+    let path = env::var("L2_AVS_DEPLOYMENT_PATH")
+        .map_err(|_| anyhow::anyhow!("L2_AVS_DEPLOYMENT_PATH must be set"))?;
     let content = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("Failed to read L2 deployment file {}: {}", path, e))?;
     let deployment: AvsDeployment = serde_json::from_str(&content)
@@ -103,8 +104,10 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         (http_rpc.clone(), dep)
     };
 
-    let view_only_provider =
-        ProviderBuilder::new().connect_http(url::Url::parse(&rpc_for_reads).unwrap());
+    let view_only_provider = ProviderBuilder::new().connect_http(
+        url::Url::parse(&rpc_for_reads)
+            .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", rpc_for_reads, e))?,
+    );
 
     let bls_apk_registry_address = deployment
         .bls_apk_registry_address()
@@ -126,7 +129,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     providers.insert(ChainId::Sepolia, sepolia_provider);
     info!(chain = %ChainId::Sepolia, "Created wallet provider");
 
-    // Gnosis provider (optional - only if GNOSIS_HTTP_RPC is set)
+    // Gnosis provider — required in L2 mode, optional otherwise
     if gnosis_rpc.is_some() {
         match create_wallet_provider_for_chain(ChainId::Gnosis, &private_key).await {
             Ok(gnosis_provider) => {
@@ -134,6 +137,12 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
                 info!(chain = %ChainId::Gnosis, "Created wallet provider");
             }
             Err(e) => {
+                if use_l2 {
+                    return Err(anyhow::anyhow!(
+                        "L2 mode requires a Gnosis wallet provider but it failed to initialize: {}",
+                        e
+                    ));
+                }
                 tracing::warn!(
                     chain = %ChainId::Gnosis,
                     error = %e,
