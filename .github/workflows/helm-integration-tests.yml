@@ -444,43 +444,6 @@ jobs:
 
           echo "✅ All $SUCCESSFUL triggers completed successfully!"
 
-      - name: Align L1 block number with L2
-        run: |
-          echo "=== Aligning L1 block number with L2 for BLS staleness check ==="
-          # The BLS executor uses the L1 block as the reference block for verifyAndUpdate,
-          # but the GasKiller contract on L2 checks referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number.
-          # Since L2 (Gnosis fork ~44M) is far ahead of L1 (Sepolia fork ~10M), we mine blocks
-          # on L1 to close the gap. This is done AFTER helm install completes so the hook pods
-          # have freed their memory, reducing OOM pressure on the ethereum pod.
-
-          L1_RPC="http://localhost:8545"
-          L2_RPC="http://localhost:8546"
-
-          L1_BLOCK=$(cast block-number --rpc-url "$L1_RPC" | tr -d '[:space:]')
-          L2_BLOCK=$(cast block-number --rpc-url "$L2_RPC" | tr -d '[:space:]')
-          echo "L1 block: $L1_BLOCK, L2 block: $L2_BLOCK"
-
-          if [ "$L1_BLOCK" -lt "$L2_BLOCK" ] 2>/dev/null; then
-            GAP=$((L2_BLOCK - L1_BLOCK + 1000))
-            BATCH=500000
-            echo "Mining $GAP blocks on L1 in batches of $BATCH..."
-            MINED=0
-            while [ $MINED -lt $GAP ]; do
-              REMAINING=$((GAP - MINED))
-              CHUNK=$BATCH
-              if [ $REMAINING -lt $BATCH ]; then
-                CHUNK=$REMAINING
-              fi
-              cast rpc --rpc-url "$L1_RPC" anvil_mine $(printf '0x%x' "$CHUNK")
-              MINED=$((MINED + CHUNK))
-              echo "  Mined $MINED / $GAP blocks"
-            done
-            NEW_L1=$(cast block-number --rpc-url "$L1_RPC" | tr -d '[:space:]')
-            echo "L1 aligned: $NEW_L1 (L2: $L2_BLOCK)"
-          else
-            echo "L1 already at or ahead of L2, no alignment needed"
-          fi
-
       - name: Trigger Yield Distribution via router
         run: |
           echo "=== Triggering Yield Distribution through router ==="

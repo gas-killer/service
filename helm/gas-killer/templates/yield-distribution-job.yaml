@@ -250,10 +250,10 @@ spec:
               NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
               echo "New block number: $NEW_BLOCK"
 
-              # NOTE: L1 block alignment (mining ~34M blocks on L1 to match L2) was moved
-              # out of this hook job to avoid OOMing the ethereum pod during helm install.
-              # L1 alignment is only needed for the full BLS trigger flow, which runs
-              # after helm install completes (in the CI workflow or local test script).
+              # NOTE: L1 block alignment (mining ~34M blocks on L1 to match L2) was removed.
+              # The executor's view_only_provider now reads from L2 (Gnosis) when
+              # GNOSIS_HTTP_RPC and L2_AVS_DEPLOYMENT_PATH are set, so the reference
+              # block number is already an L2 block and passes the StaleBlockNumber check.
 
               # Step 5: Quick state check before verification
               echo ""
