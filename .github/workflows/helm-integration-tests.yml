@@ -6,14 +6,12 @@ on:
       - main
       - dev
       - staging
-      - 'RonTuretzky/k8s-support'
+      - bagelface/yield-dist-e2e
   pull_request:
     branches:
       - main
       - dev
       - staging
-      - RonTuretzky/gnosis-factory-call
-      - 'RonTuretzky/k8s-support'
   workflow_dispatch:
 
 jobs:
