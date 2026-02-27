@@ -262,6 +262,12 @@ spec:
             {{- else }}
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"
+            {{- if .Values.router.gnosisHttpRpc }}
+            - name: GNOSIS_HTTP_RPC
+              value: {{ .Values.router.gnosisHttpRpc | quote }}
+            - name: L2_AVS_DEPLOYMENT_PATH
+              value: "/app/.nodes/l2_avs_deploy.json"
+            {{- end }}
             {{- end }}
             - name: INGRESS
               value: {{ .Values.router.ingress.enabled | quote }}

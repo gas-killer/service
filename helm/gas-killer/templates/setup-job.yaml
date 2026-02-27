@@ -62,7 +62,16 @@ spec:
               # Write all logs to both stdout AND a file on the PVC
               # This ensures logs survive even if the pod crashes
               LOG_FILE="/root/.nodes/setup.log"
-              exec > >(tee -a "$LOG_FILE") 2>&1
+              # Use a named pipe + background tee to avoid process substitution
+              # which can prevent the container from exiting (bash waits for the
+              # tee subprocess, causing the Job to hang as InProgress forever)
+              TEE_PID=""
+              _log_pipe=$(mktemp -u)
+              mkfifo "$_log_pipe"
+              tee -a "$LOG_FILE" < "$_log_pipe" &
+              TEE_PID=$!
+              exec > "$_log_pipe" 2>&1
+              rm -f "$_log_pipe"
               echo "=== Setup Job Starting at $(date -Iseconds) ==="
               echo "Logs being written to: $LOG_FILE"
               echo ""
@@ -117,10 +126,12 @@ spec:
                 chmod 644 /root/.nodes/.setup_complete
                 echo "Setup marker created"
                 echo "=== Setup Job SUCCEEDED at $(date -Iseconds) ==="
+                exec 1>&- 2>&-; kill $TEE_PID 2>/dev/null; wait $TEE_PID 2>/dev/null
                 exit 0
               else
                 echo "Error: avs_deploy.json not found"
                 echo "=== Setup Job FAILED at $(date -Iseconds) ==="
+                exec 1>&- 2>&-; kill $TEE_PID 2>/dev/null; wait $TEE_PID 2>/dev/null
                 exit 1
               fi
           env:

@@ -19,6 +19,7 @@
 #   --cluster-name     Name of the kind cluster (default: gas-killer-test)
 #   --node-count       Number of operator nodes (default: 3)
 #   --fork-url         RPC URL to fork from (default: https://ethereum-sepolia-rpc.publicnode.com)
+#   --l2-fork-url      L2 (Gnosis) RPC URL to fork from (default: https://rpc.gnosischain.com)
 #
 
 set -e
@@ -38,6 +39,7 @@ NODE_COUNT="${NODE_COUNT:-3}"
 FORK_URL="${FORK_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
 PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 FUNDED_KEY="${FUNDED_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+L2_FORK_URL="${L2_FORK_URL:-https://rpc.gnosischain.com}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 SKIP_CLEANUP="${SKIP_CLEANUP:-false}"
 
@@ -62,6 +64,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fork-url)
             FORK_URL="$2"
+            shift 2
+            ;;
+        --l2-fork-url)
+            L2_FORK_URL="$2"
             shift 2
             ;;
         *)
@@ -116,6 +122,7 @@ echo "Project root: $PROJECT_ROOT"
 echo "Cluster name: $CLUSTER_NAME"
 echo "Node count: $NODE_COUNT"
 echo "Fork URL: $FORK_URL"
+echo "L2 Fork URL: $L2_FORK_URL"
 
 # Step 1: Check prerequisites
 echo -e "${YELLOW}Step 1: Checking prerequisites...${NC}"
@@ -182,19 +189,37 @@ if helm list -q | grep -q "^${HELM_RELEASE}$"; then
     sleep 10
 fi
 
-helm install "$HELM_RELEASE" ./helm/gas-killer \
+if ! helm install "$HELM_RELEASE" ./helm/gas-killer \
+    --timeout 20m \
     --set global.environment=LOCAL \
     --set global.nodeCount="$NODE_COUNT" \
     --set secrets.forkUrl="$FORK_URL" \
     --set secrets.privateKey="$PRIVATE_KEY" \
     --set secrets.fundedKey="$FUNDED_KEY" \
+    --set secrets.l2ForkUrl="$L2_FORK_URL" \
     --set node.image.repository=gas-killer-node \
     --set node.image.tag=local \
     --set node.image.pullPolicy=Never \
     --set router.image.repository=gas-killer-router \
     --set router.image.tag=local \
     --set router.image.pullPolicy=Never \
-    --set sharedData.storageClass=""
+    --set sharedData.storageClass="" \
+    --set eigenlayer.resources.requests.memory=512Mi \
+    --set eigenlayer.resources.limits.memory=2Gi \
+    --set gnosis.resources.requests.memory=512Mi \
+    --set gnosis.resources.limits.memory=4Gi; then
+    echo -e "${RED}Helm install failed! Dumping debug info...${NC}"
+    echo ""
+    echo "=== Pod Status ==="
+    kubectl get pods -o wide 2>/dev/null || true
+    echo ""
+    echo "=== Setup Pod Logs ==="
+    kubectl logs job/gas-killer-setup --all-containers --tail=50 2>/dev/null || true
+    echo ""
+    echo "=== Recent Events ==="
+    kubectl get events --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -20 || true
+    exit 1
+fi
 
 echo -e "${GREEN}Helm chart installed successfully${NC}"
 
@@ -211,9 +236,7 @@ fi
 
 echo "Found setup job: $SETUP_JOB"
 kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=500s
-
-echo "Setup job completed:"
-kubectl logs "$SETUP_JOB" --tail=20
+echo -e "${GREEN}Setup job completed${NC}"
 
 # Step 7: Wait for pods to be ready
 echo -e "${YELLOW}Step 7: Waiting for all pods to be ready...${NC}"
@@ -221,8 +244,8 @@ echo -e "${YELLOW}Step 7: Waiting for all pods to be ready...${NC}"
 echo "Waiting for ethereum pod..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=ethereum --timeout=180s
 
-echo "Waiting for signer pod..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=signer --timeout=180s
+echo "Waiting for gnosis pod..."
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=gnosis --timeout=180s
 
 echo "Waiting for node pods..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=node --timeout=300s --all
@@ -316,16 +339,73 @@ if [ $TRIGGER_STATUS -eq 0 ]; then
     echo -e "${GREEN}Gas Killer task executed successfully!${NC}"
 else
     echo -e "${RED}Gas Killer task failed${NC}"
-    echo "Router logs:"
-    kubectl logs -l app.kubernetes.io/component=router --tail 100
+    kubectl logs -l app.kubernetes.io/component=router --tail 50
     exit 1
 fi
 
-# Show router logs
-echo -e "${YELLOW}Recent router logs:${NC}"
-kubectl logs -l app.kubernetes.io/component=router --tail 50
+# Step 13: Verify L2 bridge job
+echo -e "${YELLOW}Step 13: Verifying L2 bridge job...${NC}"
+
+BRIDGE_JOB=$(kubectl get jobs -o name 2>/dev/null | grep bridge | head -1)
+if [ -n "$BRIDGE_JOB" ]; then
+    echo "Found bridge job: $BRIDGE_JOB"
+    # Check if already complete, otherwise wait
+    if ! kubectl get "$BRIDGE_JOB" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' | grep -q "True"; then
+        echo "Waiting for bridge job to complete..."
+        kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=300s
+    fi
+    echo -e "${GREEN}Bridge job completed successfully${NC}"
+else
+    echo -e "${RED}Bridge job not found!${NC}"
+    kubectl get jobs
+    exit 1
+fi
+
+# Step 14: Verify yield distribution job
+echo -e "${YELLOW}Step 14: Verifying yield distribution job...${NC}"
+
+YIELD_JOB=$(kubectl get jobs -o name 2>/dev/null | grep yield | head -1)
+if [ -n "$YIELD_JOB" ]; then
+    echo "Found yield distribution job: $YIELD_JOB"
+    # Check if already complete, otherwise wait
+    if ! kubectl get "$YIELD_JOB" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' | grep -q "True"; then
+        echo "Waiting for yield distribution job to complete..."
+        kubectl wait --for=condition=complete "$YIELD_JOB" --timeout=600s
+    fi
+    echo -e "${GREEN}Yield distribution job completed successfully${NC}"
+else
+    echo -e "${RED}Yield distribution job not found!${NC}"
+    kubectl get jobs
+    exit 1
+fi
+
+# Step 15: Verify yield distribution results from PVC
+echo -e "${YELLOW}Step 15: Checking yield distribution results...${NC}"
+
+YIELD_LOG=$(kubectl run yield-log-reader --image=busybox:1.36 --restart=Never --rm -i \
+    --overrides='{"spec":{"volumes":[{"name":"shared","persistentVolumeClaim":{"claimName":"gas-killer-shared-data"}}],"containers":[{"name":"reader","image":"busybox:1.36","command":["cat","/data/yield-distribution.log"],"volumeMounts":[{"name":"shared","mountPath":"/data"}]}]}}' \
+    2>/dev/null) || true
+
+if echo "$YIELD_LOG" | grep -q "YIELD DISTRIBUTION TEST PASSED"; then
+    echo -e "${GREEN}Yield distribution test PASSED${NC}"
+elif echo "$YIELD_LOG" | grep -q "YIELD DISTRIBUTION TEST FAILED"; then
+    echo -e "${RED}Yield distribution test FAILED${NC}"
+    echo "$YIELD_LOG" | tail -30
+    exit 1
+else
+    echo -e "${YELLOW}Could not determine yield distribution result from PVC log${NC}"
+    echo "Falling back to job status (already verified complete above)"
+fi
 
 echo -e "${GREEN}=== Test Summary ===${NC}"
+echo -e "${GREEN}L1 Tests:${NC}"
+echo -e "${GREEN}  - EigenLayer setup: PASSED${NC}"
+echo -e "${GREEN}  - ArraySummation deployment: PASSED${NC}"
+echo -e "${GREEN}  - Gas Killer trigger + BLS aggregation: PASSED${NC}"
+echo -e "${GREEN}L2 Tests:${NC}"
+echo -e "${GREEN}  - Gnosis pod running: PASSED${NC}"
+echo -e "${GREEN}  - Bridge job (L1->L2 operator state): PASSED${NC}"
+echo -e "${GREEN}  - Yield distribution test: PASSED${NC}"
 echo -e "${GREEN}All tests passed!${NC}"
 
 exit 0

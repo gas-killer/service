@@ -3783,7 +3783,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-rs"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer#999d1b0c688627af3ea46c104e9776090f835fda"
+source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer?branch=RonTuretzky%2Fgas-killer-analyzer#c0a77ea9249184b111e4b3b9ee8f45aa40a74457"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
