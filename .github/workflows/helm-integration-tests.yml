@@ -124,7 +124,9 @@ jobs:
 
           # Install without --wait to avoid circular dependency
           # (pods wait for setup job, setup job is post-install hook)
+          # Use 20m timeout to allow setup + bridge + yield-distribution hooks to complete
           helm install gas-killer ./helm/gas-killer \
+            --timeout 20m \
             --set global.environment=LOCAL \
             --set global.nodeCount=3 \
             --set secrets.forkUrl="$FORK_URL" \
@@ -141,7 +143,11 @@ jobs:
             --set gnosis.enabled=true \
             --set bridge.enabled=true \
             --set bridge.waitForBridge=true \
-            --set yieldDistribution.enabled=true
+            --set yieldDistribution.enabled=true \
+            --set eigenlayer.resources.requests.memory=512Mi \
+            --set eigenlayer.resources.limits.memory=2Gi \
+            --set gnosis.resources.requests.memory=512Mi \
+            --set gnosis.resources.limits.memory=4Gi
 
       - name: Check deployment status
         run: |
