@@ -92,7 +92,15 @@ spec:
             - |
               set -x
               LOG_FILE="/app/.nodes/yield-distribution.log"
-              exec > >(tee -a "$LOG_FILE") 2>&1
+              # Use a named pipe + background tee to avoid process substitution
+              # which can prevent the container from exiting
+              TEE_PID=""
+              _log_pipe=$(mktemp -u)
+              mkfifo "$_log_pipe"
+              tee -a "$LOG_FILE" < "$_log_pipe" &
+              TEE_PID=$!
+              exec > "$_log_pipe" 2>&1
+              rm -f "$_log_pipe"
 
               echo "=== Yield Distribution Test Starting at $(date) ==="
 
@@ -346,12 +354,14 @@ spec:
                 echo "  - Storage manipulation set distribution timing"
                 echo "  - resolveYieldDistribution returns true"
                 touch /app/.nodes/.yield_distribution_complete
+                exec 1>&- 2>&-; kill $TEE_PID 2>/dev/null; wait $TEE_PID 2>/dev/null
                 exit 0
               else
                 echo "=========================================="
                 echo "=== YIELD DISTRIBUTION TEST FAILED ==="
                 echo "=========================================="
                 echo "One or more checks failed (see above)"
+                exec 1>&- 2>&-; kill $TEE_PID 2>/dev/null; wait $TEE_PID 2>/dev/null
                 exit 1
               fi
 

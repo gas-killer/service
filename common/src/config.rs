@@ -5,6 +5,49 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 
+/// Supported chain identifiers
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ChainId {
+    /// Sepolia testnet (chain ID: 11155111)
+    #[default]
+    Sepolia = 11155111,
+    /// Gnosis mainnet (chain ID: 100)
+    Gnosis = 100,
+}
+
+impl ChainId {
+    /// Creates a ChainId from a numeric chain ID
+    pub fn from_u64(chain_id: u64) -> Option<Self> {
+        match chain_id {
+            11155111 => Some(ChainId::Sepolia),
+            100 => Some(ChainId::Gnosis),
+            _ => None,
+        }
+    }
+
+    /// Returns the numeric chain ID
+    pub fn as_u64(&self) -> u64 {
+        match self {
+            ChainId::Sepolia => 11155111,
+            ChainId::Gnosis => 100,
+        }
+    }
+
+    /// Returns the chain name
+    pub fn name(&self) -> &'static str {
+        match self {
+            ChainId::Sepolia => "sepolia",
+            ChainId::Gnosis => "gnosis",
+        }
+    }
+}
+
+impl std::fmt::Display for ChainId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
 /// Configuration for loading BLS private keys from JSON files
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(non_snake_case)]
