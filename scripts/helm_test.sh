@@ -207,7 +207,8 @@ if ! helm install "$HELM_RELEASE" ./helm/gas-killer \
     --set eigenlayer.resources.requests.memory=512Mi \
     --set eigenlayer.resources.limits.memory=2Gi \
     --set gnosis.resources.requests.memory=512Mi \
-    --set gnosis.resources.limits.memory=4Gi; then
+    --set gnosis.resources.limits.memory=4Gi \
+    --set ethereum.resources.limits.memory=4Gi; then
     echo -e "${RED}Helm install failed! Dumping debug info...${NC}"
     echo ""
     echo "=== Pod Status ==="

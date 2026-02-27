@@ -250,26 +250,10 @@ spec:
               NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
               echo "New block number: $NEW_BLOCK"
 
-              # Step 4b: Align L1 block number with L2
-              # The BLS executor uses the L1 reference block for verifyAndUpdate,
-              # but the GasKiller contract on L2 checks referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number.
-              # Since L2 (Gnosis fork ~44M) is far ahead of L1 (Sepolia fork ~10M), we mine blocks
-              # on L1 to close the gap so the staleness check passes.
-              echo ""
-              echo "=== Step 4b: Aligning L1 block number with L2 ==="
-              L1_BLOCK=$(cast block-number --rpc-url "$L1_RPC_URL" | tr -d '[:space:]')
-              L2_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
-              echo "L1 block: $L1_BLOCK, L2 block: $L2_BLOCK"
-
-              if [ "$L1_BLOCK" -lt "$L2_BLOCK" ] 2>/dev/null; then
-                GAP=$((L2_BLOCK - L1_BLOCK + 1000))
-                echo "Mining $GAP blocks on L1 Ethereum Anvil..."
-                cast rpc --rpc-url "$L1_RPC_URL" anvil_mine $(printf '0x%x' "$GAP")
-                NEW_L1=$(cast block-number --rpc-url "$L1_RPC_URL" | tr -d '[:space:]')
-                echo "New L1 block: $NEW_L1 (L2 block: $L2_BLOCK)"
-              else
-                echo "L1 already at or ahead of L2, no alignment needed"
-              fi
+              # NOTE: L1 block alignment (mining ~34M blocks on L1 to match L2) was moved
+              # out of this hook job to avoid OOMing the ethereum pod during helm install.
+              # L1 alignment is only needed for the full BLS trigger flow, which runs
+              # after helm install completes (in the CI workflow or local test script).
 
               # Step 5: Quick state check before verification
               echo ""
