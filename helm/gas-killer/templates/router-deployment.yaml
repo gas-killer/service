@@ -69,6 +69,31 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+
+        # Transform l2-deploy.json (bridge output) into AvsDeployment format for L2_AVS_DEPLOYMENT_PATH
+        - name: create-l2-avs-config
+          image: alpine:3.19
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              apk add --no-cache jq > /dev/null 2>&1
+              SRC="/app/.nodes/l2-deploy.json"
+              DST="/app/.nodes/l2_avs_deploy.json"
+              if [ ! -f "$SRC" ]; then
+                echo "WARNING: $SRC not found, skipping L2 AVS config"
+                exit 0
+              fi
+              REG=$(jq -r '.registryCoordinatorMimic' "$SRC")
+              BLS=$(jq -r '.blsSignatureChecker' "$SRC")
+              jq -n --arg r "$REG" --arg b "$BLS" \
+                '{"addresses":{"registryCoordinator":$r,"blsapkRegistry":$r,"blsSigCheck":$b}}' > "$DST"
+              echo "Created $DST from bridge output"
+              cat "$DST"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
         {{- end }}
 
         {{- if and .Values.l2 .Values.l2.enabled }}
@@ -254,6 +279,9 @@ spec:
             # LOCAL mode: Gnosis RPC for cross-chain execution (yield distribution) via Anvil fork
             - name: GNOSIS_HTTP_RPC
               value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+            # L2 AVS deployment (created by create-l2-avs-config init container from bridge output)
+            - name: L2_AVS_DEPLOYMENT_PATH
+              value: "/app/.nodes/l2_avs_deploy.json"
             {{- end }}
             {{- if and .Values.l2 .Values.l2.enabled }}
             # TESTNET + L2 mode: Use L2 AVS deployment path

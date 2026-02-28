@@ -80,6 +80,32 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+
+        {{- if and (eq $root.Values.global.environment "LOCAL") $root.Values.gnosis.enabled }}
+        # Wait for L2 AVS config (created by router's create-l2-avs-config init container)
+        - name: wait-for-l2-avs-config
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for L2 AVS config..."
+              TIMEOUT=120
+              ELAPSED=0
+              until [ -f /app/.nodes/l2_avs_deploy.json ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for l2_avs_deploy.json after ${TIMEOUT}s"
+                  exit 1
+                fi
+                sleep 5
+                ELAPSED=$((ELAPSED + 5))
+              done
+              echo "L2 AVS config ready!"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+        {{- end }}
         {{- end }}
 
         {{- if eq $root.Values.global.environment "LOCAL" }}
@@ -176,6 +202,9 @@ spec:
             # LOCAL mode: Gnosis RPC for cross-chain validation (PR 87 multi-chain support)
             - name: GNOSIS_HTTP_RPC
               value: "http://{{ include "gas-killer.gnosis.fullname" $root }}:{{ $root.Values.gnosis.service.port }}"
+            # L2 AVS deployment (created by router's create-l2-avs-config init container)
+            - name: L2_AVS_DEPLOYMENT_PATH
+              value: "/app/.nodes/l2_avs_deploy.json"
             {{- end }}
             - name: RUST_BACKTRACE
               value: "1"
