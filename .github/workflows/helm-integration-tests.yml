@@ -133,12 +133,12 @@ jobs:
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
             --set secrets.l2ForkUrl="$L2_FORK_URL" \
-            --set node.image.repository=ghcr.io/breadchaincoop/gas-killer-router \
-            --set node.image.tag=node-pr-87 \
-            --set node.image.pullPolicy=IfNotPresent \
-            --set router.image.repository=ghcr.io/breadchaincoop/gas-killer-router \
-            --set router.image.tag=pr-87 \
-            --set router.image.pullPolicy=IfNotPresent \
+            --set node.image.repository=gas-killer-node \
+            --set node.image.tag=local \
+            --set node.image.pullPolicy=Never \
+            --set router.image.repository=gas-killer-router \
+            --set router.image.tag=local \
+            --set router.image.pullPolicy=Never \
             --set sharedData.storageClass="" \
             --set gnosis.enabled=true \
             --set bridge.enabled=true \
@@ -461,6 +461,19 @@ jobs:
           echo "=== Router logs before trigger (last 50 lines) ==="
           kubectl logs $ROUTER_POD --tail=50 || true
 
+          # Debug: Verify L2 mode is active on the router
+          echo ""
+          echo "=== L2 Mode Verification ==="
+          echo "Router env vars (L2-related):"
+          kubectl exec $ROUTER_POD -c router -- env 2>/dev/null | grep -E "(GNOSIS|L2_AVS|AVS_DEPLOYMENT)" || echo "WARNING: Could not read env vars"
+          echo ""
+          echo "L2 AVS deployment file on PVC:"
+          kubectl exec $ROUTER_POD -c router -- cat /app/.nodes/l2_avs_deploy.json 2>/dev/null || echo "WARNING: l2_avs_deploy.json NOT FOUND on router pod"
+          echo ""
+          echo "Router startup mode (L2 vs L1):"
+          kubectl logs $ROUTER_POD 2>/dev/null | grep -E "(L2 mode|L1 mode|GNOSIS_HTTP_RPC not set)" || echo "WARNING: No L2/L1 mode log found in router output"
+          echo ""
+
           # Get current state
           INITIAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
           BLOCK=$(cast block-number --rpc-url "$L2_RPC" | tr -d '[:space:]')
@@ -470,6 +483,19 @@ jobs:
           # Verify distribution is ready
           RESOLVER=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1)
           echo "resolveYieldDistribution: $RESOLVER"
+
+          if ! echo "$RESOLVER" | grep -q "true"; then
+            echo "ERROR: resolveYieldDistribution did not return true - yield is not ready for distribution"
+            echo "This likely means the yield-distribution helm hook did not properly set up timing."
+            echo "Checking contract state..."
+            echo "cycleLength: $(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>/dev/null || echo N/A)"
+            echo "lastClaimedBlockNumber: $(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo N/A)"
+            echo "current block: $(cast block-number --rpc-url "$L2_RPC" 2>/dev/null || echo N/A)"
+            echo "blsSignatureChecker: $(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo N/A)"
+            echo "avsAddress: $(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo N/A)"
+            exit 1
+          fi
+          echo "Distribution is ready!"
 
           # Build distributeYieldGK() calldata
           CALL_DATA=$(cast calldata "distributeYieldGK()")
