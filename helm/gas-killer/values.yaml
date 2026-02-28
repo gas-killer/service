@@ -108,9 +108,9 @@ node:
     # For local development, build and load the image into kind:
     # docker build -t gas-killer-node:local -f node/Dockerfile .
     # kind load docker-image gas-killer-node:local --name <cluster-name>
-    repository: gas-killer-router
-    tag: node-pr-87
-    pullPolicy: IfNotPresent
+    repository: gas-killer-node
+    tag: local
+    pullPolicy: Never
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
   resources:
@@ -128,8 +128,8 @@ router:
     # docker build -t gas-killer-router:local -f router/Dockerfile .
     # kind load docker-image gas-killer-router:local --name <cluster-name>
     repository: gas-killer-router
-    tag: pr-87
-    pullPolicy: IfNotPresent
+    tag: local
+    pullPolicy: Never
   port: 3000
   ingressPort: 8080
   ingress:
