@@ -48,7 +48,7 @@ spec:
               mountPath: /app/.nodes
               readOnly: true
 
-        # Extract bridge addresses from l2-deploy.json
+        # Extract bridge addresses from l2-deploy.json and create L2 AVS config for the router
         - name: extract-addresses
           image: alpine:3.19
           command:
@@ -56,7 +56,7 @@ spec:
             - -c
             - |
               set -e
-              apk add --no-cache jq
+              apk add --no-cache jq curl
 
               echo "=== Reading l2-deploy.json ==="
               cat /app/.nodes/l2-deploy.json
@@ -76,11 +76,42 @@ spec:
               echo "$BLS_CHECKER" > /yield-config/bls_checker
               echo "$REG_COORD" > /yield-config/registry_coordinator
 
-              echo "Addresses written to /yield-config/"
+              # Query blsApkRegistry() from the RegistryCoordinatorMimic on L2
+              # Function selector: keccak256("blsApkRegistry()") = 0x5df45946
+              L2_RPC="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+              echo "Querying blsApkRegistry() from RegistryCoordinatorMimic at $REG_COORD..."
+              BLS_APK_REGISTRY_RAW=$(curl -sf -X POST -H "Content-Type: application/json" \
+                --data '{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"'"$REG_COORD"'","data":"0x5df45946"},"latest"],"id":1}' \
+                "$L2_RPC" | jq -r '.result')
+              # ABI-decode: 32-byte hex → 20-byte address (strip 0x + 24 zero chars)
+              BLS_APK_REGISTRY="0x$(echo "$BLS_APK_REGISTRY_RAW" | sed 's/^0x//' | cut -c 25-64)"
+              echo "BLSApkRegistry: $BLS_APK_REGISTRY"
+
+              # The BLSSigCheckOperatorStateRetriever exists on mainnet Gnosis (forked by Anvil)
+              # It takes registryCoordinator as a parameter so it works with our RegistryCoordinatorMimic
+              BLS_SIG_CHECK="0x056A41125bB62168B464ddDECd995e8494448913"
+              echo "BLSSigCheckOperatorStateRetriever (from mainnet fork): $BLS_SIG_CHECK"
+
+              # Create l2_avs_deploy.json for the router's executor
+              # Format matches AvsDeployment { addresses: { registryCoordinator, blsapkRegistry, blsSigCheck, counter } }
+              cat > /app/.nodes/l2_avs_deploy.json <<DEPLOYEOF
+              {
+                "addresses": {
+                  "registryCoordinator": "$REG_COORD",
+                  "blsapkRegistry": "$BLS_APK_REGISTRY",
+                  "blsSigCheck": "$BLS_SIG_CHECK",
+                  "counter": "0x0000000000000000000000000000000000000000"
+                }
+              }
+              DEPLOYEOF
+
+              echo "=== Created l2_avs_deploy.json ==="
+              cat /app/.nodes/l2_avs_deploy.json
+
+              echo "Addresses written to /yield-config/ and /app/.nodes/"
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes
-              readOnly: true
             - name: yield-config
               mountPath: /yield-config
 
@@ -114,7 +145,6 @@ spec:
 
               YIELD_DISTRIBUTOR="{{ .Values.yieldDistribution.contractAddress }}"
               L2_RPC_URL="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
-              L1_RPC_URL="http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
 
               echo "BLS Signature Checker: $BLS_CHECKER"
               echo "Registry Coordinator Mimic: $REG_COORD"
@@ -241,27 +271,6 @@ spec:
 
               NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
               echo "New block number: $NEW_BLOCK"
-
-              # Step 4b: Align L1 block number with L2
-              # The BLS executor uses the L1 reference block for verifyAndUpdate,
-              # but the GasKiller contract on L2 checks referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number.
-              # Since L2 (Gnosis fork ~44M) is far ahead of L1 (Sepolia fork ~10M), we mine blocks
-              # on L1 to close the gap so the staleness check passes.
-              echo ""
-              echo "=== Step 4b: Aligning L1 block number with L2 ==="
-              L1_BLOCK=$(cast block-number --rpc-url "$L1_RPC_URL" | tr -d '[:space:]')
-              L2_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
-              echo "L1 block: $L1_BLOCK, L2 block: $L2_BLOCK"
-
-              if [ "$L1_BLOCK" -lt "$L2_BLOCK" ] 2>/dev/null; then
-                GAP=$((L2_BLOCK - L1_BLOCK + 1000))
-                echo "Mining $GAP blocks on L1 Ethereum Anvil..."
-                cast rpc --rpc-url "$L1_RPC_URL" anvil_mine $(printf '0x%x' "$GAP")
-                NEW_L1=$(cast block-number --rpc-url "$L1_RPC_URL" | tr -d '[:space:]')
-                echo "New L1 block: $NEW_L1 (L2 block: $L2_BLOCK)"
-              else
-                echo "L1 already at or ahead of L2, no alignment needed"
-              fi
 
               # Step 5: Quick state check before verification
               echo ""
