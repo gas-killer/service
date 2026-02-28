@@ -108,6 +108,9 @@ spec:
               echo "=== Created l2_avs_deploy.json ==="
               cat /app/.nodes/l2_avs_deploy.json
 
+              touch /app/.nodes/.l2_avs_config_complete
+              echo "L2 AVS config marker created"
+
               echo "Addresses written to /yield-config/ and /app/.nodes/"
           volumeMounts:
             - name: shared-data

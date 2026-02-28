@@ -71,8 +71,8 @@ spec:
               readOnly: true
         {{- end }}
 
-        {{- if and .Values.l2 .Values.l2.enabled }}
-        # Wait for L2 AVS config to be ready (created by l2-avs-config terraform job) - TESTNET mode only
+        {{- if or (and .Values.l2 .Values.l2.enabled) (and (eq .Values.global.environment "LOCAL") .Values.gnosis.enabled .Values.bridge.enabled) }}
+        # Wait for L2 AVS config (TESTNET via l2.enabled, or LOCAL with gnosis+bridge)
         - name: wait-for-l2-config
           image: busybox:1.36
           command:
@@ -254,6 +254,11 @@ spec:
             # LOCAL mode: Gnosis RPC for cross-chain execution (yield distribution) via Anvil fork
             - name: GNOSIS_HTTP_RPC
               value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+            {{- if .Values.bridge.enabled }}
+            # Split-provider L2 mode: executor reads block numbers from Gnosis, APK registry from L1
+            - name: L2_AVS_DEPLOYMENT_PATH
+              value: "/app/.nodes/l2_avs_deploy.json"
+            {{- end }}
             {{- end }}
             {{- if and .Values.l2 .Values.l2.enabled }}
             # TESTNET + L2 mode: Use L2 AVS deployment path
