@@ -130,8 +130,8 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     info!(chain = %ChainId::Sepolia, "Created wallet provider");
 
     // Gnosis provider — required in L2 mode, optional otherwise
-    if let Some(ref gnosis_rpc) = gnosis_rpc {
-        match create_wallet_provider("gnosis", gnosis_rpc, &private_key).await {
+    if gnosis_rpc.is_some() {
+        match create_wallet_provider_for_chain(ChainId::Gnosis, &private_key).await {
             Ok(gnosis_provider) => {
                 providers.insert(ChainId::Gnosis, gnosis_provider);
                 info!(chain = %ChainId::Gnosis, "Created wallet provider");
