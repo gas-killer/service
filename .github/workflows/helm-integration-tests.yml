@@ -6,12 +6,14 @@ on:
       - main
       - dev
       - staging
+      - cloud-staging
       - 'RonTuretzky/k8s-support'
   pull_request:
     branches:
       - main
       - dev
       - staging
+      - cloud-staging
       - 'RonTuretzky/k8s-support'
   workflow_dispatch:
 
