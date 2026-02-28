@@ -92,7 +92,7 @@ spec:
               BLS_SIG_CHECK="0x056A41125bB62168B464ddDECd995e8494448913"
               echo "BLSSigCheckOperatorStateRetriever (from mainnet fork): $BLS_SIG_CHECK"
 
-              # Create l2_avs_deploy.json for the router's executor
+              # Create l2_avs_deploy.json with L2 AVS addresses for future use
               # Format matches AvsDeployment { addresses: { registryCoordinator, blsapkRegistry, blsSigCheck, counter } }
               cat > /app/.nodes/l2_avs_deploy.json <<DEPLOYEOF
               {

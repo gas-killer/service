@@ -71,37 +71,6 @@ spec:
               readOnly: true
         {{- end }}
 
-        {{- if and (eq .Values.global.environment "LOCAL") .Values.gnosis.enabled }}
-        # Wait for L2 AVS config (created by yield-distribution init container)
-        # The bridge deploys RegistryCoordinatorMimic + BLSSignatureChecker on L2,
-        # then the yield-distribution job creates l2_avs_deploy.json with the addresses
-        # the executor needs for getNonSignerStakesAndSignature on L2.
-        - name: wait-for-l2-avs-config
-          image: busybox:1.36
-          command:
-            - sh
-            - -c
-            - |
-              echo "Waiting for L2 AVS config (timeout: {{ .Values.global.initTimeout }}s)..."
-              TIMEOUT={{ .Values.global.initTimeout }}
-              ELAPSED=0
-              until [ -f /app/.nodes/l2_avs_deploy.json ]; do
-                if [ $ELAPSED -ge $TIMEOUT ]; then
-                  echo "ERROR: Timeout waiting for L2 AVS config after ${TIMEOUT}s"
-                  exit 1
-                fi
-                echo "L2 AVS config not ready, waiting... (${ELAPSED}s elapsed)"
-                sleep 10
-                ELAPSED=$((ELAPSED + 10))
-              done
-              echo "L2 AVS config ready!"
-              cat /app/.nodes/l2_avs_deploy.json
-          volumeMounts:
-            - name: shared-data
-              mountPath: /app/.nodes
-              readOnly: true
-        {{- end }}
-
         {{- if and .Values.l2 .Values.l2.enabled }}
         # Wait for L2 AVS config to be ready (created by l2-avs-config terraform job) - TESTNET mode only
         - name: wait-for-l2-config
@@ -285,10 +254,6 @@ spec:
             # LOCAL mode: Gnosis RPC for cross-chain execution (yield distribution) via Anvil fork
             - name: GNOSIS_HTTP_RPC
               value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
-            # L2 AVS deployment config — when set alongside GNOSIS_HTTP_RPC, the executor
-            # reads block numbers and BLS state from L2 (preventing StaleBlockNumber reverts)
-            - name: L2_AVS_DEPLOYMENT_PATH
-              value: "/app/.nodes/l2_avs_deploy.json"
             {{- end }}
             {{- if and .Values.l2 .Values.l2.enabled }}
             # TESTNET + L2 mode: Use L2 AVS deployment path
