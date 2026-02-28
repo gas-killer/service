@@ -88,7 +88,7 @@ spec:
               REG=$(jq -r '.registryCoordinatorMimic' "$SRC")
               BLS=$(jq -r '.blsSignatureChecker' "$SRC")
               jq -n --arg r "$REG" --arg b "$BLS" \
-                '{"addresses":{"registryCoordinator":$r,"blsapkRegistry":$r,"blsSigCheck":$b}}' > "$DST"
+                '{"addresses":{"registryCoordinator":$r,"blsapkRegistry":$r,"blsSigCheck":$b,"counter":"0x0000000000000000000000000000000000000000"}}' > "$DST"
               echo "Created $DST from bridge output"
               cat "$DST"
           volumeMounts:
