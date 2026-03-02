@@ -243,24 +243,23 @@ spec:
               echo "Compiling YieldDistributor with updated SDK..."
               forge build --force 2>&1 | tail -5
 
-              # Deploy the new implementation (no constructor args needed for the implementation)
+              # Deploy the new implementation via cast send --create (more reliable than forge create)
               echo "Deploying new YieldDistributor implementation..."
+              INIT_CODE=$(forge inspect src/YieldDistributor.sol:YieldDistributor bytecode)
+              CONSTRUCTOR_ARG="0000000000000000000000000000000000000000000000000000000000000000"
+
               cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$OWNER"
               cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$OWNER" "0x56BC75E2D63100000"
 
-              NEW_IMPL=$(forge create src/YieldDistributor.sol:YieldDistributor \
-                --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
-                --constructor-args "0x0000000000000000000000000000000000000000" \
-                2>&1 | grep "Deployed to:" | awk '{print $3}')
+              NEW_IMPL=$(cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
+                --create "${INIT_CODE}${CONSTRUCTOR_ARG}" \
+                --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('contractAddress',''))")
               echo "New implementation deployed at: $NEW_IMPL"
 
-              if [ -z "$NEW_IMPL" ]; then
+              if [ -z "$NEW_IMPL" ] || [ "$NEW_IMPL" = "None" ] || [ "$NEW_IMPL" = "null" ]; then
                 echo "ERROR: Failed to deploy new implementation"
-                # Try again with more verbose output
-                forge create src/YieldDistributor.sol:YieldDistributor \
-                  --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
-                  --constructor-args "0x0000000000000000000000000000000000000000" \
-                  2>&1
+                cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
+                  --create "${INIT_CODE}${CONSTRUCTOR_ARG}" 2>&1
                 exit 1
               fi
 
