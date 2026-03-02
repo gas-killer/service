@@ -63,125 +63,49 @@ async fn create_wallet_provider_for_chain(
     Ok(provider)
 }
 
-/// Loads the L2 AVS deployment from `L2_AVS_DEPLOYMENT_PATH`.
-/// Mirrors `AvsDeployment::load()` which reads from `AVS_DEPLOYMENT_PATH`.
-fn load_l2_avs_deployment() -> Result<AvsDeployment> {
-    let path = env::var("L2_AVS_DEPLOYMENT_PATH")
-        .map_err(|_| anyhow::anyhow!("L2_AVS_DEPLOYMENT_PATH must be set"))?;
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("Failed to read L2 deployment file {}: {}", path, e))?;
-    let deployment: AvsDeployment = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse L2 deployment file {}: {}", path, e))?;
-    Ok(deployment)
-}
-
-/// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations with multi-chain support.
+/// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations.
 ///
-/// By default the executor's read side (view_only_provider, BLS contracts) points at L1 via
-/// `HTTP_RPC` and `AVS_DEPLOYMENT_PATH`.
+/// The executor always reads from L1 (Sepolia) via `HTTP_RPC` / `AVS_DEPLOYMENT_PATH`.
+/// For cross-chain tasks (e.g. yield distribution on Gnosis), the handler overrides
+/// the referenceBlockNumber with the target chain's block number before calling
+/// verifyAndUpdate. This avoids the StaleBlockNumber error without changing the
+/// executor's read chain.
 ///
-/// When `GNOSIS_HTTP_RPC` **and** `L2_AVS_DEPLOYMENT_PATH` are both set, split-provider mode
-/// is activated:
-///   - `view_only_provider` + `bls_operator_state_retriever` -> L2 (Gnosis)
-///     so that block numbers match the chain where `verifyAndUpdate` executes.
-///   - `bls_apk_registry` -> L1 (Sepolia)
-///     because operator pubkey-to-address mappings only exist on L1.
+/// When `GNOSIS_HTTP_RPC` is set, a Gnosis wallet provider is created so the handler
+/// can detect and execute on Gnosis-deployed contracts.
 pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
     let gnosis_rpc = env::var("GNOSIS_HTTP_RPC").ok();
-    let use_l2 = gnosis_rpc.is_some() && env::var("L2_AVS_DEPLOYMENT_PATH").is_ok();
 
-    let (
-        view_only_provider,
-        bls_apk_registry,
-        bls_operator_state_retriever,
-        registry_coordinator_address,
-    ) = if use_l2 {
-        let l2_rpc = gnosis_rpc.as_ref().unwrap();
-        let l2_deployment = load_l2_avs_deployment()?;
-        let l1_deployment = AvsDeployment::load()
-            .map_err(|e| anyhow::anyhow!("Failed to load L1 deployment: {}", e))?;
+    let deployment =
+        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
 
-        let l2_provider = ProviderBuilder::new().connect_http(
-            url::Url::parse(l2_rpc)
-                .map_err(|e| anyhow::anyhow!("Failed to parse L2 RPC URL '{}': {}", l2_rpc, e))?,
-        );
-        let l1_provider = ProviderBuilder::new()
-            .connect_http(url::Url::parse(&http_rpc).map_err(|e| {
-                anyhow::anyhow!("Failed to parse L1 RPC URL '{}': {}", http_rpc, e)
-            })?);
+    let provider = ProviderBuilder::new().connect_http(
+        url::Url::parse(&http_rpc)
+            .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", http_rpc, e))?,
+    );
 
-        let bls_apk_registry_address = l1_deployment
-            .bls_apk_registry_address()
-            .map_err(|e| anyhow::anyhow!("Failed to get L1 BLS APK registry address: {}", e))?;
-        let registry_coordinator_address = l2_deployment
-            .registry_coordinator_address()
-            .map_err(|e| anyhow::anyhow!("Failed to get L2 registry coordinator address: {}", e))?;
-        let bls_operator_state_retriever_address = l2_deployment
-            .bls_sig_check_operator_state_retriever_address()
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to get L2 BLS operator state retriever address: {}",
-                    e
-                )
-            })?;
+    let bls_apk_registry_address = deployment
+        .bls_apk_registry_address()
+        .map_err(|e| anyhow::anyhow!("Failed to get BLS APK registry address: {}", e))?;
+    let registry_coordinator_address = deployment
+        .registry_coordinator_address()
+        .map_err(|e| anyhow::anyhow!("Failed to get registry coordinator address: {}", e))?;
+    let bls_operator_state_retriever_address = deployment
+        .bls_sig_check_operator_state_retriever_address()
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
+        })?;
 
-        let bls_apk_registry = BLSApkRegistry::new(bls_apk_registry_address, l1_provider);
-        let bls_operator_state_retriever = BLSSigCheckOperatorStateRetriever::new(
-            bls_operator_state_retriever_address,
-            l2_provider.clone(),
-        );
+    let bls_apk_registry = BLSApkRegistry::new(bls_apk_registry_address, provider.clone());
+    let bls_operator_state_retriever = BLSSigCheckOperatorStateRetriever::new(
+        bls_operator_state_retriever_address,
+        provider.clone(),
+    );
 
-        info!(
-            l2_rpc = %l2_rpc,
-            l1_rpc = %http_rpc,
-            "L2 split-provider mode: blocks/state from Gnosis, APK registry from Sepolia"
-        );
-
-        (
-            l2_provider,
-            bls_apk_registry,
-            bls_operator_state_retriever,
-            registry_coordinator_address,
-        )
-    } else {
-        let deployment = AvsDeployment::load()
-            .map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
-
-        let provider = ProviderBuilder::new().connect_http(
-            url::Url::parse(&http_rpc)
-                .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", http_rpc, e))?,
-        );
-
-        let bls_apk_registry_address = deployment
-            .bls_apk_registry_address()
-            .map_err(|e| anyhow::anyhow!("Failed to get BLS APK registry address: {}", e))?;
-        let registry_coordinator_address = deployment
-            .registry_coordinator_address()
-            .map_err(|e| anyhow::anyhow!("Failed to get registry coordinator address: {}", e))?;
-        let bls_operator_state_retriever_address = deployment
-            .bls_sig_check_operator_state_retriever_address()
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
-            })?;
-
-        let bls_apk_registry = BLSApkRegistry::new(bls_apk_registry_address, provider.clone());
-        let bls_operator_state_retriever = BLSSigCheckOperatorStateRetriever::new(
-            bls_operator_state_retriever_address,
-            provider.clone(),
-        );
-
-        info!("L1 mode: executor reads from Sepolia (HTTP_RPC)");
-
-        (
-            provider,
-            bls_apk_registry,
-            bls_operator_state_retriever,
-            registry_coordinator_address,
-        )
-    };
+    info!("Executor reads from Sepolia (HTTP_RPC)");
 
     // Create wallet providers for each supported chain
     let mut providers: HashMap<ChainId, WalletProvider> = HashMap::new();
@@ -191,7 +115,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     providers.insert(ChainId::Sepolia, sepolia_provider);
     info!(chain = %ChainId::Sepolia, "Created wallet provider");
 
-    // Gnosis provider -- required in L2 mode, optional otherwise
+    // Gnosis provider (optional — enables cross-chain execution)
     if gnosis_rpc.is_some() {
         match create_wallet_provider_for_chain(ChainId::Gnosis, &private_key).await {
             Ok(gnosis_provider) => {
@@ -199,12 +123,6 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
                 info!(chain = %ChainId::Gnosis, "Created wallet provider");
             }
             Err(e) => {
-                if use_l2 {
-                    return Err(anyhow::anyhow!(
-                        "L2 mode requires a Gnosis wallet provider but it failed to initialize: {}",
-                        e
-                    ));
-                }
                 tracing::warn!(
                     chain = %ChainId::Gnosis,
                     error = %e,
@@ -220,7 +138,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     let gas_killer_handler = GasKillerHandler::with_providers(providers);
 
     Ok(BlsEigenlayerExecutor::new(
-        view_only_provider,
+        provider,
         bls_apk_registry,
         bls_operator_state_retriever,
         registry_coordinator_address,
