@@ -135,29 +135,6 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             .get_provider(chain_id)
             .ok_or_else(|| anyhow::anyhow!("No provider configured for chain: {}", chain_id))?;
 
-        // The upstream BlsEigenlayerExecutor always reads block numbers from L1
-        // (view_only_provider). For L2 targets, we must use the L2 block number
-        // instead — otherwise the L2 contract's staleness check fails because
-        // L1 block (~10M) is far behind L2 block (~44M).
-        // The non_signer_data was computed from L1 operator state, but the L2
-        // RegistryCoordinatorMimic mirrors the same operators/stakes, so the
-        // L2 BLSSignatureChecker will validate identically.
-        let reference_block_number = if chain_id != ChainId::Sepolia {
-            let l2_block = provider
-                .get_block_number()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to get {} block number: {}", chain_id, e))?;
-            info!(
-                l1_block = current_block_number,
-                l2_block = l2_block,
-                chain = %chain_id,
-                "Overriding reference block number for L2 target"
-            );
-            l2_block as u32
-        } else {
-            current_block_number
-        };
-
         info!(
             storage_updates_len = task_data.storage_updates.len(),
             chain = %chain_id,
@@ -236,7 +213,7 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             .verifyAndUpdate(
                 msg_hash,
                 quorum_numbers,
-                reference_block_number,
+                current_block_number,
                 storage_updates,
                 transition_index,
                 target_function,
