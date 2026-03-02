@@ -279,9 +279,12 @@ spec:
             # LOCAL mode: Gnosis RPC for cross-chain execution (yield distribution) via Anvil fork
             - name: GNOSIS_HTTP_RPC
               value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
-            # L2 AVS deployment (created by create-l2-avs-config init container from bridge output)
-            - name: L2_AVS_DEPLOYMENT_PATH
-              value: "/app/.nodes/l2_avs_deploy.json"
+            # NOTE: L2_AVS_DEPLOYMENT_PATH is intentionally NOT set here.
+            # Setting it activates global L2 mode in factories.rs, which redirects ALL
+            # executor reads (including BLS operator lookups) to Gnosis. This breaks L1
+            # tasks (e.g. ArraySummation) because the L2 RegistryCoordinatorMimic doesn't
+            # implement getRegisteredPubkey(). Per-task chain selection is needed first
+            # (see helm-multi-trigger branch).
             {{- end }}
             {{- if and .Values.l2 .Values.l2.enabled }}
             # TESTNET + L2 mode: Use L2 AVS deployment path

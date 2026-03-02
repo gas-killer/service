@@ -452,27 +452,8 @@ jobs:
           L2_RPC="http://localhost:8546"
           ROUTER_URL="http://localhost:8080"
 
-          # Capture router state before trigger
-          echo "=== Router pod status before trigger ==="
-          kubectl get pods -l app.kubernetes.io/component=router -o wide
           ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
           echo "Router pod: $ROUTER_POD"
-          echo "Restart count: $(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)"
-          echo "=== Router logs before trigger (last 50 lines) ==="
-          kubectl logs $ROUTER_POD --tail=50 || true
-
-          # Debug: Verify L2 mode is active on the router
-          echo ""
-          echo "=== L2 Mode Verification ==="
-          echo "Router env vars (L2-related):"
-          kubectl exec $ROUTER_POD -c router -- env 2>/dev/null | grep -E "(GNOSIS|L2_AVS|AVS_DEPLOYMENT)" || echo "WARNING: Could not read env vars"
-          echo ""
-          echo "L2 AVS deployment file on PVC:"
-          kubectl exec $ROUTER_POD -c router -- cat /app/.nodes/l2_avs_deploy.json 2>/dev/null || echo "WARNING: l2_avs_deploy.json NOT FOUND on router pod"
-          echo ""
-          echo "Router startup mode (L2 vs L1):"
-          kubectl logs $ROUTER_POD 2>/dev/null | grep -E "(L2 mode|L1 mode|GNOSIS_HTTP_RPC not set)" || echo "WARNING: No L2/L1 mode log found in router output"
-          echo ""
 
           # Get current state
           INITIAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
@@ -486,13 +467,10 @@ jobs:
 
           if ! echo "$RESOLVER" | grep -q "true"; then
             echo "ERROR: resolveYieldDistribution did not return true - yield is not ready for distribution"
-            echo "This likely means the yield-distribution helm hook did not properly set up timing."
             echo "Checking contract state..."
             echo "cycleLength: $(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>/dev/null || echo N/A)"
             echo "lastClaimedBlockNumber: $(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo N/A)"
             echo "current block: $(cast block-number --rpc-url "$L2_RPC" 2>/dev/null || echo N/A)"
-            echo "blsSignatureChecker: $(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo N/A)"
-            echo "avsAddress: $(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo N/A)"
             exit 1
           fi
           echo "Distribution is ready!"
@@ -526,7 +504,7 @@ jobs:
             exit 1
           fi
 
-          # Capture logs periodically during the wait to catch crashes
+          # Wait for BLS aggregation and on-chain execution
           echo "Waiting 120s for BLS aggregation and on-chain execution..."
           for i in 30 60 90 120; do
             sleep 30
@@ -536,19 +514,10 @@ jobs:
             PHASE=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.phase}' 2>/dev/null || echo unknown)
             echo "Router pod phase: $PHASE, restart count: $RESTART_COUNT"
             if [ "$RESTART_COUNT" != "0" ] && [ "$RESTART_COUNT" != "unknown" ]; then
-              echo "=== ROUTER RESTARTED! Previous container logs (last 200 lines): ==="
+              echo "=== ROUTER RESTARTED! Previous container logs: ==="
               kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous logs available"
-              echo "=== Current container logs (after restart): ==="
-              kubectl logs $ROUTER_POD --tail=100 2>/dev/null || true
             fi
           done
-
-          # Final state
-          echo ""
-          echo "=== Final router state ==="
-          kubectl get pods -l app.kubernetes.io/component=router -o wide
-          FINAL_RESTART=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)
-          echo "Final restart count: $FINAL_RESTART"
 
           # Verify stateTransitionCount increased
           FINAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
@@ -563,9 +532,6 @@ jobs:
             echo ""
             echo "=== Router logs (last 100) ==="
             kubectl logs $ROUTER_POD --tail=100 2>/dev/null || true
-            echo ""
-            echo "=== Previous container logs (if restarted, last 200) ==="
-            kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous container logs"
             echo ""
             echo "=== Node-1 logs (last 50) ==="
             kubectl logs -l gas-killer/node-index=1 -c node --tail 50 || true
