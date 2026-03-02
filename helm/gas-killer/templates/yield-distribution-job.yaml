@@ -120,7 +120,8 @@ spec:
 
       containers:
         - name: yield-distribution-test
-          image: debian:bookworm-slim
+          image: "{{ .Values.eigenlayer.image.repository }}:{{ .Values.eigenlayer.image.tag }}"
+          imagePullPolicy: {{ .Values.eigenlayer.image.pullPolicy }}
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -130,17 +131,9 @@ spec:
 
               echo "=== Yield Distribution Test Starting at $(date) ==="
 
-              # Install required tools
-              echo "Installing curl, git and foundry (cast)..."
-              apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates
-
-              # Install foundry cast binary
-              curl -L https://foundry.paradigm.xyz | bash
-              export PATH="$HOME/.foundry/bin:$PATH"
-              foundryup
-
-              # Verify cast is available
-              cast --version || { echo "ERROR: cast not installed"; exit 1; }
+              # Verify tools are available (forge/cast/git come from eigenlayer image)
+              forge --version
+              cast --version
 
               # Read addresses from init container
               BLS_CHECKER=$(cat /yield-config/bls_checker)
@@ -212,43 +205,66 @@ spec:
                 # For now, continue and see if distribution works anyway
               fi
 
-              # Stop impersonating
-              cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
-
               # Verify the new addresses are set
               NEW_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
               echo "BLS Signature Checker after init: $NEW_BLS"
 
-              # Disable the StaleBlockNumber check in the YieldDistributor's implementation
-              # bytecode via anvil_setCode. The L1 referenceBlockNumber (~10M) would fail
-              # the staleness check on L2 (~44M) since BLOCK_STALE_MEASURE (300) is baked
-              # into the bytecode as an inline constant.
-              #
-              # Patch: in the implementation bytecode, replace the ISZERO+PUSH2+JUMPI sequence
-              # that branches to the StaleBlockNumber revert with POP+PUSH2+POP (no-op).
-              # Pattern: 1015611fd157 -> 1050611fd150
-              #   10=LT 15=ISZERO 61=PUSH2 1fd1 57=JUMPI  (original: jump to revert if stale)
-              #   10=LT 50=POP    61=PUSH2 1fd1 50=POP     (patched: pop results, never revert)
+              # Upgrade YieldDistributor to use the new GasKillerSDK with configurable
+              # blockStaleMeasure (PR #32). The new SDK defaults to type(uint256).max when
+              # unset, which lets the L1 referenceBlockNumber (~10M) pass the staleness
+              # check on L2 (~44M). BLOCK_STALE_MEASURE (300) is baked into the current
+              # implementation bytecode as an inline constant and cannot be changed via storage.
               echo ""
-              echo "=== Patching StaleBlockNumber check in implementation bytecode ==="
-              IMPL_SLOT="0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-              IMPL_ADDR=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$IMPL_SLOT" | sed 's/0x000000000000000000000000/0x/')
-              echo "Implementation address: $IMPL_ADDR"
+              echo "=== Upgrading YieldDistributor implementation ==="
 
-              CODE=$(cast code --rpc-url "$L2_RPC_URL" "$IMPL_ADDR")
-              echo "Original bytecode length: ${#CODE}"
+              cd /tmp
+              git clone --depth 1 --recurse-submodules https://github.com/BreadchainCoop/solidarity-fund.git breadchain-upgrade
+              cd breadchain-upgrade
 
-              if echo "$CODE" | grep -q "1015611fd157"; then
-                PATCHED=$(echo "$CODE" | sed 's/1015611fd157/1050611fd150/')
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setCode "$IMPL_ADDR" "$PATCHED"
-                echo "StaleBlockNumber check patched successfully"
+              # Update gas-killer-solidity-sdk submodule to PR #32 (configurable blockStaleMeasure)
+              cd lib/gas-killer-solidity-sdk
+              git fetch origin RonTuretzky/configurable-block-steal
+              git checkout FETCH_HEAD
+              cd /tmp/breadchain-upgrade
 
-                # Verify contract still works
-                BSM=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "BLOCK_STALE_MEASURE()(uint32)" 2>/dev/null || echo "N/A")
-                echo "BLOCK_STALE_MEASURE (should still be 300): $BSM"
-              else
-                echo "WARNING: StaleBlockNumber bytecode pattern not found, skipping patch"
+              # Compile the YieldDistributor with the updated SDK
+              echo "Compiling YieldDistributor with updated SDK..."
+              forge build 2>&1 | tail -20
+
+              # Deploy the new implementation
+              echo "Deploying new YieldDistributor implementation..."
+              DEPLOY_OUTPUT=$(forge create src/YieldDistributor.sol:YieldDistributor \
+                --constructor-args "0x0000000000000000000000000000000000000000" \
+                --rpc-url "$L2_RPC_URL" \
+                --from "$OWNER" \
+                --unlocked 2>&1)
+              echo "$DEPLOY_OUTPUT"
+              NEW_IMPL=$(echo "$DEPLOY_OUTPUT" | grep "Deployed to:" | awk '{print $3}')
+              echo "New implementation deployed at: $NEW_IMPL"
+
+              if [ -z "$NEW_IMPL" ] || [ "$NEW_IMPL" = "null" ]; then
+                echo "ERROR: Failed to deploy new implementation"
+                exit 1
               fi
+
+              # Upgrade the proxy: write new implementation address to ERC1967 implementation slot
+              IMPL_SLOT="0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+              NEW_IMPL_PADDED=$(printf '0x%064s' "${NEW_IMPL#0x}" | tr ' ' '0')
+              echo "Upgrading proxy implementation slot to $NEW_IMPL_PADDED"
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$IMPL_SLOT" "$NEW_IMPL_PADDED"
+
+              # Verify upgrade
+              CURRENT_IMPL=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$IMPL_SLOT")
+              echo "Proxy implementation after upgrade: $CURRENT_IMPL"
+
+              # Verify blockStaleMeasure defaults to max (new SDK behavior)
+              BSM=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blockStaleMeasure()(uint256)" 2>/dev/null || echo "N/A")
+              echo "blockStaleMeasure after upgrade: $BSM"
+
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
+
+              cd /tmp
+              rm -rf breadchain-upgrade
 
               # Step 3: Check distribution timing
               echo ""
