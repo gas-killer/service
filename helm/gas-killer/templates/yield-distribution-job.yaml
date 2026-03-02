@@ -219,6 +219,39 @@ spec:
               NEW_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
               echo "BLS Signature Checker after init: $NEW_BLS"
 
+              # Set BLOCK_STALE_MEASURE to max uint32 so the L1 referenceBlockNumber
+              # passes the on-chain staleness check on L2 (L1 block ~10M vs L2 block ~44M).
+              # Find the storage slot by scanning for the packed value (QUORUM_THRESHOLD=66 + BLOCK_STALE_MEASURE=300).
+              echo ""
+              echo "=== Setting BLOCK_STALE_MEASURE to max uint32 ==="
+              CURRENT_BSM=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "BLOCK_STALE_MEASURE()(uint32)" 2>/dev/null | grep -oE '^[0-9]+' | head -1)
+              echo "Current BLOCK_STALE_MEASURE: $CURRENT_BSM"
+
+              BSM_SLOT=""
+              for slot in $(seq 0 30); do
+                SLOT_HEX=$(printf '0x%x' "$slot")
+                VAL=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$SLOT_HEX" 2>/dev/null)
+                # BLOCK_STALE_MEASURE (300=0x12c) and QUORUM_THRESHOLD (66=0x42) are packed in the same slot
+                if echo "$VAL" | grep -qi "0000012c.*42"; then
+                  BSM_SLOT="$SLOT_HEX"
+                  echo "Found BLOCK_STALE_MEASURE at slot $BSM_SLOT (value: $VAL)"
+                  break
+                fi
+              done
+
+              if [ -n "$BSM_SLOT" ]; then
+                # Pack: QUORUM_THRESHOLD (0x42) in lowest byte, BLOCK_STALE_MEASURE (0xffffffff) in next 4 bytes
+                # Solidity packs right-aligned: lowest-order byte = first declared (QUORUM_THRESHOLD uint8),
+                # next 4 bytes = BLOCK_STALE_MEASURE uint32
+                NEW_VAL="0x000000000000000000000000000000000000000000000000000000ffffffff42"
+                echo "Setting slot $BSM_SLOT to $NEW_VAL"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$BSM_SLOT" "$NEW_VAL"
+                VERIFY_BSM=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "BLOCK_STALE_MEASURE()(uint32)" 2>/dev/null)
+                echo "BLOCK_STALE_MEASURE after update: $VERIFY_BSM"
+              else
+                echo "WARNING: Could not find BLOCK_STALE_MEASURE storage slot, staleness check may fail"
+              fi
+
               # Step 3: Check distribution timing
               echo ""
               echo "=== Step 3: Checking distribution timing ==="
