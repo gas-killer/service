@@ -260,9 +260,17 @@ spec:
               CURRENT_IMPL=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$IMPL_SLOT")
               echo "Proxy implementation after upgrade: $CURRENT_IMPL"
 
-              # Verify blockStaleMeasure defaults to max (new SDK behavior)
+              # Set blockStaleMeasure to a safe value. The default (type(uint256).max when unset)
+              # causes overflow in: uint256(referenceBlockNumber) + blockStaleMeasure >= block.number
+              # We need blockStaleMeasure >= L2_block(~44M) - L1_refBlock(~10M) = ~34M.
+              # Set to 100M to be safe. The slot is base+3 in the ERC-7201 GasKillerSDK storage struct.
+              BSM_SLOT="0xb2e7df4d13596d7e1e77b4f36e5e8e1e1e05315db3a0e8dcbcfb4f7cf87b6703"
+              BSM_VALUE=$(printf '0x%064x' 100000000)
+              echo "Setting blockStaleMeasure to 100000000 at slot $BSM_SLOT"
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$BSM_SLOT" "$BSM_VALUE"
+
               BSM=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blockStaleMeasure()(uint256)" 2>/dev/null || echo "N/A")
-              echo "blockStaleMeasure after upgrade: $BSM"
+              echo "blockStaleMeasure after setting: $BSM"
 
               cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
 
