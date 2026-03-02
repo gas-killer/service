@@ -277,29 +277,6 @@ spec:
               cd /tmp
               rm -rf breadchain-upgrade
 
-              # Advance L1 block number to match L2. The executor reads referenceBlockNumber
-              # from L1 (~10M on Sepolia fork) but verifyAndUpdate executes on L2 (~44M on
-              # Gnosis fork). On-chain checkSignatures uses referenceBlockNumber to look up
-              # operator history — operators on L2 were registered at the bridge block (~44M),
-              # so lookups at block 10M fail with array-out-of-bounds. Advancing L1 so that
-              # referenceBlockNumber >= bridge_block makes the history indices valid on both chains.
-              echo ""
-              echo "=== Syncing L1 block number to L2 ==="
-              L1_RPC_URL="http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
-              L1_BLOCK=$(cast block-number --rpc-url "$L1_RPC_URL")
-              L2_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
-              echo "L1 block: $L1_BLOCK, L2 block: $L2_BLOCK"
-
-              if [ "$L2_BLOCK" -gt "$L1_BLOCK" ]; then
-                BLOCKS_TO_MINE=$((L2_BLOCK - L1_BLOCK + 100))
-                echo "Advancing L1 by $BLOCKS_TO_MINE blocks..."
-                cast rpc --rpc-url "$L1_RPC_URL" anvil_mine $(printf '0x%x' $BLOCKS_TO_MINE) 0x1
-                NEW_L1=$(cast block-number --rpc-url "$L1_RPC_URL")
-                echo "L1 advanced to block $NEW_L1 (was $L1_BLOCK)"
-              else
-                echo "L1 already at or ahead of L2, no advance needed"
-              fi
-
               # Step 3: Check distribution timing
               echo ""
               echo "=== Step 3: Checking distribution timing ==="
