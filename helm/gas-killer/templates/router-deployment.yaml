@@ -122,51 +122,6 @@ spec:
               echo "Ethereum is ready!"
         {{- end }}
 
-        {{- if and (eq .Values.global.environment "LOCAL") .Values.gnosis.enabled }}
-        # Mine L1 blocks so its block number matches L2 (Gnosis).
-        # The executor reads referenceBlockNumber from L1 via view_only_provider.
-        # When yield distribution calls verifyAndUpdate on L2, the contract checks
-        # referenceBlockNumber + 300 >= block.number. Without syncing, L1 (~10M)
-        # is far behind L2 (~44M) and the check fails with StaleBlockNumber.
-        - name: sync-block-numbers
-          image: alpine:3.19
-          command:
-            - sh
-            - -c
-            - |
-              apk add --no-cache curl jq >/dev/null 2>&1
-
-              L1_RPC="http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
-              L2_RPC="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
-
-              echo "Fetching block numbers..."
-              L1_HEX=$(curl -sf -X POST -H "Content-Type: application/json" \
-                -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-                "$L1_RPC" | jq -r '.result')
-              L2_HEX=$(curl -sf -X POST -H "Content-Type: application/json" \
-                -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-                "$L2_RPC" | jq -r '.result')
-
-              L1_BLOCK=$((L1_HEX))
-              L2_BLOCK=$((L2_HEX))
-              echo "L1 block: $L1_BLOCK  L2 block: $L2_BLOCK"
-
-              if [ "$L1_BLOCK" -lt "$L2_BLOCK" ]; then
-                MINE=$((L2_BLOCK - L1_BLOCK + 1000))
-                MINE_HEX=$(printf '0x%x' "$MINE")
-                echo "Mining $MINE blocks on L1 to sync with L2..."
-                curl -sf -X POST -H "Content-Type: application/json" \
-                  -d "{\"jsonrpc\":\"2.0\",\"method\":\"anvil_mine\",\"params\":[\"$MINE_HEX\"],\"id\":1}" \
-                  "$L1_RPC" | jq .
-
-                NEW_HEX=$(curl -sf -X POST -H "Content-Type: application/json" \
-                  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-                  "$L1_RPC" | jq -r '.result')
-                echo "L1 block after mining: $((NEW_HEX))"
-              else
-                echo "L1 already >= L2, no mining needed."
-              fi
-        {{- end }}
 
         # Wait for nodes to be ready
         - name: wait-for-nodes
