@@ -239,9 +239,9 @@ spec:
               # Also init other required submodules
               git submodule update --init --recursive
 
-              # Compile the YieldDistributor
+              # Compile only the YieldDistributor (--force recompiles all 118 files and OOMs)
               echo "Compiling YieldDistributor with updated SDK..."
-              forge build --force 2>&1 | tail -5
+              forge build --contracts src/YieldDistributor.sol 2>&1 | tail -5
 
               # Deploy the new implementation via cast send --create (more reliable than forge create)
               echo "Deploying new YieldDistributor implementation..."
