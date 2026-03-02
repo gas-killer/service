@@ -135,25 +135,6 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             .get_provider(chain_id)
             .ok_or_else(|| anyhow::anyhow!("No provider configured for chain: {}", chain_id))?;
 
-        // For cross-chain tasks (e.g. yield distribution on Gnosis): use the target
-        // chain's block number so referenceBlockNumber passes the on-chain staleness
-        // check (referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number).
-        let verification_block = if chain_id != ChainId::Sepolia {
-            let target_block = provider
-                .get_block_number()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to get {} block number: {}", chain_id, e))?;
-            info!(
-                l1_block = current_block_number,
-                target_block = target_block,
-                chain = %chain_id,
-                "Using target chain block number for cross-chain verification"
-            );
-            target_block as u32
-        } else {
-            current_block_number
-        };
-
         info!(
             storage_updates_len = task_data.storage_updates.len(),
             chain = %chain_id,
@@ -232,7 +213,7 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             .verifyAndUpdate(
                 msg_hash,
                 quorum_numbers,
-                verification_block,
+                current_block_number,
                 storage_updates,
                 transition_index,
                 target_function,
