@@ -229,17 +229,20 @@ spec:
 
               # Compile the YieldDistributor with the updated SDK
               echo "Compiling YieldDistributor with updated SDK..."
+              export FOUNDRY_ETH_RPC_URL="$L2_RPC_URL"
               forge build 2>&1 | tail -20
 
-              # Deploy the new implementation
+              # Deploy the new implementation using cast send --create
+              # (forge create ignores --rpc-url with --unlocked in some versions)
               echo "Deploying new YieldDistributor implementation..."
-              DEPLOY_OUTPUT=$(forge create src/YieldDistributor.sol:YieldDistributor \
-                --constructor-args "0x0000000000000000000000000000000000000000" \
-                --rpc-url "$L2_RPC_URL" \
-                --from "$OWNER" \
-                --unlocked 2>&1)
+              INIT_CODE=$(forge inspect src/YieldDistributor.sol:YieldDistributor bytecode)
+              # Constructor arg: address(0) padded to 32 bytes
+              CONSTRUCTOR_ARG="0000000000000000000000000000000000000000000000000000000000000000"
+
+              DEPLOY_OUTPUT=$(cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
+                --create "${INIT_CODE}${CONSTRUCTOR_ARG}" --json 2>&1)
               echo "$DEPLOY_OUTPUT"
-              NEW_IMPL=$(echo "$DEPLOY_OUTPUT" | grep "Deployed to:" | awk '{print $3}')
+              NEW_IMPL=$(echo "$DEPLOY_OUTPUT" | jq -r '.contractAddress' 2>/dev/null || echo "")
               echo "New implementation deployed at: $NEW_IMPL"
 
               if [ -z "$NEW_IMPL" ] || [ "$NEW_IMPL" = "null" ]; then
