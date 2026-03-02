@@ -253,7 +253,7 @@ spec:
 
               NEW_IMPL=$(cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
                 --create "${INIT_CODE}${CONSTRUCTOR_ARG}" \
-                --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('contractAddress',''))")
+                2>&1 | grep -i "contractAddress" | awk '{print $2}')
               echo "New implementation deployed at: $NEW_IMPL"
 
               if [ -z "$NEW_IMPL" ] || [ "$NEW_IMPL" = "None" ] || [ "$NEW_IMPL" = "null" ]; then
