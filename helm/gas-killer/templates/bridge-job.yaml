@@ -48,100 +48,86 @@ spec:
               mountPath: /app/.nodes
               readOnly: true
 
-        # Extract registry coordinator address from avs_deploy.json
-        - name: extract-registry-coordinator
-          image: alpine:3.19
-          command:
-            - sh
-            - -c
-            - |
-              set -e
-              apk add --no-cache jq
-              echo "=== avs_deploy.json contents ==="
-              cat /app/.nodes/avs_deploy.json
-              echo ""
-              echo "=== Extracting RegistryCoordinator address ==="
-
-              # Try different possible field names for registry coordinator
-              REGISTRY_ADDR=$(jq -r '.addresses.RegistryCoordinator // .addresses.registryCoordinator // .addresses.registry_coordinator // .addresses.registryCoordinatorProxy // empty' /app/.nodes/avs_deploy.json 2>/dev/null)
-
-              if [ -z "$REGISTRY_ADDR" ] || [ "$REGISTRY_ADDR" = "null" ]; then
-                echo "ERROR: Could not find RegistryCoordinator address in avs_deploy.json"
-                echo "Available addresses:"
-                jq '.addresses' /app/.nodes/avs_deploy.json
-                exit 1
-              fi
-
-              echo "Found RegistryCoordinator: $REGISTRY_ADDR"
-              echo "$REGISTRY_ADDR" > /bridge-config/registry_coordinator_address
-              echo "Wrote to /bridge-config/registry_coordinator_address"
-              cat /bridge-config/registry_coordinator_address
-          volumeMounts:
-            - name: shared-data
-              mountPath: /app/.nodes
-              readOnly: true
-            - name: bridge-config
-              mountPath: /bridge-config
-
       containers:
         - name: bridge
           image: "{{ .Values.bridge.image.repository }}:{{ .Values.bridge.image.tag }}"
           imagePullPolicy: {{ .Values.bridge.image.pullPolicy }}
-          # Set REGISTRY_COORDINATOR_ADDRESS from file and run the image's entrypoint
-          command: ["/bin/sh", "-c"]
+          command: ["/bin/bash", "-c"]
           args:
             - |
-              # Create a wrapper script that logs everything
+              set -e
               LOG_FILE="/app/.nodes/bridge.log"
-              echo "=== Bridge Container Starting at $(date) ===" >> "$LOG_FILE"
-              echo "=== Bridge Container Starting ==="
+              exec > >(tee -a "$LOG_FILE") 2>&1
 
-              echo "Checking /bridge-config contents..." | tee -a "$LOG_FILE"
-              ls -la /bridge-config/ 2>&1 | tee -a "$LOG_FILE" || echo "Cannot list /bridge-config" | tee -a "$LOG_FILE"
+              echo "=== Bridge Container Starting at $(date) ==="
 
-              if [ ! -f /bridge-config/registry_coordinator_address ]; then
-                echo "ERROR: /bridge-config/registry_coordinator_address not found!" | tee -a "$LOG_FILE"
-                exit 1
-              fi
+              # Create env file required by target-contracts config.sh
+              cat > /tmp/bridge.env << EOF
+              DEPLOYER_KEY=${PRIVATE_KEY}
+              L1_RPC_URL=${L1_RPC_URL}
+              L2_RPC_URL=${L2_RPC_URL}
+              SP1HELIOS_ADDRESS=0x0000000000000000000000000000000000000001
+              IS_SP1HELIOS_MOCK=1
+              L1_ETHERSCAN_API_KEY=
+              L2_ETHERSCAN_API_KEY=
+              EOF
 
-              export REGISTRY_COORDINATOR_ADDRESS=$(cat /bridge-config/registry_coordinator_address)
-              echo "[BRIDGE] REGISTRY_COORDINATOR_ADDRESS: $REGISTRY_COORDINATOR_ADDRESS" | tee -a "$LOG_FILE"
-              echo "[BRIDGE] L1_RPC_URL: $L1_RPC_URL" | tee -a "$LOG_FILE"
-              echo "[BRIDGE] L2_RPC_URL: $L2_RPC_URL" | tee -a "$LOG_FILE"
-              echo "[BRIDGE] PRIVATE_KEY is set: $([ -n "$PRIVATE_KEY" ] && echo 'yes' || echo 'no')" | tee -a "$LOG_FILE"
+              # Set Docker context vars for config.sh
+              export IS_DOCKER=true
+              export SCRIPTS_DIR=/app/scripts
+              export ARTIFACTS_DIR=/app/contracts/artifacts
+              export NODES_DIR=/app/.nodes
+              export E2E_ENV_FILE=/tmp/bridge.env
+              export FOUNDRY_ROOT_DIR=/app/contracts
 
-              echo "=== Checking bridge script ===" | tee -a "$LOG_FILE"
-              ls -la /app/scripts/ 2>&1 | tee -a "$LOG_FILE" || echo "Cannot list /app/scripts" | tee -a "$LOG_FILE"
+              mkdir -p /app/contracts/artifacts
 
-              if [ ! -f /app/scripts/bridge-to-l2.sh ]; then
-                echo "ERROR: /app/scripts/bridge-to-l2.sh not found!" | tee -a "$LOG_FILE"
-                echo "Checking /app directory structure..." | tee -a "$LOG_FILE"
-                find /app -type f 2>/dev/null | head -50 | tee -a "$LOG_FILE" || true
-                exit 1
-              fi
+              echo "=== avs_deploy.json contents ==="
+              cat /app/.nodes/avs_deploy.json
+              echo ""
 
-              echo "=== Executing bridge script ===" | tee -a "$LOG_FILE"
-              /app/scripts/bridge-to-l2.sh 2>&1 | tee -a "$LOG_FILE"
-              EXIT_CODE=$?
-              echo "=== Bridge script exited with code: $EXIT_CODE at $(date) ===" | tee -a "$LOG_FILE"
+              echo "=== Step 1: Deploying bridge contracts (L1 + L2) ==="
+              /app/scripts/deploy-bridge.sh
+              echo "Deploy complete. Checking artifacts..."
+              ls -la /app/contracts/artifacts/
 
-              if [ $EXIT_CODE -eq 0 ]; then
-                # Copy l2-deploy.json to shared volume if it exists in artifacts
-                if [ -f /app/contracts/artifacts/l2-deploy.json ]; then
-                  cp /app/contracts/artifacts/l2-deploy.json /app/.nodes/l2-deploy.json
-                  chmod 644 /app/.nodes/l2-deploy.json
-                  echo "l2-deploy.json copied to shared volume" | tee -a "$LOG_FILE"
-                fi
+              echo ""
+              echo "=== Step 2: Updating middleware shim on L1 ==="
+              /app/scripts/update-shim.sh
 
-                # Write completion marker
-                touch /app/.nodes/.bridge_complete
-                chmod 644 /app/.nodes/.bridge_complete
-                echo "Bridge completion marker created" | tee -a "$LOG_FILE"
-              fi
+              echo ""
+              echo "=== Step 3: Generating mock proof ==="
+              /app/scripts/generate-mock-proof.sh 1234
 
-              exit $EXIT_CODE
+              echo ""
+              echo "=== Step 4: Updating mimic on L2 (populates operator arrays) ==="
+              /app/scripts/update-mimic.sh
+
+              echo ""
+              echo "=== Bridge flow complete, copying artifacts ==="
+
+              # Copy both deploy files to shared volume
+              cp /app/contracts/artifacts/l1-deploy.json /app/.nodes/l1-deploy.json
+              chmod 644 /app/.nodes/l1-deploy.json
+              echo "l1-deploy.json copied to shared volume"
+
+              cp /app/contracts/artifacts/l2-deploy.json /app/.nodes/l2-deploy.json
+              chmod 644 /app/.nodes/l2-deploy.json
+              echo "l2-deploy.json copied to shared volume"
+
+              # Write completion marker
+              touch /app/.nodes/.bridge_complete
+              chmod 644 /app/.nodes/.bridge_complete
+              echo "Bridge completion marker created"
+
+              echo "=== Bridge Job SUCCEEDED at $(date) ==="
           env:
             - name: PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: PRIVATE_KEY
+            - name: DEPLOYER_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
@@ -176,9 +162,6 @@ spec:
             {{- end }}
             {{- end }}
           volumeMounts:
-            - name: bridge-config
-              mountPath: /bridge-config
-              readOnly: true
             - name: shared-data
               mountPath: /app/.nodes
           resources:
@@ -188,6 +171,4 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" . }}
-        - name: bridge-config
-          emptyDir: {}
 {{- end }}
