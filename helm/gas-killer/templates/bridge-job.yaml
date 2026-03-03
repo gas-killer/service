@@ -93,7 +93,8 @@ spec:
               fi
 
               MIMIC_ADDRESS=$(jq -r '.registryCoordinatorMimic' "$L2_DEPLOY")
-              LAST_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" 2>/dev/null | cast to-dec 2>/dev/null || echo "0")
+              LAST_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" 2>/dev/null | tr -d '[:space:]' || echo "0")
+              [ -z "$LAST_BLOCK" ] && LAST_BLOCK="0"
               echo "[BRIDGE] Mimic lastBlockNumber: $LAST_BLOCK" | tee -a "$LOG_FILE"
 
               if [ "$LAST_BLOCK" = "0" ] && [ -f "$PROOF_FILE" ]; then
@@ -123,7 +124,7 @@ spec:
                   --broadcast -vvvv 2>&1 | tee -a "$LOG_FILE"
 
                 # Verify recovery succeeded
-                LAST_BLOCK_AFTER=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | cast to-dec)
+                LAST_BLOCK_AFTER=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
                 echo "[RECOVERY] Mimic lastBlockNumber after recovery: $LAST_BLOCK_AFTER" | tee -a "$LOG_FILE"
 
                 if [ "$LAST_BLOCK_AFTER" = "0" ]; then
@@ -134,7 +135,7 @@ spec:
               fi
 
               # Final check: ensure mimic is populated before proceeding
-              FINAL_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | cast to-dec)
+              FINAL_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
               if [ "$FINAL_BLOCK" = "0" ]; then
                 echo "ERROR: Mimic still empty after bridge — cannot proceed" | tee -a "$LOG_FILE"
                 exit 1
