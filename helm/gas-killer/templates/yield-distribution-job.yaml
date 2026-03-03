@@ -236,9 +236,11 @@ spec:
               cd /tmp/breadchain-upgrade
 
               # Compile the YieldDistributor with the updated SDK
+              # --skip test --skip script avoids compiling test/script files,
+              # significantly reducing peak memory usage (prevents OOMKill).
               echo "Compiling YieldDistributor with updated SDK..."
               export FOUNDRY_ETH_RPC_URL="$L2_RPC_URL"
-              forge build 2>&1 | tail -20
+              forge build --skip test --skip script 2>&1 | tail -20
 
               # Deploy the new implementation using cast send --create
               # (forge create ignores --rpc-url with --unlocked in some versions)

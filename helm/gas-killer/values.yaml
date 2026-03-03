@@ -244,7 +244,9 @@ yieldDistribution:
       memory: "2Gi"
       cpu: "500m"
     limits:
-      memory: "4Gi"
+      # forge build (Solidity compilation) during the upgrade step requires
+      # significant memory.  4 Gi was not enough and caused OOMKill.
+      memory: "6Gi"
       cpu: "1000m"
 
 # Shared data volume for keys and deployment configs
