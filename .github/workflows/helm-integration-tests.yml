@@ -191,7 +191,31 @@ jobs:
             echo "Found bridge job: $BRIDGE_JOB"
             kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=600s || {
               echo "Bridge job failed or timed out"
-              kubectl logs "$BRIDGE_JOB" --tail=100 || true
+              echo ""
+              echo "=== Bridge job status ==="
+              kubectl describe "$BRIDGE_JOB" || true
+              echo ""
+              echo "=== Bridge pod status ==="
+              BRIDGE_POD=$(kubectl get pods -l app.kubernetes.io/component=bridge -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+              if [ -n "$BRIDGE_POD" ]; then
+                kubectl describe pod "$BRIDGE_POD" || true
+                echo "=== Bridge init container (extract-registry-coordinator) logs ==="
+                kubectl logs "$BRIDGE_POD" -c extract-registry-coordinator --tail=50 || true
+                echo "=== Bridge container logs ==="
+                kubectl logs "$BRIDGE_POD" -c bridge --tail=200 || true
+                echo "=== Bridge container previous logs ==="
+                kubectl logs "$BRIDGE_POD" -c bridge --previous --tail=200 2>/dev/null || echo "No previous logs"
+              else
+                echo "No bridge pod found via label selector"
+                kubectl logs "$BRIDGE_JOB" --tail=100 || true
+              fi
+              echo ""
+              echo "=== Bridge log from shared volume ==="
+              # Try to read bridge.log from any pod with the shared volume
+              ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+              if [ -n "$ROUTER_POD" ]; then
+                kubectl exec "$ROUTER_POD" -- cat /app/.nodes/bridge.log 2>/dev/null || echo "No bridge.log in shared volume"
+              fi
               exit 1
             }
             echo "Bridge job completed successfully"
@@ -557,6 +581,24 @@ jobs:
 
           echo "=== Events (last 30) ==="
           kubectl get events --sort-by=.metadata.creationTimestamp | tail -30
+
+          echo "=== Bridge Job Logs ==="
+          BRIDGE_POD=$(kubectl get pods -l app.kubernetes.io/component=bridge -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$BRIDGE_POD" ]; then
+            echo "--- Init: extract-registry-coordinator ---"
+            kubectl logs "$BRIDGE_POD" -c extract-registry-coordinator --tail=50 || true
+            echo "--- Container: bridge ---"
+            kubectl logs "$BRIDGE_POD" -c bridge --tail=200 || true
+            echo "--- Container: bridge (previous) ---"
+            kubectl logs "$BRIDGE_POD" -c bridge --previous --tail=200 2>/dev/null || echo "No previous logs"
+          else
+            kubectl logs -l app.kubernetes.io/component=bridge --tail 200 || true
+          fi
+          echo "--- Bridge log from shared volume ---"
+          ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$ROUTER_POD" ]; then
+            kubectl exec "$ROUTER_POD" -- cat /app/.nodes/bridge.log 2>/dev/null || echo "No bridge.log"
+          fi
 
           echo "=== Yield Distribution Job Logs ==="
           kubectl logs -l app.kubernetes.io/component=yield-distribution --tail 100 || true
