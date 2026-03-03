@@ -48,7 +48,7 @@ spec:
               mountPath: /app/.nodes
               readOnly: true
 
-        # Extract bridge addresses from l2-deploy.json
+        # Extract bridge addresses from l2-deploy.json and create L2 AVS config for the router
         - name: extract-addresses
           image: alpine:3.19
           command:
@@ -56,7 +56,7 @@ spec:
             - -c
             - |
               set -e
-              apk add --no-cache jq
+              apk add --no-cache jq curl
 
               echo "=== Reading l2-deploy.json ==="
               cat /app/.nodes/l2-deploy.json
@@ -76,17 +76,52 @@ spec:
               echo "$BLS_CHECKER" > /yield-config/bls_checker
               echo "$REG_COORD" > /yield-config/registry_coordinator
 
-              echo "Addresses written to /yield-config/"
+              # Query blsApkRegistry() from the RegistryCoordinatorMimic on L2
+              # Function selector: keccak256("blsApkRegistry()") = 0x5df45946
+              L2_RPC="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+              echo "Querying blsApkRegistry() from RegistryCoordinatorMimic at $REG_COORD..."
+              BLS_APK_REGISTRY_RAW=$(curl -sf -X POST -H "Content-Type: application/json" \
+                --data '{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"'"$REG_COORD"'","data":"0x5df45946"},"latest"],"id":1}' \
+                "$L2_RPC" | jq -r '.result')
+              # ABI-decode: 32-byte hex → 20-byte address (strip 0x + 24 zero chars)
+              BLS_APK_REGISTRY="0x$(echo "$BLS_APK_REGISTRY_RAW" | sed 's/^0x//' | cut -c 25-64)"
+              echo "BLSApkRegistry: $BLS_APK_REGISTRY"
+
+              # The BLSSigCheckOperatorStateRetriever exists on mainnet Gnosis (forked by Anvil)
+              # It takes registryCoordinator as a parameter so it works with our RegistryCoordinatorMimic
+              BLS_SIG_CHECK="0x056A41125bB62168B464ddDECd995e8494448913"
+              echo "BLSSigCheckOperatorStateRetriever (from mainnet fork): $BLS_SIG_CHECK"
+
+              # Create l2_avs_deploy.json with L2 AVS addresses for future use
+              # Format matches AvsDeployment { addresses: { registryCoordinator, blsapkRegistry, blsSigCheck, counter } }
+              cat > /app/.nodes/l2_avs_deploy.json <<DEPLOYEOF
+              {
+                "addresses": {
+                  "registryCoordinator": "$REG_COORD",
+                  "blsapkRegistry": "$BLS_APK_REGISTRY",
+                  "blsSigCheck": "$BLS_SIG_CHECK",
+                  "counter": "0x0000000000000000000000000000000000000000"
+                }
+              }
+              DEPLOYEOF
+
+              echo "=== Created l2_avs_deploy.json ==="
+              cat /app/.nodes/l2_avs_deploy.json
+
+              touch /app/.nodes/.l2_avs_config_complete
+              echo "L2 AVS config marker created"
+
+              echo "Addresses written to /yield-config/ and /app/.nodes/"
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes
-              readOnly: true
             - name: yield-config
               mountPath: /yield-config
 
       containers:
         - name: yield-distribution-test
-          image: debian:bookworm-slim
+          image: "{{ .Values.eigenlayer.image.repository }}:{{ .Values.eigenlayer.image.tag }}"
+          imagePullPolicy: {{ .Values.eigenlayer.image.pullPolicy }}
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -104,17 +139,9 @@ spec:
 
               echo "=== Yield Distribution Test Starting at $(date) ==="
 
-              # Install required tools
-              echo "Installing curl, git and foundry (cast)..."
-              apt-get update && apt-get install -y --no-install-recommends curl git ca-certificates
-
-              # Install foundry cast binary
-              curl -L https://foundry.paradigm.xyz | bash
-              export PATH="$HOME/.foundry/bin:$PATH"
-              foundryup
-
-              # Verify cast is available
-              cast --version || { echo "ERROR: cast not installed"; exit 1; }
+              # Verify tools are available (forge/cast/git come from eigenlayer image)
+              forge --version
+              cast --version
 
               # Read addresses from init container
               BLS_CHECKER=$(cat /yield-config/bls_checker)
@@ -122,7 +149,6 @@ spec:
 
               YIELD_DISTRIBUTOR="{{ .Values.yieldDistribution.contractAddress }}"
               L2_RPC_URL="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
-              L1_RPC_URL="http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
 
               echo "BLS Signature Checker: $BLS_CHECKER"
               echo "Registry Coordinator Mimic: $REG_COORD"
@@ -187,12 +213,77 @@ spec:
                 # For now, continue and see if distribution works anyway
               fi
 
-              # Stop impersonating
-              cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
-
               # Verify the new addresses are set
               NEW_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
               echo "BLS Signature Checker after init: $NEW_BLS"
+
+              # Upgrade YieldDistributor to use the new GasKillerSDK with configurable
+              # blockStaleMeasure (PR #32). The new SDK defaults to type(uint256).max when
+              # unset, which lets the L1 referenceBlockNumber (~10M) pass the staleness
+              # check on L2 (~44M). BLOCK_STALE_MEASURE (300) is baked into the current
+              # implementation bytecode as an inline constant and cannot be changed via storage.
+              echo ""
+              echo "=== Upgrading YieldDistributor implementation ==="
+
+              cd /tmp
+              git clone --depth 1 --recurse-submodules https://github.com/BreadchainCoop/solidarity-fund.git breadchain-upgrade
+              cd breadchain-upgrade
+
+              # Update gas-killer-solidity-sdk submodule to PR #32 (configurable blockStaleMeasure)
+              cd lib/gas-killer-solidity-sdk
+              git fetch origin RonTuretzky/configurable-block-steal
+              git checkout FETCH_HEAD
+              cd /tmp/breadchain-upgrade
+
+              # Compile the YieldDistributor with the updated SDK
+              echo "Compiling YieldDistributor with updated SDK..."
+              export FOUNDRY_ETH_RPC_URL="$L2_RPC_URL"
+              forge build 2>&1 | tail -20
+
+              # Deploy the new implementation using cast send --create
+              # (forge create ignores --rpc-url with --unlocked in some versions)
+              echo "Deploying new YieldDistributor implementation..."
+              INIT_CODE=$(forge inspect src/YieldDistributor.sol:YieldDistributor bytecode)
+              # Constructor arg: address(0) padded to 32 bytes
+              CONSTRUCTOR_ARG="0000000000000000000000000000000000000000000000000000000000000000"
+
+              DEPLOY_OUTPUT=$(cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
+                --create "${INIT_CODE}${CONSTRUCTOR_ARG}" --json 2>&1)
+              echo "$DEPLOY_OUTPUT"
+              NEW_IMPL=$(echo "$DEPLOY_OUTPUT" | jq -r '.contractAddress' 2>/dev/null || echo "")
+              echo "New implementation deployed at: $NEW_IMPL"
+
+              if [ -z "$NEW_IMPL" ] || [ "$NEW_IMPL" = "null" ]; then
+                echo "ERROR: Failed to deploy new implementation"
+                exit 1
+              fi
+
+              # Upgrade the proxy: write new implementation address to ERC1967 implementation slot
+              IMPL_SLOT="0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+              NEW_IMPL_PADDED=$(printf '0x%064s' "${NEW_IMPL#0x}" | tr ' ' '0')
+              echo "Upgrading proxy implementation slot to $NEW_IMPL_PADDED"
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$IMPL_SLOT" "$NEW_IMPL_PADDED"
+
+              # Verify upgrade
+              CURRENT_IMPL=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$IMPL_SLOT")
+              echo "Proxy implementation after upgrade: $CURRENT_IMPL"
+
+              # Set blockStaleMeasure to a safe value. The default (type(uint256).max when unset)
+              # causes overflow in: uint256(referenceBlockNumber) + blockStaleMeasure >= block.number
+              # We need blockStaleMeasure >= L2_block(~44M) - L1_refBlock(~10M) = ~34M.
+              # Set to 100M to be safe. The slot is base+3 in the ERC-7201 GasKillerSDK storage struct.
+              BSM_SLOT="0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d003"
+              BSM_VALUE=$(printf '0x%064x' 100000000)
+              echo "Setting blockStaleMeasure to 100000000 at slot $BSM_SLOT"
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$BSM_SLOT" "$BSM_VALUE"
+
+              BSM=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blockStaleMeasure()(uint256)" 2>/dev/null || echo "N/A")
+              echo "blockStaleMeasure after setting: $BSM"
+
+              cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
+
+              cd /tmp
+              rm -rf breadchain-upgrade
 
               # Step 3: Check distribution timing
               echo ""
@@ -249,11 +340,6 @@ spec:
 
               NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
               echo "New block number: $NEW_BLOCK"
-
-              # NOTE: L1 block alignment (mining ~34M blocks on L1 to match L2) was removed.
-              # The executor's view_only_provider now reads from L2 (Gnosis) when
-              # GNOSIS_HTTP_RPC and L2_AVS_DEPLOYMENT_PATH are set, so the reference
-              # block number is already an L2 block and passes the StaleBlockNumber check.
 
               # Step 5: Quick state check before verification
               echo ""

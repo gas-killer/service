@@ -48,36 +48,6 @@ spec:
               mountPath: /app/.nodes
               readOnly: true
 
-        # Extract registry coordinator address (jq may not exist in the bridge image)
-        - name: extract-registry-coordinator
-          image: alpine:3.19
-          command:
-            - sh
-            - -c
-            - |
-              set -e
-              apk add --no-cache jq
-
-              echo "=== Reading avs_deploy.json ==="
-              cat /app/.nodes/avs_deploy.json
-
-              REG_COORD=$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' /app/.nodes/avs_deploy.json)
-              echo "RegistryCoordinator: $REG_COORD"
-
-              if [ -z "$REG_COORD" ] || [ "$REG_COORD" = "null" ]; then
-                echo "ERROR: Failed to parse registryCoordinator from avs_deploy.json"
-                exit 1
-              fi
-
-              echo "$REG_COORD" > /bridge-config/registry_coordinator
-              echo "Address written to /bridge-config/registry_coordinator"
-          volumeMounts:
-            - name: shared-data
-              mountPath: /app/.nodes
-              readOnly: true
-            - name: bridge-config
-              mountPath: /bridge-config
-
       containers:
         - name: bridge
           image: "{{ .Values.bridge.image.repository }}:{{ .Values.bridge.image.tag }}"
@@ -85,53 +55,107 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
+              set -e
               LOG_FILE="/app/.nodes/bridge.log"
 
               echo "=== Bridge Container Starting at $(date) ===" | tee -a "$LOG_FILE"
 
-              # Diagnostics: show what's in the image
-              echo "[BRIDGE] Shell: $(readlink /bin/sh 2>/dev/null || echo unknown)" | tee -a "$LOG_FILE"
-              echo "[BRIDGE] Scripts available:" | tee -a "$LOG_FILE"
-              ls -la /app/scripts/ 2>&1 | tee -a "$LOG_FILE"
-
-              # Read registry coordinator address from init container output
-              export REGISTRY_COORDINATOR_ADDRESS=$(cat /bridge-config/registry_coordinator)
+              # Read registry coordinator address from avs_deploy.json
+              # The bridge image has jq installed; try both camelCase and PascalCase field names
+              export REGISTRY_COORDINATOR_ADDRESS=$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' /app/.nodes/avs_deploy.json)
               echo "[BRIDGE] REGISTRY_COORDINATOR_ADDRESS: $REGISTRY_COORDINATOR_ADDRESS" | tee -a "$LOG_FILE"
               echo "[BRIDGE] L1_RPC_URL: $L1_RPC_URL" | tee -a "$LOG_FILE"
               echo "[BRIDGE] L2_RPC_URL: $L2_RPC_URL" | tee -a "$LOG_FILE"
               echo "[BRIDGE] PRIVATE_KEY is set: $([ -n "$PRIVATE_KEY" ] && echo 'yes' || echo 'no')" | tee -a "$LOG_FILE"
 
               if [ -z "$REGISTRY_COORDINATOR_ADDRESS" ] || [ "$REGISTRY_COORDINATOR_ADDRESS" = "null" ]; then
-                echo "ERROR: Could not find RegistryCoordinator address" | tee -a "$LOG_FILE"
+                echo "ERROR: Could not find RegistryCoordinator address in avs_deploy.json" | tee -a "$LOG_FILE"
+                jq '.addresses' /app/.nodes/avs_deploy.json | tee -a "$LOG_FILE"
                 exit 1
               fi
 
               echo "=== Executing bridge-to-l2.sh ===" | tee -a "$LOG_FILE"
-              /app/scripts/bridge-to-l2.sh 2>&1 | tee -a "$LOG_FILE"
-              EXIT_CODE=$?
-              echo "=== bridge-to-l2.sh exited with code: $EXIT_CODE at $(date) ===" | tee -a "$LOG_FILE"
 
-              if [ $EXIT_CODE -eq 0 ]; then
-                # Copy both deploy files to shared volume
-                if [ -f /app/contracts/artifacts/l1-deploy.json ]; then
-                  cp /app/contracts/artifacts/l1-deploy.json /app/.nodes/l1-deploy.json
-                  chmod 644 /app/.nodes/l1-deploy.json
-                  echo "l1-deploy.json copied to shared volume" | tee -a "$LOG_FILE"
-                fi
+              /app/scripts/bridge-to-l2.sh 2>&1 | tee -a "$LOG_FILE" || true
+              echo "=== bridge-to-l2.sh finished at $(date) ===" | tee -a "$LOG_FILE"
 
-                if [ -f /app/contracts/artifacts/l2-deploy.json ]; then
-                  cp /app/contracts/artifacts/l2-deploy.json /app/.nodes/l2-deploy.json
-                  chmod 644 /app/.nodes/l2-deploy.json
-                  echo "l2-deploy.json copied to shared volume" | tee -a "$LOG_FILE"
-                fi
+              # --- Recovery: Fix zero execution state root from Anvil ---
+              # Anvil doesn't compute state roots for forked blocks, returning 0x0.
+              # This causes UpdateMimic to fail with MissingExecutionStateRoot.
+              # We recover by computing the actual state root from the account proof:
+              # keccak256(accountProof[0]) = state root (MPT root node hash).
+              PROOF_FILE="/app/contracts/artifacts/middlewareDataProof.json"
+              L2_DEPLOY="/app/contracts/artifacts/l2-deploy.json"
+              L1_DEPLOY="/app/contracts/artifacts/l1-deploy.json"
 
-                # Write completion marker
-                touch /app/.nodes/.bridge_complete
-                chmod 644 /app/.nodes/.bridge_complete
-                echo "Bridge completion marker created" | tee -a "$LOG_FILE"
+              if [ ! -f "$L2_DEPLOY" ] || [ ! -f "$L1_DEPLOY" ]; then
+                echo "ERROR: Deploy files not found — bridge-to-l2.sh failed before contract deployment" | tee -a "$LOG_FILE"
+                exit 1
               fi
 
-              exit $EXIT_CODE
+              MIMIC_ADDRESS=$(jq -r '.registryCoordinatorMimic' "$L2_DEPLOY")
+              LAST_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" 2>/dev/null | tr -d '[:space:]' || echo "0")
+              [ -z "$LAST_BLOCK" ] && LAST_BLOCK="0"
+              echo "[BRIDGE] Mimic lastBlockNumber: $LAST_BLOCK" | tee -a "$LOG_FILE"
+
+              if [ "$LAST_BLOCK" = "0" ] && [ -f "$PROOF_FILE" ]; then
+                echo "=== UpdateMimic recovery: mimic not populated, fixing state root ===" | tee -a "$LOG_FILE"
+
+                # Compute actual state root: keccak256 of the MPT root node (accountProof[0])
+                ROOT_NODE=$(jq -r '.accountProof[0]' "$PROOF_FILE")
+                ACTUAL_STATE_ROOT=$(cast keccak "$ROOT_NODE")
+                echo "[RECOVERY] Computed actual state root: $ACTUAL_STATE_ROOT" | tee -a "$LOG_FILE"
+
+                # Fix the proof file with the correct execution state root
+                jq --arg esr "$ACTUAL_STATE_ROOT" '.executionStateRoot = $esr' "$PROOF_FILE" > /tmp/proof_fixed.json
+                mv /tmp/proof_fixed.json "$PROOF_FILE"
+                echo "[RECOVERY] Patched proof file with actual state root" | tee -a "$LOG_FILE"
+
+                # Re-run UpdateMimic forge script with required env vars
+                # Use relative path for PROOF_FILE so Foundry fs_permissions resolve correctly
+                cd /app/contracts
+                export PROOF_FILE="./artifacts/middlewareDataProof.json"
+                export REGISTRY_COORDINATOR_MIMIC_ADDRESS="$MIMIC_ADDRESS"
+                export BLS_SIGNATURE_CHECKER_ADDRESS=$(jq -r '.blsSignatureChecker' "$L2_DEPLOY")
+                export MIDDLEWARE_SHIM_ADDRESS=$(jq -r '.middlewareShim' "$L1_DEPLOY")
+                export IS_SP1HELIOS_MOCK=true
+
+                echo "[RECOVERY] Re-running UpdateMimic..." | tee -a "$LOG_FILE"
+                forge script script/e2e/UpdateMimic.s.sol:UpdateMimic \
+                  --broadcast -vvvv 2>&1 | tee -a "$LOG_FILE"
+
+                # Verify recovery succeeded
+                LAST_BLOCK_AFTER=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+                echo "[RECOVERY] Mimic lastBlockNumber after recovery: $LAST_BLOCK_AFTER" | tee -a "$LOG_FILE"
+
+                if [ "$LAST_BLOCK_AFTER" = "0" ]; then
+                  echo "ERROR: UpdateMimic recovery failed — mimic still empty" | tee -a "$LOG_FILE"
+                  exit 1
+                fi
+                echo "=== UpdateMimic recovery succeeded ===" | tee -a "$LOG_FILE"
+              fi
+
+              # Final check: ensure mimic is populated before proceeding
+              FINAL_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+              if [ "$FINAL_BLOCK" = "0" ]; then
+                echo "ERROR: Mimic still empty after bridge — cannot proceed" | tee -a "$LOG_FILE"
+                exit 1
+              fi
+              echo "[BRIDGE] Mimic populated with lastBlockNumber: $FINAL_BLOCK" | tee -a "$LOG_FILE"
+
+              # Copy deploy files to shared volume
+              cp /app/contracts/artifacts/l1-deploy.json /app/.nodes/l1-deploy.json
+              chmod 644 /app/.nodes/l1-deploy.json
+              echo "l1-deploy.json copied to shared volume" | tee -a "$LOG_FILE"
+
+              cp /app/contracts/artifacts/l2-deploy.json /app/.nodes/l2-deploy.json
+              chmod 644 /app/.nodes/l2-deploy.json
+              echo "l2-deploy.json copied to shared volume" | tee -a "$LOG_FILE"
+
+              # Write completion marker
+              touch /app/.nodes/.bridge_complete
+              chmod 644 /app/.nodes/.bridge_complete
+              echo "Bridge completion marker created" | tee -a "$LOG_FILE"
           env:
             - name: PRIVATE_KEY
               valueFrom:
@@ -170,9 +194,6 @@ spec:
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes
-            - name: bridge-config
-              mountPath: /bridge-config
-              readOnly: true
           resources:
             {{- toYaml .Values.bridge.resources | nindent 12 }}
 
@@ -180,6 +201,4 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" . }}
-        - name: bridge-config
-          emptyDir: {}
 {{- end }}
