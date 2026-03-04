@@ -119,3 +119,63 @@ variable "array_summation_factory_address" {
   type        = string
   default     = "0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
 }
+
+# L1-L2 Bridge Configuration
+variable "run_bridge" {
+  description = "Run L1-L2 bridge job before deploying gas-killer"
+  type        = bool
+  default     = true
+}
+
+variable "l1_rpc_url" {
+  description = "RPC URL for L1 (Sepolia, Holesky, Mainnet)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "l2_rpc_url" {
+  description = "RPC URL for L2 (Gnosis, Arbitrum, etc.)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "registry_coordinator_address" {
+  description = "EigenLayer RegistryCoordinator address on L1"
+  type        = string
+  default     = ""
+}
+
+variable "bridge_image" {
+  description = "Docker image for L1-L2 bridge"
+  type        = string
+  default     = "ghcr.io/ronturetzky/target-contracts/bridge:pr-1"
+}
+
+# Gnosis Factory Configuration
+variable "run_gnosis_factory" {
+  description = "Run Gnosis factory job after bridge to deploy ArraySummation"
+  type        = bool
+  default     = true
+}
+
+variable "gnosis_factory_address" {
+  description = "Gnosis ArraySummation factory contract address"
+  type        = string
+  default     = "0xCF2e7d5673Ec1b3F174f25A45ddd6d8b2923ca2e"
+}
+
+# L2 AVS Trigger Configuration
+variable "run_l2_avs_trigger" {
+  description = "Run L2 AVS trigger job to test Gnosis ArraySummation through router"
+  type        = bool
+  default     = false
+}
+
+# L2 AVS Mode Configuration
+variable "l2_avs_mode" {
+  description = "Enable L2 AVS mode - router/nodes will use L2 RPC and L2 AVS contracts"
+  type        = bool
+  default     = false
+}

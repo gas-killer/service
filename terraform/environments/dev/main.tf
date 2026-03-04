@@ -242,37 +242,137 @@ resource "null_resource" "vpc_post_cleanup" {
         --region ${self.triggers.region} \
         --name ${self.triggers.cluster_name} 2>/dev/null || true
 
-      echo "Waiting for k8s-managed security groups to become deletable..."
-      K8S_SGS=$(aws ec2 describe-security-groups \
+      # Function to clean up security groups
+      cleanup_security_groups() {
+        echo "Cleaning up all non-default security groups in VPC..."
+        ALL_SGS=$(aws ec2 describe-security-groups \
+          --region ${self.triggers.region} \
+          --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
+          --query "SecurityGroups[?GroupName!='default'].GroupId" \
+          --output text 2>/dev/null)
+
+        if [ -z "$ALL_SGS" ]; then
+          echo "No security groups to clean up"
+          return 0
+        fi
+
+        # First pass: remove all ingress/egress rules that reference other SGs
+        for sg in $ALL_SGS; do
+          echo "Clearing rules from SG: $sg"
+          # Get and revoke ingress rules
+          aws ec2 describe-security-groups --group-ids "$sg" --region ${self.triggers.region} \
+            --query 'SecurityGroups[0].IpPermissions' --output json 2>/dev/null | \
+            jq -c 'if . then . else [] end' | \
+            xargs -I {} aws ec2 revoke-security-group-ingress --group-id "$sg" --ip-permissions '{}' --region ${self.triggers.region} 2>/dev/null || true
+          # Get and revoke egress rules
+          aws ec2 describe-security-groups --group-ids "$sg" --region ${self.triggers.region} \
+            --query 'SecurityGroups[0].IpPermissionsEgress' --output json 2>/dev/null | \
+            jq -c 'if . then . else [] end' | \
+            xargs -I {} aws ec2 revoke-security-group-egress --group-id "$sg" --ip-permissions '{}' --region ${self.triggers.region} 2>/dev/null || true
+        done
+
+        # Second pass: delete the security groups
+        for sg in $ALL_SGS; do
+          echo "Trying to delete SG: $sg"
+          aws ec2 delete-security-group \
+            --region ${self.triggers.region} \
+            --group-id "$sg" 2>/dev/null && echo "Deleted SG: $sg" || echo "Failed to delete SG: $sg (will retry)"
+        done
+      }
+
+      # Function to clean up ENIs
+      cleanup_enis() {
+        echo "Deleting any leftover ENIs..."
+        for eni in $(aws ec2 describe-network-interfaces \
+          --region ${self.triggers.region} \
+          --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
+          --query 'NetworkInterfaces[*].NetworkInterfaceId' \
+          --output text 2>/dev/null); do
+          echo "Processing ENI: $eni"
+          # Try to detach first if attached
+          ATTACHMENT=$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" \
+            --region ${self.triggers.region} \
+            --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null)
+          if [ -n "$ATTACHMENT" ] && [ "$ATTACHMENT" != "None" ] && [ "$ATTACHMENT" != "null" ]; then
+            echo "Detaching ENI: $eni"
+            aws ec2 detach-network-interface --attachment-id "$ATTACHMENT" --force --region ${self.triggers.region} 2>/dev/null || true
+            sleep 5
+          fi
+          echo "Deleting ENI: $eni"
+          aws ec2 delete-network-interface --region ${self.triggers.region} --network-interface-id "$eni" 2>/dev/null || true
+        done
+      }
+
+      # Run cleanup multiple times with increasing wait times
+      # EKS orphaned security groups can take a while to become deletable
+      for attempt in 1 2 3 4 5; do
+        echo ""
+        echo "=== Cleanup attempt $attempt/5 ==="
+
+        # Check if there are any remaining SGs
+        REMAINING_SGS=$(aws ec2 describe-security-groups \
+          --region ${self.triggers.region} \
+          --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
+          --query "SecurityGroups[?GroupName!='default'].GroupId" \
+          --output text 2>/dev/null)
+
+        if [ -z "$REMAINING_SGS" ]; then
+          echo "All security groups cleaned up!"
+          break
+        fi
+
+        echo "Remaining security groups: $REMAINING_SGS"
+
+        # Clean up ENIs first (they can block SG deletion)
+        cleanup_enis
+
+        # Then clean up security groups
+        cleanup_security_groups
+
+        if [ $attempt -lt 5 ]; then
+          WAIT_TIME=$((attempt * 15))
+          echo "Waiting $${WAIT_TIME}s before next attempt..."
+          sleep $WAIT_TIME
+        fi
+      done
+
+      # Final aggressive cleanup for any remaining EKS security groups
+      echo ""
+      echo "=== Final EKS security group cleanup ==="
+      EKS_SGS=$(aws ec2 describe-security-groups \
         --region ${self.triggers.region} \
-        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
-        --query 'SecurityGroups[?starts_with(GroupName, `k8s-`)].GroupId' \
+        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" "Name=group-name,Values=eks-cluster-sg-*" \
+        --query "SecurityGroups[*].GroupId" \
         --output text 2>/dev/null)
 
-      for sg in $K8S_SGS; do
-        echo "Trying to delete SG: $sg"
-        for i in {1..60}; do
-          if aws ec2 delete-security-group \
-            --region ${self.triggers.region} \
-            --group-id "$sg" 2>/dev/null; then
-            echo "Deleted SG: $sg"
-            break
-          fi
-          echo "SG $sg still has dependencies, retrying..."
-          sleep 10
+      if [ -n "$EKS_SGS" ]; then
+        echo "Found EKS security groups: $EKS_SGS"
+        for sg in $EKS_SGS; do
+          echo "Force deleting EKS SG: $sg"
+          # Clear all rules first
+          aws ec2 describe-security-groups --group-ids "$sg" --region ${self.triggers.region} \
+            --query 'SecurityGroups[0].IpPermissions' --output json 2>/dev/null | \
+            jq -c 'if . then . else [] end' | \
+            xargs -I {} aws ec2 revoke-security-group-ingress --group-id "$sg" --ip-permissions '{}' --region ${self.triggers.region} 2>/dev/null || true
+          aws ec2 describe-security-groups --group-ids "$sg" --region ${self.triggers.region} \
+            --query 'SecurityGroups[0].IpPermissionsEgress' --output json 2>/dev/null | \
+            jq -c 'if . then . else [] end' | \
+            xargs -I {} aws ec2 revoke-security-group-egress --group-id "$sg" --ip-permissions '{}' --region ${self.triggers.region} 2>/dev/null || true
+          # Delete with retries
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if aws ec2 delete-security-group --region ${self.triggers.region} --group-id "$sg" 2>/dev/null; then
+              echo "Deleted EKS SG: $sg"
+              break
+            fi
+            echo "Retry $i/10 for EKS SG $sg..."
+            sleep 10
+          done
         done
-      done
+      else
+        echo "No EKS security groups remaining"
+      fi
 
-      echo "Deleting any leftover AVAILABLE ENIs..."
-      for eni in $(aws ec2 describe-network-interfaces \
-        --region ${self.triggers.region} \
-        --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" "Name=status,Values=available" \
-        --query 'NetworkInterfaces[*].NetworkInterfaceId' \
-        --output text 2>/dev/null); do
-        echo "Deleting ENI: $eni"
-        aws ec2 delete-network-interface --region ${self.triggers.region} --network-interface-id "$eni" 2>/dev/null || true
-      done
-
+      echo ""
       echo "=== Post cleanup complete ==="
     EOT
   }
@@ -314,6 +414,23 @@ module "gas_killer" {
   # E2E Test
   run_e2e_test                    = var.run_e2e_test
   array_summation_factory_address = var.array_summation_factory_address
+
+  # L1-L2 Bridge
+  run_bridge                   = var.run_bridge
+  l1_rpc_url                   = var.l1_rpc_url
+  l2_rpc_url                   = var.l2_rpc_url
+  registry_coordinator_address = var.registry_coordinator_address
+  bridge_image                 = var.bridge_image
+
+  # Gnosis Factory
+  run_gnosis_factory     = var.run_gnosis_factory
+  gnosis_factory_address = var.gnosis_factory_address
+
+  # L2 AVS Trigger
+  run_l2_avs_trigger = var.run_l2_avs_trigger
+
+  # L2 AVS Mode
+  l2_avs_mode = var.l2_avs_mode
 
   # Dependency
   addons_ready = module.eks_addons.ready

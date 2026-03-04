@@ -107,3 +107,24 @@ Secret name - supports existing secret or creates new one
 {{- printf "%s-secret" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
+
+{{/*
+Bridge job name
+*/}}
+{{- define "gas-killer.bridge.fullname" -}}
+{{- printf "%s-bridge" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Gnosis (L2) service name
+*/}}
+{{- define "gas-killer.gnosis.fullname" -}}
+{{- printf "%s-gnosis" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Yield distribution job name
+*/}}
+{{- define "gas-killer.yield-distribution.fullname" -}}
+{{- printf "%s-yield-distribution" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}

@@ -40,13 +40,6 @@ RUN apt-get update && apt-get install -y \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Foundry/Anvil for gas-analyzer-rs
-RUN curl -L https://foundry.paradigm.xyz | bash && \
-    /root/.foundry/bin/foundryup && \
-    cp /root/.foundry/bin/anvil /usr/local/bin/anvil && \
-    chmod +x /usr/local/bin/anvil && \
-    rm -rf /root/.foundry
-
 # Create a non-root user
 RUN useradd -m -u 1000 -s /bin/bash appuser
 
