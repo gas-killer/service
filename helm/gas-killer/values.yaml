@@ -113,9 +113,9 @@ node:
     # For local development, build and load the image into kind:
     # docker build -t gas-killer-node:local -f node/Dockerfile .
     # kind load docker-image gas-killer-node:local --name <cluster-name>
-    repository: gas-killer-router
-    tag: node-pr-87
-    pullPolicy: Always
+    repository: gas-killer-node
+    tag: local
+    pullPolicy: Never-dist-e2e
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
   resources:
@@ -123,10 +123,6 @@ node:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      # With PR-87, nodes send debug_traceCall directly to the target
-      # chain RPC (e.g. gas-killer-gnosis:8546) instead of spawning
-      # local Anvil forks.  The heavy memory usage is on the Gnosis
-      # Anvil pod; nodes themselves are lightweight HTTP clients.
       memory: "1Gi"
       cpu: "500m"
 
@@ -137,8 +133,8 @@ router:
     # docker build -t gas-killer-router:local -f router/Dockerfile .
     # kind load docker-image gas-killer-router:local --name <cluster-name>
     repository: gas-killer-router
-    tag: pr-87
-    pullPolicy: Always
+    tag: local
+    pullPolicy: Never
   port: 3000
   ingressPort: 8080
   ingress:
@@ -155,10 +151,6 @@ router:
       memory: "512Mi"
       cpu: "250m"
     limits:
-      # With PR-87, the router sends debug_traceCall directly to the
-      # target chain RPC (e.g. gas-killer-gnosis:8546) instead of
-      # spawning a local Anvil fork.  It still orchestrates the Creator
-      # phase but does not need multi-GB headroom itself.
       memory: "2Gi"
       cpu: "1000m"
 
@@ -200,10 +192,6 @@ gnosis:
       memory: "1Gi"
       cpu: "500m"
     limits:
-      # With PR-87, router + all 3 nodes send debug_traceCall directly
-      # to this Anvil (no inner forks).  Tracing the YieldDistributor on
-      # a Gnosis mainnet fork requires several GB per concurrent request.
-      # This is now the primary memory bottleneck for gas analysis.
       memory: "6Gi"
       cpu: "1000m"
 

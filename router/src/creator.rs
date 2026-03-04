@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
 use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -182,6 +183,8 @@ pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     config: GasKillerConfig,
     validator: Arc<GasKillerValidator>,
     current_task: Mutex<Option<EnrichedTask>>,
+    /// Round counter - incremented for each new task to ensure unique rounds
+    round_counter: AtomicU64,
 }
 
 impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
@@ -191,6 +194,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
             config,
             validator,
             current_task: Mutex::new(None),
+            round_counter: AtomicU64::new(0),
         }
     }
 
@@ -230,9 +234,12 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             "Creator received task"
         );
 
-        // Compute storage updates using the shared validator
-        debug!("Computing storage updates for task");
-        let (storage_updates, block_height) = self
+        // Compute storage updates - the validator automatically detects which chain has the contract
+        debug!(
+            "Computing storage updates for target {}",
+            task.body.target_address
+        );
+        let (storage_updates, block_height, detected_chain) = self
             .validator
             .compute_storage_updates_for_tx(
                 task.body.target_address,
@@ -256,7 +263,8 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             transition_index = task.body.transition_index,
             target_address = %task.body.target_address,
             target_function = %task.body.call_data.get(..4).map(hex::encode).unwrap_or_default(),
-            "Creator computed storage updates"
+            chain = %detected_chain,
+            "Creator computed storage updates on detected chain"
         );
 
         // Store enriched task with computed storage updates and block height for metadata access
@@ -273,7 +281,13 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         }
 
         let payload = self.get_task_metadata().encode().to_vec();
-        Ok((payload, 0)) // set default "round" to 0
+
+        // Increment round counter for each new task to ensure unique rounds
+        // Nodes will refuse to sign the same round twice
+        let round = self.round_counter.fetch_add(1, Ordering::SeqCst);
+        info!(round = round, "Creator returning payload with round");
+
+        Ok((payload, round))
     }
 
     fn get_task_metadata(&self) -> Self::TaskData {
