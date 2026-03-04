@@ -7,12 +7,14 @@ on:
       - dev
       - staging
       - cloud-staging
+      - RonTuretzky/yield-dist-e2e
   pull_request:
     branches:
       - main
       - dev
       - staging
       - cloud-staging
+      - RonTuretzky/yield-dist-e2e
   workflow_dispatch:
 
 jobs:
