@@ -201,7 +201,8 @@ bridge:
   # Wait for bridge job to complete before starting nodes/router
   waitForBridge: true
   image:
-    repository: ghcr.io/BreadchainCoop/target-contracts/bridge:latest
+    repository: ghcr.io/breadchaincoop/target-contracts/bridge
+    tag: latest
     pullPolicy: IfNotPresent
   resources:
     requests:
