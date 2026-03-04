@@ -220,7 +220,7 @@ variable "registry_coordinator_address" {
 variable "bridge_image" {
   description = "Docker image for L1-L2 bridge"
   type        = string
-  default     = "ghcr.io/ronturetzky/target-contracts/bridge:pr-1"
+  default     = "ghcr.io/BreadchainCoop/target-contracts/bridge"
 }
 
 # =============================================================================
