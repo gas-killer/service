@@ -13,6 +13,7 @@ on:
       - dev
       - staging
       - cloud-staging
+      - cloud-staging-pr-fixes-debug
   workflow_dispatch:
 
 jobs:
@@ -430,6 +431,44 @@ jobs:
           fi
 
           echo "✅ All $SUCCESSFUL triggers completed successfully!"
+
+      - name: Debug YieldDistributor via cast (pre-router)
+        run: |
+          echo "=== Debugging distributeYieldGK directly on Gnosis fork ==="
+
+          YIELD_DISTRIBUTOR="0xeE95A62b749d8a2520E0128D9b3aCa241269024b"
+          L2_RPC="http://localhost:8546"
+          FROM="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+
+          echo "YieldDistributor: $YIELD_DISTRIBUTOR"
+          echo "L2 RPC: $L2_RPC"
+          echo "From address: $FROM"
+
+          echo ""
+          echo "=== Owner and basic state ==="
+          cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "owner()(address)" 2>&1 || echo "owner() call failed"
+          cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>&1 || echo "stateTransitionCount() call failed"
+
+          echo ""
+          echo "=== resolveYieldDistribution() ==="
+          cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1 || echo "resolveYieldDistribution() call failed"
+
+          echo ""
+          echo "=== cast estimate distributeYieldGK() (this should mirror gas-analyzer behavior) ==="
+          set +e
+          cast estimate --rpc-url "$L2_RPC" \
+            --from "$FROM" \
+            "$YIELD_DISTRIBUTOR" \
+            "distributeYieldGK()" 2>&1 || echo "cast estimate reverted (see output above)"
+
+          echo ""
+          echo "=== cast call distributeYieldGK() with trace (to locate internal revert) ==="
+          cast call --rpc-url "$L2_RPC" \
+            --from "$FROM" \
+            --trace \
+            "$YIELD_DISTRIBUTOR" \
+            "distributeYieldGK()" 2>&1 || echo "cast call reverted (see trace above)"
+          set -e
 
       - name: Trigger Yield Distribution via router
         run: |
