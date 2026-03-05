@@ -187,8 +187,9 @@ orchestrator:
   routerPrivateKey: ""
 
 # Gnosis (Anvil fork for L2) configuration - only used in LOCAL mode
+# Defaults to disabled; enable explicitly via --set gnosis.enabled=true (e.g. in CI)
 gnosis:
-  enabled: true
+  enabled: false
   image:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: dev
@@ -232,8 +233,9 @@ l2:
   avsDeploymentPath: "/app/.nodes/l2_avs_deploy.json"
 
 # Yield Distribution test configuration - only used in LOCAL mode with gnosis.enabled
+# Defaults to disabled; enable explicitly via --set yieldDistribution.enabled=true (e.g. in CI)
 yieldDistribution:
-  enabled: true
+  enabled: false
   # YieldDistributor contract address on Gnosis
   contractAddress: "0xeE95A62b749d8a2520E0128D9b3aCa241269024b"
   resources:
