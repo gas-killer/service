@@ -124,8 +124,6 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     // Create wallet providers for each supported chain
     let mut providers: HashMap<ChainId, WalletProvider> = HashMap::new();
 
-    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
-
     // Sepolia provider (required)
     let sepolia_provider = create_wallet_provider_for_chain(ChainId::Sepolia, &private_key).await?;
     providers.insert(ChainId::Sepolia, sepolia_provider);
