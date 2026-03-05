@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 # Ethereum / Alloy (for bindings)
 alloy = { workspace = true }
+alloy-eips = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-provider = { workspace = true }
 alloy-signer = { workspace = true }

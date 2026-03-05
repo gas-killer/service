@@ -323,11 +323,14 @@ impl GasKillerValidator {
             .input(alloy::primitives::Bytes::copy_from_slice(call_data).into());
 
         // Call gas-analyzer-rs to get storage updates and gas estimate using EvmSketch
-        let block = BlockNumberOrTag::Number(block_height);
         let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_evmsketch(rpc_url_str, tx_request, block)
-                .await
-                .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+            call_to_encoded_state_updates_with_evmsketch(
+                rpc_url_str,
+                tx_request,
+                BlockNumberOrTag::Number(block_height),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
@@ -473,8 +476,8 @@ mod tests {
         assert_eq!(decoded.metadata.transition_index, 1);
     }
 
-    #[tokio::test]
-    #[ignore = "requires RPC and Anvil - run with: cargo test -- --ignored"]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires RPC - run with: cargo test -- --ignored"]
     async fn test_full_validation_with_rpc() {
         // Integration test: full validation including storage update computation
         // This test is ignored by default as it requires RPC access and Anvil

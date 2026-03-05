@@ -40,6 +40,11 @@ secrets:
   # Example: --set secrets.rpcUrl=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
   rpcUrl: ""
 
+  # L2 Fork URL for local Gnosis Anvil (only used in LOCAL mode with gnosis.enabled=true)
+  # Override with: --set secrets.l2ForkUrl=<your-gnosis-rpc-url>
+  # Example: --set secrets.l2ForkUrl=https://rpc.gnosischain.com
+  l2ForkUrl: ""
+
 # Ethereum (Anvil) configuration - only used in LOCAL mode
 ethereum:
   enabled: true
@@ -108,9 +113,9 @@ node:
     # For local development, build and load the image into kind:
     # docker build -t gas-killer-node:local -f node/Dockerfile .
     # kind load docker-image gas-killer-node:local --name <cluster-name>
-    repository: gas-killer-router
-    tag: node-pr-87
-    pullPolicy: IfNotPresent
+    repository: gas-killer-node
+    tag: local
+    pullPolicy: Never
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
   resources:
@@ -118,8 +123,8 @@ node:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "512Mi"
-      cpu: "250m"
+      memory: "1Gi"
+      cpu: "500m"
 
 # Gas Killer Router configuration
 router:
@@ -128,8 +133,8 @@ router:
     # docker build -t gas-killer-router:local -f router/Dockerfile .
     # kind load docker-image gas-killer-router:local --name <cluster-name>
     repository: gas-killer-router
-    tag: pr-87
-    pullPolicy: IfNotPresent
+    tag: local
+    pullPolicy: Never
   port: 3000
   ingressPort: 8080
   ingress:
@@ -143,11 +148,11 @@ router:
     ingressPort: 8080
   resources:
     requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
       memory: "512Mi"
       cpu: "250m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
 
 # Orchestrator configuration
 # The orchestrator configs are included in the Docker image at /app/config/
@@ -171,6 +176,64 @@ orchestrator:
   # If not provided, will use /app/config/router_orchestrator.json from the image
   # WARNING: The image contains a default private key. For production, always provide your own!
   routerPrivateKey: ""
+
+# Gnosis (Anvil fork for L2) configuration - only used in LOCAL mode
+gnosis:
+  enabled: true
+  image:
+    repository: ghcr.io/breadchaincoop/ethereum
+    tag: dev
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8546
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "6Gi"
+      cpu: "1000m"
+
+# Bridge configuration - bridges EigenLayer operator state from L1 to L2
+bridge:
+  enabled: true
+  # Wait for bridge job to complete before starting nodes/router
+  waitForBridge: true
+  image:
+    repository: ghcr.io/breadchaincoop/target-contracts/bridge
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+# L2 Configuration (for Gnosis/multi-chain operation in TESTNET mode)
+# When enabled, router/nodes will connect to real L2 RPC for AVS operations
+l2:
+  # Enable L2 AVS mode - router will use L2 RPC for AVS lookups (TESTNET only)
+  enabled: false
+  # L2 RPC URL (e.g., Gnosis mainnet)
+  rpcUrl: ""
+  # Path to L2 AVS deployment JSON (created by l2-avs-config job)
+  avsDeploymentPath: "/app/.nodes/l2_avs_deploy.json"
+
+# Yield Distribution test configuration - only used in LOCAL mode with gnosis.enabled
+yieldDistribution:
+  enabled: true
+  # YieldDistributor contract address on Gnosis
+  contractAddress: "0xeE95A62b749d8a2520E0128D9b3aCa241269024b"
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "500m"
+    limits:
+      memory: "4Gi"
+      cpu: "1000m"
 
 # Shared data volume for keys and deployment configs
 sharedData:
