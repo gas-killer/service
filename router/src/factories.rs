@@ -63,14 +63,51 @@ async fn create_wallet_provider_for_chain(
     Ok(provider)
 }
 
-/// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations with multi-chain support
+/// Loads the L2 AVS deployment from `L2_AVS_DEPLOYMENT_PATH`.
+/// Mirrors `AvsDeployment::load()` which reads from `AVS_DEPLOYMENT_PATH`.
+fn load_l2_avs_deployment() -> Result<AvsDeployment> {
+    let path = env::var("L2_AVS_DEPLOYMENT_PATH")
+        .map_err(|_| anyhow::anyhow!("L2_AVS_DEPLOYMENT_PATH must be set"))?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to read L2 deployment file {}: {}", path, e))?;
+    let deployment: AvsDeployment = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse L2 deployment file {}: {}", path, e))?;
+    Ok(deployment)
+}
+
+/// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations with multi-chain support.
+///
+/// By default the executor's read side (view_only_provider, BLS contracts) points at L1 via
+/// `HTTP_RPC` and `AVS_DEPLOYMENT_PATH`.
+///
+/// When `GNOSIS_HTTP_RPC` **and** `L2_AVS_DEPLOYMENT_PATH` are both set, the read side is
+/// switched to L2 (Gnosis) so that block numbers and operator-state queries are consistent
+/// with the chain where `verifyAndUpdate` executes. This prevents `StaleBlockNumber` reverts
+/// caused by passing L1 block numbers to an L2 contract.
 pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
-    let view_only_provider =
-        ProviderBuilder::new().connect_http(url::Url::parse(&http_rpc).unwrap());
+    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
-    let deployment =
-        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
+    // --- L2 sidecar: optionally override the read side to point at Gnosis ---
+    let gnosis_rpc = env::var("GNOSIS_HTTP_RPC").ok();
+    let use_l2 = gnosis_rpc.is_some() && env::var("L2_AVS_DEPLOYMENT_PATH").is_ok();
+
+    let (rpc_for_reads, deployment) = if use_l2 {
+        let rpc = gnosis_rpc.as_ref().unwrap();
+        let dep = load_l2_avs_deployment()?;
+        info!("L2 mode enabled — executor reads from Gnosis (GNOSIS_HTTP_RPC)");
+        (rpc.clone(), dep)
+    } else {
+        let dep = AvsDeployment::load()
+            .map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
+        info!("L1 mode — executor reads from Sepolia (HTTP_RPC)");
+        (http_rpc.clone(), dep)
+    };
+
+    let view_only_provider = ProviderBuilder::new().connect_http(
+        url::Url::parse(&rpc_for_reads)
+            .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", rpc_for_reads, e))?,
+    );
 
     let bls_apk_registry_address = deployment
         .bls_apk_registry_address()
@@ -78,11 +115,6 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     let registry_coordinator_address = deployment
         .registry_coordinator_address()
         .map_err(|e| anyhow::anyhow!("Failed to get registry coordinator address: {}", e))?;
-
-    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
-
-    // Read the BLSSigCheckOperatorStateRetriever address from the deployment config
-    // This is stored in the blsSigCheck field of avs_deploy.json
     let bls_operator_state_retriever_address = deployment
         .bls_sig_check_operator_state_retriever_address()
         .map_err(|e| {
@@ -92,19 +124,27 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     // Create wallet providers for each supported chain
     let mut providers: HashMap<ChainId, WalletProvider> = HashMap::new();
 
+    let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
+
     // Sepolia provider (required)
     let sepolia_provider = create_wallet_provider_for_chain(ChainId::Sepolia, &private_key).await?;
     providers.insert(ChainId::Sepolia, sepolia_provider);
     info!(chain = %ChainId::Sepolia, "Created wallet provider");
 
-    // Gnosis provider (optional - only if GNOSIS_HTTP_RPC is set)
-    if env::var("GNOSIS_HTTP_RPC").is_ok() {
+    // Gnosis provider — required in L2 mode, optional otherwise
+    if gnosis_rpc.is_some() {
         match create_wallet_provider_for_chain(ChainId::Gnosis, &private_key).await {
             Ok(gnosis_provider) => {
                 providers.insert(ChainId::Gnosis, gnosis_provider);
                 info!(chain = %ChainId::Gnosis, "Created wallet provider");
             }
             Err(e) => {
+                if use_l2 {
+                    return Err(anyhow::anyhow!(
+                        "L2 mode requires a Gnosis wallet provider but it failed to initialize: {}",
+                        e
+                    ));
+                }
                 tracing::warn!(
                     chain = %ChainId::Gnosis,
                     error = %e,

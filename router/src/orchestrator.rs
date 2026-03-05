@@ -1,4 +1,5 @@
-use crate::{GasKillerCreatorType, GasKillerHandler, GasKillerValidator};
+use crate::executor::GasKillerHandler;
+use crate::{GasKillerCreatorType, GasKillerValidator};
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
 use commonware_avs_router::orchestrator::types::Orchestrator;
 

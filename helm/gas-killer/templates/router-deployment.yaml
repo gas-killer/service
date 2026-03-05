@@ -313,6 +313,12 @@ spec:
               subPath: router_orchestrator.json
               readOnly: true
             {{- end }}
+            {{- if .Values.router.l2AvsDeployment }}
+            - name: config
+              mountPath: /app/.nodes/l2_avs_deploy.json
+              subPath: l2_avs_deploy.json
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.router.resources | nindent 12 }}
 
@@ -323,6 +329,11 @@ spec:
         {{- if .Values.orchestrator.routerPrivateKey }}
         - name: router-key
           emptyDir: {}
+        {{- end }}
+        {{- if .Values.router.l2AvsDeployment }}
+        - name: config
+          configMap:
+            name: {{ include "gas-killer.config.fullname" . }}
         {{- end }}
 ---
 apiVersion: v1

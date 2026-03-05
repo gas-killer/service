@@ -137,6 +137,15 @@ router:
     pullPolicy: Never
   port: 3000
   ingressPort: 8080
+  # Gnosis RPC URL for L2 mode (optional)
+  # When set along with l2AvsDeployment, the executor reads block numbers
+  # and BLS state from Gnosis instead of L1, preventing StaleBlockNumber reverts
+  gnosisHttpRpc: ""
+  # L2 AVS deployment config JSON (optional)
+  # Required when gnosisHttpRpc is set — contains BLS contract addresses
+  # for the RegistryCoordinatorMimic deployed on Gnosis
+  # Example: --set-file router.l2AvsDeployment=config/.nodes/l2_avs_deploy.json
+  l2AvsDeployment: ""
   ingress:
     enabled: true
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation (3e+06)
