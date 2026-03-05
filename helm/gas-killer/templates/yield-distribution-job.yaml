@@ -267,7 +267,7 @@ spec:
                 BSM_SLOT="0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d003"
                 BSM_VALUE=$(printf '0x%064x' 100000000)
                 echo "Setting blockStaleMeasure to 100000000 at slot $BSM_SLOT"
-                cast rpc --rpc-url "$YIELD_DISTRIBUTOR" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$BSM_SLOT" "$BSM_VALUE"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$BSM_SLOT" "$BSM_VALUE"
 
                 BSM=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blockStaleMeasure()(uint256)" 2>/dev/null || echo "N/A")
                 echo "blockStaleMeasure after setting: $BSM"
