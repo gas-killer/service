@@ -3745,7 +3745,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer#29f38fd619e88e57fb4e706fbd0ea363f9a50d0e"
+source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer?branch=bagelface%2Ffix-gas-estimator#705737e3fd157df80e31d936d13a21197f644d30"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -3759,7 +3759,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer#29f38fd619e88e57fb4e706fbd0ea363f9a50d0e"
+source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer?branch=bagelface%2Ffix-gas-estimator#705737e3fd157df80e31d936d13a21197f644d30"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -3774,7 +3774,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer#29f38fd619e88e57fb4e706fbd0ea363f9a50d0e"
+source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer?branch=bagelface%2Ffix-gas-estimator#705737e3fd157df80e31d936d13a21197f644d30"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -3793,7 +3793,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer#29f38fd619e88e57fb4e706fbd0ea363f9a50d0e"
+source = "git+https://github.com/BreadchainCoop/gas-killer-analyzer?branch=bagelface%2Ffix-gas-estimator#705737e3fd157df80e31d936d13a21197f644d30"
 dependencies = [
  "alloy",
  "alloy-eips",
