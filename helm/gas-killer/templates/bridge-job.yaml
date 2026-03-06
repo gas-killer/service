@@ -52,7 +52,7 @@ spec:
         - name: bridge
           image: "{{ .Values.bridge.image.repository }}:{{ .Values.bridge.image.tag }}"
           imagePullPolicy: {{ .Values.bridge.image.pullPolicy }}
-          command: ["/bin/sh", "-c"]
+          command: ["/bin/bash", "-c"]
           args:
             - |
               set -e
