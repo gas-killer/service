@@ -52,7 +52,7 @@ spec:
         - name: bridge
           image: "{{ .Values.bridge.image.repository }}:{{ .Values.bridge.image.tag }}"
           imagePullPolicy: {{ .Values.bridge.image.pullPolicy }}
-          command: ["/bin/sh", "-c"]
+          command: ["/bin/bash", "-c"]
           args:
             - |
               set -e
@@ -75,8 +75,11 @@ spec:
               fi
 
               echo "=== Executing bridge-to-l2.sh ===" | tee -a "$LOG_FILE"
-              /app/scripts/bridge-to-l2.sh 2>&1 | tee -a "$LOG_FILE" || true
-              echo "=== bridge-to-l2.sh finished at $(date) ===" | tee -a "$LOG_FILE"
+              set +e
+              /app/scripts/bridge-to-l2.sh 2>&1 | tee -a "$LOG_FILE"
+              BRIDGE_EXIT=${PIPESTATUS[0]}
+              set -e
+              echo "=== bridge-to-l2.sh finished at $(date) with exit code $BRIDGE_EXIT ===" | tee -a "$LOG_FILE"
 
               # --- Recovery: Fix zero execution state root from Anvil ---
               # Anvil doesn't compute state roots for forked blocks, returning 0x0.
@@ -88,8 +91,12 @@ spec:
               L1_DEPLOY="/app/contracts/artifacts/l1-deploy.json"
 
               if [ ! -f "$L2_DEPLOY" ] || [ ! -f "$L1_DEPLOY" ]; then
-                echo "ERROR: Deploy files not found — bridge-to-l2.sh failed before contract deployment" | tee -a "$LOG_FILE"
+                echo "ERROR: Deploy files not found — bridge-to-l2.sh failed before contract deployment (exit code: $BRIDGE_EXIT)" | tee -a "$LOG_FILE"
                 exit 1
+              fi
+
+              if [ "$BRIDGE_EXIT" -ne 0 ]; then
+                echo "WARNING: bridge-to-l2.sh failed (exit code: $BRIDGE_EXIT) but deploy files exist — attempting recovery" | tee -a "$LOG_FILE"
               fi
 
               MIMIC_ADDRESS=$(jq -r '.registryCoordinatorMimic' "$L2_DEPLOY")

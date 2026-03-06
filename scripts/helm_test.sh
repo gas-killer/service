@@ -201,9 +201,6 @@ echo -e "${YELLOW}Step 7: Waiting for all pods to be ready...${NC}"
 echo "Waiting for ethereum pod..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=ethereum --timeout=180s
 
-echo "Waiting for signer pod..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=signer --timeout=180s
-
 echo "Waiting for node pods..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=node --timeout=300s --all
 

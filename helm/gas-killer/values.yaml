@@ -50,7 +50,7 @@ ethereum:
   enabled: true
   image:
     repository: ghcr.io/breadchaincoop/ethereum
-    tag: dev
+    tag: latest
     pullPolicy: IfNotPresent
   # Priority class for ethereum pod - it holds critical blockchain state
   # Consider creating a custom priority class instead of using system-cluster-critical
@@ -71,8 +71,8 @@ ethereum:
 eigenlayer:
   image:
     repository: ghcr.io/breadchaincoop/eigenlayer
-    tag: dev
-    pullPolicy: Always
+    tag: latest
+    pullPolicy: IfNotPresent
   # Sepolia testnet contract addresses (forked by Anvil in LOCAL mode)
   contracts:
     delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
@@ -167,20 +167,15 @@ router:
 # The orchestrator configs are included in the Docker image at /app/config/
 # You can override them here if needed, otherwise they will be used from the image
 orchestrator:
-  # Public orchestrator config (JSON string) - optional override
-  # If not provided, will use /app/config/public_orchestrator.json from the image
-  # NOTE: The image file has "address": "router" which works for docker-compose.
-  # For K8s, you need to override with the correct service name.
-  # The service name will be: <release-name>-gas-killer-router
-  publicConfig: |
-    {
-      "g2_x1": "20265730220917057623326116620721648047640065506233168445998945605458084341755",
-      "g2_x2": "1537141129484558011683382469842956131676085503509229854572844956364492197092",
-      "g2_y1": "4380068110839997539835821427545270098552639074995346826656804866303457881635",
-      "g2_y2": "479676018937294309080674601592141614301396550682703157902264620243097107417",
-      "port": "3000",
-      "address": "gas-killer-router"
-    }
+  # Public orchestrator config fields
+  # The "address" field is automatically set to the router service name via the Helm template.
+  # If not provided, will use /app/config/public_orchestrator.json from the image.
+  publicConfig:
+    g2_x1: "20265730220917057623326116620721648047640065506233168445998945605458084341755"
+    g2_x2: "1537141129484558011683382469842956131676085503509229854572844956364492197092"
+    g2_y1: "4380068110839997539835821427545270098552639074995346826656804866303457881635"
+    g2_y2: "479676018937294309080674601592141614301396550682703157902264620243097107417"
+    port: "3000"
   # Router private key (BLS private key) - stored in Secret for security
   # If not provided, will use /app/config/router_orchestrator.json from the image
   # WARNING: The image contains a default private key. For production, always provide your own!
@@ -192,7 +187,7 @@ gnosis:
   enabled: false
   image:
     repository: ghcr.io/breadchaincoop/ethereum
-    tag: dev
+    tag: latest
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
