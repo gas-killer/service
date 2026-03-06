@@ -7,6 +7,7 @@ on:
       - dev
       - staging
       - cloud-staging
+      - bagelface/remove-block-stale-measure
   pull_request:
     branches:
       - main

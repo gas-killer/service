@@ -209,73 +209,7 @@ spec:
                 NEW_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
                 echo "BLS Signature Checker after init: $NEW_BLS"
 
-                # Upgrade YieldDistributor to use the new GasKillerSDK with configurable
-                # blockStaleMeasure (PR #32). The new SDK defaults to type(uint256).max when
-                # unset, which lets the L1 referenceBlockNumber (~10M) pass the staleness
-                # check on L2 (~44M). BLOCK_STALE_MEASURE (300) is baked into the current
-                # implementation bytecode as an inline constant and cannot be changed via storage.
-                echo ""
-                echo "=== Upgrading YieldDistributor implementation ==="
-
-                cd /tmp
-                git clone --depth 1 --recurse-submodules https://github.com/BreadchainCoop/solidarity-fund.git breadchain-upgrade
-                cd breadchain-upgrade
-
-                # Update gas-killer-solidity-sdk submodule to PR #32 (configurable blockStaleMeasure)
-                cd lib/gas-killer-solidity-sdk
-                git fetch origin RonTuretzky/configurable-block-steal
-                git checkout FETCH_HEAD
-                cd /tmp/breadchain-upgrade
-
-                # Compile the YieldDistributor with the updated SDK
-                echo "Compiling YieldDistributor with updated SDK..."
-                export FOUNDRY_ETH_RPC_URL="$L2_RPC_URL"
-                forge build 2>&1 | tail -20
-
-                # Deploy the new implementation using cast send --create
-                # (forge create ignores --rpc-url with --unlocked in some versions)
-                echo "Deploying new YieldDistributor implementation..."
-                INIT_CODE=$(forge inspect src/YieldDistributor.sol:YieldDistributor bytecode)
-                # Constructor arg: address(0) padded to 32 bytes
-                CONSTRUCTOR_ARG="0000000000000000000000000000000000000000000000000000000000000000"
-
-                DEPLOY_OUTPUT=$(cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
-                  --create "${INIT_CODE}${CONSTRUCTOR_ARG}" --json 2>&1)
-                echo "$DEPLOY_OUTPUT"
-                NEW_IMPL=$(echo "$DEPLOY_OUTPUT" | jq -r '.contractAddress' 2>/dev/null || echo "")
-                echo "New implementation deployed at: $NEW_IMPL"
-
-                if [ -z "$NEW_IMPL" ] || [ "$NEW_IMPL" = "null" ]; then
-                  echo "ERROR: Failed to deploy new implementation"
-                  exit 1
-                fi
-
-                # Upgrade the proxy: write new implementation address to ERC1967 implementation slot
-                IMPL_SLOT="0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-                NEW_IMPL_PADDED=$(printf '0x%064s' "${NEW_IMPL#0x}" | tr ' ' '0')
-                echo "Upgrading proxy implementation slot to $NEW_IMPL_PADDED"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$IMPL_SLOT" "$NEW_IMPL_PADDED"
-
-                # Verify upgrade
-                CURRENT_IMPL=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$IMPL_SLOT")
-                echo "Proxy implementation after upgrade: $CURRENT_IMPL"
-
-                # Set blockStaleMeasure to a safe value. The default (type(uint256).max when unset)
-                # causes overflow in: uint256(referenceBlockNumber) + blockStaleMeasure >= block.number
-                # We need blockStaleMeasure >= L2_block(~44M) - L1_refBlock(~10M) = ~34M.
-                # Set to 100M to be safe. The slot is base+3 in the ERC-7201 GasKillerSDK storage struct.
-                BSM_SLOT="0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d003"
-                BSM_VALUE=$(printf '0x%064x' 100000000)
-                echo "Setting blockStaleMeasure to 100000000 at slot $BSM_SLOT"
-                cast rpc --rpc-url "$YIELD_DISTRIBUTOR" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$BSM_SLOT" "$BSM_VALUE"
-
-                BSM=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blockStaleMeasure()(uint256)" 2>/dev/null || echo "N/A")
-                echo "blockStaleMeasure after setting: $BSM"
-
                 cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
-
-                cd /tmp
-                rm -rf breadchain-upgrade
 
                 # Step 3: Check distribution timing
                 echo ""
