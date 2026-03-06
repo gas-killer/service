@@ -50,7 +50,7 @@ ethereum:
   enabled: true
   image:
     repository: ghcr.io/breadchaincoop/ethereum
-    tag: dev
+    tag: latest
     pullPolicy: IfNotPresent
   # Priority class for ethereum pod - it holds critical blockchain state
   # Consider creating a custom priority class instead of using system-cluster-critical
@@ -71,8 +71,8 @@ ethereum:
 eigenlayer:
   image:
     repository: ghcr.io/breadchaincoop/eigenlayer
-    tag: dev
-    pullPolicy: Always
+    tag: latest
+    pullPolicy: IfNotPresent
   # Sepolia testnet contract addresses (forked by Anvil in LOCAL mode)
   contracts:
     delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
@@ -187,7 +187,7 @@ gnosis:
   enabled: false
   image:
     repository: ghcr.io/breadchaincoop/ethereum
-    tag: dev
+    tag: latest
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
