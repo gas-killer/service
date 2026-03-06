@@ -89,27 +89,7 @@ cleanup() {
     echo -e "${GREEN}Cleanup completed${NC}"
 }
 
-# Helper function to read counter value from smart contract
-read_counter() {
-    local counter_address=$1
-    local result=$(curl -s -X POST http://localhost:8545 \
-        -H "Content-Type: application/json" \
-        -d '{
-            "jsonrpc":"2.0",
-            "method":"eth_call",
-            "params":[{
-                "to":"'$counter_address'",
-                "data":"0x8381f58a"
-            }, "latest"],
-            "id":1
-        }' | jq -r '.result')
 
-    if [ -z "$result" ] || [ "$result" = "null" ] || [ "$result" = "0x" ]; then
-        echo "0"
-    else
-        printf "%d\n" "$result" 2>/dev/null || echo "0"
-    fi
-}
 
 echo -e "${GREEN}Starting Gas Killer Helm Test${NC}"
 echo "Project root: $PROJECT_ROOT"

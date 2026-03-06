@@ -23,7 +23,7 @@ secrets:
   # Required keys: PRIVATE_KEY, FUNDED_KEY, FORK_URL
   existingSecret: ""
 
-  # Anvil default key - NEVER use in production!
+  # Private keys for signing transactions
   # Override with: --set secrets.privateKey=<your-key>
   privateKey: ""
   fundedKey: ""

@@ -298,7 +298,7 @@ impl GasKillerValidator {
     /// Takes an explicit RPC URL parameter for flexibility.
     /// Forks at the specified block for deterministic results.
     pub async fn analyze_transaction(
-        rpc_url_str: &str,
+        rpc_url: &str,
         contract_address: alloy::primitives::Address,
         call_data: &[u8],
         from_address: Option<alloy::primitives::Address>,
@@ -325,7 +325,7 @@ impl GasKillerValidator {
         // Call gas-analyzer-rs to get storage updates and gas estimate using EvmSketch
         let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
             call_to_encoded_state_updates_with_evmsketch(
-                rpc_url_str,
+                rpc_url,
                 tx_request,
                 BlockNumberOrTag::Number(block_height),
             )
