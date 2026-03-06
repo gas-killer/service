@@ -255,6 +255,11 @@ spec:
             - name: GNOSIS_HTTP_RPC
               value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
             {{- end }}
+            {{- if and (eq .Values.global.environment "LOCAL") .Values.gnosis.enabled .Values.bridge.enabled }}
+            # LOCAL mode: L2 AVS deployment path enables L2 mode (view_only_provider reads from Gnosis)
+            - name: L2_AVS_DEPLOYMENT_PATH
+              value: "/app/.nodes/l2_avs_deploy.json"
+            {{- end }}
             {{- if and .Values.l2 .Values.l2.enabled }}
             # TESTNET + L2 mode: Use L2 AVS deployment path
             - name: AVS_DEPLOYMENT_PATH
