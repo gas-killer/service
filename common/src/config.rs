@@ -48,6 +48,61 @@ impl std::fmt::Display for ChainId {
     }
 }
 
+/// The ordered list of chains to check when detecting where a contract is deployed.
+/// Sepolia is checked first as the primary chain.
+pub const CHAIN_DETECTION_ORDER: [ChainId; 2] = [ChainId::Sepolia, ChainId::Gnosis];
+
+/// Detects which chain has code deployed at the given address.
+///
+/// Checks each chain in `CHAIN_DETECTION_ORDER` by calling the provided
+/// async `get_code` closure. Returns the first chain where non-empty code is found.
+///
+/// # Arguments
+/// * `address` - The contract address to look up
+/// * `supported_chains` - Slice of chains the caller supports (filtered against detection order)
+/// * `get_code` - Async closure `(ChainId, Address) -> Result<Bytes>` that fetches bytecode
+pub async fn detect_chain_for_address<F, Fut>(
+    address: alloy_primitives::Address,
+    supported_chains: &[ChainId],
+    get_code: F,
+) -> anyhow::Result<ChainId>
+where
+    F: Fn(ChainId, alloy_primitives::Address) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<alloy_primitives::Bytes>>,
+{
+    for &chain_id in &CHAIN_DETECTION_ORDER {
+        if !supported_chains.contains(&chain_id) {
+            continue;
+        }
+
+        match get_code(chain_id, address).await {
+            Ok(code) => {
+                if !code.is_empty() {
+                    tracing::debug!(
+                        chain = %chain_id,
+                        address = %address,
+                        code_len = code.len(),
+                        "Found contract code on chain"
+                    );
+                    return Ok(chain_id);
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    chain = %chain_id,
+                    error = %e,
+                    "Failed to check code on chain"
+                );
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "No contract code found at address {} on any supported chain",
+        address
+    ))
+}
+
 /// Configuration for loading BLS private keys from JSON files
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(non_snake_case)]

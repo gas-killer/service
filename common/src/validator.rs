@@ -127,43 +127,23 @@ impl GasKillerValidator {
             "Detecting chain for address"
         );
 
-        // Check Sepolia first (primary chain)
-        for chain_id in [ChainId::Sepolia, ChainId::Gnosis] {
-            if let Some(rpc_url) = self.rpc_url_for_chain(chain_id) {
-                let url = match Url::parse(rpc_url) {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                };
+        let supported = self.supported_chains();
+        // Clone the RPC URLs so the closure doesn't borrow self
+        let chain_rpc_urls = self.chain_rpc_urls.clone();
 
+        crate::config::detect_chain_for_address(address, &supported, |chain_id, addr| {
+            let chain_rpc_urls = chain_rpc_urls.clone();
+            async move {
+                let rpc_url = chain_rpc_urls
+                    .get(&chain_id)
+                    .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_id))?;
+                let url = Url::parse(rpc_url)?;
                 let provider = ProviderBuilder::new().connect_http(url);
-
-                match provider.get_code_at(address).await {
-                    Ok(code) => {
-                        if !code.is_empty() {
-                            debug!(
-                                chain = %chain_id,
-                                address = %address,
-                                code_len = code.len(),
-                                "Found contract code on chain"
-                            );
-                            return Ok(chain_id);
-                        }
-                    }
-                    Err(e) => {
-                        debug!(
-                            chain = %chain_id,
-                            error = %e,
-                            "Failed to check code on chain"
-                        );
-                    }
-                }
+                let code = provider.get_code_at(addr).await?;
+                Ok(code)
             }
-        }
-
-        Err(anyhow::anyhow!(
-            "No contract code found at address {} on any supported chain",
-            address
-        ))
+        })
+        .await
     }
 
     /// Computes storage updates for a transaction using gas-analyzer-rs.
