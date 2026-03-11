@@ -186,9 +186,63 @@ spec:
 
                 cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
 
-                # Step 3: Check distribution timing and advance chain enough for resolver
+                # Step 3: Cast a vote from a test voter so currentVotes > 0
                 echo ""
-                echo "=== Step 3: Checking distribution timing ==="
+                echo "=== Step 3: Casting vote from test voter ==="
+
+                TEST_VOTER="0xbA6E1C26bE2F8b46D9e7ab7573b99921Ee81AcF5"
+                echo "Using test voter: $TEST_VOTER"
+
+                # Discover current projects via getCurrentVotingDistribution()
+                VOTING_DIST_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "getCurrentVotingDistribution()(address[],uint256[])" 2>/dev/null || echo "")
+                if [ -z "$VOTING_DIST_RAW" ]; then
+                  echo "ERROR: Failed to read current voting distribution"
+                  exit 1
+                fi
+
+                # Extract the projects array length by counting occurrences of '0x' in the first tuple element
+                PROJECTS_HEX=$(echo "$VOTING_DIST_RAW" | head -n1)
+                PROJECT_COUNT=$(echo "$PROJECTS_HEX" | grep -o "0x" | wc -l | tr -d '[:space:]')
+                if [ "$PROJECT_COUNT" -le 0 ]; then
+                  echo "ERROR: No projects found for voting (projectCount=$PROJECT_COUNT)"
+                  exit 1
+                fi
+                echo "Detected $PROJECT_COUNT projects for voting"
+                # Build a simple points vector: [1,1,1,...] (length = projectCount)
+                POINTS_CSV=""
+                for i in $(seq 1 "$PROJECT_COUNT"); do
+                  if [ -z "$POINTS_CSV" ]; then
+                    POINTS_CSV="1"
+                  else
+                    POINTS_CSV="$POINTS_CSV,1"
+                  fi
+                done
+                POINTS_ARG="[$POINTS_CSV]"
+                echo "Voting points vector: $POINTS_ARG"
+
+                echo "Impersonating test voter and submitting vote..."
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$TEST_VOTER"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$TEST_VOTER" "0x56BC75E2D63100000"
+
+                if ! cast send --rpc-url "$L2_RPC_URL" --from "$TEST_VOTER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "castVote(uint256[])" "$POINTS_ARG"; then
+                  echo "ERROR: castVote from test voter failed"
+                  cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$TEST_VOTER" || true
+                  exit 1
+                fi
+
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$TEST_VOTER"
+
+                CURRENT_VOTES=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "currentVotes()(uint256)" 2>/dev/null | tr -d '[:space:]' | grep -oE '^[0-9]+' || echo "0")
+                echo "currentVotes after test vote: $CURRENT_VOTES"
+                if [ "$CURRENT_VOTES" -le 0 ]; then
+                  echo "ERROR: currentVotes is still zero after casting vote"
+                  exit 1
+                fi
+
+                # Step 4: Check distribution timing and advance chain enough for resolver
+                echo ""
+                echo "=== Step 4: Checking distribution timing ==="
                 # Cast outputs decimal by default for uint256
                 # Add error handling in case function names differ on the contract
                 echo "Querying cycleLength..."
@@ -207,9 +261,9 @@ spec:
                 echo "Last claimed block: $LAST_CLAIMED"
                 echo "Current block: $CURRENT"
 
-                # Step 4: Advance time and mine a couple blocks
+                # Step 5: Advance time and mine a couple blocks
                 echo ""
-                echo "=== Step 4: Setting up distribution timing ==="
+                echo "=== Step 5: Setting up distribution timing ==="
 
                 # Get current timestamp and block
                 CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp 2>&1 | grep -oE '^[0-9]+' | head -1) || CURRENT_TIMESTAMP="1770000000"
@@ -229,9 +283,9 @@ spec:
                 NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
                 echo "New block number: $NEW_BLOCK"
 
-                # Step 5: Quick state check before verification
+                # Step 6: Quick state check before verification
                 echo ""
-                echo "=== Step 5: Contract state after setup ==="
+                echo "=== Step 6: Contract state after setup ==="
                 echo "blsSignatureChecker:"
                 cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "N/A"
                 echo "avsAddress:"
@@ -241,7 +295,7 @@ spec:
                 echo "lastClaimedBlockNumber:"
                 cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo "N/A"
 
-                # Step 6: Verify test results
+                # Step 7: Verify test results
                 # NOTE: Full BLS aggregation via the router is not yet supported for
                 # cross-chain tasks in LOCAL mode. The router validator forks L1 (HTTP_RPC)
                 # to simulate transactions, but the YieldDistributor lives on L2 (Gnosis).
@@ -251,7 +305,7 @@ spec:
                 #   3. Owner-only setters configure test-friendly parameters (no storage writes)
                 #   4. resolveYieldDistribution returns true
                 echo ""
-                echo "=== Step 6: Verifying test results ==="
+                echo "=== Step 7: Verifying test results ==="
 
                 PASSED=true
 
