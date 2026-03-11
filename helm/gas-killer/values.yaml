@@ -232,7 +232,7 @@ l2:
 yieldDistribution:
   enabled: false
   # YieldDistributor contract address on Gnosis
-  contractAddress: "0x01B814B541973D310D8B60446b0D9430BF1542C2"
+  contractAddress: "0xe113994D24a10C114cFAF183d9D702933eEEEeb7"
   # Owner of the YieldDistributor on the fork (used for anvil impersonation)
   ownerAddress: "0x5DD2e7db868e33c03daB85d0C623048A7980634E"
   # Test-friendly overrides applied via contract setters
