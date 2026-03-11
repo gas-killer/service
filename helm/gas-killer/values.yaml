@@ -237,7 +237,7 @@ yieldDistribution:
   ownerAddress: "0x5DD2e7db868e33c03daB85d0C623048A7980634E"
   # Test-friendly overrides applied via contract setters
   cycleLength: 1
-  blockStaleMeasure: 100000000
+  blockStaleMeasure: "100000000"
   resources:
     requests:
       memory: "2Gi"
