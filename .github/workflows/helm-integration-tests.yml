@@ -436,7 +436,12 @@ jobs:
         run: |
           echo "=== Triggering Yield Distribution through router ==="
 
-          YIELD_DISTRIBUTOR="0xeE95A62b749d8a2520E0128D9b3aCa241269024b"
+          YIELD_DISTRIBUTOR=$(helm get values gas-killer --all -o json | jq -r '.yieldDistribution.contractAddress')
+          if [ -z "$YIELD_DISTRIBUTOR" ] || [ "$YIELD_DISTRIBUTOR" = "null" ]; then
+            echo "ERROR: Could not read yieldDistribution.contractAddress from Helm values"
+            helm get values gas-killer --all
+            exit 1
+          fi
           L2_RPC="http://localhost:8546"
           ROUTER_URL="http://localhost:8080"
 
