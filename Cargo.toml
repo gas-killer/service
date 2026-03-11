@@ -29,7 +29,7 @@ commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-
 commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-usecases = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-codec = "0.0.63"
 commonware-cryptography = "0.0.63"
 commonware-macros = "0.0.63"

@@ -10,7 +10,7 @@ use anyhow::Result;
 use commonware_avs_router::bindings::blsapkregistry::BLSApkRegistry;
 use commonware_avs_router::bindings::blssigcheckoperatorstateretriever::BLSSigCheckOperatorStateRetriever;
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
-use commonware_avs_usecases::AvsDeployment;
+use commonware_avs_eigenlayer::AvsDeployment;
 use gas_killer_common::{ChainId, GasKillerValidator, WalletProvider};
 use std::collections::HashMap;
 use std::{env, str::FromStr, sync::Arc};

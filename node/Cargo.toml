@@ -24,7 +24,7 @@ clap = { workspace = true }
 # Upstream AVS crates
 commonware-avs-core = { workspace = true }
 commonware-avs-node = { workspace = true }
-commonware-avs-usecases = { workspace = true }
+commonware-avs-eigenlayer = { workspace = true }
 
 # Commonware ecosystem
 commonware-codec = { workspace = true }
