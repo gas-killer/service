@@ -1,6 +1,6 @@
 //! Shared configuration types and utilities for Gas Killer AVS components
 
-use commonware_avs_usecases::{EigenStakingClient, QuorumInfo};
+use commonware_avs_eigenlayer::{EigenStakingClient, QuorumInfo};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;

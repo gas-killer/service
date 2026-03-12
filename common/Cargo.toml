@@ -19,7 +19,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 commonware-avs-router = { workspace = true }
-commonware-avs-usecases = { workspace = true }
+commonware-avs-eigenlayer = { workspace = true }
 commonware-avs-bindings = { workspace = true }
 
 # Commonware (for codec and usecases)

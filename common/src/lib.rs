@@ -12,7 +12,7 @@ pub use task_data::GasKillerTaskData;
 pub use validator::GasKillerValidator;
 
 // Re-export QuorumInfo for convenience
-pub use commonware_avs_usecases::QuorumInfo;
+pub use commonware_avs_eigenlayer::QuorumInfo;
 
 // Re-export provider types for convenience
 pub use commonware_avs_bindings::{ReadOnlyProvider, WalletProvider};
