@@ -238,10 +238,10 @@ yieldDistribution:
   contractAddress: "0xeE95A62b749d8a2520E0128D9b3aCa241269024b"
   resources:
     requests:
-      memory: "2Gi"
+      memory: "4Gi"
       cpu: "500m"
     limits:
-      memory: "4Gi"
+      memory: "6Gi"
       cpu: "1000m"
 
 # Shared data volume for keys and deployment configs
