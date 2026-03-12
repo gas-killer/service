@@ -123,7 +123,7 @@ node:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "1Gi"
+      memory: "2Gi"
       cpu: "500m"
 
 # Gas Killer Router configuration
@@ -146,6 +146,9 @@ router:
   # for the RegistryCoordinatorMimic deployed on Gnosis
   # Example: --set-file router.l2AvsDeployment=config/.nodes/l2_avs_deploy.json
   l2AvsDeployment: ""
+  # Aggregation window duration in seconds. Must exceed the time nodes need to compute
+  # EVMSketch storage updates. Gnosis computation takes ~60s, so 90s gives a safe margin.
+  aggregationFrequency: "90"
   ingress:
     enabled: true
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation (3e+06)
@@ -160,7 +163,7 @@ router:
       memory: "512Mi"
       cpu: "250m"
     limits:
-      memory: "2Gi"
+      memory: "6Gi"
       cpu: "1000m"
 
 # Orchestrator configuration
@@ -243,7 +246,7 @@ yieldDistribution:
       memory: "2Gi"
       cpu: "500m"
     limits:
-      memory: "4Gi"
+      memory: "6Gi"
       cpu: "1000m"
 
 # Shared data volume for keys and deployment configs

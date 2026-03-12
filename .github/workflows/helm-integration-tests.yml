@@ -493,8 +493,8 @@ jobs:
           fi
 
           # Capture logs periodically during the wait to catch crashes
-          echo "Waiting 120s for BLS aggregation and on-chain execution..."
-          for i in 30 60 90 120; do
+          echo "Waiting 300s for BLS aggregation and on-chain execution..."
+          for i in 30 60 90 120 150 180 210 240 270 300; do
             sleep 30
             echo ""
             echo "=== ${i}s checkpoint ==="

@@ -22,7 +22,7 @@ commonware-avs-router = { workspace = true }
 commonware-avs-eigenlayer = { workspace = true }
 commonware-avs-bindings = { workspace = true }
 
-# Commonware (for codec and usecases)
+# Commonware (for codec and eigenlayer)
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 
