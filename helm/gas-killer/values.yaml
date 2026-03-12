@@ -123,7 +123,7 @@ node:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "4Gi"
+      memory: "6Gi"
       cpu: "500m"
 
 # Gas Killer Router configuration
@@ -163,7 +163,7 @@ router:
       memory: "512Mi"
       cpu: "250m"
     limits:
-      memory: "4Gi"
+      memory: "6Gi"
       cpu: "1000m"
 
 # Orchestrator configuration
