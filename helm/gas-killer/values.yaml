@@ -146,6 +146,9 @@ router:
   # for the RegistryCoordinatorMimic deployed on Gnosis
   # Example: --set-file router.l2AvsDeployment=config/.nodes/l2_avs_deploy.json
   l2AvsDeployment: ""
+  # Aggregation window duration in seconds. Must exceed the time nodes need to compute
+  # EVMSketch storage updates. Gnosis computation takes ~60s, so 90s gives a safe margin.
+  aggregationFrequency: "90"
   ingress:
     enabled: true
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation (3e+06)
