@@ -186,6 +186,25 @@ spec:
 
                 cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
 
+                # Register new YieldDistributor as the BREAD token's yieldClaimer.
+                # The BREAD contract restricts claimYield() to owner or yieldClaimer;
+                # the fork's yieldClaimer is still the old distributor, so simulation
+                # of distributeYieldGK() would revert with OnlyClaimers() otherwise.
+                echo ""
+                echo "=== Step 2b: Registering YieldDistributor as BREAD yieldClaimer ==="
+                BREAD_TOKEN="0xa555d5344f6fb6c65da19e403cb4c1ec4a1a5ee3"
+                CURRENT_CLAIMER=$(cast call --rpc-url "$L2_RPC_URL" "$BREAD_TOKEN" "yieldClaimer()(address)" 2>/dev/null || echo "unknown")
+                echo "Current BREAD yieldClaimer: $CURRENT_CLAIMER"
+                BREAD_OWNER=$(cast call --rpc-url "$L2_RPC_URL" "$BREAD_TOKEN" "owner()(address)")
+                echo "BREAD owner: $BREAD_OWNER"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$BREAD_OWNER"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$BREAD_OWNER" "0x56BC75E2D63100000"
+                cast send --rpc-url "$L2_RPC_URL" --from "$BREAD_OWNER" --unlocked \
+                  "$BREAD_TOKEN" "setYieldClaimer(address)" "$YIELD_DISTRIBUTOR"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$BREAD_OWNER"
+                NEW_CLAIMER=$(cast call --rpc-url "$L2_RPC_URL" "$BREAD_TOKEN" "yieldClaimer()(address)" 2>/dev/null || echo "unknown")
+                echo "New BREAD yieldClaimer: $NEW_CLAIMER"
+
                 # Step 3: Cast a vote from a test voter so currentVotes > 0
                 echo ""
                 echo "=== Step 3: Casting vote from test voter ==="
