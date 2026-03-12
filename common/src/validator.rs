@@ -7,6 +7,8 @@ use commonware_cryptography::sha256::Digest;
 use commonware_cryptography::{Hasher, Sha256};
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::debug;
 use url::Url;
 
@@ -38,6 +40,10 @@ pub struct GasKillerValidator {
     chain_rpc_urls: HashMap<ChainId, String>,
     /// Default chain for backwards compatibility
     default_chain: ChainId,
+    /// Cache: (transition_index, block_height) -> computed digest
+    /// Prevents re-running expensive EVMSketch for the same round when the
+    /// orchestrator validates multiple signatures for identical task data.
+    digest_cache: Arc<Mutex<HashMap<(u64, u64), Digest>>>,
 }
 
 impl GasKillerValidator {
@@ -66,6 +72,7 @@ impl GasKillerValidator {
         Ok(Self {
             chain_rpc_urls,
             default_chain: ChainId::Sepolia,
+            digest_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -78,6 +85,7 @@ impl GasKillerValidator {
         Self {
             chain_rpc_urls,
             default_chain: ChainId::Sepolia,
+            digest_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -86,6 +94,7 @@ impl GasKillerValidator {
         Self {
             chain_rpc_urls,
             default_chain: ChainId::Sepolia,
+            digest_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -204,6 +213,23 @@ impl GasKillerValidator {
             aggregation.round
         );
         Ok(aggregation)
+    }
+
+    /// Precomputes and caches the payload digest using already-computed storage updates.
+    ///
+    /// Call this from the task creator after it runs EVMSketch to build the payload, so that
+    /// the orchestrator's validator can skip running EVMSketch again when verifying each incoming
+    /// node signature for the same round.
+    pub async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
+        let digest = self.build_payload_hash(task_data, storage_updates);
+        let cache_key = (task_data.transition_index, task_data.block_height);
+        let mut cache = self.digest_cache.lock().await;
+        cache.insert(cache_key, digest);
+        debug!(
+            transition_index = task_data.transition_index,
+            block_height = task_data.block_height,
+            "Primed validator digest cache from creator (verification will skip EVMSketch)"
+        );
     }
 
     /// Builds the payload hash from task data and storage updates
@@ -364,19 +390,45 @@ impl GasKillerValidator {
 
     /// Core validation logic: decodes message, computes storage updates, and builds payload hash.
     /// This is the single place where storage updates are computed to avoid double computation.
+    ///
+    /// Results are cached by (transition_index, block_height) so that repeated calls for the
+    /// same round (e.g., the orchestrator validating each of the N node signatures) only run
+    /// the expensive EVMSketch computation once.
     async fn validate_and_build_hash(&self, msg: &[u8]) -> Result<Digest> {
         debug!("Validating message of length: {} bytes", msg.len());
 
         // Validate message format and decode
         let aggregation = self.validate_message_format(msg).await?;
+        let task_data = &aggregation.metadata;
 
-        // Compute storage updates independently - don't trust request values
-        let storage_updates = self.compute_storage_updates(&aggregation.metadata).await?;
+        let cache_key = (task_data.transition_index, task_data.block_height);
+
+        // Check cache before running expensive EVMSketch
+        {
+            let cache = self.digest_cache.lock().await;
+            if let Some(cached) = cache.get(&cache_key) {
+                debug!(
+                    transition_index = task_data.transition_index,
+                    block_height = task_data.block_height,
+                    "Returning cached digest (skipping EVMSketch)"
+                );
+                return Ok(*cached);
+            }
+        }
+
+        // Not cached — compute storage updates
+        let storage_updates = self.compute_storage_updates(task_data).await?;
 
         // Build expected payload hash using computed storage updates
-        let payload_hash = self.build_payload_hash(&aggregation.metadata, &storage_updates);
+        let payload_hash = self.build_payload_hash(task_data, &storage_updates);
 
-        debug!("Built payload hash: {:?}", payload_hash);
+        // Store in cache for subsequent calls with the same round
+        {
+            let mut cache = self.digest_cache.lock().await;
+            cache.insert(cache_key, payload_hash);
+        }
+
+        debug!("Built and cached payload hash: {:?}", payload_hash);
         Ok(payload_hash)
     }
 }

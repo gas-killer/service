@@ -123,7 +123,7 @@ node:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "6Gi"
+      memory: "2Gi"
       cpu: "500m"
 
 # Gas Killer Router configuration
@@ -241,7 +241,7 @@ yieldDistribution:
       memory: "2Gi"
       cpu: "500m"
     limits:
-      memory: "4Gi"
+      memory: "6Gi"
       cpu: "1000m"
 
 # Shared data volume for keys and deployment configs
