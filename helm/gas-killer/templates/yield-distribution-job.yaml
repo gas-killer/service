@@ -140,146 +140,118 @@ spec:
                 REG_COORD=$(cat /yield-config/registry_coordinator)
 
                 YIELD_DISTRIBUTOR="{{ .Values.yieldDistribution.contractAddress }}"
+                YIELD_DISTRIBUTOR_OWNER="{{ .Values.yieldDistribution.ownerAddress }}"
                 L2_RPC_URL="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+                CYCLE_LENGTH_OVERRIDE="{{ .Values.yieldDistribution.cycleLength }}"
+                BLOCK_STALE_MEASURE_OVERRIDE="{{ .Values.yieldDistribution.blockStaleMeasure }}"
 
                 echo "BLS Signature Checker: $BLS_CHECKER"
                 echo "Registry Coordinator Mimic: $REG_COORD"
                 echo "Yield Distributor: $YIELD_DISTRIBUTOR"
+                echo "Yield Distributor Owner (impersonated): $YIELD_DISTRIBUTOR_OWNER"
                 echo "L2 RPC URL: $L2_RPC_URL"
 
-                # Step 1: Get owner of the YieldDistributor
+                # Step 1: Sanity-check contract owner
                 echo ""
                 echo "=== Step 1: Getting contract owner ==="
-                OWNER=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "owner()(address)")
-                echo "Owner: $OWNER"
+                OWNER_ONCHAIN=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "owner()(address)")
+                echo "Owner (onchain): $OWNER_ONCHAIN"
 
-                # Step 2: Initialize GasKiller with our bridge-deployed addresses
+                # Step 2: Configure GasKiller
                 echo ""
-                echo "=== Step 2: Initializing GasKiller with bridge-deployed addresses ==="
+                echo "=== Step 2: Configuring YieldDistributor for test ==="
 
-                # The contract uses OpenZeppelin's reinitializer pattern:
-                # - initializeVotingMultipliers uses reinitializer(1)
-                # - initializeGasKiller uses reinitializer(2)
-                # On mainnet, version 1 is initialized but version 2 is not, so initializeGasKiller should work
-
-                # First, check current state
                 CURRENT_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
-                echo "Current BLS Signature Checker (from mainnet): $CURRENT_BLS"
-                echo "New BLS Signature Checker (from bridge): $BLS_CHECKER"
-                echo "New Registry Coordinator (from bridge): $REG_COORD"
+                CURRENT_AVS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
+                echo "Current blsSignatureChecker: $CURRENT_BLS"
+                echo "Current avsAddress: $CURRENT_AVS"
+                echo "New blsSignatureChecker (from bridge): $BLS_CHECKER"
+                echo "New avsAddress (from bridge): $REG_COORD"
 
-                # Debug: Check the EIP-7201 Initializable storage slot on the fork
-                INIT_SLOT="0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00"
-                INIT_VALUE=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$INIT_SLOT")
-                echo "Initializable storage slot value: $INIT_VALUE"
-                echo "(0x01 = version 1, 0x02 = version 2, etc.)"
+                echo "Impersonating owner to apply config..."
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$YIELD_DISTRIBUTOR_OWNER"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$YIELD_DISTRIBUTOR_OWNER" "0x56BC75E2D63100000"
 
-                # If version is already 2 or higher, we need to reset it to allow reinitializer(2)
-                # Extract the version from the storage slot (last 2 hex chars before any newline)
-                VERSION_HEX=$(echo "$INIT_VALUE" | tr -d '\n' | tail -c 2)
-                VERSION=$((16#$VERSION_HEX)) || VERSION=0
-                echo "Current initialized version: $VERSION (hex: $VERSION_HEX)"
+                echo "Setting GasKiller config via setters..."
+                cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "setAvsAddress(address)" "$REG_COORD"
+                cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "setBlsSignatureChecker(address)" "$BLS_CHECKER"
+                cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "setBlockStaleMeasure(uint256)" "$BLOCK_STALE_MEASURE_OVERRIDE"
 
-                if [ "$VERSION" -ge 2 ]; then
-                  echo "Version >= 2, resetting to 1 to allow reinitializer(2)..."
-                  cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$INIT_SLOT" "0x0000000000000000000000000000000000000000000000000000000000000001"
-                  echo "Storage slot reset to version 1"
-                fi
+                echo "Setting cycleLength to test-friendly value..."
+                cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "setCycleLength(uint256)" "$CYCLE_LENGTH_OVERRIDE"
 
-                # Impersonate owner and fund the account
-                echo "Impersonating owner..."
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$OWNER"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$OWNER" "0x56BC75E2D63100000"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
 
-                # initializeGasKiller(address _avsAddress, address _blsSignatureChecker)
-                echo "Calling initializeGasKiller with bridge-deployed addresses..."
-                if cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
-                  "$YIELD_DISTRIBUTOR" \
-                  "initializeGasKiller(address,address)" \
-                  "$REG_COORD" "$BLS_CHECKER" 2>&1; then
-                  echo "GasKiller initialized successfully with our test addresses"
-                else
-                  echo "Warning: initializeGasKiller failed, trying alternative approach..."
-                  # If the above fails, try resetting the specific _gkInitialized slot
-                  # This slot location depends on the contract layout - we may need to find it
-                  # For now, continue and see if distribution works anyway
-                fi
+                echo "Registering YieldDistributor as BREAD yieldClaimer..."
+                BREAD_TOKEN="0xa555d5344f6fb6c65da19e403cb4c1ec4a1a5ee3"
+                BREAD_OWNER=$(cast call --rpc-url "$L2_RPC_URL" "$BREAD_TOKEN" "owner()(address)")
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$BREAD_OWNER"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$BREAD_OWNER" "0x56BC75E2D63100000"
+                cast send --rpc-url "$L2_RPC_URL" --from "$BREAD_OWNER" --unlocked \
+                  "$BREAD_TOKEN" "setYieldClaimer(address)" "$YIELD_DISTRIBUTOR"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$BREAD_OWNER"
 
-                # Verify the new addresses are set
-                NEW_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
-                echo "BLS Signature Checker after init: $NEW_BLS"
-
-                # Upgrade YieldDistributor to use the new GasKillerSDK with configurable
-                # blockStaleMeasure (PR #32). The new SDK defaults to type(uint256).max when
-                # unset, which lets the L1 referenceBlockNumber (~10M) pass the staleness
-                # check on L2 (~44M). BLOCK_STALE_MEASURE (300) is baked into the current
-                # implementation bytecode as an inline constant and cannot be changed via storage.
+                # Step 3: Cast a vote from a test voter so currentVotes > 0
                 echo ""
-                echo "=== Upgrading YieldDistributor implementation ==="
+                echo "=== Step 3: Casting vote from test voter ==="
 
-                cd /tmp
-                git clone --depth 1 --recurse-submodules https://github.com/BreadchainCoop/solidarity-fund.git breadchain-upgrade
-                cd breadchain-upgrade
+                TEST_VOTER="0xbA6E1C26bE2F8b46D9e7ab7573b99921Ee81AcF5"
+                echo "Using test voter: $TEST_VOTER"
 
-                # Update gas-killer-solidity-sdk submodule to PR #32 (configurable blockStaleMeasure)
-                cd lib/gas-killer-solidity-sdk
-                git fetch origin RonTuretzky/configurable-block-steal
-                git checkout FETCH_HEAD
-                cd /tmp/breadchain-upgrade
-
-                # Compile the YieldDistributor with the updated SDK
-                echo "Compiling YieldDistributor with updated SDK..."
-                export FOUNDRY_ETH_RPC_URL="$L2_RPC_URL"
-                forge build 2>&1 | tail -20
-
-                # Deploy the new implementation using cast send --create
-                # (forge create ignores --rpc-url with --unlocked in some versions)
-                echo "Deploying new YieldDistributor implementation..."
-                INIT_CODE=$(forge inspect src/YieldDistributor.sol:YieldDistributor bytecode)
-                # Constructor arg: address(0) padded to 32 bytes
-                CONSTRUCTOR_ARG="0000000000000000000000000000000000000000000000000000000000000000"
-
-                DEPLOY_OUTPUT=$(cast send --rpc-url "$L2_RPC_URL" --from "$OWNER" --unlocked \
-                  --create "${INIT_CODE}${CONSTRUCTOR_ARG}" --json 2>&1)
-                echo "$DEPLOY_OUTPUT"
-                NEW_IMPL=$(echo "$DEPLOY_OUTPUT" | jq -r '.contractAddress' 2>/dev/null || echo "")
-                echo "New implementation deployed at: $NEW_IMPL"
-
-                if [ -z "$NEW_IMPL" ] || [ "$NEW_IMPL" = "null" ]; then
-                  echo "ERROR: Failed to deploy new implementation"
+                # Discover current projects via getCurrentVotingDistribution()
+                VOTING_DIST_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "getCurrentVotingDistribution()(address[],uint256[])" 2>/dev/null || echo "")
+                if [ -z "$VOTING_DIST_RAW" ]; then
+                  echo "ERROR: Failed to read current voting distribution"
                   exit 1
                 fi
 
-                # Upgrade the proxy: write new implementation address to ERC1967 implementation slot
-                IMPL_SLOT="0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-                NEW_IMPL_PADDED=$(printf '0x%064s' "${NEW_IMPL#0x}" | tr ' ' '0')
-                echo "Upgrading proxy implementation slot to $NEW_IMPL_PADDED"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$IMPL_SLOT" "$NEW_IMPL_PADDED"
+                # Extract the projects array length by counting occurrences of '0x' in the first tuple element
+                PROJECTS_HEX=$(echo "$VOTING_DIST_RAW" | head -n1)
+                PROJECT_COUNT=$(echo "$PROJECTS_HEX" | grep -o "0x" | wc -l | tr -d '[:space:]')
+                if [ "$PROJECT_COUNT" -le 0 ]; then
+                  echo "ERROR: No projects found for voting (projectCount=$PROJECT_COUNT)"
+                  exit 1
+                fi
+                echo "Detected $PROJECT_COUNT projects for voting"
+                # Build a simple points vector: [1,1,1,...] (length = projectCount)
+                POINTS_CSV=""
+                for i in $(seq 1 "$PROJECT_COUNT"); do
+                  if [ -z "$POINTS_CSV" ]; then
+                    POINTS_CSV="1"
+                  else
+                    POINTS_CSV="$POINTS_CSV,1"
+                  fi
+                done
+                POINTS_ARG="[$POINTS_CSV]"
+                echo "Voting points vector: $POINTS_ARG"
 
-                # Verify upgrade
-                CURRENT_IMPL=$(cast storage --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "$IMPL_SLOT")
-                echo "Proxy implementation after upgrade: $CURRENT_IMPL"
+                echo "Impersonating test voter and submitting vote..."
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$TEST_VOTER"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$TEST_VOTER" "0x56BC75E2D63100000"
 
-                # Set blockStaleMeasure to a safe value. The default (type(uint256).max when unset)
-                # causes overflow in: uint256(referenceBlockNumber) + blockStaleMeasure >= block.number
-                # We need blockStaleMeasure >= L2_block(~44M) - L1_refBlock(~10M) = ~34M.
-                # Set to 100M to be safe. The slot is base+3 in the ERC-7201 GasKillerSDK storage struct.
-                BSM_SLOT="0x321ebf629ed2e1e368f0890e8fdd95cf9a2ae5961b66a1805f0b2ec84e21d003"
-                BSM_VALUE=$(printf '0x%064x' 100000000)
-                echo "Setting blockStaleMeasure to 100000000 at slot $BSM_SLOT"
-                cast rpc --rpc-url "$YIELD_DISTRIBUTOR" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$BSM_SLOT" "$BSM_VALUE"
+                if ! cast send --rpc-url "$L2_RPC_URL" --from "$TEST_VOTER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "castVote(uint256[])" "$POINTS_ARG"; then
+                  echo "ERROR: castVote from test voter failed"
+                  cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$TEST_VOTER" || true
+                  exit 1
+                fi
 
-                BSM=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blockStaleMeasure()(uint256)" 2>/dev/null || echo "N/A")
-                echo "blockStaleMeasure after setting: $BSM"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$TEST_VOTER"
 
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$OWNER"
+                CURRENT_VOTES=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "currentVotes()(uint256)" 2>/dev/null | tr -d '[:space:]' | grep -oE '^[0-9]+' || echo "0")
+                echo "currentVotes after test vote: $CURRENT_VOTES"
+                if [ "$CURRENT_VOTES" -le 0 ]; then
+                  echo "ERROR: currentVotes is still zero after casting vote"
+                  exit 1
+                fi
 
-                cd /tmp
-                rm -rf breadchain-upgrade
-
-                # Step 3: Check distribution timing
+                # Step 4: Check distribution timing and advance chain enough for resolver
                 echo ""
-                echo "=== Step 3: Checking distribution timing ==="
+                echo "=== Step 4: Checking distribution timing ==="
                 # Cast outputs decimal by default for uint256
                 # Add error handling in case function names differ on the contract
                 echo "Querying cycleLength..."
@@ -298,9 +270,9 @@ spec:
                 echo "Last claimed block: $LAST_CLAIMED"
                 echo "Current block: $CURRENT"
 
-                # Step 4: Advance time and manipulate storage to reach distribution time
+                # Step 5: Advance time and mine a couple blocks
                 echo ""
-                echo "=== Step 4: Setting up distribution timing ==="
+                echo "=== Step 5: Setting up distribution timing ==="
 
                 # Get current timestamp and block
                 CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp 2>&1 | grep -oE '^[0-9]+' | head -1) || CURRENT_TIMESTAMP="1770000000"
@@ -314,28 +286,15 @@ spec:
                 echo "Advancing time by $TIME_ADVANCE seconds to timestamp $NEW_TIMESTAMP"
                 cast rpc --rpc-url "$L2_RPC_URL" anvil_setNextBlockTimestamp $(printf '0x%x' "$NEW_TIMESTAMP")
                 cast rpc --rpc-url "$L2_RPC_URL" anvil_mine 0x1
+                # Mine a couple extra blocks to satisfy: block.number >= lastClaimedBlockNumber + cycleLength
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_mine 0x2
 
-                # Instead of mining 50k+ blocks, manipulate lastClaimedBlockNumber storage
-                # Storage slot 0x5 contains lastClaimedBlockNumber (verified on Gnosis mainnet)
-                LAST_CLAIMED_SLOT="0x5"
-
-                # Set lastClaimedBlockNumber to make distribution ready
-                # New value = currentBlock - cycleLength - 100 (buffer)
-                NEW_LAST_CLAIMED=$((CURRENT - CYCLE_LENGTH - 100))
-                NEW_LAST_CLAIMED_HEX=$(printf '0x%064x' "$NEW_LAST_CLAIMED")
-                echo "Setting lastClaimedBlockNumber to $NEW_LAST_CLAIMED (slot $LAST_CLAIMED_SLOT)"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setStorageAt "$YIELD_DISTRIBUTOR" "$LAST_CLAIMED_SLOT" "$NEW_LAST_CLAIMED_HEX"
-
-                # Verify the change
-                VERIFY=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null)
-                echo "Verified lastClaimedBlockNumber: $VERIFY"
-
-                NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL")
+                NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
                 echo "New block number: $NEW_BLOCK"
 
-                # Step 5: Quick state check before verification
+                # Step 6: Quick state check before verification
                 echo ""
-                echo "=== Step 5: Contract state after setup ==="
+                echo "=== Step 6: Contract state after setup ==="
                 echo "blsSignatureChecker:"
                 cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "N/A"
                 echo "avsAddress:"
@@ -345,17 +304,17 @@ spec:
                 echo "lastClaimedBlockNumber:"
                 cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo "N/A"
 
-                # Step 6: Verify test results
+                # Step 7: Verify test results
                 # NOTE: Full BLS aggregation via the router is not yet supported for
                 # cross-chain tasks in LOCAL mode. The router validator forks L1 (HTTP_RPC)
                 # to simulate transactions, but the YieldDistributor lives on L2 (Gnosis).
                 # Until the router supports cross-chain validation, this test verifies:
                 #   1. Bridge deployed BLSSignatureChecker + RegistryCoordinatorMimic
-                #   2. initializeGasKiller set the correct addresses
-                #   3. Storage manipulation makes distribution timing ready
+                #   2. YieldDistributor configured with bridge-deployed addresses
+                #   3. Owner-only setters configure test-friendly parameters (no storage writes)
                 #   4. resolveYieldDistribution returns true
                 echo ""
-                echo "=== Step 6: Verifying test results ==="
+                echo "=== Step 7: Verifying test results ==="
 
                 PASSED=true
 
@@ -380,19 +339,7 @@ spec:
                 else
                   echo "OK: avsAddress matches bridge deployment"
                 fi
-
-                # Check 3: lastClaimedBlockNumber was manipulated
-                FINAL_LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
-                echo "lastClaimedBlockNumber: $FINAL_LAST_CLAIMED"
-                echo "Expected (approx): $NEW_LAST_CLAIMED"
-                if [ "$FINAL_LAST_CLAIMED" -eq "$NEW_LAST_CLAIMED" ] 2>/dev/null; then
-                  echo "OK: lastClaimedBlockNumber was set correctly"
-                else
-                  echo "FAIL: lastClaimedBlockNumber was not set (got $FINAL_LAST_CLAIMED, expected $NEW_LAST_CLAIMED)"
-                  PASSED=false
-                fi
-
-                # Check 4: Resolver returns true
+                # Check 3: Resolver returns true
                 echo ""
                 echo "Checking resolveYieldDistribution..."
                 RESOLVER_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1) || RESOLVER_RAW="call failed"
@@ -412,8 +359,8 @@ spec:
                   echo "=========================================="
                   echo "All checks passed:"
                   echo "  - Bridge deployed BLSSignatureChecker + RegistryCoordinatorMimic"
-                  echo "  - initializeGasKiller configured YieldDistributor correctly"
-                  echo "  - Storage manipulation set distribution timing"
+                  echo "  - YieldDistributor configured with bridge-deployed addresses"
+                  echo "  - Owner-only setters configured test-friendly parameters"
                   echo "  - resolveYieldDistribution returns true"
                   touch /app/.nodes/.yield_distribution_complete
                   exit 0
