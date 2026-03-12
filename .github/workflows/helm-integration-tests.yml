@@ -7,12 +7,14 @@ on:
       - dev
       - staging
       - cloud-staging
+      - cloud-staging-pr-fixes
   pull_request:
     branches:
       - main
       - dev
       - staging
       - cloud-staging
+      - cloud-staging-pr-fixes
   workflow_dispatch:
 
 jobs:
