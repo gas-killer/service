@@ -280,7 +280,15 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             error!("Failed to acquire lock on current_task mutex");
         }
 
-        let payload = self.get_task_metadata().encode().to_vec();
+        // Prime the validator's digest cache now so node-signature verification skips EVMSketch.
+        // The creator already ran EVMSketch to compute the storage updates; the validator would
+        // otherwise run it again for each incoming signature, causing a second ~2Gi memory spike.
+        let task_data = self.get_task_metadata();
+        self.validator
+            .prime_cache(&task_data, &task_data.storage_updates)
+            .await;
+
+        let payload = task_data.encode().to_vec();
 
         // Increment round counter for each new task to ensure unique rounds
         // Nodes will refuse to sign the same round twice

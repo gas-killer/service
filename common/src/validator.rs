@@ -215,6 +215,23 @@ impl GasKillerValidator {
         Ok(aggregation)
     }
 
+    /// Precomputes and caches the payload digest using already-computed storage updates.
+    ///
+    /// Call this from the task creator after it runs EVMSketch to build the payload, so that
+    /// the orchestrator's validator can skip running EVMSketch again when verifying each incoming
+    /// node signature for the same round.
+    pub async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
+        let digest = self.build_payload_hash(task_data, storage_updates);
+        let cache_key = (task_data.transition_index, task_data.block_height);
+        let mut cache = self.digest_cache.lock().await;
+        cache.insert(cache_key, digest);
+        debug!(
+            transition_index = task_data.transition_index,
+            block_height = task_data.block_height,
+            "Primed validator digest cache from creator (verification will skip EVMSketch)"
+        );
+    }
+
     /// Builds the payload hash from task data and storage updates
     ///
     /// This method must produce the same hash as the on-chain expectedHash
