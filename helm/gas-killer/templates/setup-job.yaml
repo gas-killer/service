@@ -62,67 +62,72 @@ spec:
               # Write all logs to both stdout AND a file on the PVC
               # This ensures logs survive even if the pod crashes
               LOG_FILE="/root/.nodes/setup.log"
-              exec > >(tee -a "$LOG_FILE") 2>&1
-              echo "=== Setup Job Starting at $(date -Iseconds) ==="
-              echo "Logs being written to: $LOG_FILE"
-              echo ""
-              echo "=== Setup Job Starting ==="
-              echo "ENVIRONMENT: $ENVIRONMENT"
-              echo "TEST_ACCOUNTS: $TEST_ACCOUNTS"
-              echo "RPC_URL: ${RPC_URL:0:50}..."
-              echo "DELEGATION_MANAGER_ADDRESS: $DELEGATION_MANAGER_ADDRESS"
-              echo "STRATEGY_MANAGER_ADDRESS: $STRATEGY_MANAGER_ADDRESS"
-              echo "ALLOCATION_MANAGER_ADDRESS: $ALLOCATION_MANAGER_ADDRESS"
-              echo ""
-              echo "=== Running /main.sh ==="
 
-              # Run the eigenlayer setup and capture output
-              /main.sh 2>&1
-              MAIN_EXIT_CODE=$?
+              {
+                echo "=== Setup Job Starting at $(date -Iseconds) ==="
+                echo "Logs being written to: $LOG_FILE"
+                echo ""
+                echo "=== Setup Job Starting ==="
+                echo "ENVIRONMENT: $ENVIRONMENT"
+                echo "TEST_ACCOUNTS: $TEST_ACCOUNTS"
+                echo "RPC_URL: ${RPC_URL:0:50}..."
+                echo "DELEGATION_MANAGER_ADDRESS: $DELEGATION_MANAGER_ADDRESS"
+                echo "STRATEGY_MANAGER_ADDRESS: $STRATEGY_MANAGER_ADDRESS"
+                echo "ALLOCATION_MANAGER_ADDRESS: $ALLOCATION_MANAGER_ADDRESS"
+                echo ""
+                echo "=== Running /main.sh ==="
 
-              echo ""
-              echo "=== /main.sh completed with exit code: $MAIN_EXIT_CODE ==="
-              echo ""
-              echo "=== Checking created files ==="
-              echo "Contents of /root/.nodes:"
-              ls -la /root/.nodes/ 2>/dev/null || echo "Directory does not exist or is empty"
-              echo ""
-              echo "Contents of /root/.nodes/operator_keys:"
-              ls -la /root/.nodes/operator_keys/ 2>/dev/null || echo "Directory does not exist or is empty"
-              echo ""
+                # Run the eigenlayer setup and capture output
+                /main.sh 2>&1
+                MAIN_EXIT_CODE=$?
 
-              # Verify that required files were created
-              if [ -f /root/.nodes/avs_deploy.json ]; then
-                echo "avs_deploy.json created successfully"
-                # Check if all operator keys exist
-                {{- $nodeCount := int .Values.global.nodeCount }}
-                {{- range $i := until $nodeCount }}
-                {{- $nodeIndex := add $i 1 }}
-                if [ ! -f "/root/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json" ]; then
-                  echo "Error: testacc{{ $nodeIndex }}.private.bls.key.json not found"
+                echo ""
+                echo "=== /main.sh completed with exit code: $MAIN_EXIT_CODE ==="
+                echo ""
+                echo "=== Checking created files ==="
+                echo "Contents of /root/.nodes:"
+                ls -la /root/.nodes/ 2>/dev/null || echo "Directory does not exist or is empty"
+                echo ""
+                echo "Contents of /root/.nodes/operator_keys:"
+                ls -la /root/.nodes/operator_keys/ 2>/dev/null || echo "Directory does not exist or is empty"
+                echo ""
+
+                # Verify that required files were created
+                if [ -f /root/.nodes/avs_deploy.json ]; then
+                  echo "avs_deploy.json created successfully"
+                  # Check if all operator keys exist
+                  {{- $nodeCount := int .Values.global.nodeCount }}
+                  {{- range $i := until $nodeCount }}
+                  {{- $nodeIndex := add $i 1 }}
+                  if [ ! -f "/root/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json" ]; then
+                    echo "Error: testacc{{ $nodeIndex }}.private.bls.key.json not found"
+                    exit 1
+                  fi
+                  {{- end }}
+                  echo "All {{ .Values.global.nodeCount }} operator keys created successfully"
+
+                  # Fix permissions so non-root containers can read the files
+                  # Node/router containers run as UID 1000 (appuser)
+                  chmod -R 755 /root/.nodes
+                  chmod 644 /root/.nodes/avs_deploy.json
+                  chmod 644 /root/.nodes/operator_keys/*.json
+                  echo "Permissions fixed for UID 1000"
+
+                  # Create marker file to signal setup completion
+                  touch /root/.nodes/.setup_complete
+                  chmod 644 /root/.nodes/.setup_complete
+                  echo "Setup marker created"
+                  echo "=== Setup Job SUCCEEDED at $(date -Iseconds) ==="
+                  exit 0
+                else
+                  echo "Error: avs_deploy.json not found"
+                  echo "=== Setup Job FAILED at $(date -Iseconds) ==="
                   exit 1
                 fi
-                {{- end }}
-                echo "All {{ .Values.global.nodeCount }} operator keys created successfully"
+              } 2>&1 | tee -a "$LOG_FILE"
 
-                # Fix permissions so non-root containers can read the files
-                # Node/router containers run as UID 1000 (appuser)
-                chmod -R 755 /root/.nodes
-                chmod 644 /root/.nodes/avs_deploy.json
-                chmod 644 /root/.nodes/operator_keys/*.json
-                echo "Permissions fixed for UID 1000"
-
-                # Create marker file to signal setup completion
-                touch /root/.nodes/.setup_complete
-                chmod 644 /root/.nodes/.setup_complete
-                echo "Setup marker created"
-                echo "=== Setup Job SUCCEEDED at $(date -Iseconds) ==="
-                exit 0
-              else
-                echo "Error: avs_deploy.json not found"
-                echo "=== Setup Job FAILED at $(date -Iseconds) ==="
-                exit 1
-              fi
+              EXIT_CODE=${PIPESTATUS[0]}
+              exit $EXIT_CODE
           env:
             - name: ENVIRONMENT
               value: {{ .Values.global.environment | quote }}

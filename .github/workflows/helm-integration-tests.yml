@@ -6,15 +6,11 @@ on:
       - main
       - dev
       - staging
-      - cloud-staging
-      - RonTuretzky/yield-dist-e2e
   pull_request:
     branches:
       - main
       - dev
       - staging
-      - cloud-staging
-      - RonTuretzky/yield-dist-e2e
   workflow_dispatch:
 
 jobs:
@@ -437,7 +433,12 @@ jobs:
         run: |
           echo "=== Triggering Yield Distribution through router ==="
 
-          YIELD_DISTRIBUTOR="0xeE95A62b749d8a2520E0128D9b3aCa241269024b"
+          YIELD_DISTRIBUTOR=$(helm get values gas-killer --all -o json | jq -r '.yieldDistribution.contractAddress')
+          if [ -z "$YIELD_DISTRIBUTOR" ] || [ "$YIELD_DISTRIBUTOR" = "null" ]; then
+            echo "ERROR: Could not read yieldDistribution.contractAddress from Helm values"
+            helm get values gas-killer --all
+            exit 1
+          fi
           L2_RPC="http://localhost:8546"
           ROUTER_URL="http://localhost:8080"
 
@@ -490,8 +491,8 @@ jobs:
           fi
 
           # Capture logs periodically during the wait to catch crashes
-          echo "Waiting 120s for BLS aggregation and on-chain execution..."
-          for i in 30 60 90 120; do
+          echo "Waiting 300s for BLS aggregation and on-chain execution..."
+          for i in 30 60 90 120 150 180 210 240 270 300; do
             sleep 30
             echo ""
             echo "=== ${i}s checkpoint ==="

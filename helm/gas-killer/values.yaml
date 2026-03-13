@@ -23,7 +23,7 @@ secrets:
   # Required keys: PRIVATE_KEY, FUNDED_KEY, FORK_URL
   existingSecret: ""
 
-  # Anvil default key - NEVER use in production!
+  # Private keys for signing transactions
   # Override with: --set secrets.privateKey=<your-key>
   privateKey: ""
   fundedKey: ""
@@ -50,7 +50,7 @@ ethereum:
   enabled: true
   image:
     repository: ghcr.io/breadchaincoop/ethereum
-    tag: dev
+    tag: latest
     pullPolicy: IfNotPresent
   # Priority class for ethereum pod - it holds critical blockchain state
   # Consider creating a custom priority class instead of using system-cluster-critical
@@ -71,8 +71,8 @@ ethereum:
 eigenlayer:
   image:
     repository: ghcr.io/breadchaincoop/eigenlayer
-    tag: dev
-    pullPolicy: Always
+    tag: latest
+    pullPolicy: IfNotPresent
   # Sepolia testnet contract addresses (forked by Anvil in LOCAL mode)
   contracts:
     delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
@@ -123,7 +123,7 @@ node:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "1Gi"
+      memory: "2Gi"
       cpu: "500m"
 
 # Gas Killer Router configuration
@@ -146,6 +146,9 @@ router:
   # for the RegistryCoordinatorMimic deployed on Gnosis
   # Example: --set-file router.l2AvsDeployment=config/.nodes/l2_avs_deploy.json
   l2AvsDeployment: ""
+  # Aggregation window duration in seconds. Must exceed the time nodes need to compute
+  # EVMSketch storage updates. Gnosis computation takes ~60s, so 90s gives a safe margin.
+  aggregationFrequency: "90"
   ingress:
     enabled: true
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation (3e+06)
@@ -160,38 +163,34 @@ router:
       memory: "512Mi"
       cpu: "250m"
     limits:
-      memory: "2Gi"
+      memory: "6Gi"
       cpu: "1000m"
 
 # Orchestrator configuration
 # The orchestrator configs are included in the Docker image at /app/config/
 # You can override them here if needed, otherwise they will be used from the image
 orchestrator:
-  # Public orchestrator config (JSON string) - optional override
-  # If not provided, will use /app/config/public_orchestrator.json from the image
-  # NOTE: The image file has "address": "router" which works for docker-compose.
-  # For K8s, you need to override with the correct service name.
-  # The service name will be: <release-name>-gas-killer-router
-  publicConfig: |
-    {
-      "g2_x1": "20265730220917057623326116620721648047640065506233168445998945605458084341755",
-      "g2_x2": "1537141129484558011683382469842956131676085503509229854572844956364492197092",
-      "g2_y1": "4380068110839997539835821427545270098552639074995346826656804866303457881635",
-      "g2_y2": "479676018937294309080674601592141614301396550682703157902264620243097107417",
-      "port": "3000",
-      "address": "gas-killer-router"
-    }
+  # Public orchestrator config fields
+  # The "address" field is automatically set to the router service name via the Helm template.
+  # If not provided, will use /app/config/public_orchestrator.json from the image.
+  publicConfig:
+    g2_x1: "20265730220917057623326116620721648047640065506233168445998945605458084341755"
+    g2_x2: "1537141129484558011683382469842956131676085503509229854572844956364492197092"
+    g2_y1: "4380068110839997539835821427545270098552639074995346826656804866303457881635"
+    g2_y2: "479676018937294309080674601592141614301396550682703157902264620243097107417"
+    port: "3000"
   # Router private key (BLS private key) - stored in Secret for security
   # If not provided, will use /app/config/router_orchestrator.json from the image
   # WARNING: The image contains a default private key. For production, always provide your own!
   routerPrivateKey: ""
 
 # Gnosis (Anvil fork for L2) configuration - only used in LOCAL mode
+# Defaults to disabled; enable explicitly via --set gnosis.enabled=true (e.g. in CI)
 gnosis:
-  enabled: true
+  enabled: false
   image:
     repository: ghcr.io/breadchaincoop/ethereum
-    tag: dev
+    tag: latest
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -232,16 +231,22 @@ l2:
   avsDeploymentPath: "/app/.nodes/l2_avs_deploy.json"
 
 # Yield Distribution test configuration - only used in LOCAL mode with gnosis.enabled
+# Defaults to disabled; enable explicitly via --set yieldDistribution.enabled=true (e.g. in CI)
 yieldDistribution:
-  enabled: true
+  enabled: false
   # YieldDistributor contract address on Gnosis
-  contractAddress: "0xeE95A62b749d8a2520E0128D9b3aCa241269024b"
+  contractAddress: "0xe113994D24a10C114cFAF183d9D702933eEEEeb7"
+  # Owner of the YieldDistributor on the fork (used for anvil impersonation)
+  ownerAddress: "0x5DD2e7db868e33c03daB85d0C623048A7980634E"
+  # Test-friendly overrides applied via contract setters
+  cycleLength: 1
+  blockStaleMeasure: "100000000"
   resources:
     requests:
       memory: "2Gi"
       cpu: "500m"
     limits:
-      memory: "4Gi"
+      memory: "6Gi"
       cpu: "1000m"
 
 # Shared data volume for keys and deployment configs

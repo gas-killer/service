@@ -48,36 +48,17 @@ impl GasKillerHandler {
             "Detecting chain for address in executor"
         );
 
-        // Check Sepolia first (primary chain), then Gnosis
-        for chain_id in [ChainId::Sepolia, ChainId::Gnosis] {
-            if let Some(provider) = self.get_provider(chain_id) {
-                match provider.get_code_at(address).await {
-                    Ok(code) => {
-                        if !code.is_empty() {
-                            debug!(
-                                chain = %chain_id,
-                                address = %address,
-                                code_len = code.len(),
-                                "Found contract code on chain"
-                            );
-                            return Ok(chain_id);
-                        }
-                    }
-                    Err(e) => {
-                        debug!(
-                            chain = %chain_id,
-                            error = %e,
-                            "Failed to check code on chain"
-                        );
-                    }
-                }
+        let supported: Vec<ChainId> = self.providers.keys().copied().collect();
+        gas_killer_common::detect_chain_for_address(address, &supported, |chain_id, addr| {
+            let provider = self.providers.get(&chain_id).cloned();
+            async move {
+                let provider = provider
+                    .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?;
+                let code = provider.get_code_at(addr).await?;
+                Ok(code)
             }
-        }
-
-        Err(anyhow::anyhow!(
-            "No contract code found at address {} on any supported chain",
-            address
-        ))
+        })
+        .await
     }
 }
 

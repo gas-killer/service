@@ -89,27 +89,7 @@ cleanup() {
     echo -e "${GREEN}Cleanup completed${NC}"
 }
 
-# Helper function to read counter value from smart contract
-read_counter() {
-    local counter_address=$1
-    local result=$(curl -s -X POST http://localhost:8545 \
-        -H "Content-Type: application/json" \
-        -d '{
-            "jsonrpc":"2.0",
-            "method":"eth_call",
-            "params":[{
-                "to":"'$counter_address'",
-                "data":"0x8381f58a"
-            }, "latest"],
-            "id":1
-        }' | jq -r '.result')
 
-    if [ -z "$result" ] || [ "$result" = "null" ] || [ "$result" = "0x" ]; then
-        echo "0"
-    else
-        printf "%d\n" "$result" 2>/dev/null || echo "0"
-    fi
-}
 
 echo -e "${GREEN}Starting Gas Killer Helm Test${NC}"
 echo "Project root: $PROJECT_ROOT"
@@ -220,9 +200,6 @@ echo -e "${YELLOW}Step 7: Waiting for all pods to be ready...${NC}"
 
 echo "Waiting for ethereum pod..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=ethereum --timeout=180s
-
-echo "Waiting for signer pod..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=signer --timeout=180s
 
 echo "Waiting for node pods..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=node --timeout=300s --all
