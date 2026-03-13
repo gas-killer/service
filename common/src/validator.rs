@@ -1,19 +1,24 @@
 use alloy::primitives::U256;
 use alloy::sol_types::SolValue;
+use alloy_provider::Provider;
 use anyhow::Result;
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
 use commonware_cryptography::{Hasher, Sha256};
+use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::debug;
 use url::Url;
 
+use crate::config::ChainId;
 use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
 use commonware_avs_router::wire;
 
+use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::TransactionRequest;
-use alloy_eips::BlockNumberOrTag;
 use gas_analyzer_rs::call_to_encoded_state_updates_with_evmsketch;
 
 /// Result of gas analysis containing storage updates and gas information
@@ -28,47 +33,132 @@ pub struct AnalysisResult {
     pub block_height: u64,
 }
 
-/// Validator implementation for the gas killer use case
+/// Validator implementation for the gas killer use case with multi-chain support
 #[derive(Clone)]
 pub struct GasKillerValidator {
-    /// RPC URL for the gas analyzer
-    fork_rpc_url: String,
+    /// RPC URLs per chain for the gas analyzer
+    chain_rpc_urls: HashMap<ChainId, String>,
+    /// Default chain for backwards compatibility
+    default_chain: ChainId,
+    /// Cache: (transition_index, block_height) -> computed digest
+    /// Prevents re-running expensive EVMSketch for the same round when the
+    /// orchestrator validates multiple signatures for identical task data.
+    digest_cache: Arc<Mutex<HashMap<(u64, u64), Digest>>>,
 }
 
 impl GasKillerValidator {
-    /// Creates a new GasKillerValidator with default settings.
+    /// Creates a new GasKillerValidator with multi-chain support.
     ///
-    /// Reads RPC URL from RPC_URL environment variable.
-    /// Returns an error if not set.
+    /// Reads RPC URLs from environment variables:
+    /// - RPC_URL or HTTP_RPC for Sepolia (required)
+    /// - GNOSIS_RPC_URL or GNOSIS_HTTP_RPC for Gnosis (optional)
+    ///
+    /// Returns an error if Sepolia RPC is not set.
     pub fn new() -> Result<Self> {
-        // TODO: In production, HTTP_RPC and RPC_URL should be unified to a single env var.
-        // Currently nodes use HTTP_RPC while this expects RPC_URL.
-        let rpc_url = env::var("RPC_URL")
-            .map_err(|_| anyhow::anyhow!("RPC_URL environment variable is not set"))?;
+        let mut chain_rpc_urls = HashMap::new();
+
+        // Load Sepolia RPC URL (required)
+        let sepolia_rpc = env::var("RPC_URL")
+            .or_else(|_| env::var("HTTP_RPC"))
+            .map_err(|_| anyhow::anyhow!("RPC_URL or HTTP_RPC environment variable is not set"))?;
+        chain_rpc_urls.insert(ChainId::Sepolia, sepolia_rpc);
+
+        // Load Gnosis RPC URL (optional)
+        if let Ok(gnosis_rpc) = env::var("GNOSIS_RPC_URL").or_else(|_| env::var("GNOSIS_HTTP_RPC"))
+        {
+            chain_rpc_urls.insert(ChainId::Gnosis, gnosis_rpc);
+        }
+
         Ok(Self {
-            fork_rpc_url: rpc_url,
+            chain_rpc_urls,
+            default_chain: ChainId::Sepolia,
+            digest_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    /// Creates a new GasKillerValidator with a specific RPC URL.
+    /// Creates a new GasKillerValidator with a specific RPC URL (for default chain).
     ///
     /// Useful for testing without modifying environment variables.
     pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
+        let mut chain_rpc_urls = HashMap::new();
+        chain_rpc_urls.insert(ChainId::Sepolia, rpc_url.into());
         Self {
-            fork_rpc_url: rpc_url.into(),
+            chain_rpc_urls,
+            default_chain: ChainId::Sepolia,
+            digest_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Returns the RPC URL used by this validator
+    /// Creates a new GasKillerValidator with RPC URLs for multiple chains.
+    pub fn with_chain_rpc_urls(chain_rpc_urls: HashMap<ChainId, String>) -> Self {
+        Self {
+            chain_rpc_urls,
+            default_chain: ChainId::Sepolia,
+            digest_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Returns the RPC URL for the default chain
     pub fn rpc_url(&self) -> &str {
-        &self.fork_rpc_url
+        self.chain_rpc_urls
+            .get(&self.default_chain)
+            .map(|s| s.as_str())
+            .unwrap_or("")
+    }
+
+    /// Returns the RPC URL for a specific chain
+    pub fn rpc_url_for_chain(&self, chain_id: ChainId) -> Option<&str> {
+        self.chain_rpc_urls.get(&chain_id).map(|s| s.as_str())
+    }
+
+    /// Returns whether a chain is supported
+    pub fn supports_chain(&self, chain_id: ChainId) -> bool {
+        self.chain_rpc_urls.contains_key(&chain_id)
+    }
+
+    /// Returns all supported chains
+    pub fn supported_chains(&self) -> Vec<ChainId> {
+        self.chain_rpc_urls.keys().copied().collect()
+    }
+
+    /// Detects which chain has code deployed at the given address.
+    ///
+    /// Checks each supported chain to see if the address has contract code.
+    /// Returns the first chain where code is found, or an error if no chain has code.
+    pub async fn detect_chain_for_address(
+        &self,
+        address: alloy::primitives::Address,
+    ) -> Result<ChainId> {
+        use alloy_provider::ProviderBuilder;
+
+        debug!(
+            address = %address,
+            "Detecting chain for address"
+        );
+
+        let supported = self.supported_chains();
+        // Clone the RPC URLs so the closure doesn't borrow self
+        let chain_rpc_urls = self.chain_rpc_urls.clone();
+
+        crate::config::detect_chain_for_address(address, &supported, |chain_id, addr| {
+            let chain_rpc_urls = chain_rpc_urls.clone();
+            async move {
+                let rpc_url = chain_rpc_urls
+                    .get(&chain_id)
+                    .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_id))?;
+                let url = Url::parse(rpc_url)?;
+                let provider = ProviderBuilder::new().connect_http(url);
+                let code = provider.get_code_at(addr).await?;
+                Ok(code)
+            }
+        })
+        .await
     }
 
     /// Computes storage updates for a transaction using gas-analyzer-rs.
     ///
-    /// This is the public method for computing storage updates from transaction parameters.
-    /// Used by the creator to compute storage updates before creating tasks.
-    /// Returns both the storage updates and the block height at which they were computed.
+    /// Automatically detects which chain the contract is on, then computes storage updates.
+    /// Returns the storage updates, block height, and detected chain ID.
     pub async fn compute_storage_updates_for_tx(
         &self,
         contract_address: alloy::primitives::Address,
@@ -76,9 +166,22 @@ impl GasKillerValidator {
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
         block_height: u64,
-    ) -> Result<(Vec<u8>, u64)> {
+    ) -> Result<(Vec<u8>, u64, ChainId)> {
+        // Detect which chain has the contract
+        let chain_id = self.detect_chain_for_address(contract_address).await?;
+
+        debug!(
+            chain = %chain_id,
+            address = %contract_address,
+            "Detected chain for contract"
+        );
+
+        let rpc_url = self
+            .rpc_url_for_chain(chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
+
         let result = Self::analyze_transaction(
-            &self.fork_rpc_url,
+            rpc_url,
             contract_address,
             call_data,
             from_address,
@@ -86,7 +189,7 @@ impl GasKillerValidator {
             block_height,
         )
         .await?;
-        Ok((result.storage_updates, result.block_height))
+        Ok((result.storage_updates, result.block_height, chain_id))
     }
 
     /// Validates the message format and decodes the aggregation
@@ -110,6 +213,23 @@ impl GasKillerValidator {
             aggregation.round
         );
         Ok(aggregation)
+    }
+
+    /// Precomputes and caches the payload digest using already-computed storage updates.
+    ///
+    /// Call this from the task creator after it runs EVMSketch to build the payload, so that
+    /// the orchestrator's validator can skip running EVMSketch again when verifying each incoming
+    /// node signature for the same round.
+    pub async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
+        let digest = self.build_payload_hash(task_data, storage_updates);
+        let cache_key = (task_data.transition_index, task_data.block_height);
+        let mut cache = self.digest_cache.lock().await;
+        cache.insert(cache_key, digest);
+        debug!(
+            transition_index = task_data.transition_index,
+            block_height = task_data.block_height,
+            "Primed validator digest cache from creator (verification will skip EVMSketch)"
+        );
     }
 
     /// Builds the payload hash from task data and storage updates
@@ -184,16 +304,13 @@ impl GasKillerValidator {
     /// Takes an explicit RPC URL parameter for flexibility.
     /// Forks at the specified block for deterministic results.
     pub async fn analyze_transaction(
-        rpc_url_str: &str,
+        rpc_url: &str,
         contract_address: alloy::primitives::Address,
         call_data: &[u8],
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
         block_height: u64,
     ) -> Result<AnalysisResult> {
-        let rpc_url =
-            Url::parse(rpc_url_str).map_err(|e| anyhow::anyhow!("Invalid RPC URL: {}", e))?;
-
         debug!(
             block_number = block_height,
             contract = %contract_address,
@@ -235,15 +352,32 @@ impl GasKillerValidator {
         })
     }
 
-    /// Computes storage updates by running local analysis using this validator's RPC URL
-    /// Uses the block_height from task_data to ensure deterministic results matching the router
+    /// Computes storage updates by running local analysis.
+    /// Automatically detects which chain the target address is on.
+    /// Uses the block_height from task_data to ensure deterministic results matching the router.
     async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
         if task_data.block_height == 0 {
             return Err(anyhow::anyhow!("block_height is required for validation"));
         }
 
+        // Detect which chain has the contract
+        let chain_id = self
+            .detect_chain_for_address(task_data.target_address)
+            .await?;
+
+        // Get the RPC URL for the detected chain
+        let rpc_url = self
+            .rpc_url_for_chain(chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
+
+        debug!(
+            chain_id = %chain_id,
+            target_address = %task_data.target_address,
+            "Computing storage updates for detected chain"
+        );
+
         let result = Self::analyze_transaction(
-            &self.fork_rpc_url,
+            rpc_url,
             task_data.target_address,
             &task_data.call_data,
             Some(task_data.from_address),
@@ -256,19 +390,45 @@ impl GasKillerValidator {
 
     /// Core validation logic: decodes message, computes storage updates, and builds payload hash.
     /// This is the single place where storage updates are computed to avoid double computation.
+    ///
+    /// Results are cached by (transition_index, block_height) so that repeated calls for the
+    /// same round (e.g., the orchestrator validating each of the N node signatures) only run
+    /// the expensive EVMSketch computation once.
     async fn validate_and_build_hash(&self, msg: &[u8]) -> Result<Digest> {
         debug!("Validating message of length: {} bytes", msg.len());
 
         // Validate message format and decode
         let aggregation = self.validate_message_format(msg).await?;
+        let task_data = &aggregation.metadata;
 
-        // Compute storage updates independently - don't trust request values
-        let storage_updates = self.compute_storage_updates(&aggregation.metadata).await?;
+        let cache_key = (task_data.transition_index, task_data.block_height);
+
+        // Check cache before running expensive EVMSketch
+        {
+            let cache = self.digest_cache.lock().await;
+            if let Some(cached) = cache.get(&cache_key) {
+                debug!(
+                    transition_index = task_data.transition_index,
+                    block_height = task_data.block_height,
+                    "Returning cached digest (skipping EVMSketch)"
+                );
+                return Ok(*cached);
+            }
+        }
+
+        // Not cached — compute storage updates
+        let storage_updates = self.compute_storage_updates(task_data).await?;
 
         // Build expected payload hash using computed storage updates
-        let payload_hash = self.build_payload_hash(&aggregation.metadata, &storage_updates);
+        let payload_hash = self.build_payload_hash(task_data, &storage_updates);
 
-        debug!("Built payload hash: {:?}", payload_hash);
+        // Store in cache for subsequent calls with the same round
+        {
+            let mut cache = self.digest_cache.lock().await;
+            cache.insert(cache_key, payload_hash);
+        }
+
+        debug!("Built and cached payload hash: {:?}", payload_hash);
         Ok(payload_hash)
     }
 }
@@ -352,7 +512,7 @@ mod tests {
     #[ignore = "requires RPC - run with: cargo test -- --ignored"]
     async fn test_full_validation_with_rpc() {
         // Integration test: full validation including storage update computation
-        // This test is ignored by default as it requires RPC access
+        // This test is ignored by default as it requires RPC access and Anvil
         let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
         let task_data = create_test_task_data();
 

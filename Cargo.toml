@@ -29,7 +29,7 @@ commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-
 commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-usecases = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-codec = "0.0.63"
 commonware-cryptography = "0.0.63"
 commonware-macros = "0.0.63"
@@ -46,9 +46,7 @@ eigen-services-operatorsinfo = "2.0.0"
 eigen-utils = "2.0.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
-gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer.git", default-features = false, features = [
-    "evmsketch",
-] }
+gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer", package = "gas-analyzer-evmsketch" }
 gas-killer-common = { path = "common" }
 governor = "0.6.3"
 hex = "0.4"

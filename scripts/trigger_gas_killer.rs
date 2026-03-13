@@ -120,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Capture initial currentSum before posting task
+    // Each trigger uses different indexes, so currentSum will change each time
     let initial_sum = array_contract
         .currentSum()
         .call()
@@ -213,11 +214,6 @@ async fn resolve_block_height<P: Provider>(
 
 async fn build_mock_request()
 -> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
-    // Encode a sample ArraySummation sum(uint256[]) call with indexes [0,1,2]
-    let indexes = vec![U256::from(0), U256::from(1), U256::from(2)];
-    let call = sumCall { indexes };
-    let call_data = call.abi_encode().to_vec();
-
     // Try to source a real deployed ArraySummation address from AVS_DEPLOYMENT_PATH; fallback to placeholder
     let target_address: Address = match env::var("AVS_DEPLOYMENT_PATH") {
         Ok(path) => {
@@ -260,6 +256,25 @@ async fn build_mock_request()
         .await
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
         .to::<u64>();
+
+    // Use different indexes based on transition_index to get different sums each time
+    // Offset by 3 for each new trigger: [0,1,2], [3,4,5], [6,7,8], etc.
+    // Array has 100 elements, so we can do ~33 unique triggers
+    let base_idx = (current_count * 3) % 97; // Stay within bounds of 100 element array
+    let indexes = vec![
+        U256::from(base_idx),
+        U256::from(base_idx + 1),
+        U256::from(base_idx + 2),
+    ];
+    println!(
+        "Using indexes [{}, {}, {}] for transition_index={}",
+        base_idx,
+        base_idx + 1,
+        base_idx + 2,
+        current_count
+    );
+    let call = sumCall { indexes };
+    let call_data = call.abi_encode().to_vec();
 
     // Resolve block_height for deterministic execution
     let block_height = resolve_block_height(&provider).await?;

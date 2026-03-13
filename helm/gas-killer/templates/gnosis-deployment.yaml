@@ -1,0 +1,67 @@
+{{- if and .Values.gnosis.enabled (eq .Values.global.environment "LOCAL") }}
+{{- /* Gnosis (Anvil fork) deployment - only in LOCAL mode */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gas-killer.gnosis.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gnosis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "gas-killer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gnosis
+  template:
+    metadata:
+      labels:
+        {{- include "gas-killer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gnosis
+    spec:
+      containers:
+        - name: gnosis
+          image: "{{ .Values.gnosis.image.repository }}:{{ .Values.gnosis.image.tag }}"
+          imagePullPolicy: {{ .Values.gnosis.image.pullPolicy }}
+          env:
+            - name: FORK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_FORK_URL
+          ports:
+            - name: rpc
+              containerPort: 8545
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: rpc
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            tcpSocket:
+              port: rpc
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.gnosis.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gas-killer.gnosis.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gnosis
+spec:
+  type: {{ .Values.gnosis.service.type }}
+  ports:
+    - port: {{ .Values.gnosis.service.port }}
+      targetPort: rpc
+      protocol: TCP
+      name: rpc
+  selector:
+    {{- include "gas-killer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: gnosis
+{{- end }}

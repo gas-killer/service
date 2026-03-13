@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "gas-killer.shareddata.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.sharedData.accessMode }}
+  {{- if .Values.sharedData.storageClass }}
+  storageClassName: {{ .Values.sharedData.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.sharedData.size }}

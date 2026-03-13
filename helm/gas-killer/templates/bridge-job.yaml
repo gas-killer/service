@@ -1,0 +1,210 @@
+{{- /* Bridge job runs after setup to bridge operator state from L1 to L2 */ -}}
+{{- if .Values.bridge.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gas-killer.bridge.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bridge
+  annotations:
+    # Run after the main setup job completes
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "gas-killer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bridge
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        # Wait for setup job to complete (avs_deploy.json must exist)
+        - name: wait-for-setup
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for setup to complete (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until [ -f /app/.nodes/.setup_complete ] && [ -f /app/.nodes/avs_deploy.json ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for setup to complete after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Setup not complete, waiting for .setup_complete marker and avs_deploy.json... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "Setup complete! avs_deploy.json found."
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+
+      containers:
+        - name: bridge
+          image: "{{ .Values.bridge.image.repository }}:{{ .Values.bridge.image.tag }}"
+          imagePullPolicy: {{ .Values.bridge.image.pullPolicy }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              LOG_FILE="/app/.nodes/bridge.log"
+
+              echo "=== Bridge Container Starting at $(date) ===" | tee -a "$LOG_FILE"
+
+              # Read registry coordinator address from avs_deploy.json
+              # The bridge image has jq installed; try both camelCase and PascalCase field names
+              export REGISTRY_COORDINATOR_ADDRESS=$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' /app/.nodes/avs_deploy.json)
+              echo "[BRIDGE] REGISTRY_COORDINATOR_ADDRESS: $REGISTRY_COORDINATOR_ADDRESS" | tee -a "$LOG_FILE"
+              echo "[BRIDGE] L1_RPC_URL: $L1_RPC_URL" | tee -a "$LOG_FILE"
+              echo "[BRIDGE] L2_RPC_URL: $L2_RPC_URL" | tee -a "$LOG_FILE"
+              echo "[BRIDGE] PRIVATE_KEY is set: $([ -n "$PRIVATE_KEY" ] && echo 'yes' || echo 'no')" | tee -a "$LOG_FILE"
+
+              if [ -z "$REGISTRY_COORDINATOR_ADDRESS" ] || [ "$REGISTRY_COORDINATOR_ADDRESS" = "null" ]; then
+                echo "ERROR: Could not find RegistryCoordinator address in avs_deploy.json" | tee -a "$LOG_FILE"
+                jq '.addresses' /app/.nodes/avs_deploy.json | tee -a "$LOG_FILE"
+                exit 1
+              fi
+
+              echo "=== Executing bridge-to-l2.sh ===" | tee -a "$LOG_FILE"
+              set +e
+              /app/scripts/bridge-to-l2.sh 2>&1 | tee -a "$LOG_FILE"
+              BRIDGE_EXIT=${PIPESTATUS[0]}
+              set -e
+              echo "=== bridge-to-l2.sh finished at $(date) with exit code $BRIDGE_EXIT ===" | tee -a "$LOG_FILE"
+
+              # --- Recovery: Fix zero execution state root from Anvil ---
+              # Anvil doesn't compute state roots for forked blocks, returning 0x0.
+              # This causes UpdateMimic to fail with MissingExecutionStateRoot.
+              # We recover by computing the actual state root from the account proof:
+              # keccak256(accountProof[0]) = state root (MPT root node hash).
+              PROOF_FILE="/app/contracts/artifacts/middlewareDataProof.json"
+              L2_DEPLOY="/app/contracts/artifacts/l2-deploy.json"
+              L1_DEPLOY="/app/contracts/artifacts/l1-deploy.json"
+
+              if [ ! -f "$L2_DEPLOY" ] || [ ! -f "$L1_DEPLOY" ]; then
+                echo "ERROR: Deploy files not found — bridge-to-l2.sh failed before contract deployment (exit code: $BRIDGE_EXIT)" | tee -a "$LOG_FILE"
+                exit 1
+              fi
+
+              if [ "$BRIDGE_EXIT" -ne 0 ]; then
+                echo "WARNING: bridge-to-l2.sh failed (exit code: $BRIDGE_EXIT) but deploy files exist — attempting recovery" | tee -a "$LOG_FILE"
+              fi
+
+              MIMIC_ADDRESS=$(jq -r '.registryCoordinatorMimic' "$L2_DEPLOY")
+              LAST_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" 2>/dev/null | tr -d '[:space:]' || echo "0")
+              [ -z "$LAST_BLOCK" ] && LAST_BLOCK="0"
+              echo "[BRIDGE] Mimic lastBlockNumber: $LAST_BLOCK" | tee -a "$LOG_FILE"
+
+              if [ "$LAST_BLOCK" = "0" ] && [ -f "$PROOF_FILE" ]; then
+                echo "=== UpdateMimic recovery: mimic not populated, fixing state root ===" | tee -a "$LOG_FILE"
+
+                # Compute actual state root: keccak256 of the MPT root node (accountProof[0])
+                ROOT_NODE=$(jq -r '.accountProof[0]' "$PROOF_FILE")
+                ACTUAL_STATE_ROOT=$(cast keccak "$ROOT_NODE")
+                echo "[RECOVERY] Computed actual state root: $ACTUAL_STATE_ROOT" | tee -a "$LOG_FILE"
+
+                # Fix the proof file with the correct execution state root
+                jq --arg esr "$ACTUAL_STATE_ROOT" '.executionStateRoot = $esr' "$PROOF_FILE" > /tmp/proof_fixed.json
+                mv /tmp/proof_fixed.json "$PROOF_FILE"
+                echo "[RECOVERY] Patched proof file with actual state root" | tee -a "$LOG_FILE"
+
+                # Re-run UpdateMimic forge script with required env vars
+                # Use relative path for PROOF_FILE so Foundry fs_permissions resolve correctly
+                cd /app/contracts
+                export PROOF_FILE="./artifacts/middlewareDataProof.json"
+                export REGISTRY_COORDINATOR_MIMIC_ADDRESS="$MIMIC_ADDRESS"
+                export BLS_SIGNATURE_CHECKER_ADDRESS=$(jq -r '.blsSignatureChecker' "$L2_DEPLOY")
+                export MIDDLEWARE_SHIM_ADDRESS=$(jq -r '.middlewareShim' "$L1_DEPLOY")
+                export IS_SP1HELIOS_MOCK=true
+
+                echo "[RECOVERY] Re-running UpdateMimic..." | tee -a "$LOG_FILE"
+                forge script script/e2e/UpdateMimic.s.sol:UpdateMimic \
+                  --broadcast -vvvv 2>&1 | tee -a "$LOG_FILE"
+
+                # Verify recovery succeeded
+                LAST_BLOCK_AFTER=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+                echo "[RECOVERY] Mimic lastBlockNumber after recovery: $LAST_BLOCK_AFTER" | tee -a "$LOG_FILE"
+
+                if [ "$LAST_BLOCK_AFTER" = "0" ]; then
+                  echo "ERROR: UpdateMimic recovery failed — mimic still empty" | tee -a "$LOG_FILE"
+                  exit 1
+                fi
+                echo "=== UpdateMimic recovery succeeded ===" | tee -a "$LOG_FILE"
+              fi
+
+              # Final check: ensure mimic is populated before proceeding
+              FINAL_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+              if [ "$FINAL_BLOCK" = "0" ]; then
+                echo "ERROR: Mimic still empty after bridge — cannot proceed" | tee -a "$LOG_FILE"
+                exit 1
+              fi
+              echo "[BRIDGE] Mimic populated with lastBlockNumber: $FINAL_BLOCK" | tee -a "$LOG_FILE"
+
+              # Copy deploy files to shared volume
+              cp /app/contracts/artifacts/l1-deploy.json /app/.nodes/l1-deploy.json
+              chmod 644 /app/.nodes/l1-deploy.json
+              echo "l1-deploy.json copied to shared volume" | tee -a "$LOG_FILE"
+
+              cp /app/contracts/artifacts/l2-deploy.json /app/.nodes/l2-deploy.json
+              chmod 644 /app/.nodes/l2-deploy.json
+              echo "l2-deploy.json copied to shared volume" | tee -a "$LOG_FILE"
+
+              # Write completion marker
+              touch /app/.nodes/.bridge_complete
+              chmod 644 /app/.nodes/.bridge_complete
+              echo "Bridge completion marker created" | tee -a "$LOG_FILE"
+          env:
+            - name: PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: PRIVATE_KEY
+            {{- if eq .Values.global.environment "TESTNET" }}
+            # TESTNET mode: Use external RPC from secret
+            - name: L1_RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: RPC_URL
+            - name: L2_RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_RPC_URL
+            {{- else }}
+            # LOCAL mode: Use local Anvil services
+            - name: L1_RPC_URL
+              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+            {{- if .Values.gnosis.enabled }}
+            # Use local Gnosis Anvil fork
+            - name: L2_RPC_URL
+              value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+            {{- else }}
+            # Use external L2 RPC
+            - name: L2_RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_RPC_URL
+            {{- end }}
+            {{- end }}
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+          resources:
+            {{- toYaml .Values.bridge.resources | nindent 12 }}
+
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: {{ include "gas-killer.shareddata.fullname" . }}
+{{- end }}

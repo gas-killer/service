@@ -1,0 +1,361 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gas-killer.router.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "gas-killer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: router
+  template:
+    metadata:
+      labels:
+        {{- include "gas-killer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: router
+    spec:
+      initContainers:
+        # Wait for setup job to fully complete (check for .setup_complete marker)
+        - name: wait-for-setup
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for setup to complete (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until [ -f /app/.nodes/.setup_complete ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for setup to complete after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Setup not complete, waiting for .setup_complete marker... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "Setup complete! Contracts deployed and operators registered."
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+
+        {{- if .Values.bridge.waitForBridge }}
+        # Wait for bridge job to complete before starting the router
+        # The bridge creates a .bridge_complete marker when done
+        - name: wait-for-bridge
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for bridge to complete (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until [ -f /app/.nodes/.bridge_complete ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for bridge to complete after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Bridge not complete, waiting for .bridge_complete marker... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "Bridge complete!"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+        {{- end }}
+
+        {{- if or (and .Values.l2 .Values.l2.enabled) (and (eq .Values.global.environment "LOCAL") .Values.gnosis.enabled .Values.bridge.enabled) }}
+        # Wait for L2 AVS config (TESTNET via l2.enabled, or LOCAL with gnosis+bridge)
+        - name: wait-for-l2-config
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for L2 AVS config (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until [ -f /app/.nodes/.l2_avs_config_complete ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for L2 AVS config after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "L2 config not ready, waiting... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "L2 AVS config ready!"
+              cat /app/.nodes/l2_avs_deploy.json
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+        {{- end }}
+
+        {{- if eq .Values.global.environment "LOCAL" }}
+        # Wait for ethereum RPC to be accessible (LOCAL mode only)
+        - name: wait-for-ethereum
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Ethereum RPC (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until nc -z {{ include "gas-killer.ethereum.fullname" . }} {{ .Values.ethereum.service.port }}; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for Ethereum RPC after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Ethereum not ready, waiting... (${ELAPSED}s elapsed)"
+                sleep 5
+                ELAPSED=$((ELAPSED + 5))
+              done
+              echo "Ethereum is ready!"
+        {{- end }}
+
+        # Wait for nodes to be ready
+        - name: wait-for-nodes
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for nodes to be ready (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              {{- $nodeCount := int .Values.global.nodeCount }}
+              {{- range $i := until $nodeCount }}
+              {{- $nodeIndex := add $i 1 }}
+              {{- $nodePort := add (int $.Values.node.basePort) $i }}
+              until nc -z {{ include "gas-killer.node.fullname" $ }}-{{ $nodeIndex }} {{ $nodePort }}; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for Node {{ $nodeIndex }} after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Node {{ $nodeIndex }} not ready, waiting... (${ELAPSED}s elapsed)"
+                sleep 5
+                ELAPSED=$((ELAPSED + 5))
+              done
+              echo "Node {{ $nodeIndex }} is ready!"
+              {{- end }}
+              echo "All nodes are ready!"
+
+        {{- if .Values.orchestrator.routerPrivateKey }}
+        # Create router_orchestrator.json from secret if provided
+        - name: setup-router-key
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo '{"privateKey":"'$ROUTER_KEY'"}' > /app/router_orchestrator.json
+              echo "Router orchestrator key file created from secret"
+          env:
+            - name: ROUTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: ROUTER_ORCHESTRATOR_PRIVATE_KEY
+          volumeMounts:
+            - name: router-key
+              mountPath: /app
+        {{- end }}
+
+      containers:
+        - name: router
+          image: "{{ .Values.router.image.repository }}:{{ .Values.router.image.tag }}"
+          imagePullPolicy: {{ .Values.router.image.pullPolicy }}
+          args:
+            - "--key-file"
+            {{- if .Values.orchestrator.routerPrivateKey }}
+            - "/app/router_orchestrator.json"
+            {{- else }}
+            # Use the orchestrator key from the image if not provided via secret
+            - "/app/config/router_orchestrator.json"
+            {{- end }}
+            - "--port"
+            - {{ .Values.router.port | quote }}
+          env:
+            {{- if and .Values.l2 .Values.l2.enabled }}
+            # TESTNET + L2 mode: Use L2 RPC for AVS operations (e.g., Gnosis mainnet)
+            - name: HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_RPC_URL
+            - name: RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_RPC_URL
+            - name: WS_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_WS_RPC_URL
+            # Gnosis RPC for multi-chain support (PR 87 compatibility)
+            - name: GNOSIS_HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_RPC_URL
+            # L1 RPC still needed for validator fork simulation
+            {{- if .Values.secrets.rpcUrl }}
+            - name: FORK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: RPC_URL
+            {{- end }}
+            {{- else if eq .Values.global.environment "TESTNET" }}
+            # TESTNET mode (no L2): Use external RPC from secret
+            - name: HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: RPC_URL
+            - name: RPC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: RPC_URL
+            - name: WS_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: WS_RPC_URL
+            {{- if .Values.secrets.forkUrl }}
+            # FORK_URL for internal Anvil simulation
+            - name: FORK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: FORK_URL
+            {{- end }}
+            {{- else }}
+            # LOCAL mode: Use local Anvil service
+            - name: HTTP_RPC
+              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+            - name: RPC_URL
+              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+            - name: WS_RPC
+              value: "ws://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+            {{- end }}
+            {{- if and (eq .Values.global.environment "LOCAL") .Values.gnosis.enabled }}
+            # LOCAL mode: Gnosis RPC for cross-chain execution (yield distribution) via Anvil fork
+            - name: GNOSIS_HTTP_RPC
+              value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+            {{- end }}
+            {{- if and .Values.l2 .Values.l2.enabled }}
+            # TESTNET + L2 mode: Use L2 AVS deployment path
+            - name: AVS_DEPLOYMENT_PATH
+              value: {{ .Values.l2.avsDeploymentPath | quote }}
+            {{- else }}
+            - name: AVS_DEPLOYMENT_PATH
+              value: "/app/.nodes/avs_deploy.json"
+            {{- end }}
+            - name: INGRESS
+              value: {{ .Values.router.ingress.enabled | quote }}
+            - name: INGRESS_ADDRESS
+              value: "0.0.0.0:{{ .Values.router.ingressPort }}"
+            - name: RUST_BACKTRACE
+              value: "1"
+            - name: INGRESS_TIMEOUT_MS
+              value: {{ .Values.router.ingress.timeoutMs | quote }}
+            - name: AGGREGATION_FREQUENCY
+              value: {{ .Values.router.aggregationFrequency | quote }}
+            - name: PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: PRIVATE_KEY
+          ports:
+            - name: router
+              containerPort: {{ .Values.router.port }}
+              protocol: TCP
+            - name: ingress
+              containerPort: {{ .Values.router.ingressPort }}
+              protocol: TCP
+          # Use exec probe to check if process is running
+          # Check /proc/1/cmdline since our process is PID 1 in the container
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "cat /proc/1/cmdline | grep -q gas-killer"
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "cat /proc/1/cmdline | grep -q gas-killer"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+            {{- if .Values.orchestrator.routerPrivateKey }}
+            - name: router-key
+              mountPath: /app/router_orchestrator.json
+              subPath: router_orchestrator.json
+              readOnly: true
+            {{- end }}
+            {{- if .Values.router.l2AvsDeployment }}
+            - name: config
+              mountPath: /app/.nodes/l2_avs_deploy.json
+              subPath: l2_avs_deploy.json
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.router.resources | nindent 12 }}
+
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: {{ include "gas-killer.shareddata.fullname" . }}
+        {{- if .Values.orchestrator.routerPrivateKey }}
+        - name: router-key
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.router.l2AvsDeployment }}
+        - name: config
+          configMap:
+            name: {{ include "gas-killer.config.fullname" . }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gas-killer.router.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  type: {{ .Values.router.service.type }}
+  ports:
+    - port: {{ .Values.router.service.port }}
+      targetPort: router
+      protocol: TCP
+      name: router
+    - port: {{ .Values.router.service.ingressPort }}
+      targetPort: ingress
+      protocol: TCP
+      name: ingress
+  selector:
+    {{- include "gas-killer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: router

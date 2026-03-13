@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gas-killer.config.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+data:
+  # EigenLayer setup config - dynamically generates operator socket addresses
+  # This replaces config/config.example.json with Kubernetes service names
+  config.json: |
+    {
+        "quorum": {
+            "minimumStake": "1",
+            "maxOperatorCount": 32,
+            "kickBIPsOfOperatorStake": 10000,
+            "kickBIPsOfTotalStake": 100
+        },
+        "metadata": {
+            "uri": "metadataURI"
+        },
+        "operators": {
+            {{- $nodeCount := int .Values.global.nodeCount }}
+            {{- range $i := until $nodeCount }}
+            "testacc{{ add $i 1 }}": {
+                "socketAddress": "{{ include "gas-killer.node.fullname" $ }}-{{ add $i 1 }}:{{ add (int $.Values.node.basePort) $i }}"
+            }{{ if lt (add $i 1) $nodeCount }},{{ end }}
+            {{- end }}
+        }
+    }
+  {{- if .Values.orchestrator.publicConfig }}
+  # Public orchestrator config - address is always set to the correct router service name
+  public_orchestrator.json: |
+    {
+      "g2_x1": {{ .Values.orchestrator.publicConfig.g2_x1 | quote }},
+      "g2_x2": {{ .Values.orchestrator.publicConfig.g2_x2 | quote }},
+      "g2_y1": {{ .Values.orchestrator.publicConfig.g2_y1 | quote }},
+      "g2_y2": {{ .Values.orchestrator.publicConfig.g2_y2 | quote }},
+      "port": {{ .Values.orchestrator.publicConfig.port | quote }},
+      "address": {{ include "gas-killer.router.fullname" . | quote }}
+    }
+  {{- end }}
+  {{- if .Values.router.l2AvsDeployment }}
+  # L2 AVS deployment config - required when router.gnosisHttpRpc is set
+  # Contains BLS contract addresses for the RegistryCoordinatorMimic on Gnosis
+  l2_avs_deploy.json: |
+{{ .Values.router.l2AvsDeployment | indent 4 }}
+  {{- end }}
