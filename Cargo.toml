@@ -25,11 +25,11 @@ axum = "0.7"
 bn254 = { git = "https://github.com/BreadchainCoop/bn254.git" }
 bytes = "1.10.1"
 clap = "4.5.37"
-commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-orchestrator-round-handling" }
+commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-orchestrator-round-handling" }
+commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-orchestrator-round-handling" }
+commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-orchestrator-round-handling" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-orchestrator-round-handling" }
 commonware-codec = "0.0.63"
 commonware-cryptography = "0.0.63"
 commonware-macros = "0.0.63"

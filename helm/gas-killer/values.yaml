@@ -137,15 +137,6 @@ router:
     pullPolicy: Never
   port: 3000
   ingressPort: 8080
-  # Gnosis RPC URL for L2 mode (optional)
-  # When set along with l2AvsDeployment, the executor reads block numbers
-  # and BLS state from Gnosis instead of L1, preventing StaleBlockNumber reverts
-  gnosisHttpRpc: ""
-  # L2 AVS deployment config JSON (optional)
-  # Required when gnosisHttpRpc is set — contains BLS contract addresses
-  # for the RegistryCoordinatorMimic deployed on Gnosis
-  # Example: --set-file router.l2AvsDeployment=config/.nodes/l2_avs_deploy.json
-  l2AvsDeployment: ""
   # Aggregation window duration in seconds. Must exceed the time nodes need to compute
   # EVMSketch storage updates. Gnosis computation takes ~60s, so 90s gives a safe margin.
   aggregationFrequency: "90"
@@ -219,16 +210,6 @@ bridge:
     limits:
       memory: "1Gi"
       cpu: "500m"
-
-# L2 Configuration (for Gnosis/multi-chain operation in TESTNET mode)
-# When enabled, router/nodes will connect to real L2 RPC for AVS operations
-l2:
-  # Enable L2 AVS mode - router will use L2 RPC for AVS lookups (TESTNET only)
-  enabled: false
-  # L2 RPC URL (e.g., Gnosis mainnet)
-  rpcUrl: ""
-  # Path to L2 AVS deployment JSON (created by l2-avs-config job)
-  avsDeploymentPath: "/app/.nodes/l2_avs_deploy.json"
 
 # Yield Distribution test configuration - only used in LOCAL mode with gnosis.enabled
 # Defaults to disabled; enable explicitly via --set yieldDistribution.enabled=true (e.g. in CI)
