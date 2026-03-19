@@ -105,8 +105,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/avs:${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/avs:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/avs:router-${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/avs:router-${{ github.sha }}
           cache-from: type=gha,scope=router
           cache-to: type=gha,mode=max,scope=router
           build-args: |
