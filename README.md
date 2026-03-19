@@ -1,7 +1,7 @@
 # Gas Killer Router
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io/breadchaincoop/gas--killer--router-blue.svg)](https://github.com/BreadchainCoop/gas-killer-router/pkgs/container/gas-killer-router)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io/gas--killer/gas--killer--router-blue.svg)](https://github.com/gas-killer/gas-killer-router/pkgs/container/gas-killer-router)
 
 A specialized router for Gas Killer optimized transaction execution with BLS signature aggregation for EigenLayer AVS operators.
 
@@ -66,7 +66,7 @@ If you're developing the router and want to test local changes:
 
 ```bash
 # Build the router image locally
-docker build -t ghcr.io/breadchaincoop/commonware-avs-router:dev .
+docker build -t ghcr.io/gas-killer/gas-killer-router:dev .
 
 # Run with locally built image
 docker compose up -d
@@ -116,7 +116,7 @@ Contract addresses are automatically loaded from the deployment JSON file.
 
 Pull the latest image:
 ```bash
-docker pull ghcr.io/breadchaincoop/gas-killer-router:latest
+docker pull ghcr.io/gas-killer/gas-killer-router:latest
 ```
 
 Run with Docker Compose:
@@ -124,7 +124,7 @@ Run with Docker Compose:
 version: '3.8'
 services:
   orchestrator:
-    image: ghcr.io/breadchaincoop/gas-killer-router:latest
+    image: ghcr.io/gas-killer/gas-killer-router:latest
     volumes:
       - ./config:/app/config
       - ./keys:/app/keys

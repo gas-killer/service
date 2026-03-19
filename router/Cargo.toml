@@ -30,8 +30,6 @@ async-trait = { workspace = true }
 
 # Web / HTTP
 axum = { workspace = true }
-bn254 = { workspace = true }
-
 # Serialization
 bytes = { workspace = true }
 
