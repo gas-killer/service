@@ -132,7 +132,7 @@ fn main() {
 
     // Allow handshakes from IPs that aren't yet in the registered peer set
     // TODO: Remove this once we have a proper way to handle handshakes
-    // https://github.com/gas-killer/gas-killer-router/issues/82
+    // https://github.com/gas-killer/avs/issues/82
     p2p_cfg.attempt_unregistered_handshakes = true;
 
     // Start runtime

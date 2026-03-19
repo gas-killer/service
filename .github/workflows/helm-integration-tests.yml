@@ -73,18 +73,18 @@ jobs:
       - name: Build Docker images
         run: |
           echo "Building router image..."
-          docker build -f ./router/Dockerfile -t gas-killer-router:local .
+          docker build -f ./router/Dockerfile -t avs:router-local .
 
           echo "Building node image..."
-          docker build -f ./node/Dockerfile -t gas-killer-node:local .
+          docker build -f ./node/Dockerfile -t avs:node-local .
 
       - name: Load images into kind cluster
         run: |
           echo "Loading router image into kind..."
-          kind load docker-image gas-killer-router:local --name gas-killer-test
+          kind load docker-image avs:router-local --name gas-killer-test
 
           echo "Loading node image into kind..."
-          kind load docker-image gas-killer-node:local --name gas-killer-test
+          kind load docker-image avs:node-local --name gas-killer-test
 
       - name: Verify cluster is ready
         run: |
@@ -123,11 +123,11 @@ jobs:
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
             --set secrets.l2ForkUrl="$L2_FORK_URL" \
-            --set node.image.repository=gas-killer-node \
-            --set node.image.tag=local \
+            --set node.image.repository=avs \
+            --set node.image.tag=node-local \
             --set node.image.pullPolicy=Never \
-            --set router.image.repository=gas-killer-router \
-            --set router.image.tag=local \
+            --set router.image.repository=avs \
+            --set router.image.tag=router-local \
             --set router.image.pullPolicy=Never \
             --set sharedData.storageClass="" \
             --set gnosis.enabled=true \
