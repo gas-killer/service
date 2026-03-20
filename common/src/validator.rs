@@ -26,7 +26,7 @@ use gas_analyzer::call_to_encoded_state_updates_with_evmsketch;
 pub struct AnalysisResult {
     /// The storage updates extracted from the transaction
     pub storage_updates: Vec<u8>,
-    /// The gas estimate from gas-analyzer-rs
+    /// The gas estimate from gas-analyzer
     #[allow(dead_code)]
     pub gas_estimate: u64,
     /// The block height at which the analysis was performed
@@ -155,7 +155,7 @@ impl GasKillerValidator {
         .await
     }
 
-    /// Computes storage updates for a transaction using gas-analyzer-rs.
+    /// Computes storage updates for a transaction using gas-analyzer.
     ///
     /// Automatically detects which chain the contract is on, then computes storage updates.
     /// Returns the storage updates, block height, and detected chain ID.
@@ -294,7 +294,7 @@ impl GasKillerValidator {
         payload_hash
     }
 
-    /// Performs the core gas analysis using gas-analyzer-rs
+    /// Performs the core gas analysis using gas-analyzer
     ///
     /// This method contains the core logic for:
     /// 1. Forking the blockchain state
@@ -328,7 +328,7 @@ impl GasKillerValidator {
             .value(tx_value)
             .input(alloy::primitives::Bytes::copy_from_slice(call_data).into());
 
-        // Call gas-analyzer-rs to get storage updates and gas estimate using EvmSketch
+        // Call gas-analyzer to get storage updates and gas estimate using EvmSketch
         let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
             call_to_encoded_state_updates_with_evmsketch(
                 rpc_url,

@@ -86,6 +86,20 @@ jobs:
           echo "Loading node image into kind..."
           kind load docker-image avs:node-local --name gas-killer-test
 
+      - name: Pre-pull external images into kind
+        run: |
+          IMAGES=(
+            "ghcr.io/breadchaincoop/ethereum:latest"
+            "ghcr.io/breadchaincoop/eigenlayer:latest"
+            "ghcr.io/breadchaincoop/target-contracts/bridge:latest"
+          )
+          for IMAGE in "${IMAGES[@]}"; do
+            echo "Pulling $IMAGE..."
+            docker pull "$IMAGE"
+            echo "Loading $IMAGE into kind..."
+            kind load docker-image "$IMAGE" --name gas-killer-test
+          done
+
       - name: Verify cluster is ready
         run: |
           kubectl cluster-info
