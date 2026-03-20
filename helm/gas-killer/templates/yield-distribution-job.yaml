@@ -89,8 +89,8 @@ spec:
 
               # The BLSSigCheckOperatorStateRetriever exists on the forked L2 chain (via Anvil)
               # It takes registryCoordinator as a parameter so it works with our RegistryCoordinatorMimic
-              BLS_SIG_CHECK="0x056A41125bB62168B464ddDECd995e8494448913"
-              echo "BLSSigCheckOperatorStateRetriever (from mainnet fork): $BLS_SIG_CHECK"
+              BLS_SIG_CHECK="{{ .Values.yieldDistribution.blsSigCheckAddress }}"
+              echo "BLSSigCheckOperatorStateRetriever (from L2 fork): $BLS_SIG_CHECK"
 
               # Create l2_avs_deploy.json with L2 AVS addresses for future use
               # Format matches AvsDeployment { addresses: { registryCoordinator, blsapkRegistry, blsSigCheck, counter } }
@@ -243,20 +243,20 @@ spec:
                 # Cast outputs decimal by default for uint256
                 # Add error handling in case function names differ on the contract
                 echo "Querying cycleLength..."
-                CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>&1 | tr -d '[:space:]') || CYCLE_LENGTH="302400"
+                CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>&1 | tr -d '[:space:]') || CYCLE_LENGTH="{{ .Values.yieldDistribution.cycleLength }}"
                 echo "Querying lastClaimedBlockNumber..."
                 LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>&1 | tr -d '[:space:]') || LAST_CLAIMED="0"
                 echo "Querying current block..."
-                CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" 2>&1 | tr -d '[:space:]') || CURRENT="44000000"
+                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" 2>&1 | tr -d '[:space:]') || CURRENT_BLOCK="{{ .Values.yieldDistribution.fallbackBlockNumber }}"
 
                 # Sanitize values - extract just the number
-                CYCLE_LENGTH=$(echo "$CYCLE_LENGTH" | grep -oE '^[0-9]+' | head -1) || CYCLE_LENGTH="302400"
+                CYCLE_LENGTH=$(echo "$CYCLE_LENGTH" | grep -oE '^[0-9]+' | head -1) || CYCLE_LENGTH="{{ .Values.yieldDistribution.cycleLength }}"
                 LAST_CLAIMED=$(echo "$LAST_CLAIMED" | grep -oE '^[0-9]+' | head -1) || LAST_CLAIMED="0"
-                CURRENT=$(echo "$CURRENT" | grep -oE '^[0-9]+' | head -1) || CURRENT="44000000"
+                CURRENT_BLOCK=$(echo "$CURRENT_BLOCK" | grep -oE '^[0-9]+' | head -1) || CURRENT_BLOCK="{{ .Values.yieldDistribution.fallbackBlockNumber }}"
 
                 echo "Cycle length: $CYCLE_LENGTH"
                 echo "Last claimed block: $LAST_CLAIMED"
-                echo "Current block: $CURRENT"
+                echo "Current block: $CURRENT_BLOCK"
 
                 # Step 5: Advance time and mine a couple blocks
                 echo ""
@@ -264,9 +264,9 @@ spec:
 
                 # Get current timestamp and block
                 CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp 2>&1 | grep -oE '^[0-9]+' | head -1) || CURRENT_TIMESTAMP="1770000000"
-                CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
                 echo "Current timestamp: $CURRENT_TIMESTAMP"
-                echo "Current block: $CURRENT"
+                echo "Current block: $CURRENT_BLOCK"
 
                 # Advance time by 8 days
                 TIME_ADVANCE=$((8 * 24 * 60 * 60))
