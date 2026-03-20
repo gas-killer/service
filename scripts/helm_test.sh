@@ -137,15 +137,15 @@ if [ "$SKIP_BUILD" != "true" ]; then
     echo -e "${YELLOW}Step 4: Building Docker images...${NC}"
 
     echo "Building router image..."
-    docker build -f ./router/Dockerfile -t gas-killer-router:local .
+    docker build -f ./router/Dockerfile -t avs:router-local .
 
     echo "Building node image..."
-    docker build -f ./node/Dockerfile -t gas-killer-node:local .
+    docker build -f ./node/Dockerfile -t avs:node-local .
 
     # Load images into kind cluster
     echo "Loading images into kind cluster..."
-    kind load docker-image gas-killer-router:local --name "$CLUSTER_NAME"
-    kind load docker-image gas-killer-node:local --name "$CLUSTER_NAME"
+    kind load docker-image avs:router-local --name "$CLUSTER_NAME"
+    kind load docker-image avs:node-local --name "$CLUSTER_NAME"
 else
     echo -e "${YELLOW}Step 4: Skipping Docker build (--skip-build specified)${NC}"
 fi
@@ -168,11 +168,11 @@ helm install "$HELM_RELEASE" ./helm/gas-killer \
     --set secrets.forkUrl="$FORK_URL" \
     --set secrets.privateKey="$PRIVATE_KEY" \
     --set secrets.fundedKey="$FUNDED_KEY" \
-    --set node.image.repository=gas-killer-node \
-    --set node.image.tag=local \
+    --set node.image.repository=avs \
+    --set node.image.tag=node-local \
     --set node.image.pullPolicy=Never \
-    --set router.image.repository=gas-killer-router \
-    --set router.image.tag=local \
+    --set router.image.repository=avs \
+    --set router.image.tag=router-local \
     --set router.image.pullPolicy=Never \
     --set sharedData.storageClass=""
 

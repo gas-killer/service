@@ -111,9 +111,9 @@ signer:
 node:
   image:
     # For local development, build and load the image into kind:
-    # docker build -t gas-killer-node:local -f node/Dockerfile .
-    # kind load docker-image gas-killer-node:local --name <cluster-name>
-    repository: gas-killer-node
+    # docker build -t avs:node-local -f node/Dockerfile .
+    # kind load docker-image avs:node-local --name <cluster-name>
+    repository: avs
     tag: local
     pullPolicy: Never
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
@@ -130,10 +130,10 @@ node:
 router:
   image:
     # For local development, build and load the image into kind:
-    # docker build -t gas-killer-router:local -f router/Dockerfile .
-    # kind load docker-image gas-killer-router:local --name <cluster-name>
-    repository: gas-killer-router
-    tag: local
+    # docker build -t avs:router-local -f router/Dockerfile .
+    # kind load docker-image avs:router-local --name <cluster-name>
+    repository: avs
+    tag: router-local
     pullPolicy: Never
   port: 3000
   ingressPort: 8080
