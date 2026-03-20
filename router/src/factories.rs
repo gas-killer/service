@@ -77,8 +77,8 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
 
     let gnosis_rpc = env::var("GNOSIS_HTTP_RPC").ok();
 
-    let deployment = AvsDeployment::load()
-        .map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
+    let deployment =
+        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
     info!("Executor reads operator state from L1 (HTTP_RPC)");
 
     let view_only_provider = ProviderBuilder::new().connect_http(
