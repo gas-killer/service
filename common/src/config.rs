@@ -5,39 +5,25 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 
-/// Supported chain identifiers
+/// Chain role identifiers — L1 (primary) and L2 (optional secondary).
+///
+/// These are role labels, not chain-specific names. The actual numeric chain ID
+/// is discovered at runtime by querying `eth_chainId` on the configured RPC endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ChainId {
-    /// Sepolia testnet (chain ID: 11155111)
+    /// The primary (L1) chain
     #[default]
-    Sepolia = 11155111,
-    /// Gnosis mainnet (chain ID: 100)
-    Gnosis = 100,
+    L1,
+    /// The secondary (L2) chain
+    L2,
 }
 
 impl ChainId {
-    /// Creates a ChainId from a numeric chain ID
-    pub fn from_u64(chain_id: u64) -> Option<Self> {
-        match chain_id {
-            11155111 => Some(ChainId::Sepolia),
-            100 => Some(ChainId::Gnosis),
-            _ => None,
-        }
-    }
-
-    /// Returns the numeric chain ID
-    pub fn as_u64(&self) -> u64 {
-        match self {
-            ChainId::Sepolia => 11155111,
-            ChainId::Gnosis => 100,
-        }
-    }
-
-    /// Returns the chain name
+    /// Returns the role name as a string
     pub fn name(&self) -> &'static str {
         match self {
-            ChainId::Sepolia => "sepolia",
-            ChainId::Gnosis => "gnosis",
+            ChainId::L1 => "l1",
+            ChainId::L2 => "l2",
         }
     }
 }
@@ -48,11 +34,21 @@ impl std::fmt::Display for ChainId {
     }
 }
 
-/// The ordered list of chains to check when detecting where a contract is deployed.
-/// L1 is checked first as the primary chain.
-pub const CHAIN_DETECTION_ORDER: [ChainId; 2] = [ChainId::Sepolia, ChainId::Gnosis];
+/// Queries `eth_chainId` on the given HTTP RPC URL and returns the numeric chain ID.
+pub async fn fetch_chain_id(rpc_url: &str) -> anyhow::Result<u64> {
+    use alloy_provider::{Provider, ProviderBuilder};
+    let url = url::Url::parse(rpc_url)
+        .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", rpc_url, e))?;
+    let provider = ProviderBuilder::new().connect_http(url);
+    let chain_id = provider.get_chain_id().await?;
+    Ok(chain_id)
+}
 
-/// Detects which chain has code deployed at the given address.
+/// The ordered list of roles to check when detecting where a contract is deployed.
+/// L1 is checked first as the primary chain.
+pub const CHAIN_DETECTION_ORDER: [ChainId; 2] = [ChainId::L1, ChainId::L2];
+
+/// Detects which chain role has code deployed at the given address.
 ///
 /// Checks each chain in `CHAIN_DETECTION_ORDER` by calling the provided
 /// async `get_code` closure. Returns the first chain where non-empty code is found.

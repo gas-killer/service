@@ -44,10 +44,9 @@ async fn create_wallet_provider_for_chain(
     private_key: &str,
 ) -> Result<WalletProvider> {
     let http_rpc = match chain_id {
-        ChainId::Sepolia => {
-            env::var("HTTP_RPC").map_err(|_| anyhow::anyhow!("HTTP_RPC must be set for L1 chain"))?
-        }
-        ChainId::Gnosis => env::var("L2_HTTP_RPC")
+        ChainId::L1 => env::var("HTTP_RPC")
+            .map_err(|_| anyhow::anyhow!("HTTP_RPC must be set for L1 chain"))?,
+        ChainId::L2 => env::var("L2_HTTP_RPC")
             .map_err(|_| anyhow::anyhow!("L2_HTTP_RPC must be set for L2 chain"))?,
     };
 
@@ -77,8 +76,8 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
 
     let l2_http_rpc = env::var("L2_HTTP_RPC").ok();
 
-    let deployment = AvsDeployment::load()
-        .map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
+    let deployment =
+        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
     info!("Executor reads operator state from L1 (HTTP_RPC)");
 
     let view_only_provider = ProviderBuilder::new().connect_http(
@@ -102,20 +101,20 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     let mut providers: HashMap<ChainId, WalletProvider> = HashMap::new();
 
     // L1 provider (required)
-    let l1_provider = create_wallet_provider_for_chain(ChainId::Sepolia, &private_key).await?;
-    providers.insert(ChainId::Sepolia, l1_provider);
-    info!(chain = %ChainId::Sepolia, "Created L1 wallet provider");
+    let l1_provider = create_wallet_provider_for_chain(ChainId::L1, &private_key).await?;
+    providers.insert(ChainId::L1, l1_provider);
+    info!(chain = %ChainId::L1, "Created L1 wallet provider");
 
     // L2 provider — optional, only used for write-side tx execution on L2
     if l2_http_rpc.is_some() {
-        match create_wallet_provider_for_chain(ChainId::Gnosis, &private_key).await {
+        match create_wallet_provider_for_chain(ChainId::L2, &private_key).await {
             Ok(l2_provider) => {
-                providers.insert(ChainId::Gnosis, l2_provider);
-                info!(chain = %ChainId::Gnosis, "Created L2 wallet provider");
+                providers.insert(ChainId::L2, l2_provider);
+                info!(chain = %ChainId::L2, "Created L2 wallet provider");
             }
             Err(e) => {
                 tracing::warn!(
-                    chain = %ChainId::Gnosis,
+                    chain = %ChainId::L2,
                     error = %e,
                     "Failed to create L2 wallet provider, L2 chain will be unavailable"
                 );

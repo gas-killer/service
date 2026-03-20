@@ -61,17 +61,16 @@ impl GasKillerValidator {
         let l1_rpc = env::var("RPC_URL")
             .or_else(|_| env::var("HTTP_RPC"))
             .map_err(|_| anyhow::anyhow!("RPC_URL or HTTP_RPC environment variable is not set"))?;
-        chain_rpc_urls.insert(ChainId::Sepolia, l1_rpc);
+        chain_rpc_urls.insert(ChainId::L1, l1_rpc);
 
         // Load L2 RPC URL (optional)
-        if let Ok(l2_rpc) = env::var("L2_RPC_URL").or_else(|_| env::var("L2_HTTP_RPC"))
-        {
-            chain_rpc_urls.insert(ChainId::Gnosis, l2_rpc);
+        if let Ok(l2_rpc) = env::var("L2_RPC_URL").or_else(|_| env::var("L2_HTTP_RPC")) {
+            chain_rpc_urls.insert(ChainId::L2, l2_rpc);
         }
 
         Ok(Self {
             chain_rpc_urls,
-            default_chain: ChainId::Sepolia,
+            default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -81,10 +80,10 @@ impl GasKillerValidator {
     /// Useful for testing without modifying environment variables.
     pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         let mut chain_rpc_urls = HashMap::new();
-        chain_rpc_urls.insert(ChainId::Sepolia, rpc_url.into());
+        chain_rpc_urls.insert(ChainId::L1, rpc_url.into());
         Self {
             chain_rpc_urls,
-            default_chain: ChainId::Sepolia,
+            default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -93,7 +92,7 @@ impl GasKillerValidator {
     pub fn with_chain_rpc_urls(chain_rpc_urls: HashMap<ChainId, String>) -> Self {
         Self {
             chain_rpc_urls,
-            default_chain: ChainId::Sepolia,
+            default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
