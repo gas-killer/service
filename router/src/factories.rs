@@ -45,10 +45,10 @@ async fn create_wallet_provider_for_chain(
 ) -> Result<WalletProvider> {
     let http_rpc = match chain_id {
         ChainId::Sepolia => {
-            env::var("HTTP_RPC").map_err(|_| anyhow::anyhow!("HTTP_RPC must be set for Sepolia"))?
+            env::var("HTTP_RPC").map_err(|_| anyhow::anyhow!("HTTP_RPC must be set for L1 chain"))?
         }
-        ChainId::Gnosis => env::var("GNOSIS_HTTP_RPC")
-            .map_err(|_| anyhow::anyhow!("GNOSIS_HTTP_RPC must be set for Gnosis"))?,
+        ChainId::Gnosis => env::var("L2_HTTP_RPC")
+            .map_err(|_| anyhow::anyhow!("L2_HTTP_RPC must be set for L2 chain"))?,
     };
 
     let ecdsa_signer = PrivateKeySigner::from_str(private_key)
@@ -66,16 +66,16 @@ async fn create_wallet_provider_for_chain(
 /// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations with multi-chain support.
 ///
 /// The executor's read side (view_only_provider, BLS contracts) always points at L1 via
-/// `HTTP_RPC` and `AVS_DEPLOYMENT_PATH`. Operator state lives on L1 (Sepolia) and is not
+/// `HTTP_RPC` and `AVS_DEPLOYMENT_PATH`. Operator state lives on L1 and is not
 /// available on the L2 mimic contract.
 ///
-/// `GNOSIS_HTTP_RPC` is used exclusively for the write side: submitting `verifyAndUpdate`
-/// transactions on Gnosis when the target contract lives there.
+/// `L2_HTTP_RPC` is used exclusively for the write side: submitting `verifyAndUpdate`
+/// transactions on L2 when the target contract lives there.
 pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
-    let gnosis_rpc = env::var("GNOSIS_HTTP_RPC").ok();
+    let l2_http_rpc = env::var("L2_HTTP_RPC").ok();
 
     let deployment = AvsDeployment::load()
         .map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
@@ -101,28 +101,28 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
     // Create wallet providers for each supported chain
     let mut providers: HashMap<ChainId, WalletProvider> = HashMap::new();
 
-    // Sepolia provider (required)
-    let sepolia_provider = create_wallet_provider_for_chain(ChainId::Sepolia, &private_key).await?;
-    providers.insert(ChainId::Sepolia, sepolia_provider);
-    info!(chain = %ChainId::Sepolia, "Created wallet provider");
+    // L1 provider (required)
+    let l1_provider = create_wallet_provider_for_chain(ChainId::Sepolia, &private_key).await?;
+    providers.insert(ChainId::Sepolia, l1_provider);
+    info!(chain = %ChainId::Sepolia, "Created L1 wallet provider");
 
-    // Gnosis provider — optional, only used for write-side tx execution on Gnosis
-    if gnosis_rpc.is_some() {
+    // L2 provider — optional, only used for write-side tx execution on L2
+    if l2_http_rpc.is_some() {
         match create_wallet_provider_for_chain(ChainId::Gnosis, &private_key).await {
-            Ok(gnosis_provider) => {
-                providers.insert(ChainId::Gnosis, gnosis_provider);
-                info!(chain = %ChainId::Gnosis, "Created wallet provider");
+            Ok(l2_provider) => {
+                providers.insert(ChainId::Gnosis, l2_provider);
+                info!(chain = %ChainId::Gnosis, "Created L2 wallet provider");
             }
             Err(e) => {
                 tracing::warn!(
                     chain = %ChainId::Gnosis,
                     error = %e,
-                    "Failed to create Gnosis wallet provider, Gnosis chain will be unavailable"
+                    "Failed to create L2 wallet provider, L2 chain will be unavailable"
                 );
             }
         }
     } else {
-        info!("GNOSIS_HTTP_RPC not set, Gnosis chain support disabled");
+        info!("L2_HTTP_RPC not set, L2 chain support disabled");
     }
 
     let bls_apk_registry =

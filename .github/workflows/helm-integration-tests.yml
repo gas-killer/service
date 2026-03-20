@@ -73,18 +73,18 @@ jobs:
       - name: Build Docker images
         run: |
           echo "Building router image..."
-          docker build -f ./router/Dockerfile -t gas-killer-router:local .
+          docker build -f ./router/Dockerfile -t avs:router-local .
 
           echo "Building node image..."
-          docker build -f ./node/Dockerfile -t gas-killer-node:local .
+          docker build -f ./node/Dockerfile -t avs:node-local .
 
       - name: Load images into kind cluster
         run: |
           echo "Loading router image into kind..."
-          kind load docker-image gas-killer-router:local --name gas-killer-test
+          kind load docker-image avs:router-local --name gas-killer-test
 
           echo "Loading node image into kind..."
-          kind load docker-image gas-killer-node:local --name gas-killer-test
+          kind load docker-image avs:node-local --name gas-killer-test
 
       - name: Verify cluster is ready
         run: |
@@ -94,7 +94,7 @@ jobs:
 
       - name: Install Helm chart
         run: |
-          # Set fork URL from secret or use public Sepolia
+          # Set L1 fork URL from secret or use public Sepolia
           if [ -n "${{ secrets.RPC_URL }}" ]; then
             FORK_URL="${{ secrets.RPC_URL }}"
           else
@@ -107,9 +107,9 @@ jobs:
 
           echo "Installing Helm chart with fork URL: $FORK_URL"
 
-          # Set L2 fork URL for Gnosis Anvil (LOCAL mode)
-          if [ -n "${{ secrets.GNOSIS_RPC_URL }}" ]; then
-            L2_FORK_URL="${{ secrets.GNOSIS_RPC_URL }}"
+          # Set L2 fork URL for local L2 Anvil (LOCAL mode)
+          if [ -n "${{ secrets.L2_RPC_URL }}" ]; then
+            L2_FORK_URL="${{ secrets.L2_RPC_URL }}"
           else
             L2_FORK_URL="https://rpc.gnosischain.com"
           fi
@@ -123,14 +123,14 @@ jobs:
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
             --set secrets.l2ForkUrl="$L2_FORK_URL" \
-            --set node.image.repository=gas-killer-node \
-            --set node.image.tag=local \
+            --set node.image.repository=avs \
+            --set node.image.tag=node-local \
             --set node.image.pullPolicy=Never \
-            --set router.image.repository=gas-killer-router \
-            --set router.image.tag=local \
+            --set router.image.repository=avs \
+            --set router.image.tag=router-local \
             --set router.image.pullPolicy=Never \
             --set sharedData.storageClass="" \
-            --set gnosis.enabled=true \
+            --set l2.enabled=true \
             --set bridge.enabled=true \
             --set bridge.waitForBridge=true \
             --set yieldDistribution.enabled=true
@@ -251,11 +251,11 @@ jobs:
 
       - name: Wait for all pods to be ready
         run: |
-          echo "Waiting for gnosis pod..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=gnosis --timeout=180s || echo "No gnosis pod found"
+          echo "Waiting for L2 pod..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=l2 --timeout=180s || echo "No L2 pod found"
 
-          echo "Waiting for ethereum pod..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=ethereum --timeout=180s
+          echo "Waiting for L1 pod..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=l1 --timeout=180s
 
           echo "Waiting for node pods..."
           # Show pod status before waiting
@@ -273,8 +273,8 @@ jobs:
             if [ -n "$NODE1_POD" ]; then
               echo "Init container wait-for-setup:"
               kubectl logs $NODE1_POD -c wait-for-setup || true
-              echo "Init container wait-for-ethereum:"
-              kubectl logs $NODE1_POD -c wait-for-ethereum || true
+              echo "Init container wait-for-l1:"
+              kubectl logs $NODE1_POD -c wait-for-l1 || true
               echo "Main container node:"
               kubectl logs $NODE1_POD -c node || true
             fi
@@ -289,23 +289,23 @@ jobs:
       - name: Setup port forwarding for testing
         run: |
           # Find actual service names (they include the chart name)
-          ETHEREUM_SERVICE=$(kubectl get services -o name | grep ethereum | head -1 | sed 's|service/||')
+          L1_SERVICE=$(kubectl get services -o name | grep '\-l1$' | head -1 | sed 's|service/||')
           ROUTER_SERVICE=$(kubectl get services -o name | grep router | head -1 | sed 's|service/||')
 
-          echo "Ethereum service: $ETHEREUM_SERVICE"
+          echo "L1 service: $L1_SERVICE"
           echo "Router service: $ROUTER_SERVICE"
 
-          # Port forward ethereum RPC
-          kubectl port-forward service/$ETHEREUM_SERVICE 8545:8545 &
+          # Port forward L1 RPC
+          kubectl port-forward service/$L1_SERVICE 8545:8545 &
 
           # Port forward router ingress
           kubectl port-forward service/$ROUTER_SERVICE 8080:8080 &
 
-          # Port forward gnosis RPC (for yield distribution verification)
-          GNOSIS_SERVICE=$(kubectl get services -o name | grep gnosis | head -1 | sed 's|service/||')
-          if [ -n "$GNOSIS_SERVICE" ]; then
-            echo "Gnosis service: $GNOSIS_SERVICE"
-            kubectl port-forward service/$GNOSIS_SERVICE 8546:8546 &
+          # Port forward L2 RPC (for yield distribution verification)
+          L2_SERVICE=$(kubectl get services -o name | grep '\-l2$' | head -1 | sed 's|service/||')
+          if [ -n "$L2_SERVICE" ]; then
+            echo "L2 service: $L2_SERVICE"
+            kubectl port-forward service/$L2_SERVICE 8546:8546 &
           fi
 
           # Wait for port forwards to be ready
@@ -455,7 +455,7 @@ jobs:
           INITIAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
           BLOCK=$(cast block-number --rpc-url "$L2_RPC" | tr -d '[:space:]')
           echo "Initial stateTransitionCount: $INITIAL_COUNT"
-          echo "Gnosis block: $BLOCK"
+          echo "L2 block: $BLOCK"
 
           # Verify distribution is ready
           RESOLVER=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1)

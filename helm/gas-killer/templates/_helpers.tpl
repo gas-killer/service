@@ -49,10 +49,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Ethereum service name
+L1 service name
 */}}
-{{- define "gas-killer.ethereum.fullname" -}}
-{{- printf "%s-ethereum" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- define "gas-killer.l1.fullname" -}}
+{{- printf "%s-l1" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
@@ -116,10 +116,10 @@ Bridge job name
 {{- end }}
 
 {{/*
-Gnosis (L2) service name
+L2 service name
 */}}
-{{- define "gas-killer.gnosis.fullname" -}}
-{{- printf "%s-gnosis" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- define "gas-killer.l2.fullname" -}}
+{{- printf "%s-l2" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*

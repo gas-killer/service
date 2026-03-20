@@ -30,7 +30,7 @@ commonware-cryptography = { workspace = true }
 dotenv = { workspace = true }
 
 # Gas analysis
-gas-analyzer-rs = { workspace = true }
+gas-analyzer = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

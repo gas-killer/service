@@ -3,11 +3,11 @@
 # Global settings
 global:
   # Environment mode: LOCAL or TESTNET
-  # LOCAL: Uses Anvil with forked Sepolia, auto-deploys AVS contracts to local fork
-  #        Requires: secrets.forkUrl (Sepolia RPC to fork from)
-  # TESTNET: Connects directly to real Sepolia testnet
-  #          Requires: secrets.rpcUrl (Sepolia RPC endpoint)
-  #          AVS contracts are deployed to real Sepolia
+  # LOCAL: Uses Anvil with forked L1, auto-deploys AVS contracts to local fork
+  #        Requires: secrets.forkUrl (L1 RPC to fork from)
+  # TESTNET: Connects directly to real L1 network
+  #          Requires: secrets.rpcUrl (L1 RPC endpoint)
+  #          AVS contracts are deployed to real L1
   environment: LOCAL
 
   # Number of operator nodes to deploy
@@ -34,25 +34,25 @@ secrets:
   # Example: --set secrets.forkUrl=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
   forkUrl: ""
 
-  # Direct RPC URL for Sepolia (contains API key - sensitive!)
+  # Direct RPC URL for L1 (contains API key - sensitive!)
   # REQUIRED for TESTNET mode - nodes/router connect directly to this RPC
   # Override with: --set secrets.rpcUrl=<your-rpc-url>
   # Example: --set secrets.rpcUrl=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
   rpcUrl: ""
 
-  # L2 Fork URL for local Gnosis Anvil (only used in LOCAL mode with gnosis.enabled=true)
-  # Override with: --set secrets.l2ForkUrl=<your-gnosis-rpc-url>
+  # L2 Fork URL for local L2 Anvil (only used in LOCAL mode with l2.enabled=true)
+  # Override with: --set secrets.l2ForkUrl=<your-l2-rpc-url>
   # Example: --set secrets.l2ForkUrl=https://rpc.gnosischain.com
   l2ForkUrl: ""
 
-# Ethereum (Anvil) configuration - only used in LOCAL mode
-ethereum:
+# L1 (Anvil) configuration - only used in LOCAL mode
+l1:
   enabled: true
   image:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: latest
     pullPolicy: IfNotPresent
-  # Priority class for ethereum pod - it holds critical blockchain state
+  # Priority class for L1 pod - it holds critical blockchain state
   # Consider creating a custom priority class instead of using system-cluster-critical
   # See README.md for details
   priorityClassName: "system-cluster-critical"
@@ -73,7 +73,7 @@ eigenlayer:
     repository: ghcr.io/breadchaincoop/eigenlayer
     tag: latest
     pullPolicy: IfNotPresent
-  # Sepolia testnet contract addresses (forked by Anvil in LOCAL mode)
+  # L1 contract addresses (forked by Anvil in LOCAL mode)
   contracts:
     delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
     strategyManager: "0x2E3D6c0744b10eb0A4e6F679F71554a39Ec47a5D"
@@ -111,10 +111,10 @@ signer:
 node:
   image:
     # For local development, build and load the image into kind:
-    # docker build -t gas-killer-node:local -f node/Dockerfile .
-    # kind load docker-image gas-killer-node:local --name <cluster-name>
-    repository: gas-killer-node
-    tag: local
+    # docker build -t avs:node-local -f node/Dockerfile .
+    # kind load docker-image avs:node-local --name <cluster-name>
+    repository: avs
+    tag: node-local
     pullPolicy: Never
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
@@ -130,15 +130,15 @@ node:
 router:
   image:
     # For local development, build and load the image into kind:
-    # docker build -t gas-killer-router:local -f router/Dockerfile .
-    # kind load docker-image gas-killer-router:local --name <cluster-name>
-    repository: gas-killer-router
-    tag: local
+    # docker build -t avs:router-local -f router/Dockerfile .
+    # kind load docker-image avs:router-local --name <cluster-name>
+    repository: avs
+    tag: router-local
     pullPolicy: Never
   port: 3000
   ingressPort: 8080
   # Aggregation window duration in seconds. Must exceed the time nodes need to compute
-  # EVMSketch storage updates. Gnosis computation takes ~60s, so 90s gives a safe margin.
+  # EVMSketch storage updates. L2 computation takes ~60s, so 90s gives a safe margin.
   aggregationFrequency: "90"
   ingress:
     enabled: true
@@ -175,9 +175,9 @@ orchestrator:
   # WARNING: The image contains a default private key. For production, always provide your own!
   routerPrivateKey: ""
 
-# Gnosis (Anvil fork for L2) configuration - only used in LOCAL mode
-# Defaults to disabled; enable explicitly via --set gnosis.enabled=true (e.g. in CI)
-gnosis:
+# L2 (Anvil fork) configuration - only used in LOCAL mode
+# Defaults to disabled; enable explicitly via --set l2.enabled=true (e.g. in CI)
+l2:
   enabled: false
   image:
     repository: ghcr.io/breadchaincoop/ethereum
@@ -211,11 +211,11 @@ bridge:
       memory: "1Gi"
       cpu: "500m"
 
-# Yield Distribution test configuration - only used in LOCAL mode with gnosis.enabled
+# Yield Distribution test configuration - only used in LOCAL mode with l2.enabled
 # Defaults to disabled; enable explicitly via --set yieldDistribution.enabled=true (e.g. in CI)
 yieldDistribution:
   enabled: false
-  # YieldDistributor contract address on Gnosis
+  # YieldDistributor contract address on L2
   contractAddress: "0x37A9CC16412CDA9b4f9B1ABdedd3e10BAD8A06da"
   # Owner of the YieldDistributor on the fork (used for anvil impersonation)
   ownerAddress: "0x5DD2e7db868e33c03daB85d0C623048A7980634E"

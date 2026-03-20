@@ -49,7 +49,7 @@ impl std::fmt::Display for ChainId {
 }
 
 /// The ordered list of chains to check when detecting where a contract is deployed.
-/// Sepolia is checked first as the primary chain.
+/// L1 is checked first as the primary chain.
 pub const CHAIN_DETECTION_ORDER: [ChainId; 2] = [ChainId::Sepolia, ChainId::Gnosis];
 
 /// Detects which chain has code deployed at the given address.

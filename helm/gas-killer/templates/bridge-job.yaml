@@ -183,11 +183,11 @@ spec:
             {{- else }}
             # LOCAL mode: Use local Anvil services
             - name: L1_RPC_URL
-              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
-            {{- if .Values.gnosis.enabled }}
-            # Use local Gnosis Anvil fork
+              value: "http://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
+            {{- if .Values.l2.enabled }}
+            # Use local L2 Anvil fork
             - name: L2_RPC_URL
-              value: "http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+              value: "http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
             {{- else }}
             # Use external L2 RPC
             - name: L2_RPC_URL
