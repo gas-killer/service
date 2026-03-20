@@ -1,13 +1,22 @@
-# Gas Killer Router
+# Gas Killer AVS
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io/gas--killer/avs-blue.svg)](https://github.com/gas-killer/avs/pkgs/container/avs)
 
-A specialized router for Gas Killer optimized transaction execution with BLS signature aggregation for EigenLayer AVS operators.
+A Gas Killer AVS implementation built on EigenLayer with BLS signature aggregation for optimized transaction execution.
 
 ## Overview
 
-The router coordinates multiple operators to sign messages, aggregates their signatures when a threshold is reached, and executes the result onchain.
+The AVS coordinates multiple operator nodes to sign messages, aggregates their BLS signatures when a threshold is reached, and executes the result onchain via `verifyAndUpdate`.
+
+## Repository Structure
+
+- **`router/`** — Orchestrator service: aggregates signatures and executes onchain
+- **`node/`** — Operator node: validates and signs tasks
+- **`common/`** — Shared types, validation logic, and EVM gas analysis
+- **`scripts/`** — Helper binaries for deployment and end-to-end testing
+- **`helm/`** — Kubernetes Helm chart for full-stack deployment
+- **`docker-compose.yml`** — One-command local deployment
 
 ## Quick Start
 
@@ -62,13 +71,16 @@ docker compose down -v
 
 ### Building from Source (Development Only)
 
-If you're developing the router and want to test local changes:
+If you're developing locally and want to test changes:
 
 ```bash
-# Build the router image locally
-docker build -t ghcr.io/gas-killer/avs:latest .
+# Build the router image
+docker build -t ghcr.io/gas-killer/avs:router-local -f router/Dockerfile .
 
-# Run with locally built image
+# Build the node image
+docker build -t ghcr.io/gas-killer/avs:node-local -f node/Dockerfile .
+
+# Run with locally built images
 docker compose up -d
 ```
 
@@ -77,10 +89,10 @@ docker compose up -d
 The system consists of:
 
 - **Orchestrator**: Coordinates the aggregation process
-- **Creator**: Generates payloads and manages rounds  
+- **Creator**: Generates payloads and manages rounds
 - **Executor**: Handles onchain execution
-- **Validator**: Validates messages and signatures
-- **Contributors**: Operator nodes that sign messages (implemented in [`gas-killer-node`](https://github.com/BreadchainCoop/gas-killer-node) submodule)
+- **Validator**: Validates messages and signatures using EVM gas analysis
+- **Contributors**: Operator nodes that sign messages (implemented in `node/`)
 
 ### Usecases
 
@@ -167,7 +179,8 @@ curl -X POST http://localhost:8080/trigger \
 
 ### Dependencies
 - `alloy`: Ethereum interaction
-- `bn254`: BLS signature operations  
+- `commonware-avs-*`: AVS protocol types, node, and router libraries
+- `gas-analyzer`: EVM gas analysis and storage update computation
 - `commonware_cryptography`: Cryptographic operations
 - `commonware_p2p`: P2P networking
 - `commonware_runtime`: Runtime utilities
