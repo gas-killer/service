@@ -61,7 +61,7 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 
 # Gas analysis
-gas-analyzer-rs = { workspace = true }
+gas-analyzer = { workspace = true }
 
 # Internal crates
 gas-killer-common = { workspace = true }
