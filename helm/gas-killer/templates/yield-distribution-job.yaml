@@ -186,21 +186,9 @@ spec:
 
                 cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
 
-                echo "Registering YieldDistributor as BREAD yieldClaimer..."
-                BREAD_TOKEN="0xa555d5344f6fb6c65da19e403cb4c1ec4a1a5ee3"
-                BREAD_OWNER=$(cast call --rpc-url "$L2_RPC_URL" "$BREAD_TOKEN" "owner()(address)")
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$BREAD_OWNER"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$BREAD_OWNER" "0x56BC75E2D63100000"
-                cast send --rpc-url "$L2_RPC_URL" --from "$BREAD_OWNER" --unlocked \
-                  "$BREAD_TOKEN" "setYieldClaimer(address)" "$YIELD_DISTRIBUTOR"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$BREAD_OWNER"
-
-                # Step 3: Cast a vote from a test voter so currentVotes > 0
+                # Step 3: Cast a vote from owner so currentVotes > 0
                 echo ""
-                echo "=== Step 3: Casting vote from test voter ==="
-
-                TEST_VOTER="0xbA6E1C26bE2F8b46D9e7ab7573b99921Ee81AcF5"
-                echo "Using test voter: $TEST_VOTER"
+                echo "=== Step 3: Casting vote from owner ==="
 
                 # Discover current projects via getCurrentVotingDistribution()
                 VOTING_DIST_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "getCurrentVotingDistribution()(address[],uint256[])" 2>/dev/null || echo "")
@@ -229,18 +217,18 @@ spec:
                 POINTS_ARG="[$POINTS_CSV]"
                 echo "Voting points vector: $POINTS_ARG"
 
-                echo "Impersonating test voter and submitting vote..."
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$TEST_VOTER"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$TEST_VOTER" "0x56BC75E2D63100000"
+                echo "Impersonating owner and submitting vote..."
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$YIELD_DISTRIBUTOR_OWNER"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$YIELD_DISTRIBUTOR_OWNER" "0x56BC75E2D63100000"
 
-                if ! cast send --rpc-url "$L2_RPC_URL" --from "$TEST_VOTER" --unlocked \
+                if ! cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
                   "$YIELD_DISTRIBUTOR" "castVote(uint256[])" "$POINTS_ARG"; then
-                  echo "ERROR: castVote from test voter failed"
-                  cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$TEST_VOTER" || true
+                  echo "ERROR: castVote from owner failed"
+                  cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER" || true
                   exit 1
                 fi
 
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$TEST_VOTER"
+                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
 
                 CURRENT_VOTES=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "currentVotes()(uint256)" 2>/dev/null | tr -d '[:space:]' | grep -oE '^[0-9]+' || echo "0")
                 echo "currentVotes after test vote: $CURRENT_VOTES"
