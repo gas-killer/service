@@ -71,7 +71,6 @@ spec:
               readOnly: true
         {{- end }}
 
-
         {{- if eq .Values.global.environment "LOCAL" }}
         # Wait for L1 RPC to be accessible (LOCAL mode only)
         - name: wait-for-l1
