@@ -22,5 +22,5 @@ pub use creator::GasKillerCreatorType;
 pub use executor::GasKillerHandler;
 pub use gas_killer_common::GasKillerTaskData;
 pub use gas_killer_common::GasKillerValidator;
-pub use ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
+pub use ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody, ValidationError};
 pub use orchestrator::GasKillerOrchestrator;
