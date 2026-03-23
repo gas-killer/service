@@ -7,6 +7,7 @@
 #   GNOSIS_RPC_URL=https://rpc.gnosischain.com      # or your preferred Gnosis RPC
 #   GNOSIS_WS_RPC_URL=wss://rpc.gnosischain.com/wss
 #   PRIVATE_KEY=0x...    # must have xDAI on Gnosis to pay for bridge deployment txns
+#   SET_CONTRACT_VALUES_MANUALLY=true    # set to true to skip YieldDistributor update
 #
 # Flow:
 #   eigenlayer  →  bridge  →  node-1/2/3 + router
@@ -16,7 +17,6 @@
 # Then trigger distribution via the router ingress at http://localhost:8080.
 
 services:
-
   # ─── Bridge ──────────────────────────────────────────────────────────────────
   # Deploys RegistryCoordinatorMimic + BLSSignatureChecker to real Gnosis,
   # bridging EigenLayer operator state from the local Anvil Sepolia fork.
@@ -85,10 +85,9 @@ services:
 
         # ── Step 3: Snapshot L1 operator state ────────────────────────────────────
         echo "=== Step 3: Snapshotting operator state ===" | tee -a "$$LOG_FILE"
-        TX_HASH=$$(cast send --rpc-url "$$L1_RPC_URL" --private-key "$$L1_KEY" --json \
-          "$$MIDDLEWARE_SHIM" "updateMiddlewareDataHash()" | jq -r '.transactionHash')
-        sleep 3
-        BLOCK_NUMBER=$$(cast receipt --rpc-url "$$L1_RPC_URL" "$$TX_HASH" --json | jq -r '.blockNumber')
+        BLOCK_NUMBER=$$(cast send --rpc-url "$$L1_RPC_URL" --private-key "$$L1_KEY" \
+          --confirmations 1 --json \
+          "$$MIDDLEWARE_SHIM" "updateMiddlewareDataHash()" | jq -r '.blockNumber')
         echo "[BRIDGE] Operator state snapshotted at block: $$BLOCK_NUMBER" | tee -a "$$LOG_FILE"
 
         # ── Step 4: Generate mock proof ────────────────────────────────────────────
