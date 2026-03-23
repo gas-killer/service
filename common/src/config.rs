@@ -34,16 +34,6 @@ impl std::fmt::Display for ChainId {
     }
 }
 
-/// Queries `eth_chainId` on the given HTTP RPC URL and returns the numeric chain ID.
-pub async fn fetch_chain_id(rpc_url: &str) -> anyhow::Result<u64> {
-    use alloy_provider::{Provider, ProviderBuilder};
-    let url = url::Url::parse(rpc_url)
-        .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", rpc_url, e))?;
-    let provider = ProviderBuilder::new().connect_http(url);
-    let chain_id = provider.get_chain_id().await?;
-    Ok(chain_id)
-}
-
 /// The ordered list of roles to check when detecting where a contract is deployed.
 /// L1 is checked first as the primary chain.
 pub const CHAIN_DETECTION_ORDER: [ChainId; 2] = [ChainId::L1, ChainId::L2];
