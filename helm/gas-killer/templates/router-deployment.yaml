@@ -69,7 +69,7 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
-        {{- end }}\
+        {{- end }}
 
         {{- if eq .Values.global.environment "LOCAL" }}
         # Wait for ethereum RPC to be accessible (LOCAL mode only)
