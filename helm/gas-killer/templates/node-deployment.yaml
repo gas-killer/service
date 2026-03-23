@@ -123,29 +123,7 @@ spec:
             - "/app/config/public_orchestrator.json"
             {{- end }}
           env:
-            {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.l2 $root.Values.l2.rpcUrl }}
-            # TESTNET + L2 mode: Use L2 RPC for AVS operations
-            - name: HTTP_RPC
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gas-killer.secret.fullname" $root }}
-                  key: L2_RPC_URL
-            - name: RPC_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gas-killer.secret.fullname" $root }}
-                  key: L2_RPC_URL
-            - name: WS_RPC
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gas-killer.secret.fullname" $root }}
-                  key: L2_WS_RPC_URL
-            - name: L2_HTTP_RPC
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gas-killer.secret.fullname" $root }}
-                  key: L2_RPC_URL
-            {{- else if eq $root.Values.global.environment "TESTNET" }}
+            {{- if eq $root.Values.global.environment "TESTNET" }}
             # TESTNET mode (no L2): Use external RPC from secret
             - name: HTTP_RPC
               valueFrom:
@@ -177,14 +155,8 @@ spec:
             {{- end }}
             - name: RUST_BACKTRACE
               value: "1"
-            {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.l2 $root.Values.l2.rpcUrl }}
-            # TESTNET + L2 mode: Use L2 AVS deployment path
-            - name: AVS_DEPLOYMENT_PATH
-              value: {{ $root.Values.l2.avsDeploymentPath | quote }}
-            {{- else }}
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"
-            {{- end }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}

@@ -224,9 +224,11 @@ yieldDistribution:
   blsSigCheckAddress: "0x056A41125bB62168B464ddDECd995e8494448913"
   # Test-friendly overrides applied via contract setters
   cycleLength: 1
+  # Set to a large number to disable block staleness detection
   blockStaleMeasure: "100000000"
   # Fallback block number used if eth_blockNumber RPC call fails during setup
-  fallbackBlockNumber: "0"
+  # "Recent" Gnosis mainnet block number, but blockstaleness detection is disabled on fallback
+  fallbackBlockNumber: "44000000"
   resources:
     requests:
       memory: "2Gi"
