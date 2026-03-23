@@ -1,13 +1,13 @@
-# Gas Killer AVS
+# Gas Killer
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io/gas--killer/avs-blue.svg)](https://github.com/gas-killer/avs/pkgs/container/avs)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io/gas--killer/service-blue.svg)](https://github.com/gas-killer/service/pkgs/container/service)
 
-A Gas Killer AVS implementation built on EigenLayer with BLS signature aggregation for optimized transaction execution.
+Gas Killer service implementation built on EigenLayer with BLS signature aggregation for optimized transaction execution.
 
 ## Overview
 
-The AVS coordinates multiple operator nodes to sign messages, aggregates their BLS signatures when a threshold is reached, and executes the result onchain via `verifyAndUpdate`.
+The service coordinates multiple operator nodes to sign messages, aggregates their BLS signatures when a threshold is reached, and executes the result onchain via `verifyAndUpdate`.
 
 ## Repository Structure
 
@@ -75,10 +75,10 @@ If you're developing locally and want to test changes:
 
 ```bash
 # Build the router image
-docker build -t ghcr.io/gas-killer/avs:router-local -f router/Dockerfile .
+docker build -t ghcr.io/gas-killer/service:router-local -f router/Dockerfile .
 
 # Build the node image
-docker build -t ghcr.io/gas-killer/avs:node-local -f node/Dockerfile .
+docker build -t ghcr.io/gas-killer/service:node-local -f node/Dockerfile .
 
 # Run with locally built images
 docker compose up -d
@@ -128,7 +128,7 @@ Contract addresses are automatically loaded from the deployment JSON file.
 
 Pull the latest image:
 ```bash
-docker pull ghcr.io/gas-killer/avs:latest
+docker pull ghcr.io/gas-killer/service:latest
 ```
 
 Run with Docker Compose:
@@ -136,7 +136,7 @@ Run with Docker Compose:
 version: '3.8'
 services:
   orchestrator:
-    image: ghcr.io/gas-killer/avs:latest
+    image: ghcr.io/gas-killer/service:latest
     volumes:
       - ./config:/app/config
       - ./keys:/app/keys

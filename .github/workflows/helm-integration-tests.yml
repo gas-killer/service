@@ -67,24 +67,24 @@ jobs:
       # router startup and triggering tasks
       - name: Build test scripts
         run: |
-          cargo build --release -p avs-scripts --bin deploy_array_summation
-          cargo build --release -p avs-scripts --bin trigger_gas_killer
+          cargo build --release -p scripts --bin deploy_array_summation
+          cargo build --release -p scripts --bin trigger_gas_killer
 
       - name: Build Docker images
         run: |
           echo "Building router image..."
-          docker build -f ./router/Dockerfile -t avs:router-local .
+          docker build -f ./router/Dockerfile -t service:router-local .
 
           echo "Building node image..."
-          docker build -f ./node/Dockerfile -t avs:node-local .
+          docker build -f ./node/Dockerfile -t service:node-local .
 
       - name: Load images into kind cluster
         run: |
           echo "Loading router image into kind..."
-          kind load docker-image avs:router-local --name gas-killer-test
+          kind load docker-image service:router-local --name gas-killer-test
 
           echo "Loading node image into kind..."
-          kind load docker-image avs:node-local --name gas-killer-test
+          kind load docker-image service:node-local --name gas-killer-test
 
       - name: Pre-pull external images into kind
         run: |
@@ -137,10 +137,10 @@ jobs:
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
             --set secrets.l2ForkUrl="$L2_FORK_URL" \
-            --set node.image.repository=avs \
+            --set node.image.repository=service \
             --set node.image.tag=node-local \
             --set node.image.pullPolicy=Never \
-            --set router.image.repository=avs \
+            --set router.image.repository=service \
             --set router.image.tag=router-local \
             --set router.image.pullPolicy=Never \
             --set sharedData.storageClass="" \
