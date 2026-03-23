@@ -189,12 +189,17 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         };
 
         // Execute the gas killer verifyAndUpdate
+        // Use referenceBlockNumber = current_block_number - 1 so that eth_estimateGas (which
+        // simulates at the current block) satisfies the on-chain check:
+        //   require(referenceBlockNumber < block.number)
+        // Without the decrement, eth_estimateGas at block N sees referenceBlockNumber == N
+        // and reverts with FutureBlockNumber.
         info!("Sending verifyAndUpdate transaction");
         let call_return = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
                 quorum_numbers,
-                current_block_number,
+                current_block_number.saturating_sub(1),
                 storage_updates,
                 transition_index,
                 target_function,

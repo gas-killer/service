@@ -39,9 +39,3 @@ data:
       "address": {{ include "gas-killer.router.fullname" . | quote }}
     }
   {{- end }}
-  {{- if .Values.router.l2AvsDeployment }}
-  # L2 AVS deployment config - required when router.gnosisHttpRpc is set
-  # Contains BLS contract addresses for the RegistryCoordinatorMimic on Gnosis
-  l2_avs_deploy.json: |
-{{ .Values.router.l2AvsDeployment | indent 4 }}
-  {{- end }}
