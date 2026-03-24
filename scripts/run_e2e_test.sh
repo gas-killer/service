@@ -75,8 +75,8 @@ echo "Logs directory: $LOG_DIR"
 # Step 1: Build scripts
 echo -e "${YELLOW}Step 1: Building scripts...${NC}"
 cd "$PROJECT_ROOT/scripts"
-cargo build --release -p avs-scripts --bin deploy_array_summation
-cargo build --release -p avs-scripts --bin trigger_gas_killer
+cargo build --release -p scripts --bin deploy_array_summation
+cargo build --release -p scripts --bin trigger_gas_killer
 cd "$PROJECT_ROOT"
 
 # Step 2: Assume .env already exists and contains required values
@@ -151,7 +151,7 @@ if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
 fi
 
 echo "Running ArraySummation deployment..."
-cargo run --release -p avs-scripts --bin deploy_array_summation
+cargo run --release -p scripts --bin deploy_array_summation
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}ArraySummation deployment completed successfully${NC}"
@@ -200,7 +200,7 @@ sleep 5
 echo -e "${YELLOW}Step 10: Triggering task and verifying execution...${NC}"
 echo "Sending a test task to the router..."
 cd "$PROJECT_ROOT/scripts"
-cargo run --release -p avs-scripts --bin trigger_gas_killer
+cargo run --release -p scripts --bin trigger_gas_killer
 TRIGGER_STATUS=$?
 cd "$PROJECT_ROOT"
 

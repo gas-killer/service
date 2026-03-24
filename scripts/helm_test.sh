@@ -137,15 +137,15 @@ if [ "$SKIP_BUILD" != "true" ]; then
     echo -e "${YELLOW}Step 4: Building Docker images...${NC}"
 
     echo "Building router image..."
-    docker build -f ./router/Dockerfile -t avs:router-local .
+    docker build -f ./router/Dockerfile -t service:router-local .
 
     echo "Building node image..."
-    docker build -f ./node/Dockerfile -t avs:node-local .
+    docker build -f ./node/Dockerfile -t service:node-local .
 
     # Load images into kind cluster
     echo "Loading images into kind cluster..."
-    kind load docker-image avs:router-local --name "$CLUSTER_NAME"
-    kind load docker-image avs:node-local --name "$CLUSTER_NAME"
+    kind load docker-image service:router-local --name "$CLUSTER_NAME"
+    kind load docker-image service:node-local --name "$CLUSTER_NAME"
 else
     echo -e "${YELLOW}Step 4: Skipping Docker build (--skip-build specified)${NC}"
 fi
@@ -257,8 +257,8 @@ cat ./config/.nodes/avs_deploy.json
 echo -e "${YELLOW}Step 10: Building test scripts...${NC}"
 
 cd "$PROJECT_ROOT/scripts"
-cargo build --release -p avs-scripts --bin deploy_array_summation
-cargo build --release -p avs-scripts --bin trigger_gas_killer
+cargo build --release -p scripts --bin deploy_array_summation
+cargo build --release -p scripts --bin trigger_gas_killer
 cd "$PROJECT_ROOT"
 
 # Step 11: Deploy ArraySummation contract
@@ -274,7 +274,7 @@ export ARRAY_SUMMATION_MAX_VALUE=1000
 export ARRAY_SUMMATION_SEED=42
 export PRIVATE_KEY="$PRIVATE_KEY"
 
-cargo run --release -p avs-scripts --bin deploy_array_summation
+cargo run --release -p scripts --bin deploy_array_summation
 cd "$PROJECT_ROOT"
 
 echo -e "${GREEN}ArraySummation deployment completed${NC}"
@@ -285,7 +285,7 @@ echo -e "${YELLOW}Step 12: Triggering Gas Killer task...${NC}"
 cd scripts
 export GAS_KILLER_ROUTER_URL=http://localhost:8080
 
-cargo run --release -p avs-scripts --bin trigger_gas_killer
+cargo run --release -p scripts --bin trigger_gas_killer
 TRIGGER_STATUS=$?
 cd "$PROJECT_ROOT"
 

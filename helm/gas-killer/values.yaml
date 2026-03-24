@@ -111,9 +111,9 @@ signer:
 node:
   image:
     # For local development, build and load the image into kind:
-    # docker build -t avs:node-local -f node/Dockerfile .
-    # kind load docker-image avs:node-local --name <cluster-name>
-    repository: avs
+    # docker build -t service:node-local -f node/Dockerfile .
+    # kind load docker-image service:node-local --name <cluster-name>
+    repository: service
     tag: node-local
     pullPolicy: Never
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
@@ -130,9 +130,9 @@ node:
 router:
   image:
     # For local development, build and load the image into kind:
-    # docker build -t avs:router-local -f router/Dockerfile .
-    # kind load docker-image avs:router-local --name <cluster-name>
-    repository: avs
+    # docker build -t service:router-local -f router/Dockerfile .
+    # kind load docker-image service:router-local --name <cluster-name>
+    repository: service
     tag: router-local
     pullPolicy: Never
   port: 3000
