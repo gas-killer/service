@@ -25,26 +25,26 @@ spec:
       restartPolicy: OnFailure
       {{- if eq .Values.global.environment "LOCAL" }}
       initContainers:
-        # Wait for ethereum to be ready (LOCAL mode only)
-        - name: wait-for-ethereum
+        # Wait for L1 to be ready (LOCAL mode only)
+        - name: wait-for-l1
           image: busybox:1.36
           command:
             - sh
             - -c
             - |
-              echo "Waiting for Ethereum RPC (timeout: {{ .Values.global.initTimeout }}s)..."
+              echo "Waiting for L1 RPC (timeout: {{ .Values.global.initTimeout }}s)..."
               TIMEOUT={{ .Values.global.initTimeout }}
               ELAPSED=0
-              until nc -z {{ include "gas-killer.ethereum.fullname" . }} {{ .Values.ethereum.service.port }}; do
+              until nc -z {{ include "gas-killer.l1.fullname" . }} {{ .Values.l1.service.port }}; do
                 if [ $ELAPSED -ge $TIMEOUT ]; then
-                  echo "ERROR: Timeout waiting for Ethereum RPC after ${TIMEOUT}s"
+                  echo "ERROR: Timeout waiting for L1 RPC after ${TIMEOUT}s"
                   exit 1
                 fi
-                echo "Ethereum not ready, waiting... (${ELAPSED}s elapsed)"
+                echo "L1 not ready, waiting... (${ELAPSED}s elapsed)"
                 sleep 5
                 ELAPSED=$((ELAPSED + 5))
               done
-              echo "Ethereum is ready!"
+              echo "L1 is ready!"
       {{- end }}
 
       containers:
@@ -139,9 +139,9 @@ spec:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: RPC_URL
             {{- else }}
-            # LOCAL mode: Use local Anvil service
+            # LOCAL mode: Use local L1 Anvil service
             - name: RPC_URL
-              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+              value: "http://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
             {{- end }}
             - name: TEST_ACCOUNTS
               value: {{ .Values.global.nodeCount | quote }}

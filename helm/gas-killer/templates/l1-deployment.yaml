@@ -1,38 +1,43 @@
-{{- if and .Values.gnosis.enabled (eq .Values.global.environment "LOCAL") }}
-{{- /* Gnosis (Anvil fork) deployment - only in LOCAL mode */ -}}
+{{- if and .Values.l1.enabled .Values.secrets.forkUrl (eq .Values.global.environment "LOCAL") }}
+{{- /* L1 (Anvil) deployment - only in LOCAL mode */ -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "gas-killer.gnosis.fullname" . }}
+  name: {{ include "gas-killer.l1.fullname" . }}
   labels:
     {{- include "gas-killer.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gnosis
+    app.kubernetes.io/component: l1
 spec:
   replicas: 1
   selector:
     matchLabels:
       {{- include "gas-killer.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: gnosis
+      app.kubernetes.io/component: l1
   template:
     metadata:
       labels:
         {{- include "gas-killer.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: gnosis
+        app.kubernetes.io/component: l1
     spec:
+      # Prioritize keeping L1 pod running - it holds critical state
+      {{- if .Values.l1.priorityClassName }}
+      priorityClassName: {{ .Values.l1.priorityClassName }}
+      {{- end }}
       containers:
-        - name: gnosis
-          image: "{{ .Values.gnosis.image.repository }}:{{ .Values.gnosis.image.tag }}"
-          imagePullPolicy: {{ .Values.gnosis.image.pullPolicy }}
+        - name: l1
+          image: "{{ .Values.l1.image.repository }}:{{ .Values.l1.image.tag }}"
+          imagePullPolicy: {{ .Values.l1.image.pullPolicy }}
           env:
             - name: FORK_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: L2_FORK_URL
+                  key: FORK_URL
           ports:
             - name: rpc
               containerPort: 8545
               protocol: TCP
+          # Use TCP socket probe on the RPC port - more reliable than pgrep which may not exist in container
           livenessProbe:
             tcpSocket:
               port: rpc
@@ -45,23 +50,23 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 5
           resources:
-            {{- toYaml .Values.gnosis.resources | nindent 12 }}
+            {{- toYaml .Values.l1.resources | nindent 12 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "gas-killer.gnosis.fullname" . }}
+  name: {{ include "gas-killer.l1.fullname" . }}
   labels:
     {{- include "gas-killer.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gnosis
+    app.kubernetes.io/component: l1
 spec:
-  type: {{ .Values.gnosis.service.type }}
+  type: {{ .Values.l1.service.type }}
   ports:
-    - port: {{ .Values.gnosis.service.port }}
+    - port: {{ .Values.l1.service.port }}
       targetPort: rpc
       protocol: TCP
       name: rpc
   selector:
     {{- include "gas-killer.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: gnosis
+    app.kubernetes.io/component: l1
 {{- end }}

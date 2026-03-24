@@ -6,26 +6,40 @@ Your release is named {{ .Release.Name }}.
 
 The Gas Killer AVS stack is being deployed with the following components:
 
-1. Ethereum (Anvil) - Local blockchain with forked Sepolia state
-2. Signer (Cerberus) - BLS signature service
-3. Setup Job - EigenLayer contract deployment
-4. {{ .Values.global.nodeCount }} Gas Killer Nodes - Operator nodes
-5. Router - Request routing and aggregation
+- L1 (Anvil) - Local blockchain with forked L1 state
+{{- if .Values.l2.enabled }}
+- L2 (Anvil) - Local blockchain with forked L2 state
+{{- end }}
+- {{ .Values.global.nodeCount }} operator nodes - BLS signing and task execution
+- Router - Request routing and aggregation
 
-== SETUP JOB ==
+== JOBS ==
 
-A setup job will run after installation to:
-- Deploy EigenLayer contracts
-- Create {{ .Values.global.nodeCount }} test operator accounts
-
-Monitor the setup job:
-  kubectl get jobs -l app.kubernetes.io/instance={{ .Release.Name }}
+Setup Job - deploys EigenLayer contracts and creates {{ .Values.global.nodeCount }} test operator accounts:
   kubectl logs job/{{ include "gas-killer.setup.fullname" . }}
+
+{{- if .Values.bridge.enabled }}
+Bridge Job - bridges operator state from L1 to L2 (runs after setup):
+  kubectl logs job/{{ include "gas-killer.bridge.fullname" . }}
+{{- end }}
+
+{{- if and .Values.l2.enabled .Values.yieldDistribution.enabled }}
+Yield Distribution Job - configures and verifies YieldDistributor on L2 (runs after bridge):
+  kubectl logs job/{{ include "gas-killer.yield-distribution.fullname" . }}
+{{- end }}
+
+Monitor all jobs:
+  kubectl get jobs -l app.kubernetes.io/instance={{ .Release.Name }}
 
 == ACCESSING SERVICES ==
 
-Ethereum RPC:
-  kubectl port-forward svc/{{ include "gas-killer.ethereum.fullname" . }} 8545:{{ .Values.ethereum.service.port }}
+L1 RPC:
+  kubectl port-forward svc/{{ include "gas-killer.l1.fullname" . }} 8545:{{ .Values.l1.service.port }}
+
+{{- if .Values.l2.enabled }}
+L2 RPC:
+  kubectl port-forward svc/{{ include "gas-killer.l2.fullname" . }} 8546:{{ .Values.l2.service.port }}
+{{- end }}
 
 Router:
   kubectl port-forward svc/{{ include "gas-killer.router.fullname" . }} 3000:{{ .Values.router.service.port }}
@@ -47,9 +61,12 @@ Check pod status:
   kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }}
 
 View logs for a specific component:
-  kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=ethereum
+  kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=l1
   kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=node
   kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=router
+{{- if .Values.l2.enabled }}
+  kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=l2
+{{- end }}
 
 Check shared data volume:
   kubectl get pvc {{ include "gas-killer.shareddata.fullname" . }}

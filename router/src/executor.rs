@@ -22,7 +22,7 @@ impl GasKillerHandler {
     /// Creates a new handler with a single provider (for backwards compatibility)
     pub fn new(provider: WalletProvider) -> Self {
         let mut providers = HashMap::new();
-        providers.insert(ChainId::Sepolia, provider);
+        providers.insert(ChainId::L1, provider);
         Self { providers }
     }
 

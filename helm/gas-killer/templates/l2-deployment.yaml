@@ -1,43 +1,38 @@
-{{- if and .Values.ethereum.enabled .Values.secrets.forkUrl (eq .Values.global.environment "LOCAL") }}
-{{- /* Ethereum (Anvil) deployment - only in LOCAL mode */ -}}
+{{- if and .Values.l2.enabled (eq .Values.global.environment "LOCAL") }}
+{{- /* L2 (Anvil fork) deployment - only in LOCAL mode */ -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "gas-killer.ethereum.fullname" . }}
+  name: {{ include "gas-killer.l2.fullname" . }}
   labels:
     {{- include "gas-killer.labels" . | nindent 4 }}
-    app.kubernetes.io/component: ethereum
+    app.kubernetes.io/component: l2
 spec:
   replicas: 1
   selector:
     matchLabels:
       {{- include "gas-killer.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: ethereum
+      app.kubernetes.io/component: l2
   template:
     metadata:
       labels:
         {{- include "gas-killer.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: ethereum
+        app.kubernetes.io/component: l2
     spec:
-      # Prioritize keeping ethereum pod running - it holds critical state
-      {{- if .Values.ethereum.priorityClassName }}
-      priorityClassName: {{ .Values.ethereum.priorityClassName }}
-      {{- end }}
       containers:
-        - name: ethereum
-          image: "{{ .Values.ethereum.image.repository }}:{{ .Values.ethereum.image.tag }}"
-          imagePullPolicy: {{ .Values.ethereum.image.pullPolicy }}
+        - name: l2
+          image: "{{ .Values.l2.image.repository }}:{{ .Values.l2.image.tag }}"
+          imagePullPolicy: {{ .Values.l2.image.pullPolicy }}
           env:
             - name: FORK_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: FORK_URL
+                  key: L2_FORK_URL
           ports:
             - name: rpc
               containerPort: 8545
               protocol: TCP
-          # Use TCP socket probe on the RPC port - more reliable than pgrep which may not exist in container
           livenessProbe:
             tcpSocket:
               port: rpc
@@ -50,23 +45,23 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 5
           resources:
-            {{- toYaml .Values.ethereum.resources | nindent 12 }}
+            {{- toYaml .Values.l2.resources | nindent 12 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "gas-killer.ethereum.fullname" . }}
+  name: {{ include "gas-killer.l2.fullname" . }}
   labels:
     {{- include "gas-killer.labels" . | nindent 4 }}
-    app.kubernetes.io/component: ethereum
+    app.kubernetes.io/component: l2
 spec:
-  type: {{ .Values.ethereum.service.type }}
+  type: {{ .Values.l2.service.type }}
   ports:
-    - port: {{ .Values.ethereum.service.port }}
+    - port: {{ .Values.l2.service.port }}
       targetPort: rpc
       protocol: TCP
       name: rpc
   selector:
     {{- include "gas-killer.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: ethereum
+    app.kubernetes.io/component: l2
 {{- end }}

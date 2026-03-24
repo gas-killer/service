@@ -1,7 +1,7 @@
-# Override for running gas-killer against real Gnosis mainnet.
+# Override for running gas-killer against a target L2 chain.
 #
 # Usage:
-#   docker-compose -f docker-compose.yml -f docker-compose.gnosis.yml up
+#   docker-compose -f docker-compose.yml -f docker-compose.l2.yml up
 #
 # Required additions to .env:
 #   GNOSIS_RPC_URL=https://rpc.gnosischain.com      # or your preferred Gnosis RPC
@@ -18,7 +18,7 @@
 
 services:
   # ─── Bridge ──────────────────────────────────────────────────────────────────
-  # Deploys RegistryCoordinatorMimic + BLSSignatureChecker to real Gnosis,
+  # Deploys RegistryCoordinatorMimic + BLSSignatureChecker to target L2 chain,
   # bridging EigenLayer operator state from the local Anvil Sepolia fork.
   bridge:
     platform: linux/amd64
@@ -29,7 +29,7 @@ services:
     environment:
       - PRIVATE_KEY=${PRIVATE_KEY}
       - L1_RPC_URL=http://ethereum:8545
-      - L2_RPC_URL=${GNOSIS_RPC_URL}
+      - L2_RPC_URL=${L2_RPC_URL}
       - YIELD_DISTRIBUTOR_ADDRESS=${YIELD_DISTRIBUTOR_ADDRESS}
     volumes:
       - ./config/.nodes:/app/.nodes
@@ -47,7 +47,7 @@ services:
         # L1_KEY: Anvil's pre-funded test account — nonce 0 on any fresh Sepolia fork,
         # so its CREATE addresses are guaranteed fresh (no CreateCollision).
         L1_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-        # L2_KEY: your key — must hold xDAI on Gnosis for L2 contract deployments.
+        # L2_KEY: your key — must hold the native token on the L2 chain for L2 contract deployments.
         L2_KEY="$$PRIVATE_KEY"
 
         REGISTRY_COORDINATOR_ADDRESS=$$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' /app/.nodes/avs_deploy.json)
@@ -176,38 +176,38 @@ services:
         echo "=== Bridge complete at $$(date) ===" | tee -a "$$LOG_FILE"
     restart: "no"
 
-  # ─── Nodes (Gnosis overrides) ─────────────────────────────────────────────────
+  # ─── Nodes (L2 overrides) ─────────────────────────────────────────────────
   # HTTP_RPC/WS_RPC stay on Sepolia Anvil (from base file) so EigenStakingClient
   # can scan operator registration events and resolve BLS public keys.
-  # GNOSIS_HTTP_RPC enables GasKillerValidator to simulate tasks on real Gnosis.
+  # L2_HTTP_RPC enables GasKillerValidator to simulate tasks on the L2 chain.
   node-1:
     depends_on:
       bridge:
         condition: service_completed_successfully
     environment:
-      - GNOSIS_HTTP_RPC=${GNOSIS_RPC_URL}
+      - L2_HTTP_RPC=${L2_RPC_URL}
 
   node-2:
     depends_on:
       bridge:
         condition: service_completed_successfully
     environment:
-      - GNOSIS_HTTP_RPC=${GNOSIS_RPC_URL}
+      - L2_HTTP_RPC=${L2_RPC_URL}
 
   node-3:
     depends_on:
       bridge:
         condition: service_completed_successfully
     environment:
-      - GNOSIS_HTTP_RPC=${GNOSIS_RPC_URL}
+      - L2_HTTP_RPC=${L2_RPC_URL}
 
-  # ─── Router (Gnosis overrides) ────────────────────────────────────────────────
+  # ─── Router (L2 overrides) ────────────────────────────────────────────────
   # HTTP_RPC stays on Sepolia Anvil so operator state (BLS keys, pubkeyHashToOperator)
-  # is read from L1 where operators are registered. GNOSIS_HTTP_RPC enables the write-side
-  # wallet provider for submitting verifyAndUpdate transactions on Gnosis.
+  # is read from L1 where operators are registered. L2_HTTP_RPC enables the write-side
+  # wallet provider for submitting verifyAndUpdate transactions on the L2 chain.
   router:
     depends_on:
       bridge:
         condition: service_completed_successfully
     environment:
-      - GNOSIS_HTTP_RPC=${GNOSIS_RPC_URL}
+      - L2_HTTP_RPC=${L2_RPC_URL}

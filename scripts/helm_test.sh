@@ -18,7 +18,7 @@
 #   --skip-cleanup     Don't delete the kind cluster after testing
 #   --cluster-name     Name of the kind cluster (default: gas-killer-test)
 #   --node-count       Number of operator nodes (default: 3)
-#   --fork-url         RPC URL to fork from (default: https://ethereum-sepolia-rpc.publicnode.com)
+#   --fork-url         L1 RPC URL to fork from (default: https://ethereum-sepolia-rpc.publicnode.com)
 #
 
 set -e
@@ -198,8 +198,8 @@ kubectl logs "$SETUP_JOB" --tail=20
 # Step 7: Wait for pods to be ready
 echo -e "${YELLOW}Step 7: Waiting for all pods to be ready...${NC}"
 
-echo "Waiting for ethereum pod..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=ethereum --timeout=180s
+echo "Waiting for L1 pod..."
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=l1 --timeout=180s
 
 echo "Waiting for node pods..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=node --timeout=300s --all
@@ -216,20 +216,20 @@ pkill -f "kubectl port-forward.*8545" 2>/dev/null || true
 pkill -f "kubectl port-forward.*8080" 2>/dev/null || true
 sleep 2
 
-ETHEREUM_SERVICE=$(kubectl get services -o name | grep ethereum | head -1 | sed 's|service/||')
+L1_SERVICE=$(kubectl get services -o name | grep '\-l1$' | head -1 | sed 's|service/||')
 ROUTER_SERVICE=$(kubectl get services -o name | grep router | head -1 | sed 's|service/||')
 
-if [ -z "$ETHEREUM_SERVICE" ] || [ -z "$ROUTER_SERVICE" ]; then
+if [ -z "$L1_SERVICE" ] || [ -z "$ROUTER_SERVICE" ]; then
     echo -e "${RED}Required services not found!${NC}"
     kubectl get services
     exit 1
 fi
 
-echo "Ethereum service: $ETHEREUM_SERVICE"
+echo "L1 service: $L1_SERVICE"
 echo "Router service: $ROUTER_SERVICE"
 
-kubectl port-forward service/$ETHEREUM_SERVICE 8545:8545 &
-ETHEREUM_PF_PID=$!
+kubectl port-forward service/$L1_SERVICE 8545:8545 &
+L1_PF_PID=$!
 
 kubectl port-forward service/$ROUTER_SERVICE 8080:8080 &
 ROUTER_PF_PID=$!

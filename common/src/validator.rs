@@ -50,28 +50,27 @@ impl GasKillerValidator {
     /// Creates a new GasKillerValidator with multi-chain support.
     ///
     /// Reads RPC URLs from environment variables:
-    /// - RPC_URL or HTTP_RPC for Sepolia (required)
-    /// - GNOSIS_RPC_URL or GNOSIS_HTTP_RPC for Gnosis (optional)
+    /// - RPC_URL or HTTP_RPC for L1 (required)
+    /// - L2_RPC_URL or L2_HTTP_RPC for L2 (optional)
     ///
-    /// Returns an error if Sepolia RPC is not set.
+    /// Returns an error if L1 RPC is not set.
     pub fn new() -> Result<Self> {
         let mut chain_rpc_urls = HashMap::new();
 
-        // Load Sepolia RPC URL (required)
-        let sepolia_rpc = env::var("RPC_URL")
+        // Load L1 RPC URL (required)
+        let l1_rpc = env::var("RPC_URL")
             .or_else(|_| env::var("HTTP_RPC"))
             .map_err(|_| anyhow::anyhow!("RPC_URL or HTTP_RPC environment variable is not set"))?;
-        chain_rpc_urls.insert(ChainId::Sepolia, sepolia_rpc);
+        chain_rpc_urls.insert(ChainId::L1, l1_rpc);
 
-        // Load Gnosis RPC URL (optional)
-        if let Ok(gnosis_rpc) = env::var("GNOSIS_RPC_URL").or_else(|_| env::var("GNOSIS_HTTP_RPC"))
-        {
-            chain_rpc_urls.insert(ChainId::Gnosis, gnosis_rpc);
+        // Load L2 RPC URL (optional)
+        if let Ok(l2_rpc) = env::var("L2_RPC_URL").or_else(|_| env::var("L2_HTTP_RPC")) {
+            chain_rpc_urls.insert(ChainId::L2, l2_rpc);
         }
 
         Ok(Self {
             chain_rpc_urls,
-            default_chain: ChainId::Sepolia,
+            default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -81,10 +80,10 @@ impl GasKillerValidator {
     /// Useful for testing without modifying environment variables.
     pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         let mut chain_rpc_urls = HashMap::new();
-        chain_rpc_urls.insert(ChainId::Sepolia, rpc_url.into());
+        chain_rpc_urls.insert(ChainId::L1, rpc_url.into());
         Self {
             chain_rpc_urls,
-            default_chain: ChainId::Sepolia,
+            default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -93,7 +92,7 @@ impl GasKillerValidator {
     pub fn with_chain_rpc_urls(chain_rpc_urls: HashMap<ChainId, String>) -> Self {
         Self {
             chain_rpc_urls,
-            default_chain: ChainId::Sepolia,
+            default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }

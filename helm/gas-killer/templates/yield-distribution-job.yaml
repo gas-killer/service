@@ -1,5 +1,5 @@
-{{- /* Yield distribution test job - runs after bridge in LOCAL mode with Gnosis fork */ -}}
-{{- if and .Values.gnosis.enabled (eq .Values.global.environment "LOCAL") .Values.yieldDistribution.enabled }}
+{{- /* Yield distribution test job - runs after bridge in LOCAL mode with L2 fork */ -}}
+{{- if and .Values.l2.enabled (eq .Values.global.environment "LOCAL") .Values.yieldDistribution.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -78,7 +78,7 @@ spec:
 
               # Query blsApkRegistry() from the RegistryCoordinatorMimic on L2
               # Function selector: keccak256("blsApkRegistry()") = 0x5df45946
-              L2_RPC="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+              L2_RPC="http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
               echo "Querying blsApkRegistry() from RegistryCoordinatorMimic at $REG_COORD..."
               BLS_APK_REGISTRY_RAW=$(curl -sf -X POST -H "Content-Type: application/json" \
                 --data '{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"'"$REG_COORD"'","data":"0x5df45946"},"latest"],"id":1}' \
@@ -87,10 +87,10 @@ spec:
               BLS_APK_REGISTRY="0x$(echo "$BLS_APK_REGISTRY_RAW" | sed 's/^0x//' | cut -c 25-64)"
               echo "BLSApkRegistry: $BLS_APK_REGISTRY"
 
-              # The BLSSigCheckOperatorStateRetriever exists on mainnet Gnosis (forked by Anvil)
+              # The BLSSigCheckOperatorStateRetriever exists on the forked L2 chain (via Anvil)
               # It takes registryCoordinator as a parameter so it works with our RegistryCoordinatorMimic
-              BLS_SIG_CHECK="0x056A41125bB62168B464ddDECd995e8494448913"
-              echo "BLSSigCheckOperatorStateRetriever (from mainnet fork): $BLS_SIG_CHECK"
+              BLS_SIG_CHECK="{{ .Values.yieldDistribution.blsSigCheckAddress }}"
+              echo "BLSSigCheckOperatorStateRetriever (from L2 fork): $BLS_SIG_CHECK"
 
               # Create l2_avs_deploy.json with L2 AVS addresses for future use
               # Format matches AvsDeployment { addresses: { registryCoordinator, blsapkRegistry, blsSigCheck, counter } }
@@ -141,7 +141,7 @@ spec:
 
                 YIELD_DISTRIBUTOR="{{ .Values.yieldDistribution.contractAddress }}"
                 YIELD_DISTRIBUTOR_OWNER="{{ .Values.yieldDistribution.ownerAddress }}"
-                L2_RPC_URL="http://{{ include "gas-killer.gnosis.fullname" . }}:{{ .Values.gnosis.service.port }}"
+                L2_RPC_URL="http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
                 CYCLE_LENGTH_OVERRIDE="{{ .Values.yieldDistribution.cycleLength }}"
                 BLOCK_STALE_MEASURE_OVERRIDE="{{ .Values.yieldDistribution.blockStaleMeasure }}"
 
@@ -243,20 +243,20 @@ spec:
                 # Cast outputs decimal by default for uint256
                 # Add error handling in case function names differ on the contract
                 echo "Querying cycleLength..."
-                CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>&1 | tr -d '[:space:]') || CYCLE_LENGTH="302400"
+                CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>&1 | tr -d '[:space:]') || CYCLE_LENGTH="{{ .Values.yieldDistribution.cycleLength }}"
                 echo "Querying lastClaimedBlockNumber..."
                 LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>&1 | tr -d '[:space:]') || LAST_CLAIMED="0"
                 echo "Querying current block..."
-                CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" 2>&1 | tr -d '[:space:]') || CURRENT="44000000"
+                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" 2>&1 | tr -d '[:space:]') || CURRENT_BLOCK="{{ .Values.yieldDistribution.fallbackBlockNumber }}"
 
                 # Sanitize values - extract just the number
-                CYCLE_LENGTH=$(echo "$CYCLE_LENGTH" | grep -oE '^[0-9]+' | head -1) || CYCLE_LENGTH="302400"
+                CYCLE_LENGTH=$(echo "$CYCLE_LENGTH" | grep -oE '^[0-9]+' | head -1) || CYCLE_LENGTH="{{ .Values.yieldDistribution.cycleLength }}"
                 LAST_CLAIMED=$(echo "$LAST_CLAIMED" | grep -oE '^[0-9]+' | head -1) || LAST_CLAIMED="0"
-                CURRENT=$(echo "$CURRENT" | grep -oE '^[0-9]+' | head -1) || CURRENT="44000000"
+                CURRENT_BLOCK=$(echo "$CURRENT_BLOCK" | grep -oE '^[0-9]+' | head -1) || CURRENT_BLOCK="{{ .Values.yieldDistribution.fallbackBlockNumber }}"
 
                 echo "Cycle length: $CYCLE_LENGTH"
                 echo "Last claimed block: $LAST_CLAIMED"
-                echo "Current block: $CURRENT"
+                echo "Current block: $CURRENT_BLOCK"
 
                 # Step 5: Advance time and mine a couple blocks
                 echo ""
@@ -264,9 +264,9 @@ spec:
 
                 # Get current timestamp and block
                 CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp 2>&1 | grep -oE '^[0-9]+' | head -1) || CURRENT_TIMESTAMP="1770000000"
-                CURRENT=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
                 echo "Current timestamp: $CURRENT_TIMESTAMP"
-                echo "Current block: $CURRENT"
+                echo "Current block: $CURRENT_BLOCK"
 
                 # Advance time by 8 days
                 TIME_ADVANCE=$((8 * 24 * 60 * 60))
@@ -295,7 +295,7 @@ spec:
                 # Step 7: Verify test results
                 # NOTE: Full BLS aggregation via the router is not yet supported for
                 # cross-chain tasks in LOCAL mode. The router validator forks L1 (HTTP_RPC)
-                # to simulate transactions, but the YieldDistributor lives on L2 (Gnosis).
+                # to simulate transactions, but the YieldDistributor lives on L2.
                 # Until the router supports cross-chain validation, this test verifies:
                 #   1. Bridge deployed BLSSignatureChecker + RegistryCoordinatorMimic
                 #   2. YieldDistributor configured with bridge-deployed addresses
