@@ -74,6 +74,10 @@ spec:
                 exit 1
               fi
 
+              # bridge-to-l2.sh reads L1_RPC_URL / L2_RPC_URL by name
+              export L1_RPC_URL="$L1_HTTP_RPC"
+              export L2_RPC_URL="$L2_HTTP_RPC"
+
               echo "=== Executing bridge-to-l2.sh ===" | tee -a "$LOG_FILE"
               set +e
               /app/scripts/bridge-to-l2.sh 2>&1 | tee -a "$LOG_FILE"
