@@ -141,7 +141,7 @@ spec:
 
                 YIELD_DISTRIBUTOR="{{ .Values.yieldDistribution.contractAddress }}"
                 YIELD_DISTRIBUTOR_OWNER="{{ .Values.yieldDistribution.ownerAddress }}"
-                L2_RPC_URL="http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
+                L2_HTTP_RPC="http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
                 CYCLE_LENGTH_OVERRIDE="{{ .Values.yieldDistribution.cycleLength }}"
                 BLOCK_STALE_MEASURE_OVERRIDE="{{ .Values.yieldDistribution.blockStaleMeasure }}"
 
@@ -149,49 +149,49 @@ spec:
                 echo "Registry Coordinator Mimic: $REG_COORD"
                 echo "Yield Distributor: $YIELD_DISTRIBUTOR"
                 echo "Yield Distributor Owner (impersonated): $YIELD_DISTRIBUTOR_OWNER"
-                echo "L2 RPC URL: $L2_RPC_URL"
+                echo "L2 HTTP RPC: $L2_HTTP_RPC"
 
                 # Step 1: Sanity-check contract owner
                 echo ""
                 echo "=== Step 1: Getting contract owner ==="
-                OWNER_ONCHAIN=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "owner()(address)")
+                OWNER_ONCHAIN=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "owner()(address)")
                 echo "Owner (onchain): $OWNER_ONCHAIN"
 
                 # Step 2: Configure GasKiller
                 echo ""
                 echo "=== Step 2: Configuring YieldDistributor for test ==="
 
-                CURRENT_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
-                CURRENT_AVS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
+                CURRENT_BLS=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
+                CURRENT_AVS=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
                 echo "Current blsSignatureChecker: $CURRENT_BLS"
                 echo "Current avsAddress: $CURRENT_AVS"
                 echo "New blsSignatureChecker (from bridge): $BLS_CHECKER"
                 echo "New avsAddress (from bridge): $REG_COORD"
 
                 echo "Impersonating owner to apply config..."
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$YIELD_DISTRIBUTOR_OWNER"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$YIELD_DISTRIBUTOR_OWNER" "0x56BC75E2D63100000"
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_impersonateAccount "$YIELD_DISTRIBUTOR_OWNER"
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_setBalance "$YIELD_DISTRIBUTOR_OWNER" "0x56BC75E2D63100000"
 
                 echo "Setting GasKiller config via setters..."
-                cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
                   "$YIELD_DISTRIBUTOR" "setAvsAddress(address)" "$REG_COORD"
-                cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
                   "$YIELD_DISTRIBUTOR" "setBlsSignatureChecker(address)" "$BLS_CHECKER"
-                cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
                   "$YIELD_DISTRIBUTOR" "setBlockStaleMeasure(uint256)" "$BLOCK_STALE_MEASURE_OVERRIDE"
 
                 echo "Setting cycleLength to test-friendly value..."
-                cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
                   "$YIELD_DISTRIBUTOR" "setCycleLength(uint256)" "$CYCLE_LENGTH_OVERRIDE"
 
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
 
                 # Step 3: Cast a vote from owner so currentVotes > 0
                 echo ""
                 echo "=== Step 3: Casting vote from owner ==="
 
                 # Discover current projects via getCurrentVotingDistribution()
-                VOTING_DIST_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "getCurrentVotingDistribution()(address[],uint256[])" 2>/dev/null || echo "")
+                VOTING_DIST_RAW=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "getCurrentVotingDistribution()(address[],uint256[])" 2>/dev/null || echo "")
                 if [ -z "$VOTING_DIST_RAW" ]; then
                   echo "ERROR: Failed to read current voting distribution"
                   exit 1
@@ -218,19 +218,19 @@ spec:
                 echo "Voting points vector: $POINTS_ARG"
 
                 echo "Impersonating owner and submitting vote..."
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_impersonateAccount "$YIELD_DISTRIBUTOR_OWNER"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setBalance "$YIELD_DISTRIBUTOR_OWNER" "0x56BC75E2D63100000"
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_impersonateAccount "$YIELD_DISTRIBUTOR_OWNER"
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_setBalance "$YIELD_DISTRIBUTOR_OWNER" "0x56BC75E2D63100000"
 
-                if ! cast send --rpc-url "$L2_RPC_URL" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                if ! cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
                   "$YIELD_DISTRIBUTOR" "castVote(uint256[])" "$POINTS_ARG"; then
                   echo "ERROR: castVote from owner failed"
-                  cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER" || true
+                  cast rpc --rpc-url "$L2_HTTP_RPC" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER" || true
                   exit 1
                 fi
 
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
 
-                CURRENT_VOTES=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "currentVotes()(uint256)" 2>/dev/null | tr -d '[:space:]' | grep -oE '^[0-9]+' || echo "0")
+                CURRENT_VOTES=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "currentVotes()(uint256)" 2>/dev/null | tr -d '[:space:]' | grep -oE '^[0-9]+' || echo "0")
                 echo "currentVotes after test vote: $CURRENT_VOTES"
                 if [ "$CURRENT_VOTES" -le 0 ]; then
                   echo "ERROR: currentVotes is still zero after casting vote"
@@ -243,11 +243,11 @@ spec:
                 # Cast outputs decimal by default for uint256
                 # Add error handling in case function names differ on the contract
                 echo "Querying cycleLength..."
-                CYCLE_LENGTH=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>&1 | tr -d '[:space:]') || CYCLE_LENGTH="{{ .Values.yieldDistribution.cycleLength }}"
+                CYCLE_LENGTH=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>&1 | tr -d '[:space:]') || CYCLE_LENGTH="{{ .Values.yieldDistribution.cycleLength }}"
                 echo "Querying lastClaimedBlockNumber..."
-                LAST_CLAIMED=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>&1 | tr -d '[:space:]') || LAST_CLAIMED="0"
+                LAST_CLAIMED=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>&1 | tr -d '[:space:]') || LAST_CLAIMED="0"
                 echo "Querying current block..."
-                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" 2>&1 | tr -d '[:space:]') || CURRENT_BLOCK="{{ .Values.yieldDistribution.fallbackBlockNumber }}"
+                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_HTTP_RPC" 2>&1 | tr -d '[:space:]') || CURRENT_BLOCK="{{ .Values.yieldDistribution.fallbackBlockNumber }}"
 
                 # Sanitize values - extract just the number
                 CYCLE_LENGTH=$(echo "$CYCLE_LENGTH" | grep -oE '^[0-9]+' | head -1) || CYCLE_LENGTH="{{ .Values.yieldDistribution.cycleLength }}"
@@ -263,8 +263,8 @@ spec:
                 echo "=== Step 5: Setting up distribution timing ==="
 
                 # Get current timestamp and block
-                CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_RPC_URL" latest -f timestamp 2>&1 | grep -oE '^[0-9]+' | head -1) || CURRENT_TIMESTAMP="1770000000"
-                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+                CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_HTTP_RPC" latest -f timestamp 2>&1 | grep -oE '^[0-9]+' | head -1) || CURRENT_TIMESTAMP="1770000000"
+                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_HTTP_RPC" | tr -d '[:space:]')
                 echo "Current timestamp: $CURRENT_TIMESTAMP"
                 echo "Current block: $CURRENT_BLOCK"
 
@@ -272,25 +272,25 @@ spec:
                 TIME_ADVANCE=$((8 * 24 * 60 * 60))
                 NEW_TIMESTAMP=$((CURRENT_TIMESTAMP + TIME_ADVANCE))
                 echo "Advancing time by $TIME_ADVANCE seconds to timestamp $NEW_TIMESTAMP"
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_setNextBlockTimestamp $(printf '0x%x' "$NEW_TIMESTAMP")
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_mine 0x1
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_setNextBlockTimestamp $(printf '0x%x' "$NEW_TIMESTAMP")
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_mine 0x1
                 # Mine a couple extra blocks to satisfy: block.number >= lastClaimedBlockNumber + cycleLength
-                cast rpc --rpc-url "$L2_RPC_URL" anvil_mine 0x2
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_mine 0x2
 
-                NEW_BLOCK=$(cast block-number --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+                NEW_BLOCK=$(cast block-number --rpc-url "$L2_HTTP_RPC" | tr -d '[:space:]')
                 echo "New block number: $NEW_BLOCK"
 
                 # Step 6: Quick state check before verification
                 echo ""
                 echo "=== Step 6: Contract state after setup ==="
                 echo "blsSignatureChecker:"
-                cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "N/A"
+                cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "N/A"
                 echo "avsAddress:"
-                cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "N/A"
+                cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "N/A"
                 echo "stateTransitionCount:"
-                cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null || echo "N/A"
+                cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null || echo "N/A"
                 echo "lastClaimedBlockNumber:"
-                cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo "N/A"
+                cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo "N/A"
 
                 # Step 7: Verify test results
                 # NOTE: Full BLS aggregation via the router is not yet supported for
@@ -307,7 +307,7 @@ spec:
                 PASSED=true
 
                 # Check 1: BLS Signature Checker was set by initializeGasKiller
-                FINAL_BLS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
+                FINAL_BLS=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
                 echo "blsSignatureChecker: $FINAL_BLS"
                 echo "Expected (from bridge): $BLS_CHECKER"
                 if [ "$FINAL_BLS" != "$BLS_CHECKER" ]; then
@@ -318,7 +318,7 @@ spec:
                 fi
 
                 # Check 2: AVS Address (Registry Coordinator Mimic) was set
-                FINAL_AVS=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "unknown")
+                FINAL_AVS=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "unknown")
                 echo "avsAddress: $FINAL_AVS"
                 echo "Expected (from bridge): $REG_COORD"
                 if [ "$FINAL_AVS" != "$REG_COORD" ]; then
@@ -330,7 +330,7 @@ spec:
                 # Check 3: Resolver returns true
                 echo ""
                 echo "Checking resolveYieldDistribution..."
-                RESOLVER_RAW=$(cast call --rpc-url "$L2_RPC_URL" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1) || RESOLVER_RAW="call failed"
+                RESOLVER_RAW=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1) || RESOLVER_RAW="call failed"
                 echo "Resolver result: $RESOLVER_RAW"
                 if echo "$RESOLVER_RAW" | grep -q "true"; then
                   echo "OK: resolveYieldDistribution returns true"

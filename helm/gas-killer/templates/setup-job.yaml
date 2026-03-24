@@ -1,5 +1,5 @@
 {{- /* Setup job runs in both LOCAL and TESTNET modes */ -}}
-{{- $runSetup := or (and .Values.secrets.forkUrl (eq .Values.global.environment "LOCAL")) (and .Values.secrets.rpcUrl (eq .Values.global.environment "TESTNET")) -}}
+{{- $runSetup := or (and .Values.secrets.forkUrl (eq .Values.global.environment "LOCAL")) (and .Values.secrets.httpRpc (eq .Values.global.environment "TESTNET")) -}}
 {{- if $runSetup }}
 apiVersion: batch/v1
 kind: Job
@@ -70,12 +70,15 @@ spec:
                 echo "=== Setup Job Starting ==="
                 echo "ENVIRONMENT: $ENVIRONMENT"
                 echo "TEST_ACCOUNTS: $TEST_ACCOUNTS"
-                echo "RPC_URL: ${RPC_URL:0:50}..."
+                echo "HTTP_RPC: ${HTTP_RPC:0:50}..."
                 echo "DELEGATION_MANAGER_ADDRESS: $DELEGATION_MANAGER_ADDRESS"
                 echo "STRATEGY_MANAGER_ADDRESS: $STRATEGY_MANAGER_ADDRESS"
                 echo "ALLOCATION_MANAGER_ADDRESS: $ALLOCATION_MANAGER_ADDRESS"
                 echo ""
                 echo "=== Running /main.sh ==="
+
+                # main.sh reads RPC_URL; re-export from HTTP_RPC
+                export RPC_URL="$HTTP_RPC"
 
                 # Run the eigenlayer setup and capture output
                 /main.sh 2>&1
@@ -133,14 +136,14 @@ spec:
               value: {{ .Values.global.environment | quote }}
             {{- if eq .Values.global.environment "TESTNET" }}
             # TESTNET mode: Use external RPC from secret
-            - name: RPC_URL
+            - name: HTTP_RPC
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: RPC_URL
+                  key: HTTP_RPC
             {{- else }}
             # LOCAL mode: Use local L1 Anvil service
-            - name: RPC_URL
+            - name: HTTP_RPC
               value: "http://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
             {{- end }}
             - name: TEST_ACCOUNTS
