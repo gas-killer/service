@@ -163,17 +163,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: RPC_URL
-            - name: RPC_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gas-killer.secret.fullname" . }}
-                  key: RPC_URL
+                  key: HTTP_RPC
             - name: WS_RPC
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: WS_RPC_URL
+                  key: WS_RPC
             {{- if .Values.secrets.forkUrl }}
             # FORK_URL for internal Anvil simulation
             - name: FORK_URL
@@ -185,8 +180,6 @@ spec:
             {{- else }}
             # LOCAL mode: Use local L1 Anvil service
             - name: HTTP_RPC
-              value: "http://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
-            - name: RPC_URL
               value: "http://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
             - name: WS_RPC
               value: "ws://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"

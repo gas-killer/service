@@ -4,10 +4,9 @@
 #   docker-compose -f docker-compose.yml -f docker-compose.l2.yml up
 #
 # Required additions to .env:
-#   GNOSIS_RPC_URL=https://rpc.gnosischain.com      # or your preferred Gnosis RPC
-#   GNOSIS_WS_RPC_URL=wss://rpc.gnosischain.com/wss
-#   PRIVATE_KEY=0x...    # must have xDAI on Gnosis to pay for bridge deployment txns
-#   SET_CONTRACT_VALUES_MANUALLY=true    # set to true to skip YieldDistributor update
+#   L2_HTTP_RPC=https://rpc.gnosischain.com  # or your preferred L2 RPC
+#   PRIVATE_KEY=0x...                        # must have native gas token on L2 to pay for bridge deployment txns
+#   SET_CONTRACT_VALUES_MANUALLY=true        # set to true to skip YieldDistributor update
 #
 # Flow:
 #   eigenlayer  →  bridge  →  node-1/2/3 + router
@@ -28,8 +27,8 @@ services:
         condition: service_completed_successfully
     environment:
       - PRIVATE_KEY=${PRIVATE_KEY}
-      - L1_RPC_URL=http://ethereum:8545
-      - L2_RPC_URL=${L2_RPC_URL}
+      - L1_HTTP_RPC=http://ethereum:8545
+      - L2_HTTP_RPC=${L2_HTTP_RPC}
       - YIELD_DISTRIBUTOR_ADDRESS=${YIELD_DISTRIBUTOR_ADDRESS}
     volumes:
       - ./config/.nodes:/app/.nodes
@@ -52,8 +51,8 @@ services:
 
         REGISTRY_COORDINATOR_ADDRESS=$$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' /app/.nodes/avs_deploy.json)
         echo "[BRIDGE] RegistryCoordinator:  $$REGISTRY_COORDINATOR_ADDRESS" | tee -a "$$LOG_FILE"
-        echo "[BRIDGE] L1_RPC_URL:           $$L1_RPC_URL" | tee -a "$$LOG_FILE"
-        echo "[BRIDGE] L2_RPC_URL:           $$L2_RPC_URL" | tee -a "$$LOG_FILE"
+        echo "[BRIDGE] L1_HTTP_RPC:          $$L1_HTTP_RPC" | tee -a "$$LOG_FILE"
+        echo "[BRIDGE] L2_HTTP_RPC:          $$L2_HTTP_RPC" | tee -a "$$LOG_FILE"
 
         cd /app/contracts
 
@@ -63,7 +62,7 @@ services:
         REGISTRY_COORDINATOR_ADDRESS="$$REGISTRY_COORDINATOR_ADDRESS" \
         L1_OUT_PATH="$$ARTIFACTS/l1-deploy.json" \
           forge script script/e2e/DeployL1.s.sol:DeployL1 \
-            --broadcast --rpc-url "$$L1_RPC_URL" --quiet 2>&1 | tee -a "$$LOG_FILE"
+            --broadcast --rpc-url "$$L1_HTTP_RPC" --quiet 2>&1 | tee -a "$$LOG_FILE"
 
         MIDDLEWARE_SHIM=$$(jq -r '.middlewareShim' "$$ARTIFACTS/l1-deploy.json")
         echo "[BRIDGE] MiddlewareShim: $$MIDDLEWARE_SHIM" | tee -a "$$LOG_FILE"
@@ -76,7 +75,7 @@ services:
         IS_SP1HELIOS_MOCK=true \
         L2_OUT_PATH="$$ARTIFACTS/l2-deploy.json" \
           forge script script/e2e/DeployL2.s.sol:DeployL2 \
-            --broadcast --rpc-url "$$L2_RPC_URL" --quiet 2>&1 | tee -a "$$LOG_FILE"
+            --broadcast --rpc-url "$$L2_HTTP_RPC" --quiet 2>&1 | tee -a "$$LOG_FILE"
 
         MIMIC=$$(jq -r '.registryCoordinatorMimic' "$$ARTIFACTS/l2-deploy.json")
         BLS_SIG_CHECKER=$$(jq -r '.blsSignatureChecker' "$$ARTIFACTS/l2-deploy.json")
@@ -85,22 +84,22 @@ services:
 
         # ── Step 3: Snapshot L1 operator state ────────────────────────────────────
         echo "=== Step 3: Snapshotting operator state ===" | tee -a "$$LOG_FILE"
-        BLOCK_NUMBER=$$(cast send --rpc-url "$$L1_RPC_URL" --private-key "$$L1_KEY" \
+        BLOCK_NUMBER=$$(cast send --rpc-url "$$L1_HTTP_RPC" --private-key "$$L1_KEY" \
           --confirmations 1 --json \
           "$$MIDDLEWARE_SHIM" "updateMiddlewareDataHash()" | jq -r '.blockNumber')
         echo "[BRIDGE] Operator state snapshotted at block: $$BLOCK_NUMBER" | tee -a "$$LOG_FILE"
 
         # ── Step 4: Generate mock proof ────────────────────────────────────────────
         echo "=== Step 4: Generating mock proof ===" | tee -a "$$LOG_FILE"
-        SP1HELIOS=$$(cast call "$$MIMIC" "LITE_CLIENT()(address)" --rpc-url "$$L2_RPC_URL")
-        LATEST_BLOCK=$$(cast block latest --rpc-url "$$L1_RPC_URL" --json | jq -r '.number')
-        PROOF_DATA=$$(cast proof -B "$$LATEST_BLOCK" "$$MIDDLEWARE_SHIM" 0 --json --rpc-url "$$L1_RPC_URL")
-        EXECUTION_STATE_ROOT=$$(cast block "$$LATEST_BLOCK" --rpc-url "$$L1_RPC_URL" --json | jq -r '.stateRoot')
-        MIDDLEWARE_BLOCK_NUMBER=$$(cast call "$$MIDDLEWARE_SHIM" "lastBlockNumber()" --rpc-url "$$L1_RPC_URL" | cast to-dec)
+        SP1HELIOS=$$(cast call "$$MIMIC" "LITE_CLIENT()(address)" --rpc-url "$$L2_HTTP_RPC")
+        LATEST_BLOCK=$$(cast block latest --rpc-url "$$L1_HTTP_RPC" --json | jq -r '.number')
+        PROOF_DATA=$$(cast proof -B "$$LATEST_BLOCK" "$$MIDDLEWARE_SHIM" 0 --json --rpc-url "$$L1_HTTP_RPC")
+        EXECUTION_STATE_ROOT=$$(cast block "$$LATEST_BLOCK" --rpc-url "$$L1_HTTP_RPC" --json | jq -r '.stateRoot')
+        MIDDLEWARE_BLOCK_NUMBER=$$(cast call "$$MIDDLEWARE_SHIM" "lastBlockNumber()" --rpc-url "$$L1_HTTP_RPC" | cast to-dec)
 
         cast send "$$SP1HELIOS" \
           "setExecutionStateRoot(uint256,bytes32)" 12345 "$$EXECUTION_STATE_ROOT" \
-          --rpc-url "$$L2_RPC_URL" --private-key "$$L2_KEY" > /dev/null 2>&1
+          --rpc-url "$$L2_HTTP_RPC" --private-key "$$L2_KEY" > /dev/null 2>&1
 
         PROOF_FILE="$$ARTIFACTS/middlewareDataProof.json"
         jq -n \
@@ -125,7 +124,7 @@ services:
             --broadcast --quiet 2>&1 | tee -a "$$LOG_FILE"
 
         # ── Recovery: Anvil returns 0x0 state roots for forked blocks ─────────────
-        LAST_BLOCK=$$(cast call "$$MIMIC" "lastBlockNumber()(uint256)" --rpc-url "$$L2_RPC_URL" 2>/dev/null | tr -d '[:space:]' || echo "0")
+        LAST_BLOCK=$$(cast call "$$MIMIC" "lastBlockNumber()(uint256)" --rpc-url "$$L2_HTTP_RPC" 2>/dev/null | tr -d '[:space:]' || echo "0")
         if [ "$${LAST_BLOCK:-0}" = "0" ]; then
           echo "=== Recovery: mimic unpopulated, fixing zero state root ===" | tee -a "$$LOG_FILE"
           ROOT_NODE=$$(jq -r '.accountProof[0]' "$$PROOF_FILE")
@@ -142,7 +141,7 @@ services:
           IS_SP1HELIOS_MOCK=true \
             forge script script/e2e/UpdateMimic.s.sol:UpdateMimic --broadcast -vvvv 2>&1 | tee -a "$$LOG_FILE"
 
-          LAST_BLOCK_AFTER=$$(cast call "$$MIMIC" "lastBlockNumber()(uint256)" --rpc-url "$$L2_RPC_URL" | tr -d '[:space:]')
+          LAST_BLOCK_AFTER=$$(cast call "$$MIMIC" "lastBlockNumber()(uint256)" --rpc-url "$$L2_HTTP_RPC" | tr -d '[:space:]')
           if [ "$$LAST_BLOCK_AFTER" = "0" ]; then
             echo "ERROR: Recovery failed — mimic still empty" | tee -a "$$LOG_FILE"
             exit 1
@@ -162,9 +161,9 @@ services:
           echo "[BRIDGE] SET_CONTRACT_VALUES_MANUALLY set, skipping YieldDistributor update. Manually set on YieldDistributor=$$YIELD_DISTRIBUTOR_ADDRESS: setAvsAddress($$MIMIC), setBlsSignatureChecker($$BLS_SIG_CHECKER)" | tee -a "$$LOG_FILE"
         elif [ -n "$$YIELD_DISTRIBUTOR_ADDRESS" ]; then
           echo "=== Step 6: Updating YieldDistributor at $$YIELD_DISTRIBUTOR_ADDRESS ===" | tee -a "$$LOG_FILE"
-          cast send --rpc-url "$$L2_RPC_URL" --private-key "$$L2_KEY" \
+          cast send --rpc-url "$$L2_HTTP_RPC" --private-key "$$L2_KEY" \
             "$$YIELD_DISTRIBUTOR_ADDRESS" "setAvsAddress(address)" "$$MIMIC" 2>&1 | tee -a "$$LOG_FILE"
-          cast send --rpc-url "$$L2_RPC_URL" --private-key "$$L2_KEY" \
+          cast send --rpc-url "$$L2_HTTP_RPC" --private-key "$$L2_KEY" \
             "$$YIELD_DISTRIBUTOR_ADDRESS" "setBlsSignatureChecker(address)" "$$BLS_SIG_CHECKER" 2>&1 | tee -a "$$LOG_FILE"
           echo "[BRIDGE] YieldDistributor updated" | tee -a "$$LOG_FILE"
         else
@@ -185,21 +184,21 @@ services:
       bridge:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=${L2_RPC_URL}
+      - L2_HTTP_RPC=${L2_HTTP_RPC}
 
   node-2:
     depends_on:
       bridge:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=${L2_RPC_URL}
+      - L2_HTTP_RPC=${L2_HTTP_RPC}
 
   node-3:
     depends_on:
       bridge:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=${L2_RPC_URL}
+      - L2_HTTP_RPC=${L2_HTTP_RPC}
 
   # ─── Router (L2 overrides) ────────────────────────────────────────────────
   # HTTP_RPC stays on Sepolia Anvil so operator state (BLS keys, pubkeyHashToOperator)
@@ -210,4 +209,4 @@ services:
       bridge:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=${L2_RPC_URL}
+      - L2_HTTP_RPC=${L2_HTTP_RPC}

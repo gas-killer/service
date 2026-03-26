@@ -22,6 +22,8 @@ services:
         condition: service_started
     env_file:
       - .env
+    environment:
+      - RPC_URL=http://ethereum:8545
     volumes:
       - ./config/.nodes:/root/.nodes
       - ./config/config.example.json:/bls-middleware/contracts/docker/eigenlayer/config.json

@@ -109,8 +109,8 @@ jobs:
       - name: Install Helm chart
         run: |
           # Set L1 fork URL from secret or use public Sepolia
-          if [ -n "${{ secrets.RPC_URL }}" ]; then
-            FORK_URL="${{ secrets.RPC_URL }}"
+          if [ -n "${{ secrets.HTTP_RPC }}" ]; then
+            FORK_URL="${{ secrets.HTTP_RPC }}"
           else
             FORK_URL="https://ethereum-sepolia-rpc.publicnode.com"
           fi
@@ -122,8 +122,8 @@ jobs:
           echo "Installing Helm chart with fork URL: $FORK_URL"
 
           # Set L2 fork URL for local L2 Anvil (LOCAL mode)
-          if [ -n "${{ secrets.L2_RPC_URL }}" ]; then
-            L2_FORK_URL="${{ secrets.L2_RPC_URL }}"
+          if [ -n "${{ secrets.L2_HTTP_RPC }}" ]; then
+            L2_FORK_URL="${{ secrets.L2_HTTP_RPC }}"
           else
             L2_FORK_URL="https://rpc.gnosischain.com"
           fi

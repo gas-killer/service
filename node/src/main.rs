@@ -316,7 +316,7 @@ fn main() {
         // Create validator for the gas killer use case (uses full gas-analyzer validation)
         let validator = Arc::new(
             GasKillerValidator::new()
-                .expect("RPC_URL or HTTP_RPC environment variable must be set for gas analyzer"),
+                .expect("HTTP_RPC environment variable must be set for gas analyzer"),
         );
 
         // Create contributor with GasKillerTaskData as the metadata type

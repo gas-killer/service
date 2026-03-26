@@ -50,21 +50,20 @@ impl GasKillerValidator {
     /// Creates a new GasKillerValidator with multi-chain support.
     ///
     /// Reads RPC URLs from environment variables:
-    /// - RPC_URL or HTTP_RPC for L1 (required)
-    /// - L2_RPC_URL or L2_HTTP_RPC for L2 (optional)
+    /// - `HTTP_RPC` for L1 (required)
+    /// - `L2_HTTP_RPC` for L2 (optional)
     ///
     /// Returns an error if L1 RPC is not set.
     pub fn new() -> Result<Self> {
         let mut chain_rpc_urls = HashMap::new();
 
         // Load L1 RPC URL (required)
-        let l1_rpc = env::var("RPC_URL")
-            .or_else(|_| env::var("HTTP_RPC"))
-            .map_err(|_| anyhow::anyhow!("RPC_URL or HTTP_RPC environment variable is not set"))?;
+        let l1_rpc = env::var("HTTP_RPC")
+            .map_err(|_| anyhow::anyhow!("HTTP_RPC environment variable is not set"))?;
         chain_rpc_urls.insert(ChainId::L1, l1_rpc);
 
         // Load L2 RPC URL (optional)
-        if let Ok(l2_rpc) = env::var("L2_RPC_URL").or_else(|_| env::var("L2_HTTP_RPC")) {
+        if let Ok(l2_rpc) = env::var("L2_HTTP_RPC") {
             chain_rpc_urls.insert(ChainId::L2, l2_rpc);
         }
 

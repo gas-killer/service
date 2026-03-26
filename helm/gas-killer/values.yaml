@@ -6,7 +6,7 @@ global:
   # LOCAL: Uses Anvil with forked L1, auto-deploys AVS contracts to local fork
   #        Requires: secrets.forkUrl (L1 RPC to fork from)
   # TESTNET: Connects directly to real L1 network
-  #          Requires: secrets.rpcUrl (L1 RPC endpoint)
+  #          Requires: secrets.httpRpc (L1 RPC endpoint)
   #          AVS contracts are deployed to real L1
   environment: LOCAL
 
@@ -36,9 +36,9 @@ secrets:
 
   # Direct RPC URL for L1 (contains API key - sensitive!)
   # REQUIRED for TESTNET mode - nodes/router connect directly to this RPC
-  # Override with: --set secrets.rpcUrl=<your-rpc-url>
-  # Example: --set secrets.rpcUrl=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
-  rpcUrl: ""
+  # Override with: --set secrets.httpRpc=<your-rpc-url>
+  # Example: --set secrets.httpRpc=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
+  httpRpc: ""
 
   # L2 Fork URL for local L2 Anvil (only used in LOCAL mode with l2.enabled=true)
   # Override with: --set secrets.l2ForkUrl=<your-l2-rpc-url>
@@ -179,6 +179,10 @@ orchestrator:
 # Defaults to disabled; enable explicitly via --set l2.enabled=true (e.g. in CI)
 l2:
   enabled: false
+  # Direct RPC URL for L2 in TESTNET mode (contains API key - sensitive!)
+  # Override with: --set l2.httpRpc=<your-l2-rpc-url>
+  # Example: --set l2.httpRpc=https://rpc.gnosischain.com
+  httpRpc: ""
   image:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: latest

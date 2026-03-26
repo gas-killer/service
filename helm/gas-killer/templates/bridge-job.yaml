@@ -64,8 +64,8 @@ spec:
               # The bridge image has jq installed; try both camelCase and PascalCase field names
               export REGISTRY_COORDINATOR_ADDRESS=$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' /app/.nodes/avs_deploy.json)
               echo "[BRIDGE] REGISTRY_COORDINATOR_ADDRESS: $REGISTRY_COORDINATOR_ADDRESS" | tee -a "$LOG_FILE"
-              echo "[BRIDGE] L1_RPC_URL: $L1_RPC_URL" | tee -a "$LOG_FILE"
-              echo "[BRIDGE] L2_RPC_URL: $L2_RPC_URL" | tee -a "$LOG_FILE"
+              echo "[BRIDGE] L1_HTTP_RPC: $L1_HTTP_RPC" | tee -a "$LOG_FILE"
+              echo "[BRIDGE] L2_HTTP_RPC: $L2_HTTP_RPC" | tee -a "$LOG_FILE"
               echo "[BRIDGE] PRIVATE_KEY is set: $([ -n "$PRIVATE_KEY" ] && echo 'yes' || echo 'no')" | tee -a "$LOG_FILE"
 
               if [ -z "$REGISTRY_COORDINATOR_ADDRESS" ] || [ "$REGISTRY_COORDINATOR_ADDRESS" = "null" ]; then
@@ -73,6 +73,10 @@ spec:
                 jq '.addresses' /app/.nodes/avs_deploy.json | tee -a "$LOG_FILE"
                 exit 1
               fi
+
+              # bridge-to-l2.sh reads L1_RPC_URL / L2_RPC_URL by name
+              export L1_RPC_URL="$L1_HTTP_RPC"
+              export L2_RPC_URL="$L2_HTTP_RPC"
 
               echo "=== Executing bridge-to-l2.sh ===" | tee -a "$LOG_FILE"
               set +e
@@ -100,7 +104,7 @@ spec:
               fi
 
               MIMIC_ADDRESS=$(jq -r '.registryCoordinatorMimic' "$L2_DEPLOY")
-              LAST_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" 2>/dev/null | tr -d '[:space:]' || echo "0")
+              LAST_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_HTTP_RPC" 2>/dev/null | tr -d '[:space:]' || echo "0")
               [ -z "$LAST_BLOCK" ] && LAST_BLOCK="0"
               echo "[BRIDGE] Mimic lastBlockNumber: $LAST_BLOCK" | tee -a "$LOG_FILE"
 
@@ -131,7 +135,7 @@ spec:
                   --broadcast -vvvv 2>&1 | tee -a "$LOG_FILE"
 
                 # Verify recovery succeeded
-                LAST_BLOCK_AFTER=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+                LAST_BLOCK_AFTER=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_HTTP_RPC" | tr -d '[:space:]')
                 echo "[RECOVERY] Mimic lastBlockNumber after recovery: $LAST_BLOCK_AFTER" | tee -a "$LOG_FILE"
 
                 if [ "$LAST_BLOCK_AFTER" = "0" ]; then
@@ -142,7 +146,7 @@ spec:
               fi
 
               # Final check: ensure mimic is populated before proceeding
-              FINAL_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_RPC_URL" | tr -d '[:space:]')
+              FINAL_BLOCK=$(cast call "$MIMIC_ADDRESS" "lastBlockNumber()(uint256)" --rpc-url "$L2_HTTP_RPC" | tr -d '[:space:]')
               if [ "$FINAL_BLOCK" = "0" ]; then
                 echo "ERROR: Mimic still empty after bridge — cannot proceed" | tee -a "$LOG_FILE"
                 exit 1
@@ -170,31 +174,31 @@ spec:
                   key: PRIVATE_KEY
             {{- if eq .Values.global.environment "TESTNET" }}
             # TESTNET mode: Use external RPC from secret
-            - name: L1_RPC_URL
+            - name: L1_HTTP_RPC
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: RPC_URL
-            - name: L2_RPC_URL
+                  key: HTTP_RPC
+            - name: L2_HTTP_RPC
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: L2_RPC_URL
+                  key: L2_HTTP_RPC
             {{- else }}
             # LOCAL mode: Use local Anvil services
-            - name: L1_RPC_URL
+            - name: L1_HTTP_RPC
               value: "http://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
             {{- if .Values.l2.enabled }}
             # Use local L2 Anvil fork
-            - name: L2_RPC_URL
+            - name: L2_HTTP_RPC
               value: "http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
             {{- else }}
             # Use external L2 RPC
-            - name: L2_RPC_URL
+            - name: L2_HTTP_RPC
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: L2_RPC_URL
+                  key: L2_HTTP_RPC
             {{- end }}
             {{- end }}
           volumeMounts:
