@@ -51,7 +51,7 @@ services:
 
         REGISTRY_COORDINATOR_ADDRESS=$$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' /app/.nodes/avs_deploy.json)
         echo "[BRIDGE] RegistryCoordinator:  $$REGISTRY_COORDINATOR_ADDRESS" | tee -a "$$LOG_FILE"
-        echo "[BRIDGE] L1_HTTP_RPC:           $$L1_HTTP_RPC" | tee -a "$$LOG_FILE"
+        echo "[BRIDGE] L1_HTTP_RPC:          $$L1_HTTP_RPC" | tee -a "$$LOG_FILE"
         echo "[BRIDGE] L2_HTTP_RPC:          $$L2_HTTP_RPC" | tee -a "$$LOG_FILE"
 
         cd /app/contracts
