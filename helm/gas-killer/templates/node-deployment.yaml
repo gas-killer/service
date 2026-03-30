@@ -26,6 +26,7 @@ spec:
         app.kubernetes.io/component: node
         gas-killer/node-index: {{ $nodeIndex | quote }}
     spec:
+      terminationGracePeriodSeconds: 60
       initContainers:
         # Wait for setup job to fully complete (check for .setup_complete marker)
         # This ensures operators are registered in the quorum before nodes start
@@ -154,10 +155,7 @@ spec:
             - name: node
               containerPort: {{ $nodePort }}
               protocol: TCP
-          # TODO: Implement a proper readiness endpoint in the node application
-          # that verifies RPC connection, BLS key loaded, and P2P connectivity
-          # Use exec probe to check if process is running
-          # Check /proc/1/cmdline since our process is PID 1 in the container
+          # TODO: Replace with an httpGet probe once the node exposes a /healthz endpoint
           readinessProbe:
             exec:
               command:
@@ -166,7 +164,7 @@ spec:
                 - "cat /proc/1/cmdline | grep -q gas-killer"
             initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 60
+            failureThreshold: 12
           livenessProbe:
             exec:
               command:
@@ -174,8 +172,8 @@ spec:
                 - -c
                 - "cat /proc/1/cmdline | grep -q gas-killer"
             initialDelaySeconds: 30
-            periodSeconds: 30
-            failureThreshold: 5
+            periodSeconds: 15
+            failureThreshold: 4
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes

@@ -247,7 +247,77 @@ sharedData:
   size: 1Gi
   accessMode: ReadWriteOnce
 
+# =============================================================================
+# Log aggregation — Loki + Promtail
+# =============================================================================
+# Set loki.enabled and promtail.enabled to true to deploy a Loki instance and
+# a Promtail DaemonSet that ships pod logs to it.
+#
+# Usage:
+#   helm dependency update ./helm/gas-killer
+#   helm upgrade --install gas-killer ./helm/gas-killer \
+#     --set loki.enabled=true \
+#     --set promtail.enabled=true
+#
+# Loki will be reachable inside the cluster at:
+#   http://{{ .Release.Name }}-loki:3100
+#
+loki:
+  enabled: false
+  # Loki in single-binary mode — suitable for testnet / dev deployments
+  deploymentMode: SingleBinary
+  loki:
+    commonConfig:
+      replication_factor: 1
+    storage:
+      type: filesystem
+  singleBinary:
+    replicas: 1
+  # Disable components not needed in single-binary mode
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  backend:
+    replicas: 0
+
+promtail:
+  enabled: false
+  config:
+    clients:
+      # Points to the Loki service deployed by this chart
+      - url: http://{{ .Release.Name }}-loki:3100/loki/api/v1/push
+    snippets:
+      # Scrape only gas-killer pods; enrich with app/component labels
+      extraScrapeConfigs: |
+        - job_name: gas-killer-pods
+          kubernetes_sd_configs:
+            - role: pod
+              namespaces:
+                names:
+                  - {{ .Release.Namespace }}
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+              action: keep
+              regex: {{ .Release.Name }}
+            - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+              target_label: component
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: pod
+            - source_labels: [__meta_kubernetes_namespace]
+              target_label: namespace
+          pipeline_stages:
+            - json:
+                expressions:
+                  level: level
+                  message: message
+                  timestamp: timestamp
+            - labels:
+                level:
+
+# =============================================================================
 # Kubernetes Ingress for external access (optional)
+# =============================================================================
 ingress:
   enabled: false
   className: ""

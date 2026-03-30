@@ -17,6 +17,7 @@ spec:
         {{- include "gas-killer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: router
     spec:
+      terminationGracePeriodSeconds: 60
       initContainers:
         # Wait for setup job to fully complete (check for .setup_complete marker)
         - name: wait-for-setup
@@ -213,26 +214,20 @@ spec:
             - name: ingress
               containerPort: {{ .Values.router.ingressPort }}
               protocol: TCP
-          # Use exec probe to check if process is running
-          # Check /proc/1/cmdline since our process is PID 1 in the container
           readinessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - "cat /proc/1/cmdline | grep -q gas-killer"
+            httpGet:
+              path: /healthz
+              port: ingress
             initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 60
+            failureThreshold: 12
           livenessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - "cat /proc/1/cmdline | grep -q gas-killer"
+            httpGet:
+              path: /healthz
+              port: ingress
             initialDelaySeconds: 30
-            periodSeconds: 30
-            failureThreshold: 5
+            periodSeconds: 15
+            failureThreshold: 4
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes
