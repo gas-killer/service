@@ -60,9 +60,9 @@ jobs:
         run: |
           cp example.env .env
           if grep -q '^FORK_URL=' .env; then
-            sed -i "s|^FORK_URL=.*|FORK_URL=${{ secrets.RPC_URL }}|" .env
+            sed -i "s|^FORK_URL=.*|FORK_URL=${{ secrets.HTTP_RPC }}|" .env
           else
-            echo "FORK_URL=${{ secrets.RPC_URL }}" >> .env
+            echo "FORK_URL=${{ secrets.HTTP_RPC }}" >> .env
           fi
 
       - name: Run test

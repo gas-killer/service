@@ -1,43 +1,29 @@
 //! Shared configuration types and utilities for Gas Killer AVS components
 
-use commonware_avs_usecases::{EigenStakingClient, QuorumInfo};
+use commonware_avs_eigenlayer::{EigenStakingClient, QuorumInfo};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 
-/// Supported chain identifiers
+/// Chain role identifiers — L1 (primary) and L2 (optional secondary).
+///
+/// These are role labels, not chain-specific names. The actual numeric chain ID
+/// is discovered at runtime by querying `eth_chainId` on the configured RPC endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ChainId {
-    /// Sepolia testnet (chain ID: 11155111)
+    /// The primary (L1) chain
     #[default]
-    Sepolia = 11155111,
-    /// Gnosis mainnet (chain ID: 100)
-    Gnosis = 100,
+    L1,
+    /// The secondary (L2) chain
+    L2,
 }
 
 impl ChainId {
-    /// Creates a ChainId from a numeric chain ID
-    pub fn from_u64(chain_id: u64) -> Option<Self> {
-        match chain_id {
-            11155111 => Some(ChainId::Sepolia),
-            100 => Some(ChainId::Gnosis),
-            _ => None,
-        }
-    }
-
-    /// Returns the numeric chain ID
-    pub fn as_u64(&self) -> u64 {
-        match self {
-            ChainId::Sepolia => 11155111,
-            ChainId::Gnosis => 100,
-        }
-    }
-
-    /// Returns the chain name
+    /// Returns the role name as a string
     pub fn name(&self) -> &'static str {
         match self {
-            ChainId::Sepolia => "sepolia",
-            ChainId::Gnosis => "gnosis",
+            ChainId::L1 => "l1",
+            ChainId::L2 => "l2",
         }
     }
 }
@@ -46,6 +32,61 @@ impl std::fmt::Display for ChainId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
     }
+}
+
+/// The ordered list of roles to check when detecting where a contract is deployed.
+/// L1 is checked first as the primary chain.
+pub const CHAIN_DETECTION_ORDER: [ChainId; 2] = [ChainId::L1, ChainId::L2];
+
+/// Detects which chain role has code deployed at the given address.
+///
+/// Checks each chain in `CHAIN_DETECTION_ORDER` by calling the provided
+/// async `get_code` closure. Returns the first chain where non-empty code is found.
+///
+/// # Arguments
+/// * `address` - The contract address to look up
+/// * `supported_chains` - Slice of chains the caller supports (filtered against detection order)
+/// * `get_code` - Async closure `(ChainId, Address) -> Result<Bytes>` that fetches bytecode
+pub async fn detect_chain_for_address<F, Fut>(
+    address: alloy_primitives::Address,
+    supported_chains: &[ChainId],
+    get_code: F,
+) -> anyhow::Result<ChainId>
+where
+    F: Fn(ChainId, alloy_primitives::Address) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<alloy_primitives::Bytes>>,
+{
+    for &chain_id in &CHAIN_DETECTION_ORDER {
+        if !supported_chains.contains(&chain_id) {
+            continue;
+        }
+
+        match get_code(chain_id, address).await {
+            Ok(code) => {
+                if !code.is_empty() {
+                    tracing::debug!(
+                        chain = %chain_id,
+                        address = %address,
+                        code_len = code.len(),
+                        "Found contract code on chain"
+                    );
+                    return Ok(chain_id);
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    chain = %chain_id,
+                    error = %e,
+                    "Failed to check code on chain"
+                );
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "No contract code found at address {} on any supported chain",
+        address
+    ))
 }
 
 /// Configuration for loading BLS private keys from JSON files

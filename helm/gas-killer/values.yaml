@@ -3,11 +3,11 @@
 # Global settings
 global:
   # Environment mode: LOCAL or TESTNET
-  # LOCAL: Uses Anvil with forked Sepolia, auto-deploys AVS contracts to local fork
-  #        Requires: secrets.forkUrl (Sepolia RPC to fork from)
-  # TESTNET: Connects directly to real Sepolia testnet
-  #          Requires: secrets.rpcUrl (Sepolia RPC endpoint)
-  #          AVS contracts are deployed to real Sepolia
+  # LOCAL: Uses Anvil with forked L1, auto-deploys AVS contracts to local fork
+  #        Requires: secrets.forkUrl (L1 RPC to fork from)
+  # TESTNET: Connects directly to real L1 network
+  #          Requires: secrets.httpRpc (L1 RPC endpoint)
+  #          AVS contracts are deployed to real L1
   environment: LOCAL
 
   # Number of operator nodes to deploy
@@ -23,7 +23,7 @@ secrets:
   # Required keys: PRIVATE_KEY, FUNDED_KEY, FORK_URL
   existingSecret: ""
 
-  # Anvil default key - NEVER use in production!
+  # Private keys for signing transactions
   # Override with: --set secrets.privateKey=<your-key>
   privateKey: ""
   fundedKey: ""
@@ -34,20 +34,25 @@ secrets:
   # Example: --set secrets.forkUrl=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
   forkUrl: ""
 
-  # Direct RPC URL for Sepolia (contains API key - sensitive!)
+  # Direct RPC URL for L1 (contains API key - sensitive!)
   # REQUIRED for TESTNET mode - nodes/router connect directly to this RPC
-  # Override with: --set secrets.rpcUrl=<your-rpc-url>
-  # Example: --set secrets.rpcUrl=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
-  rpcUrl: ""
+  # Override with: --set secrets.httpRpc=<your-rpc-url>
+  # Example: --set secrets.httpRpc=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
+  httpRpc: ""
 
-# Ethereum (Anvil) configuration - only used in LOCAL mode
-ethereum:
+  # L2 Fork URL for local L2 Anvil (only used in LOCAL mode with l2.enabled=true)
+  # Override with: --set secrets.l2ForkUrl=<your-l2-rpc-url>
+  # Example: --set secrets.l2ForkUrl=https://rpc.gnosischain.com
+  l2ForkUrl: ""
+
+# L1 (Anvil) configuration - only used in LOCAL mode
+l1:
   enabled: true
   image:
     repository: ghcr.io/breadchaincoop/ethereum
-    tag: dev
+    tag: latest
     pullPolicy: IfNotPresent
-  # Priority class for ethereum pod - it holds critical blockchain state
+  # Priority class for L1 pod - it holds critical blockchain state
   # Consider creating a custom priority class instead of using system-cluster-critical
   # See README.md for details
   priorityClassName: "system-cluster-critical"
@@ -66,9 +71,9 @@ ethereum:
 eigenlayer:
   image:
     repository: ghcr.io/breadchaincoop/eigenlayer
-    tag: dev
-    pullPolicy: Always
-  # Sepolia testnet contract addresses (forked by Anvil in LOCAL mode)
+    tag: latest
+    pullPolicy: IfNotPresent
+  # L1 contract addresses (forked by Anvil in LOCAL mode)
   contracts:
     delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
     strategyManager: "0x2E3D6c0744b10eb0A4e6F679F71554a39Ec47a5D"
@@ -106,11 +111,11 @@ signer:
 node:
   image:
     # For local development, build and load the image into kind:
-    # docker build -t gas-killer-node:local -f node/Dockerfile .
-    # kind load docker-image gas-killer-node:local --name <cluster-name>
-    repository: gas-killer-router
-    tag: node-pr-87
-    pullPolicy: IfNotPresent
+    # docker build -t service:node-local -f node/Dockerfile .
+    # kind load docker-image service:node-local --name <cluster-name>
+    repository: service
+    tag: node-local
+    pullPolicy: Never
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
   resources:
@@ -118,29 +123,23 @@ node:
       memory: "256Mi"
       cpu: "100m"
     limits:
-      memory: "512Mi"
-      cpu: "250m"
+      memory: "2Gi"
+      cpu: "500m"
 
 # Gas Killer Router configuration
 router:
   image:
     # For local development, build and load the image into kind:
-    # docker build -t gas-killer-router:local -f router/Dockerfile .
-    # kind load docker-image gas-killer-router:local --name <cluster-name>
-    repository: gas-killer-router
-    tag: pr-87
-    pullPolicy: IfNotPresent
+    # docker build -t service:router-local -f router/Dockerfile .
+    # kind load docker-image service:router-local --name <cluster-name>
+    repository: service
+    tag: router-local
+    pullPolicy: Never
   port: 3000
   ingressPort: 8080
-  # Gnosis RPC URL for L2 mode (optional)
-  # When set along with l2AvsDeployment, the executor reads block numbers
-  # and BLS state from Gnosis instead of L1, preventing StaleBlockNumber reverts
-  gnosisHttpRpc: ""
-  # L2 AVS deployment config JSON (optional)
-  # Required when gnosisHttpRpc is set — contains BLS contract addresses
-  # for the RegistryCoordinatorMimic deployed on Gnosis
-  # Example: --set-file router.l2AvsDeployment=config/.nodes/l2_avs_deploy.json
-  l2AvsDeployment: ""
+  # Aggregation window duration in seconds. Must exceed the time nodes need to compute
+  # EVMSketch storage updates. L2 computation takes ~60s, so 90s gives a safe margin.
+  aggregationFrequency: "90"
   ingress:
     enabled: true
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation (3e+06)
@@ -152,34 +151,95 @@ router:
     ingressPort: 8080
   resources:
     requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
       memory: "512Mi"
       cpu: "250m"
+    limits:
+      memory: "6Gi"
+      cpu: "1000m"
 
 # Orchestrator configuration
 # The orchestrator configs are included in the Docker image at /app/config/
 # You can override them here if needed, otherwise they will be used from the image
 orchestrator:
-  # Public orchestrator config (JSON string) - optional override
-  # If not provided, will use /app/config/public_orchestrator.json from the image
-  # NOTE: The image file has "address": "router" which works for docker-compose.
-  # For K8s, you need to override with the correct service name.
-  # The service name will be: <release-name>-gas-killer-router
-  publicConfig: |
-    {
-      "g2_x1": "20265730220917057623326116620721648047640065506233168445998945605458084341755",
-      "g2_x2": "1537141129484558011683382469842956131676085503509229854572844956364492197092",
-      "g2_y1": "4380068110839997539835821427545270098552639074995346826656804866303457881635",
-      "g2_y2": "479676018937294309080674601592141614301396550682703157902264620243097107417",
-      "port": "3000",
-      "address": "gas-killer-router"
-    }
+  # Public orchestrator config fields
+  # The "address" field is automatically set to the router service name via the Helm template.
+  # If not provided, will use /app/config/public_orchestrator.json from the image.
+  publicConfig:
+    g2_x1: "20265730220917057623326116620721648047640065506233168445998945605458084341755"
+    g2_x2: "1537141129484558011683382469842956131676085503509229854572844956364492197092"
+    g2_y1: "4380068110839997539835821427545270098552639074995346826656804866303457881635"
+    g2_y2: "479676018937294309080674601592141614301396550682703157902264620243097107417"
+    port: "3000"
   # Router private key (BLS private key) - stored in Secret for security
   # If not provided, will use /app/config/router_orchestrator.json from the image
   # WARNING: The image contains a default private key. For production, always provide your own!
   routerPrivateKey: ""
+
+# L2 (Anvil fork) configuration - only used in LOCAL mode
+# Defaults to disabled; enable explicitly via --set l2.enabled=true (e.g. in CI)
+l2:
+  enabled: false
+  # Direct RPC URL for L2 in TESTNET mode (contains API key - sensitive!)
+  # Override with: --set l2.httpRpc=<your-l2-rpc-url>
+  # Example: --set l2.httpRpc=https://rpc.gnosischain.com
+  httpRpc: ""
+  image:
+    repository: ghcr.io/breadchaincoop/ethereum
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8546
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "6Gi"
+      cpu: "1000m"
+
+# Bridge configuration - bridges EigenLayer operator state from L1 to L2
+bridge:
+  enabled: true
+  # Wait for bridge job to complete before starting nodes/router
+  waitForBridge: true
+  image:
+    repository: ghcr.io/breadchaincoop/target-contracts/bridge
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+# Yield Distribution test configuration - only used in LOCAL mode with l2.enabled
+# Defaults to disabled; enable explicitly via --set yieldDistribution.enabled=true (e.g. in CI)
+yieldDistribution:
+  enabled: false
+  # YieldDistributor contract address on L2
+  contractAddress: "0x37A9CC16412CDA9b4f9B1ABdedd3e10BAD8A06da"
+  # Owner of the YieldDistributor on the fork (used for anvil impersonation)
+  ownerAddress: "0x5DD2e7db868e33c03daB85d0C623048A7980634E"
+  # BLSSigCheckOperatorStateRetriever address on the L2 fork
+  # In LOCAL mode this is the address present on the forked L2 chain
+  blsSigCheckAddress: "0x056A41125bB62168B464ddDECd995e8494448913"
+  # Test-friendly overrides applied via contract setters
+  cycleLength: 1
+  # Set to a large number to disable block staleness detection
+  blockStaleMeasure: "100000000"
+  # Fallback block number used if eth_blockNumber RPC call fails during setup
+  # "Recent" Gnosis mainnet block number, but blockstaleness detection is disabled on fallback
+  fallbackBlockNumber: "44000000"
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "500m"
+    limits:
+      memory: "6Gi"
+      cpu: "1000m"
 
 # Shared data volume for keys and deployment configs
 sharedData:

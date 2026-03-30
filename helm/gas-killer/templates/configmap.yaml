@@ -28,10 +28,16 @@ data:
         }
     }
   {{- if .Values.orchestrator.publicConfig }}
-  # Public orchestrator config - optional override
-  # If not provided, will use the file from the image at /app/config/public_orchestrator.json
+  # Public orchestrator config - address is always set to the correct router service name
   public_orchestrator.json: |
-{{ .Values.orchestrator.publicConfig | indent 4 }}
+    {
+      "g2_x1": {{ .Values.orchestrator.publicConfig.g2_x1 | quote }},
+      "g2_x2": {{ .Values.orchestrator.publicConfig.g2_x2 | quote }},
+      "g2_y1": {{ .Values.orchestrator.publicConfig.g2_y1 | quote }},
+      "g2_y2": {{ .Values.orchestrator.publicConfig.g2_y2 | quote }},
+      "port": {{ .Values.orchestrator.publicConfig.port | quote }},
+      "address": {{ include "gas-killer.router.fullname" . | quote }}
+    }
   {{- end }}
   {{- if .Values.router.l2AvsDeployment }}
   # L2 AVS deployment config - required when router.gnosisHttpRpc is set

@@ -9,6 +9,7 @@ license = "PPL"
 
 [workspace.dependencies]
 alloy = "1.0"
+alloy-eips = "1.0"
 alloy-network = "1.0"
 alloy-primitives = "1.0"
 alloy-provider = "1.0"
@@ -21,14 +22,13 @@ ark-ff = "0.5.0"
 ark-serialize = "0.5.0"
 async-trait = "0.1"
 axum = "0.7"
-bn254 = { git = "https://github.com/BreadchainCoop/bn254.git" }
 bytes = "1.10.1"
 clap = "4.5.37"
 commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-usecases = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-codec = "0.0.63"
 commonware-cryptography = "0.0.63"
 commonware-macros = "0.0.63"
@@ -45,7 +45,7 @@ eigen-services-operatorsinfo = "2.0.0"
 eigen-utils = "2.0.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
-gas-analyzer-rs = { git = "https://github.com/BreadchainCoop/gas-killer-analyzer", branch = "RonTuretzky/gas-killer-analyzer" }
+gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch" }
 gas-killer-common = { path = "common" }
 governor = "0.6.3"
 hex = "0.4"

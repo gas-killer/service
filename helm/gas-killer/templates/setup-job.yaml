@@ -1,5 +1,5 @@
 {{- /* Setup job runs in both LOCAL and TESTNET modes */ -}}
-{{- $runSetup := or (and .Values.secrets.forkUrl (eq .Values.global.environment "LOCAL")) (and .Values.secrets.rpcUrl (eq .Values.global.environment "TESTNET")) -}}
+{{- $runSetup := or (and .Values.secrets.forkUrl (eq .Values.global.environment "LOCAL")) (and .Values.secrets.httpRpc (eq .Values.global.environment "TESTNET")) -}}
 {{- if $runSetup }}
 apiVersion: batch/v1
 kind: Job
@@ -25,26 +25,26 @@ spec:
       restartPolicy: OnFailure
       {{- if eq .Values.global.environment "LOCAL" }}
       initContainers:
-        # Wait for ethereum to be ready (LOCAL mode only)
-        - name: wait-for-ethereum
+        # Wait for L1 to be ready (LOCAL mode only)
+        - name: wait-for-l1
           image: busybox:1.36
           command:
             - sh
             - -c
             - |
-              echo "Waiting for Ethereum RPC (timeout: {{ .Values.global.initTimeout }}s)..."
+              echo "Waiting for L1 RPC (timeout: {{ .Values.global.initTimeout }}s)..."
               TIMEOUT={{ .Values.global.initTimeout }}
               ELAPSED=0
-              until nc -z {{ include "gas-killer.ethereum.fullname" . }} {{ .Values.ethereum.service.port }}; do
+              until nc -z {{ include "gas-killer.l1.fullname" . }} {{ .Values.l1.service.port }}; do
                 if [ $ELAPSED -ge $TIMEOUT ]; then
-                  echo "ERROR: Timeout waiting for Ethereum RPC after ${TIMEOUT}s"
+                  echo "ERROR: Timeout waiting for L1 RPC after ${TIMEOUT}s"
                   exit 1
                 fi
-                echo "Ethereum not ready, waiting... (${ELAPSED}s elapsed)"
+                echo "L1 not ready, waiting... (${ELAPSED}s elapsed)"
                 sleep 5
                 ELAPSED=$((ELAPSED + 5))
               done
-              echo "Ethereum is ready!"
+              echo "L1 is ready!"
       {{- end }}
 
       containers:
@@ -62,81 +62,89 @@ spec:
               # Write all logs to both stdout AND a file on the PVC
               # This ensures logs survive even if the pod crashes
               LOG_FILE="/root/.nodes/setup.log"
-              exec > >(tee -a "$LOG_FILE") 2>&1
-              echo "=== Setup Job Starting at $(date -Iseconds) ==="
-              echo "Logs being written to: $LOG_FILE"
-              echo ""
-              echo "=== Setup Job Starting ==="
-              echo "ENVIRONMENT: $ENVIRONMENT"
-              echo "TEST_ACCOUNTS: $TEST_ACCOUNTS"
-              echo "RPC_URL: ${RPC_URL:0:50}..."
-              echo "DELEGATION_MANAGER_ADDRESS: $DELEGATION_MANAGER_ADDRESS"
-              echo "STRATEGY_MANAGER_ADDRESS: $STRATEGY_MANAGER_ADDRESS"
-              echo "ALLOCATION_MANAGER_ADDRESS: $ALLOCATION_MANAGER_ADDRESS"
-              echo ""
-              echo "=== Running /main.sh ==="
 
-              # Run the eigenlayer setup and capture output
-              /main.sh 2>&1
-              MAIN_EXIT_CODE=$?
+              {
+                echo "=== Setup Job Starting at $(date -Iseconds) ==="
+                echo "Logs being written to: $LOG_FILE"
+                echo ""
+                echo "=== Setup Job Starting ==="
+                echo "ENVIRONMENT: $ENVIRONMENT"
+                echo "TEST_ACCOUNTS: $TEST_ACCOUNTS"
+                echo "HTTP_RPC: ${HTTP_RPC:0:50}..."
+                echo "DELEGATION_MANAGER_ADDRESS: $DELEGATION_MANAGER_ADDRESS"
+                echo "STRATEGY_MANAGER_ADDRESS: $STRATEGY_MANAGER_ADDRESS"
+                echo "ALLOCATION_MANAGER_ADDRESS: $ALLOCATION_MANAGER_ADDRESS"
+                echo ""
+                echo "=== Running /main.sh ==="
 
-              echo ""
-              echo "=== /main.sh completed with exit code: $MAIN_EXIT_CODE ==="
-              echo ""
-              echo "=== Checking created files ==="
-              echo "Contents of /root/.nodes:"
-              ls -la /root/.nodes/ 2>/dev/null || echo "Directory does not exist or is empty"
-              echo ""
-              echo "Contents of /root/.nodes/operator_keys:"
-              ls -la /root/.nodes/operator_keys/ 2>/dev/null || echo "Directory does not exist or is empty"
-              echo ""
+                # main.sh reads RPC_URL; re-export from HTTP_RPC
+                export RPC_URL="$HTTP_RPC"
 
-              # Verify that required files were created
-              if [ -f /root/.nodes/avs_deploy.json ]; then
-                echo "avs_deploy.json created successfully"
-                # Check if all operator keys exist
-                {{- $nodeCount := int .Values.global.nodeCount }}
-                {{- range $i := until $nodeCount }}
-                {{- $nodeIndex := add $i 1 }}
-                if [ ! -f "/root/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json" ]; then
-                  echo "Error: testacc{{ $nodeIndex }}.private.bls.key.json not found"
+                # Run the eigenlayer setup and capture output
+                /main.sh 2>&1
+                MAIN_EXIT_CODE=$?
+
+                echo ""
+                echo "=== /main.sh completed with exit code: $MAIN_EXIT_CODE ==="
+                echo ""
+                echo "=== Checking created files ==="
+                echo "Contents of /root/.nodes:"
+                ls -la /root/.nodes/ 2>/dev/null || echo "Directory does not exist or is empty"
+                echo ""
+                echo "Contents of /root/.nodes/operator_keys:"
+                ls -la /root/.nodes/operator_keys/ 2>/dev/null || echo "Directory does not exist or is empty"
+                echo ""
+
+                # Verify that required files were created
+                if [ -f /root/.nodes/avs_deploy.json ]; then
+                  echo "avs_deploy.json created successfully"
+                  # Check if all operator keys exist
+                  {{- $nodeCount := int .Values.global.nodeCount }}
+                  {{- range $i := until $nodeCount }}
+                  {{- $nodeIndex := add $i 1 }}
+                  if [ ! -f "/root/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json" ]; then
+                    echo "Error: testacc{{ $nodeIndex }}.private.bls.key.json not found"
+                    exit 1
+                  fi
+                  {{- end }}
+                  echo "All {{ .Values.global.nodeCount }} operator keys created successfully"
+
+                  # Fix permissions so non-root containers can read the files
+                  # Node/router containers run as UID 1000 (appuser)
+                  chmod -R 755 /root/.nodes
+                  chmod 644 /root/.nodes/avs_deploy.json
+                  chmod 644 /root/.nodes/operator_keys/*.json
+                  echo "Permissions fixed for UID 1000"
+
+                  # Create marker file to signal setup completion
+                  touch /root/.nodes/.setup_complete
+                  chmod 644 /root/.nodes/.setup_complete
+                  echo "Setup marker created"
+                  echo "=== Setup Job SUCCEEDED at $(date -Iseconds) ==="
+                  exit 0
+                else
+                  echo "Error: avs_deploy.json not found"
+                  echo "=== Setup Job FAILED at $(date -Iseconds) ==="
                   exit 1
                 fi
-                {{- end }}
-                echo "All {{ .Values.global.nodeCount }} operator keys created successfully"
+              } 2>&1 | tee -a "$LOG_FILE"
 
-                # Fix permissions so non-root containers can read the files
-                # Node/router containers run as UID 1000 (appuser)
-                chmod -R 755 /root/.nodes
-                chmod 644 /root/.nodes/avs_deploy.json
-                chmod 644 /root/.nodes/operator_keys/*.json
-                echo "Permissions fixed for UID 1000"
-
-                # Create marker file to signal setup completion
-                touch /root/.nodes/.setup_complete
-                chmod 644 /root/.nodes/.setup_complete
-                echo "Setup marker created"
-                echo "=== Setup Job SUCCEEDED at $(date -Iseconds) ==="
-                exit 0
-              else
-                echo "Error: avs_deploy.json not found"
-                echo "=== Setup Job FAILED at $(date -Iseconds) ==="
-                exit 1
-              fi
+              EXIT_CODE=${PIPESTATUS[0]}
+              exit $EXIT_CODE
           env:
             - name: ENVIRONMENT
               value: {{ .Values.global.environment | quote }}
             {{- if eq .Values.global.environment "TESTNET" }}
             # TESTNET mode: Use external RPC from secret
-            - name: RPC_URL
+            - name: HTTP_RPC
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: RPC_URL
+                  key: HTTP_RPC
             {{- else }}
-            # LOCAL mode: Use local Anvil service
-            - name: RPC_URL
-              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+            # LOCAL mode: Use local L1 Anvil service
+            - name: HTTP_RPC
+              value: "http://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
             {{- end }}
             - name: TEST_ACCOUNTS
               value: {{ .Values.global.nodeCount | quote }}

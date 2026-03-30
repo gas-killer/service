@@ -43,27 +43,55 @@ spec:
               mountPath: /app/.nodes
               readOnly: true
 
-        {{- if eq .Values.global.environment "LOCAL" }}
-        # Wait for ethereum RPC to be accessible (LOCAL mode only)
-        - name: wait-for-ethereum
+        {{- if .Values.bridge.waitForBridge }}
+        # Wait for bridge job to complete before starting the router
+        # The bridge creates a .bridge_complete marker when done
+        - name: wait-for-bridge
           image: busybox:1.36
           command:
             - sh
             - -c
             - |
-              echo "Waiting for Ethereum RPC (timeout: {{ .Values.global.initTimeout }}s)..."
+              echo "Waiting for bridge to complete (timeout: {{ .Values.global.initTimeout }}s)..."
               TIMEOUT={{ .Values.global.initTimeout }}
               ELAPSED=0
-              until nc -z {{ include "gas-killer.ethereum.fullname" . }} {{ .Values.ethereum.service.port }}; do
+              until [ -f /app/.nodes/.bridge_complete ]; do
                 if [ $ELAPSED -ge $TIMEOUT ]; then
-                  echo "ERROR: Timeout waiting for Ethereum RPC after ${TIMEOUT}s"
+                  echo "ERROR: Timeout waiting for bridge to complete after ${TIMEOUT}s"
                   exit 1
                 fi
-                echo "Ethereum not ready, waiting... (${ELAPSED}s elapsed)"
+                echo "Bridge not complete, waiting for .bridge_complete marker... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "Bridge complete!"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+        {{- end }}
+
+        {{- if eq .Values.global.environment "LOCAL" }}
+        # Wait for L1 RPC to be accessible (LOCAL mode only)
+        - name: wait-for-l1
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for L1 RPC (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until nc -z {{ include "gas-killer.l1.fullname" . }} {{ .Values.l1.service.port }}; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for L1 RPC after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "L1 not ready, waiting... (${ELAPSED}s elapsed)"
                 sleep 5
                 ELAPSED=$((ELAPSED + 5))
               done
-              echo "Ethereum is ready!"
+              echo "L1 is ready!"
         {{- end }}
 
         # Wait for nodes to be ready
@@ -130,30 +158,36 @@ spec:
             - {{ .Values.router.port | quote }}
           env:
             {{- if eq .Values.global.environment "TESTNET" }}
-            # TESTNET mode: Use external RPC from secret
+            # TESTNET mode (no L2): Use external RPC from secret
             - name: HTTP_RPC
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: RPC_URL
-            - name: RPC_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gas-killer.secret.fullname" . }}
-                  key: RPC_URL
+                  key: HTTP_RPC
             - name: WS_RPC
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: WS_RPC_URL
+                  key: WS_RPC
+            {{- if .Values.secrets.forkUrl }}
+            # FORK_URL for internal Anvil simulation
+            - name: FORK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: FORK_URL
+            {{- end }}
             {{- else }}
-            # LOCAL mode: Use local Anvil service
+            # LOCAL mode: Use local L1 Anvil service
             - name: HTTP_RPC
-              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
-            - name: RPC_URL
-              value: "http://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+              value: "http://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
             - name: WS_RPC
-              value: "ws://{{ include "gas-killer.ethereum.fullname" . }}:{{ .Values.ethereum.service.port }}"
+              value: "ws://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
+            {{- end }}
+            {{- if and (eq .Values.global.environment "LOCAL") .Values.l2.enabled }}
+            # LOCAL mode: L2 RPC for cross-chain execution (yield distribution) via Anvil fork
+            - name: L2_HTTP_RPC
+              value: "http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
             {{- end }}
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"
@@ -169,8 +203,12 @@ spec:
               value: {{ .Values.router.ingress.enabled | quote }}
             - name: INGRESS_ADDRESS
               value: "0.0.0.0:{{ .Values.router.ingressPort }}"
+            - name: RUST_BACKTRACE
+              value: "1"
             - name: INGRESS_TIMEOUT_MS
               value: {{ .Values.router.ingress.timeoutMs | quote }}
+            - name: AGGREGATION_FREQUENCY
+              value: {{ .Values.router.aggregationFrequency | quote }}
             - name: PRIVATE_KEY
               valueFrom:
                 secretKeyRef:

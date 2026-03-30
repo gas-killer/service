@@ -6,13 +6,11 @@ on:
       - main
       - dev
       - staging
-      - 'RonTuretzky/k8s-support'
   pull_request:
     branches:
       - main
       - dev
       - staging
-      - 'RonTuretzky/k8s-support'
   workflow_dispatch:
 
 jobs:
@@ -31,13 +29,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Create kind cluster
         uses: helm/kind-action@v1.10.0
         with:
@@ -48,7 +39,7 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
-          version: 'latest'
+          version: "latest"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -76,24 +67,38 @@ jobs:
       # router startup and triggering tasks
       - name: Build test scripts
         run: |
-          cargo build --release -p avs-scripts --bin deploy_array_summation
-          cargo build --release -p avs-scripts --bin trigger_gas_killer
+          cargo build --release -p scripts --bin deploy_array_summation
+          cargo build --release -p scripts --bin trigger_gas_killer
 
       - name: Build Docker images
         run: |
           echo "Building router image..."
-          docker build -f ./router/Dockerfile -t gas-killer-router:local .
+          docker build -f ./router/Dockerfile -t service:router-local .
 
           echo "Building node image..."
-          docker build -f ./node/Dockerfile -t gas-killer-node:local .
+          docker build -f ./node/Dockerfile -t service:node-local .
 
       - name: Load images into kind cluster
         run: |
           echo "Loading router image into kind..."
-          kind load docker-image gas-killer-router:local --name gas-killer-test
+          kind load docker-image service:router-local --name gas-killer-test
 
           echo "Loading node image into kind..."
-          kind load docker-image gas-killer-node:local --name gas-killer-test
+          kind load docker-image service:node-local --name gas-killer-test
+
+      - name: Pre-pull external images into kind
+        run: |
+          IMAGES=(
+            "ghcr.io/breadchaincoop/ethereum:latest"
+            "ghcr.io/breadchaincoop/eigenlayer:latest"
+            "ghcr.io/breadchaincoop/target-contracts/bridge:latest"
+          )
+          for IMAGE in "${IMAGES[@]}"; do
+            echo "Pulling $IMAGE..."
+            docker pull "$IMAGE"
+            echo "Loading $IMAGE into kind..."
+            kind load docker-image "$IMAGE" --name gas-killer-test
+          done
 
       - name: Verify cluster is ready
         run: |
@@ -103,9 +108,9 @@ jobs:
 
       - name: Install Helm chart
         run: |
-          # Set fork URL from secret or use public Sepolia
-          if [ -n "${{ secrets.RPC_URL }}" ]; then
-            FORK_URL="${{ secrets.RPC_URL }}"
+          # Set L1 fork URL from secret or use public Sepolia
+          if [ -n "${{ secrets.HTTP_RPC }}" ]; then
+            FORK_URL="${{ secrets.HTTP_RPC }}"
           else
             FORK_URL="https://ethereum-sepolia-rpc.publicnode.com"
           fi
@@ -116,6 +121,13 @@ jobs:
 
           echo "Installing Helm chart with fork URL: $FORK_URL"
 
+          # Set L2 fork URL for local L2 Anvil (LOCAL mode)
+          if [ -n "${{ secrets.L2_HTTP_RPC }}" ]; then
+            L2_FORK_URL="${{ secrets.L2_HTTP_RPC }}"
+          else
+            L2_FORK_URL="https://rpc.gnosischain.com"
+          fi
+
           # Install without --wait to avoid circular dependency
           # (pods wait for setup job, setup job is post-install hook)
           helm install gas-killer ./helm/gas-killer \
@@ -124,13 +136,18 @@ jobs:
             --set secrets.forkUrl="$FORK_URL" \
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
-            --set node.image.repository=gas-killer-node \
-            --set node.image.tag=local \
+            --set secrets.l2ForkUrl="$L2_FORK_URL" \
+            --set node.image.repository=service \
+            --set node.image.tag=node-local \
             --set node.image.pullPolicy=Never \
-            --set router.image.repository=gas-killer-router \
-            --set router.image.tag=local \
+            --set router.image.repository=service \
+            --set router.image.tag=router-local \
             --set router.image.pullPolicy=Never \
-            --set sharedData.storageClass=""
+            --set sharedData.storageClass="" \
+            --set l2.enabled=true \
+            --set bridge.enabled=true \
+            --set bridge.waitForBridge=true \
+            --set yieldDistribution.enabled=true
 
       - name: Check deployment status
         run: |
@@ -162,10 +179,97 @@ jobs:
           echo "Setup job completed successfully"
           kubectl logs "$SETUP_JOB" --tail=30
 
+      - name: Wait for bridge job to complete
+        run: |
+          echo "Waiting for bridge job to complete..."
+
+          # Find the bridge job
+          BRIDGE_JOB=$(kubectl get jobs -o name | grep bridge | head -1)
+
+          if [ -n "$BRIDGE_JOB" ]; then
+            echo "Found bridge job: $BRIDGE_JOB"
+            kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=600s || {
+              echo "Bridge job failed or timed out"
+              kubectl logs "$BRIDGE_JOB" --tail=100 || true
+              exit 1
+            }
+            echo "Bridge job completed successfully"
+            kubectl logs "$BRIDGE_JOB" --tail=30
+          else
+            echo "No bridge job found (bridge may be disabled)"
+          fi
+
+      - name: Wait for yield distribution job to complete
+        run: |
+          echo "Waiting for yield distribution job to complete..."
+
+          # Find the yield distribution job
+          YIELD_JOB=$(kubectl get jobs -o name | grep yield-distribution | head -1)
+
+          if [ -n "$YIELD_JOB" ]; then
+            echo "Found yield distribution job: $YIELD_JOB"
+
+            # Wait for the job to complete (success or failure)
+            TIMEOUT=600
+            ELAPSED=0
+            while [ $ELAPSED -lt $TIMEOUT ]; do
+              # Check job status
+              STATUS=$(kubectl get "$YIELD_JOB" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")
+              FAILED=$(kubectl get "$YIELD_JOB" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || echo "")
+
+              if [ "$STATUS" = "True" ]; then
+                echo "Yield distribution job completed successfully"
+                # Get logs from the pod
+                YIELD_POD=$(kubectl get pods -l job-name=$(echo "$YIELD_JOB" | sed 's|job/||') -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+                if [ -n "$YIELD_POD" ]; then
+                  echo "=== Yield Distribution Pod Logs ==="
+                  kubectl logs "$YIELD_POD" -c yield-distribution-test --tail=100 || true
+                fi
+                exit 0
+              fi
+
+              if [ "$FAILED" = "True" ]; then
+                echo "Yield distribution job FAILED"
+                # Get logs from the pod BEFORE it gets deleted
+                YIELD_POD=$(kubectl get pods -l job-name=$(echo "$YIELD_JOB" | sed 's|job/||') -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+                if [ -n "$YIELD_POD" ]; then
+                  echo "=== Yield Distribution Pod Logs (FAILED) ==="
+                  echo "--- Init container: wait-for-bridge ---"
+                  kubectl logs "$YIELD_POD" -c wait-for-bridge --tail=50 || true
+                  echo "--- Init container: extract-addresses ---"
+                  kubectl logs "$YIELD_POD" -c extract-addresses --tail=50 || true
+                  echo "--- Main container: yield-distribution-test ---"
+                  kubectl logs "$YIELD_POD" -c yield-distribution-test --tail=200 || true
+                else
+                  echo "Could not find yield distribution pod for logs"
+                  kubectl get pods -o wide
+                fi
+                exit 1
+              fi
+
+              echo "Job still running... ($ELAPSED/$TIMEOUT seconds)"
+              sleep 10
+              ELAPSED=$((ELAPSED + 10))
+            done
+
+            echo "Timeout waiting for yield distribution job"
+            # Try to get logs even on timeout
+            YIELD_POD=$(kubectl get pods -l job-name=$(echo "$YIELD_JOB" | sed 's|job/||') -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [ -n "$YIELD_POD" ]; then
+              kubectl logs "$YIELD_POD" -c yield-distribution-test --tail=100 || true
+            fi
+            exit 1
+          else
+            echo "No yield distribution job found (yieldDistribution may be disabled)"
+          fi
+
       - name: Wait for all pods to be ready
         run: |
-          echo "Waiting for ethereum pod..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=ethereum --timeout=180s
+          echo "Waiting for L2 pod..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=l2 --timeout=180s || echo "No L2 pod found"
+
+          echo "Waiting for L1 pod..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=l1 --timeout=180s
 
           echo "Waiting for node pods..."
           # Show pod status before waiting
@@ -183,8 +287,8 @@ jobs:
             if [ -n "$NODE1_POD" ]; then
               echo "Init container wait-for-setup:"
               kubectl logs $NODE1_POD -c wait-for-setup || true
-              echo "Init container wait-for-ethereum:"
-              kubectl logs $NODE1_POD -c wait-for-ethereum || true
+              echo "Init container wait-for-l1:"
+              kubectl logs $NODE1_POD -c wait-for-l1 || true
               echo "Main container node:"
               kubectl logs $NODE1_POD -c node || true
             fi
@@ -199,17 +303,24 @@ jobs:
       - name: Setup port forwarding for testing
         run: |
           # Find actual service names (they include the chart name)
-          ETHEREUM_SERVICE=$(kubectl get services -o name | grep ethereum | head -1 | sed 's|service/||')
+          L1_SERVICE=$(kubectl get services -o name | grep '\-l1$' | head -1 | sed 's|service/||')
           ROUTER_SERVICE=$(kubectl get services -o name | grep router | head -1 | sed 's|service/||')
 
-          echo "Ethereum service: $ETHEREUM_SERVICE"
+          echo "L1 service: $L1_SERVICE"
           echo "Router service: $ROUTER_SERVICE"
 
-          # Port forward ethereum RPC
-          kubectl port-forward service/$ETHEREUM_SERVICE 8545:8545 &
+          # Port forward L1 RPC
+          kubectl port-forward service/$L1_SERVICE 8545:8545 &
 
           # Port forward router ingress
           kubectl port-forward service/$ROUTER_SERVICE 8080:8080 &
+
+          # Port forward L2 RPC (for yield distribution verification)
+          L2_SERVICE=$(kubectl get services -o name | grep '\-l2$' | head -1 | sed 's|service/||')
+          if [ -n "$L2_SERVICE" ]; then
+            echo "L2 service: $L2_SERVICE"
+            kubectl port-forward service/$L2_SERVICE 8546:8546 &
+          fi
 
           # Wait for port forwards to be ready
           sleep 10
@@ -332,6 +443,119 @@ jobs:
 
           echo "✅ All $SUCCESSFUL triggers completed successfully!"
 
+      - name: Trigger Yield Distribution via router
+        run: |
+          echo "=== Triggering Yield Distribution through router ==="
+
+          YIELD_DISTRIBUTOR=$(helm get values gas-killer --all -o json | jq -r '.yieldDistribution.contractAddress')
+          if [ -z "$YIELD_DISTRIBUTOR" ] || [ "$YIELD_DISTRIBUTOR" = "null" ]; then
+            echo "ERROR: Could not read yieldDistribution.contractAddress from Helm values"
+            helm get values gas-killer --all
+            exit 1
+          fi
+          L2_RPC="http://localhost:8546"
+          ROUTER_URL="http://localhost:8080"
+
+          # Capture router state before trigger
+          echo "=== Router pod status before trigger ==="
+          kubectl get pods -l app.kubernetes.io/component=router -o wide
+          ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          echo "Router pod: $ROUTER_POD"
+          echo "Restart count: $(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)"
+          echo "=== Router logs before trigger (last 50 lines) ==="
+          kubectl logs $ROUTER_POD --tail=50 || true
+
+          # Get current state
+          INITIAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
+          BLOCK=$(cast block-number --rpc-url "$L2_RPC" | tr -d '[:space:]')
+          echo "Initial stateTransitionCount: $INITIAL_COUNT"
+          echo "L2 block: $BLOCK"
+
+          # Verify distribution is ready
+          RESOLVER=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1)
+          echo "resolveYieldDistribution: $RESOLVER"
+
+          # Build distributeYieldGK() calldata
+          CALL_DATA=$(cast calldata "distributeYieldGK()")
+          echo "Calldata: $CALL_DATA"
+
+          # Convert calldata hex to JSON byte array
+          CALL_DATA_HEX="${CALL_DATA#0x}"
+          BYTES_ARRAY="["
+          for ((i=0; i<${#CALL_DATA_HEX}; i+=2)); do
+            [ $i -gt 0 ] && BYTES_ARRAY+=","
+            BYTES_ARRAY+="$((16#${CALL_DATA_HEX:$i:2}))"
+          done
+          BYTES_ARRAY+="]"
+
+          # Build and send trigger payload
+          PAYLOAD="{\"body\":{\"target_address\":\"$YIELD_DISTRIBUTOR\",\"call_data\":$BYTES_ARRAY,\"transition_index\":$INITIAL_COUNT,\"from_address\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\",\"value\":\"0\",\"block_height\":$BLOCK}}"
+          echo "Payload: $PAYLOAD"
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$ROUTER_URL/trigger")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -1)
+          echo "Router response ($HTTP_CODE): $BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Router rejected the trigger request"
+            echo "=== Router logs ==="
+            kubectl logs -l app.kubernetes.io/component=router --tail 50
+            exit 1
+          fi
+
+          # Capture logs periodically during the wait to catch crashes
+          echo "Waiting 300s for BLS aggregation and on-chain execution..."
+          for i in 30 60 90 120 150 180 210 240 270 300; do
+            sleep 30
+            echo ""
+            echo "=== ${i}s checkpoint ==="
+            RESTART_COUNT=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)
+            PHASE=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.phase}' 2>/dev/null || echo unknown)
+            echo "Router pod phase: $PHASE, restart count: $RESTART_COUNT"
+            if [ "$RESTART_COUNT" != "0" ] && [ "$RESTART_COUNT" != "unknown" ]; then
+              echo "=== ROUTER RESTARTED! Previous container logs (last 200 lines): ==="
+              kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous logs available"
+              echo "=== Current container logs (after restart): ==="
+              kubectl logs $ROUTER_POD --tail=100 2>/dev/null || true
+            fi
+          done
+
+          # Final state
+          echo ""
+          echo "=== Final router state ==="
+          kubectl get pods -l app.kubernetes.io/component=router -o wide
+          FINAL_RESTART=$(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)
+          echo "Final restart count: $FINAL_RESTART"
+
+          # Verify stateTransitionCount increased
+          FINAL_COUNT=$(cast call --rpc-url "$L2_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null | grep -oE '^[0-9]+' | head -1 || echo "0")
+          echo "Final stateTransitionCount: $FINAL_COUNT"
+
+          if [ "$FINAL_COUNT" -gt "$INITIAL_COUNT" ] 2>/dev/null; then
+            echo "=== YIELD DISTRIBUTION TRIGGER PASSED ==="
+            echo "stateTransitionCount increased from $INITIAL_COUNT to $FINAL_COUNT"
+          else
+            echo "=== YIELD DISTRIBUTION TRIGGER FAILED ==="
+            echo "stateTransitionCount did not increase (initial: $INITIAL_COUNT, final: $FINAL_COUNT)"
+            echo ""
+            echo "=== Router logs (last 100) ==="
+            kubectl logs $ROUTER_POD --tail=100 2>/dev/null || true
+            echo ""
+            echo "=== Previous container logs (if restarted, last 200) ==="
+            kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous container logs"
+            echo ""
+            echo "=== Node-1 logs (last 50) ==="
+            kubectl logs -l gas-killer/node-index=1 -c node --tail 50 || true
+            echo ""
+            echo "=== Node-2 logs (last 50) ==="
+            kubectl logs -l gas-killer/node-index=2 -c node --tail 50 || true
+            echo ""
+            echo "=== Node-3 logs (last 50) ==="
+            kubectl logs -l gas-killer/node-index=3 -c node --tail 50 || true
+            exit 1
+          fi
+
       - name: Show router logs
         run: |
           echo "=== Router logs ==="
@@ -340,62 +564,42 @@ jobs:
       - name: Collect logs on failure
         if: failure()
         run: |
-          echo "=== Helm Status ==="
-          helm status gas-killer || true
-
           echo "=== All Pods Status ==="
           kubectl get pods -o wide
 
-          echo "=== Pod Descriptions ==="
-          kubectl describe pods || true
+          echo "=== Events (last 30) ==="
+          kubectl get events --sort-by=.metadata.creationTimestamp | tail -30
 
-          echo "=== PVC Status ==="
-          kubectl get pvc
-          kubectl describe pvc || true
+          echo "=== Bridge Job Logs ==="
+          kubectl logs -l app.kubernetes.io/component=bridge --tail 200 || true
+          echo ""
+          echo "=== Bridge Job Logs (previous container, if restarted) ==="
+          BRIDGE_POD=$(kubectl get pods -l app.kubernetes.io/component=bridge -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [ -n "$BRIDGE_POD" ]; then
+            kubectl logs "$BRIDGE_POD" --previous --tail=200 2>/dev/null || echo "No previous bridge logs available"
+          fi
 
-          echo "=== Events ==="
-          kubectl get events --sort-by=.metadata.creationTimestamp
+          echo "=== Yield Distribution Job Logs ==="
+          kubectl logs -l app.kubernetes.io/component=yield-distribution --tail 100 || true
 
-          echo "=== Ethereum Logs ==="
-          kubectl logs -l app.kubernetes.io/component=ethereum --tail 50 || true
-
-          echo "=== Setup Job Logs ==="
-          kubectl logs -l app.kubernetes.io/component=setup --tail 100 || true
-
-          echo "=== Router Logs ==="
-          kubectl logs -l app.kubernetes.io/component=router --tail 100 || true
-
-          echo "=== Router Init Container Logs ==="
+          echo "=== Router Logs (current, last 200) ==="
           ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
           if [ -n "$ROUTER_POD" ]; then
-            kubectl logs $ROUTER_POD -c wait-for-setup || true
-            kubectl logs $ROUTER_POD -c wait-for-ethereum || true
-            kubectl logs $ROUTER_POD -c wait-for-nodes || true
+            echo "Restart count: $(kubectl get pod $ROUTER_POD -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo unknown)"
+            kubectl logs $ROUTER_POD --tail=200 || true
+            echo ""
+            echo "=== Router Logs (previous container, if crashed/restarted) ==="
+            kubectl logs $ROUTER_POD --previous --tail=200 2>/dev/null || echo "No previous container logs available"
           fi
 
-          echo "=== Node-1 Logs ==="
-          NODE1_POD=$(kubectl get pods -l gas-killer/node-index=1 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-          if [ -n "$NODE1_POD" ]; then
-            echo "Node-1 init container logs:"
-            kubectl logs $NODE1_POD -c wait-for-setup || true
-            kubectl logs $NODE1_POD -c wait-for-ethereum || true
-            echo "Node-1 main container logs:"
-            kubectl logs $NODE1_POD -c node || true
-          fi
+          echo "=== Node-1 Logs (last 100) ==="
+          kubectl logs -l gas-killer/node-index=1 -c node --tail 100 || true
 
-          echo "=== Node-2 Logs ==="
-          NODE2_POD=$(kubectl get pods -l gas-killer/node-index=2 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-          if [ -n "$NODE2_POD" ]; then
-            kubectl logs $NODE2_POD -c wait-for-setup || true
-            kubectl logs $NODE2_POD -c node || true
-          fi
+          echo "=== Node-2 Logs (last 100) ==="
+          kubectl logs -l gas-killer/node-index=2 -c node --tail 100 || true
 
-          echo "=== Node-3 Logs ==="
-          NODE3_POD=$(kubectl get pods -l gas-killer/node-index=3 -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-          if [ -n "$NODE3_POD" ]; then
-            kubectl logs $NODE3_POD -c wait-for-setup || true
-            kubectl logs $NODE3_POD -c node || true
-          fi
+          echo "=== Node-3 Logs (last 100) ==="
+          kubectl logs -l gas-killer/node-index=3 -c node --tail 100 || true
 
       - name: Cleanup
         if: always()

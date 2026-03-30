@@ -132,7 +132,7 @@ fn main() {
 
     // Allow handshakes from IPs that aren't yet in the registered peer set
     // TODO: Remove this once we have a proper way to handle handshakes
-    // https://github.com/BreadchainCoop/gas-killer-router/issues/82
+    // https://github.com/gas-killer/avs/issues/82
     p2p_cfg.attempt_unregistered_handshakes = true;
 
     // Start runtime
@@ -204,7 +204,7 @@ fn main() {
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(std::io::stdout)
             .finish();
-        let _ = tracing::subscriber::set_default(subscriber);
+        _ = tracing::subscriber::set_default(subscriber);
 
         // Provide authorized peers
         let authorized = OrderedAssociated::from_iter(recipients.clone());
@@ -248,6 +248,6 @@ fn main() {
 
         context.spawn(|_| async move { orchestrator.run(sender, receiver).await });
 
-        let _ = network.start().await;
+        _ = network.start().await;
     });
 }

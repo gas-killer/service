@@ -22,7 +22,7 @@ impl GasKillerHandler {
     /// Creates a new handler with a single provider (for backwards compatibility)
     pub fn new(provider: WalletProvider) -> Self {
         let mut providers = HashMap::new();
-        providers.insert(ChainId::Sepolia, provider);
+        providers.insert(ChainId::L1, provider);
         Self { providers }
     }
 
@@ -48,36 +48,17 @@ impl GasKillerHandler {
             "Detecting chain for address in executor"
         );
 
-        // Check Sepolia first (primary chain), then Gnosis
-        for chain_id in [ChainId::Sepolia, ChainId::Gnosis] {
-            if let Some(provider) = self.get_provider(chain_id) {
-                match provider.get_code_at(address).await {
-                    Ok(code) => {
-                        if !code.is_empty() {
-                            debug!(
-                                chain = %chain_id,
-                                address = %address,
-                                code_len = code.len(),
-                                "Found contract code on chain"
-                            );
-                            return Ok(chain_id);
-                        }
-                    }
-                    Err(e) => {
-                        debug!(
-                            chain = %chain_id,
-                            error = %e,
-                            "Failed to check code on chain"
-                        );
-                    }
-                }
+        let supported: Vec<ChainId> = self.providers.keys().copied().collect();
+        gas_killer_common::detect_chain_for_address(address, &supported, |chain_id, addr| {
+            let provider = self.providers.get(&chain_id).cloned();
+            async move {
+                let provider = provider
+                    .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?;
+                let code = provider.get_code_at(addr).await?;
+                Ok(code)
             }
-        }
-
-        Err(anyhow::anyhow!(
-            "No contract code found at address {} on any supported chain",
-            address
-        ))
+        })
+        .await
     }
 }
 
@@ -208,12 +189,17 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
         };
 
         // Execute the gas killer verifyAndUpdate
+        // Use referenceBlockNumber = current_block_number - 1 so that eth_estimateGas (which
+        // simulates at the current block) satisfies the on-chain check:
+        //   require(referenceBlockNumber < block.number)
+        // Without the decrement, eth_estimateGas at block N sees referenceBlockNumber == N
+        // and reverts with FutureBlockNumber.
         info!("Sending verifyAndUpdate transaction");
         let call_return = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
                 quorum_numbers,
-                current_block_number,
+                current_block_number.saturating_sub(1),
                 storage_updates,
                 transition_index,
                 target_function,

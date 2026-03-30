@@ -1,0 +1,212 @@
+# Override for running gas-killer against a target L2 chain.
+#
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.l2.yml up
+#
+# Required additions to .env:
+#   L2_HTTP_RPC=https://rpc.gnosischain.com  # or your preferred L2 RPC
+#   PRIVATE_KEY=0x...                        # must have native gas token on L2 to pay for bridge deployment txns
+#   SET_CONTRACT_VALUES_MANUALLY=true        # set to true to skip YieldDistributor update
+#
+# Flow:
+#   eigenlayer  →  bridge  →  node-1/2/3 + router
+#
+# After the bridge completes, manually call setAvsAddress and setBlsSignatureChecker
+# on your YieldDistributor contract using the addresses from config/.nodes/l2-deploy.json.
+# Then trigger distribution via the router ingress at http://localhost:8080.
+
+services:
+  # ─── Bridge ──────────────────────────────────────────────────────────────────
+  # Deploys RegistryCoordinatorMimic + BLSSignatureChecker to target L2 chain,
+  # bridging EigenLayer operator state from the local Anvil Sepolia fork.
+  bridge:
+    platform: linux/amd64
+    image: ghcr.io/breadchaincoop/target-contracts/bridge:latest
+    depends_on:
+      eigenlayer:
+        condition: service_completed_successfully
+    environment:
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - L1_HTTP_RPC=http://ethereum:8545
+      - L2_HTTP_RPC=${L2_HTTP_RPC}
+      - YIELD_DISTRIBUTOR_ADDRESS=${YIELD_DISTRIBUTOR_ADDRESS}
+    volumes:
+      - ./config/.nodes:/app/.nodes
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        LOG_FILE="/app/.nodes/bridge.log"
+        ARTIFACTS=/app/contracts/artifacts
+        mkdir -p "$$ARTIFACTS"
+
+        echo "=== Bridge Starting at $$(date) ===" | tee -a "$$LOG_FILE"
+
+        # L1_KEY: Anvil's pre-funded test account — nonce 0 on any fresh Sepolia fork,
+        # so its CREATE addresses are guaranteed fresh (no CreateCollision).
+        L1_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+        # L2_KEY: your key — must hold the native token on the L2 chain for L2 contract deployments.
+        L2_KEY="$$PRIVATE_KEY"
+
+        REGISTRY_COORDINATOR_ADDRESS=$$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' /app/.nodes/avs_deploy.json)
+        echo "[BRIDGE] RegistryCoordinator:  $$REGISTRY_COORDINATOR_ADDRESS" | tee -a "$$LOG_FILE"
+        echo "[BRIDGE] L1_HTTP_RPC:          $$L1_HTTP_RPC" | tee -a "$$LOG_FILE"
+        echo "[BRIDGE] L2_HTTP_RPC:          $$L2_HTTP_RPC" | tee -a "$$LOG_FILE"
+
+        cd /app/contracts
+
+        # ── Step 1: Deploy L1 (MiddlewareShim) ────────────────────────────────────
+        echo "=== Step 1: Deploying L1 contracts ===" | tee -a "$$LOG_FILE"
+        PRIVATE_KEY="$$L1_KEY" \
+        REGISTRY_COORDINATOR_ADDRESS="$$REGISTRY_COORDINATOR_ADDRESS" \
+        L1_OUT_PATH="$$ARTIFACTS/l1-deploy.json" \
+          forge script script/e2e/DeployL1.s.sol:DeployL1 \
+            --broadcast --rpc-url "$$L1_HTTP_RPC" --quiet 2>&1 | tee -a "$$LOG_FILE"
+
+        MIDDLEWARE_SHIM=$$(jq -r '.middlewareShim' "$$ARTIFACTS/l1-deploy.json")
+        echo "[BRIDGE] MiddlewareShim: $$MIDDLEWARE_SHIM" | tee -a "$$LOG_FILE"
+
+        # ── Step 2: Deploy L2 (RegistryCoordinatorMimic + BLSSignatureChecker) ────
+        echo "=== Step 2: Deploying L2 contracts ===" | tee -a "$$LOG_FILE"
+        PRIVATE_KEY="$$L2_KEY" \
+        MIDDLEWARE_SHIM_ADDRESS="$$MIDDLEWARE_SHIM" \
+        SP1HELIOS_ADDRESS=0x0000000000000000000000000000000000000000 \
+        IS_SP1HELIOS_MOCK=true \
+        L2_OUT_PATH="$$ARTIFACTS/l2-deploy.json" \
+          forge script script/e2e/DeployL2.s.sol:DeployL2 \
+            --broadcast --rpc-url "$$L2_HTTP_RPC" --quiet 2>&1 | tee -a "$$LOG_FILE"
+
+        MIMIC=$$(jq -r '.registryCoordinatorMimic' "$$ARTIFACTS/l2-deploy.json")
+        BLS_SIG_CHECKER=$$(jq -r '.blsSignatureChecker' "$$ARTIFACTS/l2-deploy.json")
+        echo "[BRIDGE] RegistryCoordinatorMimic: $$MIMIC" | tee -a "$$LOG_FILE"
+        echo "[BRIDGE] BLSSignatureChecker:      $$BLS_SIG_CHECKER" | tee -a "$$LOG_FILE"
+
+        # ── Step 3: Snapshot L1 operator state ────────────────────────────────────
+        echo "=== Step 3: Snapshotting operator state ===" | tee -a "$$LOG_FILE"
+        BLOCK_NUMBER=$$(cast send --rpc-url "$$L1_HTTP_RPC" --private-key "$$L1_KEY" \
+          --confirmations 1 --json \
+          "$$MIDDLEWARE_SHIM" "updateMiddlewareDataHash()" | jq -r '.blockNumber')
+        echo "[BRIDGE] Operator state snapshotted at block: $$BLOCK_NUMBER" | tee -a "$$LOG_FILE"
+
+        # ── Step 4: Generate mock proof ────────────────────────────────────────────
+        echo "=== Step 4: Generating mock proof ===" | tee -a "$$LOG_FILE"
+        SP1HELIOS=$$(cast call "$$MIMIC" "LITE_CLIENT()(address)" --rpc-url "$$L2_HTTP_RPC")
+        LATEST_BLOCK=$$(cast block latest --rpc-url "$$L1_HTTP_RPC" --json | jq -r '.number')
+        PROOF_DATA=$$(cast proof -B "$$LATEST_BLOCK" "$$MIDDLEWARE_SHIM" 0 --json --rpc-url "$$L1_HTTP_RPC")
+        EXECUTION_STATE_ROOT=$$(cast block "$$LATEST_BLOCK" --rpc-url "$$L1_HTTP_RPC" --json | jq -r '.stateRoot')
+        MIDDLEWARE_BLOCK_NUMBER=$$(cast call "$$MIDDLEWARE_SHIM" "lastBlockNumber()" --rpc-url "$$L1_HTTP_RPC" | cast to-dec)
+
+        cast send "$$SP1HELIOS" \
+          "setExecutionStateRoot(uint256,bytes32)" 12345 "$$EXECUTION_STATE_ROOT" \
+          --rpc-url "$$L2_HTTP_RPC" --private-key "$$L2_KEY" > /dev/null 2>&1
+
+        PROOF_FILE="$$ARTIFACTS/middlewareDataProof.json"
+        jq -n \
+          --arg middlewareBlockNumber "$$MIDDLEWARE_BLOCK_NUMBER" \
+          --arg slotNumber "12345" \
+          --arg storageHash "$$(echo "$$PROOF_DATA" | jq -r '.storageHash')" \
+          --arg executionStateRoot "$$EXECUTION_STATE_ROOT" \
+          --argjson storageProof "$$(echo "$$PROOF_DATA" | jq -r '.storageProof[0].proof')" \
+          --argjson accountProof "$$(echo "$$PROOF_DATA" | jq -r '.accountProof')" \
+          '{middlewareBlockNumber:$$middlewareBlockNumber,slotNumber:$$slotNumber,storageHash:$$storageHash,executionStateRoot:$$executionStateRoot,storageProof:$$storageProof,accountProof:$$accountProof}' \
+          > "$$PROOF_FILE"
+
+        # ── Step 5: Bridge state to L2 mimic ──────────────────────────────────────
+        echo "=== Step 5: Bridging state to L2 mimic ===" | tee -a "$$LOG_FILE"
+        PRIVATE_KEY="$$L2_KEY" \
+        PROOF_FILE="./artifacts/middlewareDataProof.json" \
+        REGISTRY_COORDINATOR_MIMIC_ADDRESS="$$MIMIC" \
+        BLS_SIGNATURE_CHECKER_ADDRESS="$$BLS_SIG_CHECKER" \
+        MIDDLEWARE_SHIM_ADDRESS="$$MIDDLEWARE_SHIM" \
+        IS_SP1HELIOS_MOCK=true \
+          forge script script/e2e/UpdateMimic.s.sol:UpdateMimic \
+            --broadcast --quiet 2>&1 | tee -a "$$LOG_FILE"
+
+        # ── Recovery: Anvil returns 0x0 state roots for forked blocks ─────────────
+        LAST_BLOCK=$$(cast call "$$MIMIC" "lastBlockNumber()(uint256)" --rpc-url "$$L2_HTTP_RPC" 2>/dev/null | tr -d '[:space:]' || echo "0")
+        if [ "$${LAST_BLOCK:-0}" = "0" ]; then
+          echo "=== Recovery: mimic unpopulated, fixing zero state root ===" | tee -a "$$LOG_FILE"
+          ROOT_NODE=$$(jq -r '.accountProof[0]' "$$PROOF_FILE")
+          ACTUAL_STATE_ROOT=$$(cast keccak "$$ROOT_NODE")
+          jq --arg esr "$$ACTUAL_STATE_ROOT" '.executionStateRoot = $$esr' "$$PROOF_FILE" > /tmp/proof_fixed.json
+          mv /tmp/proof_fixed.json "$$PROOF_FILE"
+          echo "[RECOVERY] Patched state root: $$ACTUAL_STATE_ROOT" | tee -a "$$LOG_FILE"
+
+          PRIVATE_KEY="$$L2_KEY" \
+          PROOF_FILE="./artifacts/middlewareDataProof.json" \
+          REGISTRY_COORDINATOR_MIMIC_ADDRESS="$$MIMIC" \
+          BLS_SIGNATURE_CHECKER_ADDRESS="$$BLS_SIG_CHECKER" \
+          MIDDLEWARE_SHIM_ADDRESS="$$MIDDLEWARE_SHIM" \
+          IS_SP1HELIOS_MOCK=true \
+            forge script script/e2e/UpdateMimic.s.sol:UpdateMimic --broadcast -vvvv 2>&1 | tee -a "$$LOG_FILE"
+
+          LAST_BLOCK_AFTER=$$(cast call "$$MIMIC" "lastBlockNumber()(uint256)" --rpc-url "$$L2_HTTP_RPC" | tr -d '[:space:]')
+          if [ "$$LAST_BLOCK_AFTER" = "0" ]; then
+            echo "ERROR: Recovery failed — mimic still empty" | tee -a "$$LOG_FILE"
+            exit 1
+          fi
+          echo "[RECOVERY] Succeeded — mimic lastBlockNumber: $$LAST_BLOCK_AFTER" | tee -a "$$LOG_FILE"
+        fi
+
+        cp "$$ARTIFACTS/l1-deploy.json" /app/.nodes/l1-deploy.json
+        cp "$$ARTIFACTS/l2-deploy.json" /app/.nodes/l2-deploy.json
+        chmod 644 /app/.nodes/l1-deploy.json /app/.nodes/l2-deploy.json
+
+        echo "=== l2-deploy.json ===" | tee -a "$$LOG_FILE"
+        cat /app/.nodes/l2-deploy.json | tee -a "$$LOG_FILE"
+
+        # ── Step 6: Update YieldDistributor with new contract addresses ────────────
+        if [ -n "$$SET_CONTRACT_VALUES_MANUALLY" ]; then
+          echo "[BRIDGE] SET_CONTRACT_VALUES_MANUALLY set, skipping YieldDistributor update. Manually set on YieldDistributor=$$YIELD_DISTRIBUTOR_ADDRESS: setAvsAddress($$MIMIC), setBlsSignatureChecker($$BLS_SIG_CHECKER)" | tee -a "$$LOG_FILE"
+        elif [ -n "$$YIELD_DISTRIBUTOR_ADDRESS" ]; then
+          echo "=== Step 6: Updating YieldDistributor at $$YIELD_DISTRIBUTOR_ADDRESS ===" | tee -a "$$LOG_FILE"
+          cast send --rpc-url "$$L2_HTTP_RPC" --private-key "$$L2_KEY" \
+            "$$YIELD_DISTRIBUTOR_ADDRESS" "setAvsAddress(address)" "$$MIMIC" 2>&1 | tee -a "$$LOG_FILE"
+          cast send --rpc-url "$$L2_HTTP_RPC" --private-key "$$L2_KEY" \
+            "$$YIELD_DISTRIBUTOR_ADDRESS" "setBlsSignatureChecker(address)" "$$BLS_SIG_CHECKER" 2>&1 | tee -a "$$LOG_FILE"
+          echo "[BRIDGE] YieldDistributor updated" | tee -a "$$LOG_FILE"
+        else
+          echo "[BRIDGE] YIELD_DISTRIBUTOR_ADDRESS not set, skipping YieldDistributor update" | tee -a "$$LOG_FILE"
+        fi
+
+        touch /app/.nodes/.bridge_complete
+        chmod 644 /app/.nodes/.bridge_complete
+        echo "=== Bridge complete at $$(date) ===" | tee -a "$$LOG_FILE"
+    restart: "no"
+
+  # ─── Nodes (L2 overrides) ─────────────────────────────────────────────────
+  # HTTP_RPC/WS_RPC stay on Sepolia Anvil (from base file) so EigenStakingClient
+  # can scan operator registration events and resolve BLS public keys.
+  # L2_HTTP_RPC enables GasKillerValidator to simulate tasks on the L2 chain.
+  node-1:
+    depends_on:
+      bridge:
+        condition: service_completed_successfully
+    environment:
+      - L2_HTTP_RPC=${L2_HTTP_RPC}
+
+  node-2:
+    depends_on:
+      bridge:
+        condition: service_completed_successfully
+    environment:
+      - L2_HTTP_RPC=${L2_HTTP_RPC}
+
+  node-3:
+    depends_on:
+      bridge:
+        condition: service_completed_successfully
+    environment:
+      - L2_HTTP_RPC=${L2_HTTP_RPC}
+
+  # ─── Router (L2 overrides) ────────────────────────────────────────────────
+  # HTTP_RPC stays on Sepolia Anvil so operator state (BLS keys, pubkeyHashToOperator)
+  # is read from L1 where operators are registered. L2_HTTP_RPC enables the write-side
+  # wallet provider for submitting verifyAndUpdate transactions on the L2 chain.
+  router:
+    depends_on:
+      bridge:
+        condition: service_completed_successfully
+    environment:
+      - L2_HTTP_RPC=${L2_HTTP_RPC}

@@ -49,10 +49,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Ethereum service name
+L1 service name
 */}}
-{{- define "gas-killer.ethereum.fullname" -}}
-{{- printf "%s-ethereum" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- define "gas-killer.l1.fullname" -}}
+{{- printf "%s-l1" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
@@ -106,4 +106,25 @@ Secret name - supports existing secret or creates new one
 {{- else }}
 {{- printf "%s-secret" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
+{{- end }}
+
+{{/*
+Bridge job name
+*/}}
+{{- define "gas-killer.bridge.fullname" -}}
+{{- printf "%s-bridge" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+L2 service name
+*/}}
+{{- define "gas-killer.l2.fullname" -}}
+{{- printf "%s-l2" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Yield distribution job name
+*/}}
+{{- define "gas-killer.yield-distribution.fullname" -}}
+{{- printf "%s-yield-distribution" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}

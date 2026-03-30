@@ -13,7 +13,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  ORG_NAME: breadchaincoop
+  ORG_NAME: gas-killer
 
 jobs:
   build-node:
@@ -55,8 +55,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/gas-killer-router:node-${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/gas-killer-router:node-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:node-${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:node-${{ github.sha }}
           cache-from: type=gha,scope=node
           cache-to: type=gha,mode=max,scope=node
           build-args: |
@@ -105,8 +105,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/gas-killer-router:${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/gas-killer-router:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:router-${{ steps.tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:router-${{ github.sha }}
           cache-from: type=gha,scope=router
           cache-to: type=gha,mode=max,scope=router
           build-args: |

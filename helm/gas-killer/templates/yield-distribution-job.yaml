@@ -1,0 +1,382 @@
+{{- /* Yield distribution test job - runs after bridge in LOCAL mode with L2 fork */ -}}
+{{- if and .Values.l2.enabled (eq .Values.global.environment "LOCAL") .Values.yieldDistribution.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gas-killer.yield-distribution.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: yield-distribution
+  annotations:
+    # Run after the bridge job completes (bridge is weight 10)
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "20"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels:
+        {{- include "gas-killer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: yield-distribution
+    spec:
+      restartPolicy: Never
+      initContainers:
+        # Wait for bridge job to complete
+        - name: wait-for-bridge
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for bridge to complete (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until [ -f /app/.nodes/.bridge_complete ] && [ -f /app/.nodes/l2-deploy.json ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for bridge to complete after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Bridge not complete, waiting for .bridge_complete and l2-deploy.json... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "Bridge complete! l2-deploy.json found."
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+
+        # Extract bridge addresses from l2-deploy.json and create L2 AVS config for the router
+        - name: extract-addresses
+          image: alpine:3.19
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              apk add --no-cache jq curl
+
+              echo "=== Reading l2-deploy.json ==="
+              cat /app/.nodes/l2-deploy.json
+
+              # Parse addresses (keys are camelCase)
+              BLS_CHECKER=$(jq -r '.blsSignatureChecker' /app/.nodes/l2-deploy.json)
+              REG_COORD=$(jq -r '.registryCoordinatorMimic' /app/.nodes/l2-deploy.json)
+
+              echo "BLSSignatureChecker: $BLS_CHECKER"
+              echo "RegistryCoordinatorMimic: $REG_COORD"
+
+              if [ -z "$BLS_CHECKER" ] || [ "$BLS_CHECKER" = "null" ] || [ -z "$REG_COORD" ] || [ "$REG_COORD" = "null" ]; then
+                echo "ERROR: Failed to parse addresses from l2-deploy.json"
+                exit 1
+              fi
+
+              echo "$BLS_CHECKER" > /yield-config/bls_checker
+              echo "$REG_COORD" > /yield-config/registry_coordinator
+
+              # Query blsApkRegistry() from the RegistryCoordinatorMimic on L2
+              # Function selector: keccak256("blsApkRegistry()") = 0x5df45946
+              L2_RPC="http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
+              echo "Querying blsApkRegistry() from RegistryCoordinatorMimic at $REG_COORD..."
+              BLS_APK_REGISTRY_RAW=$(curl -sf -X POST -H "Content-Type: application/json" \
+                --data '{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"'"$REG_COORD"'","data":"0x5df45946"},"latest"],"id":1}' \
+                "$L2_RPC" | jq -r '.result')
+              # ABI-decode: 32-byte hex → 20-byte address (strip 0x + 24 zero chars)
+              BLS_APK_REGISTRY="0x$(echo "$BLS_APK_REGISTRY_RAW" | sed 's/^0x//' | cut -c 25-64)"
+              echo "BLSApkRegistry: $BLS_APK_REGISTRY"
+
+              # The BLSSigCheckOperatorStateRetriever exists on the forked L2 chain (via Anvil)
+              # It takes registryCoordinator as a parameter so it works with our RegistryCoordinatorMimic
+              BLS_SIG_CHECK="{{ .Values.yieldDistribution.blsSigCheckAddress }}"
+              echo "BLSSigCheckOperatorStateRetriever (from L2 fork): $BLS_SIG_CHECK"
+
+              # Create l2_avs_deploy.json with L2 AVS addresses for future use
+              # Format matches AvsDeployment { addresses: { registryCoordinator, blsapkRegistry, blsSigCheck, counter } }
+              cat > /app/.nodes/l2_avs_deploy.json <<DEPLOYEOF
+              {
+                "addresses": {
+                  "registryCoordinator": "$REG_COORD",
+                  "blsapkRegistry": "$BLS_APK_REGISTRY",
+                  "blsSigCheck": "$BLS_SIG_CHECK",
+                  "counter": "0x0000000000000000000000000000000000000000"
+                }
+              }
+              DEPLOYEOF
+
+              echo "=== Created l2_avs_deploy.json ==="
+              cat /app/.nodes/l2_avs_deploy.json
+
+              touch /app/.nodes/.l2_avs_config_complete
+              echo "L2 AVS config marker created"
+
+              echo "Addresses written to /yield-config/ and /app/.nodes/"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+            - name: yield-config
+              mountPath: /yield-config
+
+      containers:
+        - name: yield-distribution-test
+          image: "{{ .Values.eigenlayer.image.repository }}:{{ .Values.eigenlayer.image.tag }}"
+          imagePullPolicy: {{ .Values.eigenlayer.image.pullPolicy }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -x
+              LOG_FILE="/app/.nodes/yield-distribution.log"
+
+              {
+                echo "=== Yield Distribution Test Starting at $(date) ==="
+
+                # Verify tools are available (forge/cast/git come from eigenlayer image)
+                forge --version
+                cast --version
+
+                # Read addresses from init container
+                BLS_CHECKER=$(cat /yield-config/bls_checker)
+                REG_COORD=$(cat /yield-config/registry_coordinator)
+
+                YIELD_DISTRIBUTOR="{{ .Values.yieldDistribution.contractAddress }}"
+                YIELD_DISTRIBUTOR_OWNER="{{ .Values.yieldDistribution.ownerAddress }}"
+                L2_HTTP_RPC="http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
+                CYCLE_LENGTH_OVERRIDE="{{ .Values.yieldDistribution.cycleLength }}"
+                BLOCK_STALE_MEASURE_OVERRIDE="{{ .Values.yieldDistribution.blockStaleMeasure }}"
+
+                echo "BLS Signature Checker: $BLS_CHECKER"
+                echo "Registry Coordinator Mimic: $REG_COORD"
+                echo "Yield Distributor: $YIELD_DISTRIBUTOR"
+                echo "Yield Distributor Owner (impersonated): $YIELD_DISTRIBUTOR_OWNER"
+                echo "L2 HTTP RPC: $L2_HTTP_RPC"
+
+                # Step 1: Sanity-check contract owner
+                echo ""
+                echo "=== Step 1: Getting contract owner ==="
+                OWNER_ONCHAIN=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "owner()(address)")
+                echo "Owner (onchain): $OWNER_ONCHAIN"
+
+                # Step 2: Configure GasKiller
+                echo ""
+                echo "=== Step 2: Configuring YieldDistributor for test ==="
+
+                CURRENT_BLS=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
+                CURRENT_AVS=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
+                echo "Current blsSignatureChecker: $CURRENT_BLS"
+                echo "Current avsAddress: $CURRENT_AVS"
+                echo "New blsSignatureChecker (from bridge): $BLS_CHECKER"
+                echo "New avsAddress (from bridge): $REG_COORD"
+
+                echo "Impersonating owner to apply config..."
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_impersonateAccount "$YIELD_DISTRIBUTOR_OWNER"
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_setBalance "$YIELD_DISTRIBUTOR_OWNER" "0x56BC75E2D63100000"
+
+                echo "Setting GasKiller config via setters..."
+                cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "setAvsAddress(address)" "$REG_COORD"
+                cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "setBlsSignatureChecker(address)" "$BLS_CHECKER"
+                cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "setBlockStaleMeasure(uint256)" "$BLOCK_STALE_MEASURE_OVERRIDE"
+
+                echo "Setting cycleLength to test-friendly value..."
+                cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "setCycleLength(uint256)" "$CYCLE_LENGTH_OVERRIDE"
+
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
+
+                # Step 3: Cast a vote from owner so currentVotes > 0
+                echo ""
+                echo "=== Step 3: Casting vote from owner ==="
+
+                # Discover current projects via getCurrentVotingDistribution()
+                VOTING_DIST_RAW=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "getCurrentVotingDistribution()(address[],uint256[])" 2>/dev/null || echo "")
+                if [ -z "$VOTING_DIST_RAW" ]; then
+                  echo "ERROR: Failed to read current voting distribution"
+                  exit 1
+                fi
+
+                # Extract the projects array length by counting occurrences of '0x' in the first tuple element
+                PROJECTS_HEX=$(echo "$VOTING_DIST_RAW" | head -n1)
+                PROJECT_COUNT=$(echo "$PROJECTS_HEX" | grep -o "0x" | wc -l | tr -d '[:space:]')
+                if [ "$PROJECT_COUNT" -le 0 ]; then
+                  echo "ERROR: No projects found for voting (projectCount=$PROJECT_COUNT)"
+                  exit 1
+                fi
+                echo "Detected $PROJECT_COUNT projects for voting"
+                # Build a simple points vector: [1,1,1,...] (length = projectCount)
+                POINTS_CSV=""
+                for i in $(seq 1 "$PROJECT_COUNT"); do
+                  if [ -z "$POINTS_CSV" ]; then
+                    POINTS_CSV="1"
+                  else
+                    POINTS_CSV="$POINTS_CSV,1"
+                  fi
+                done
+                POINTS_ARG="[$POINTS_CSV]"
+                echo "Voting points vector: $POINTS_ARG"
+
+                echo "Impersonating owner and submitting vote..."
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_impersonateAccount "$YIELD_DISTRIBUTOR_OWNER"
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_setBalance "$YIELD_DISTRIBUTOR_OWNER" "0x56BC75E2D63100000"
+
+                if ! cast send --rpc-url "$L2_HTTP_RPC" --from "$YIELD_DISTRIBUTOR_OWNER" --unlocked \
+                  "$YIELD_DISTRIBUTOR" "castVote(uint256[])" "$POINTS_ARG"; then
+                  echo "ERROR: castVote from owner failed"
+                  cast rpc --rpc-url "$L2_HTTP_RPC" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER" || true
+                  exit 1
+                fi
+
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_stopImpersonatingAccount "$YIELD_DISTRIBUTOR_OWNER"
+
+                CURRENT_VOTES=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "currentVotes()(uint256)" 2>/dev/null | tr -d '[:space:]' | grep -oE '^[0-9]+' || echo "0")
+                echo "currentVotes after test vote: $CURRENT_VOTES"
+                if [ "$CURRENT_VOTES" -le 0 ]; then
+                  echo "ERROR: currentVotes is still zero after casting vote"
+                  exit 1
+                fi
+
+                # Step 4: Check distribution timing and advance chain enough for resolver
+                echo ""
+                echo "=== Step 4: Checking distribution timing ==="
+                # Cast outputs decimal by default for uint256
+                # Add error handling in case function names differ on the contract
+                echo "Querying cycleLength..."
+                CYCLE_LENGTH=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "cycleLength()(uint256)" 2>&1 | tr -d '[:space:]') || CYCLE_LENGTH="{{ .Values.yieldDistribution.cycleLength }}"
+                echo "Querying lastClaimedBlockNumber..."
+                LAST_CLAIMED=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>&1 | tr -d '[:space:]') || LAST_CLAIMED="0"
+                echo "Querying current block..."
+                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_HTTP_RPC" 2>&1 | tr -d '[:space:]') || CURRENT_BLOCK="{{ .Values.yieldDistribution.fallbackBlockNumber }}"
+
+                # Sanitize values - extract just the number
+                CYCLE_LENGTH=$(echo "$CYCLE_LENGTH" | grep -oE '^[0-9]+' | head -1) || CYCLE_LENGTH="{{ .Values.yieldDistribution.cycleLength }}"
+                LAST_CLAIMED=$(echo "$LAST_CLAIMED" | grep -oE '^[0-9]+' | head -1) || LAST_CLAIMED="0"
+                CURRENT_BLOCK=$(echo "$CURRENT_BLOCK" | grep -oE '^[0-9]+' | head -1) || CURRENT_BLOCK="{{ .Values.yieldDistribution.fallbackBlockNumber }}"
+
+                echo "Cycle length: $CYCLE_LENGTH"
+                echo "Last claimed block: $LAST_CLAIMED"
+                echo "Current block: $CURRENT_BLOCK"
+
+                # Step 5: Advance time and mine a couple blocks
+                echo ""
+                echo "=== Step 5: Setting up distribution timing ==="
+
+                # Get current timestamp and block
+                CURRENT_TIMESTAMP=$(cast block --rpc-url "$L2_HTTP_RPC" latest -f timestamp 2>&1 | grep -oE '^[0-9]+' | head -1) || CURRENT_TIMESTAMP="1770000000"
+                CURRENT_BLOCK=$(cast block-number --rpc-url "$L2_HTTP_RPC" | tr -d '[:space:]')
+                echo "Current timestamp: $CURRENT_TIMESTAMP"
+                echo "Current block: $CURRENT_BLOCK"
+
+                # Advance time by 8 days
+                TIME_ADVANCE=$((8 * 24 * 60 * 60))
+                NEW_TIMESTAMP=$((CURRENT_TIMESTAMP + TIME_ADVANCE))
+                echo "Advancing time by $TIME_ADVANCE seconds to timestamp $NEW_TIMESTAMP"
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_setNextBlockTimestamp $(printf '0x%x' "$NEW_TIMESTAMP")
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_mine 0x1
+                # Mine a couple extra blocks to satisfy: block.number >= lastClaimedBlockNumber + cycleLength
+                cast rpc --rpc-url "$L2_HTTP_RPC" anvil_mine 0x2
+
+                NEW_BLOCK=$(cast block-number --rpc-url "$L2_HTTP_RPC" | tr -d '[:space:]')
+                echo "New block number: $NEW_BLOCK"
+
+                # Step 6: Quick state check before verification
+                echo ""
+                echo "=== Step 6: Contract state after setup ==="
+                echo "blsSignatureChecker:"
+                cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "N/A"
+                echo "avsAddress:"
+                cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "N/A"
+                echo "stateTransitionCount:"
+                cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "stateTransitionCount()(uint256)" 2>/dev/null || echo "N/A"
+                echo "lastClaimedBlockNumber:"
+                cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo "N/A"
+
+                # Step 7: Verify test results
+                # NOTE: Full BLS aggregation via the router is not yet supported for
+                # cross-chain tasks in LOCAL mode. The router validator forks L1 (HTTP_RPC)
+                # to simulate transactions, but the YieldDistributor lives on L2.
+                # Until the router supports cross-chain validation, this test verifies:
+                #   1. Bridge deployed BLSSignatureChecker + RegistryCoordinatorMimic
+                #   2. YieldDistributor configured with bridge-deployed addresses
+                #   3. Owner-only setters configure test-friendly parameters (no storage writes)
+                #   4. resolveYieldDistribution returns true
+                echo ""
+                echo "=== Step 7: Verifying test results ==="
+
+                PASSED=true
+
+                # Check 1: BLS Signature Checker was set by initializeGasKiller
+                FINAL_BLS=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
+                echo "blsSignatureChecker: $FINAL_BLS"
+                echo "Expected (from bridge): $BLS_CHECKER"
+                if [ "$FINAL_BLS" != "$BLS_CHECKER" ]; then
+                  echo "FAIL: blsSignatureChecker not set correctly"
+                  PASSED=false
+                else
+                  echo "OK: blsSignatureChecker matches bridge deployment"
+                fi
+
+                # Check 2: AVS Address (Registry Coordinator Mimic) was set
+                FINAL_AVS=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "avsAddress()(address)" 2>/dev/null || echo "unknown")
+                echo "avsAddress: $FINAL_AVS"
+                echo "Expected (from bridge): $REG_COORD"
+                if [ "$FINAL_AVS" != "$REG_COORD" ]; then
+                  echo "FAIL: avsAddress not set correctly"
+                  PASSED=false
+                else
+                  echo "OK: avsAddress matches bridge deployment"
+                fi
+                # Check 3: Resolver returns true
+                echo ""
+                echo "Checking resolveYieldDistribution..."
+                RESOLVER_RAW=$(cast call --rpc-url "$L2_HTTP_RPC" "$YIELD_DISTRIBUTOR" "resolveYieldDistribution()(bool,bytes)" 2>&1) || RESOLVER_RAW="call failed"
+                echo "Resolver result: $RESOLVER_RAW"
+                if echo "$RESOLVER_RAW" | grep -q "true"; then
+                  echo "OK: resolveYieldDistribution returns true"
+                else
+                  echo "FAIL: resolveYieldDistribution did not return true"
+                  PASSED=false
+                fi
+
+                # Final verdict
+                echo ""
+                if [ "$PASSED" = "true" ]; then
+                  echo "=========================================="
+                  echo "=== YIELD DISTRIBUTION TEST PASSED ==="
+                  echo "=========================================="
+                  echo "All checks passed:"
+                  echo "  - Bridge deployed BLSSignatureChecker + RegistryCoordinatorMimic"
+                  echo "  - YieldDistributor configured with bridge-deployed addresses"
+                  echo "  - Owner-only setters configured test-friendly parameters"
+                  echo "  - resolveYieldDistribution returns true"
+                  touch /app/.nodes/.yield_distribution_complete
+                  exit 0
+                else
+                  echo "=========================================="
+                  echo "=== YIELD DISTRIBUTION TEST FAILED ==="
+                  echo "=========================================="
+                  echo "One or more checks failed (see above)"
+                  exit 1
+                fi
+              } 2>&1 | tee -a "$LOG_FILE"
+
+              EXIT_CODE=${PIPESTATUS[0]}
+              exit $EXIT_CODE
+
+          volumeMounts:
+            - name: yield-config
+              mountPath: /yield-config
+              readOnly: true
+            - name: shared-data
+              mountPath: /app/.nodes
+          resources:
+            {{- toYaml .Values.yieldDistribution.resources | nindent 12 }}
+
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: {{ include "gas-killer.shareddata.fullname" . }}
+        - name: yield-config
+          emptyDir: {}
+{{- end }}

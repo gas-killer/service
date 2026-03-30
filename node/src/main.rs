@@ -249,7 +249,7 @@ fn main() {
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(std::io::stdout)
             .finish();
-        let _ = tracing::subscriber::set_default(subscriber);
+        _ = tracing::subscriber::set_default(subscriber);
 
         // Configure P2P network
         const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
@@ -316,7 +316,7 @@ fn main() {
         // Create validator for the gas killer use case (uses full gas-analyzer validation)
         let validator = Arc::new(
             GasKillerValidator::new()
-                .expect("RPC_URL or HTTP_RPC environment variable must be set for gas analyzer"),
+                .expect("HTTP_RPC environment variable must be set for gas analyzer"),
         );
 
         // Create contributor with GasKillerTaskData as the metadata type
@@ -336,6 +336,6 @@ fn main() {
         });
 
         // Start network
-        let _ = network.start().await;
+        _ = network.start().await;
     });
 }

@@ -68,4 +68,4 @@ jobs:
       - name: cargo test
         run: cargo test --all-targets --all-features
         env:
-          RPC_URL: ${{ secrets.RPC_URL }}
+          HTTP_RPC: ${{ secrets.HTTP_RPC }}

@@ -280,7 +280,15 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             error!("Failed to acquire lock on current_task mutex");
         }
 
-        let payload = self.get_task_metadata().encode().to_vec();
+        // Prime the validator's digest cache now so node-signature verification skips EVMSketch.
+        // The creator already ran EVMSketch to compute the storage updates; the validator would
+        // otherwise run it again for each incoming signature, causing a second ~2Gi memory spike.
+        let task_data = self.get_task_metadata();
+        self.validator
+            .prime_cache(&task_data, &task_data.storage_updates)
+            .await;
+
+        let payload = task_data.encode().to_vec();
 
         // Increment round counter for each new task to ensure unique rounds
         // Nodes will refuse to sign the same round twice
@@ -369,7 +377,7 @@ mod tests {
         assert_eq!(round, 0); // Default round is 0
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_validator_produces_consistent_hash() {
         // This test verifies the production flow:
         // 1. Creator produces task data
@@ -381,7 +389,7 @@ mod tests {
         use commonware_codec::{EncodeSize, Write};
         use gas_killer_common::validator::GasKillerValidator;
 
-        // Use with_rpc_url for testing - new() requires RPC_URL/HTTP_RPC env var
+        // Use with_rpc_url for testing - new() requires HTTP_RPC env var
         let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
 
         let task_data = GasKillerTaskData {

@@ -30,8 +30,6 @@ async-trait = { workspace = true }
 
 # Web / HTTP
 axum = { workspace = true }
-bn254 = { workspace = true }
-
 # Serialization
 bytes = { workspace = true }
 
@@ -40,7 +38,7 @@ clap = { workspace = true }
 # Upstream AVS crates
 commonware-avs-core = { workspace = true }
 commonware-avs-router = { workspace = true }
-commonware-avs-usecases = { workspace = true }
+commonware-avs-eigenlayer = { workspace = true }
 
 # Commonware ecosystem
 commonware-codec = { workspace = true }
@@ -63,7 +61,7 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 
 # Gas analysis
-gas-analyzer-rs = { workspace = true }
+gas-analyzer = { workspace = true }
 
 # Internal crates
 gas-killer-common = { workspace = true }
