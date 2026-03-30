@@ -309,4 +309,315 @@ mod tests {
             ValidationError::ZeroTargetAddress
         );
     }
+
+    // -- HTTP handler integration tests --
+    //
+    // These tests call trigger_task_handler through the real Axum router using
+    // tower::ServiceExt::oneshot, so they exercise JSON extraction, status codes,
+    // and queue interaction end-to-end without binding a port.
+
+    mod http {
+        use super::*;
+        use axum::body::Body;
+        use axum::http::{Method, Request, StatusCode};
+        use tower::util::ServiceExt; // for `oneshot`
+
+        fn make_app() -> (Router<()>, Arc<SimpleTaskQueue>) {
+            let queue = Arc::new(SimpleTaskQueue::new());
+            let app: Router<()> = Router::new()
+                .route("/trigger", post(trigger_task_handler))
+                .with_state(queue.clone());
+            (app, queue)
+        }
+
+        fn json_request(body: &str) -> Request<Body> {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/trigger")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        }
+
+        fn valid_body() -> String {
+            serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000001",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      [0xAB, 0xCD, 0xEF, 0x01],
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 1
+                }
+            })
+            .to_string()
+        }
+
+        async fn response_body(resp: axum::response::Response) -> GasKillerTaskResponse {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        #[tokio::test]
+        async fn test_valid_request_returns_200_and_queues_task() {
+            let (app, queue) = make_app();
+            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = response_body(resp).await;
+            assert!(body.success);
+            assert_eq!(body.message, "Task queued");
+            assert!(
+                queue.pop().is_some(),
+                "task should have been pushed to queue"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_zero_target_address_returns_400() {
+            let (app, _queue) = make_app();
+            let payload = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000000",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      [0xAB, 0xCD, 0xEF, 0x01],
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 1
+                }
+            })
+            .to_string();
+
+            let resp = app.oneshot(json_request(&payload)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = response_body(resp).await;
+            assert!(!body.success);
+            assert!(body.message.contains("target_address is zero"));
+        }
+
+        #[tokio::test]
+        async fn test_zero_from_address_returns_400() {
+            let (app, _queue) = make_app();
+            let payload = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000001",
+                    "from_address":   "0x0000000000000000000000000000000000000000",
+                    "call_data":      [0xAB, 0xCD, 0xEF, 0x01],
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 1
+                }
+            })
+            .to_string();
+
+            let resp = app.oneshot(json_request(&payload)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = response_body(resp).await;
+            assert!(!body.success);
+            assert!(body.message.contains("from_address is zero"));
+        }
+
+        #[tokio::test]
+        async fn test_empty_call_data_returns_400() {
+            let (app, _queue) = make_app();
+            let payload = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000001",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      [],
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 1
+                }
+            })
+            .to_string();
+
+            let resp = app.oneshot(json_request(&payload)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = response_body(resp).await;
+            assert!(!body.success);
+            assert!(body.message.contains("call_data is empty"));
+        }
+
+        #[tokio::test]
+        async fn test_call_data_too_short_returns_400() {
+            let (app, _queue) = make_app();
+            let payload = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000001",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      [0x01, 0x02, 0x03],
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 1
+                }
+            })
+            .to_string();
+
+            let resp = app.oneshot(json_request(&payload)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = response_body(resp).await;
+            assert!(!body.success);
+            assert!(body.message.contains("call_data too short"));
+        }
+
+        #[tokio::test]
+        async fn test_call_data_too_large_returns_400() {
+            let (app, _queue) = make_app();
+            let oversized = vec![0u8; MAX_EVM_TX_CALLDATA_SIZE + 1];
+            let payload = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000001",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      oversized,
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 1
+                }
+            })
+            .to_string();
+
+            let resp = app.oneshot(json_request(&payload)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = response_body(resp).await;
+            assert!(!body.success);
+            assert!(body.message.contains("call_data too large"));
+        }
+
+        #[tokio::test]
+        async fn test_zero_block_height_returns_400() {
+            let (app, _queue) = make_app();
+            let payload = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000001",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      [0xAB, 0xCD, 0xEF, 0x01],
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 0
+                }
+            })
+            .to_string();
+
+            let resp = app.oneshot(json_request(&payload)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = response_body(resp).await;
+            assert!(!body.success);
+            assert!(body.message.contains("block_height is zero"));
+        }
+
+        #[tokio::test]
+        async fn test_malformed_json_returns_4xx() {
+            let (app, _queue) = make_app();
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/trigger")
+                .header("content-type", "application/json")
+                .body(Body::from("not json at all {{{"))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert!(
+                resp.status().is_client_error(),
+                "malformed JSON should return 4xx, got {}",
+                resp.status()
+            );
+        }
+
+        #[tokio::test]
+        async fn test_missing_required_field_returns_422() {
+            let (app, _queue) = make_app();
+            // `block_height` is missing
+            let payload = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000001",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      [0xAB, 0xCD, 0xEF, 0x01],
+                    "transition_index": 0,
+                    "value": "0x0"
+                }
+            })
+            .to_string();
+
+            let resp = app.oneshot(json_request(&payload)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[tokio::test]
+        async fn test_empty_body_returns_4xx() {
+            let (app, _queue) = make_app();
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/trigger")
+                .header("content-type", "application/json")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert!(
+                resp.status().is_client_error(),
+                "empty body should return 4xx, got {}",
+                resp.status()
+            );
+        }
+
+        #[tokio::test]
+        async fn test_wrong_method_returns_405() {
+            let (app, _queue) = make_app();
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("/trigger")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
+
+        #[tokio::test]
+        async fn test_valid_request_does_not_leave_extra_tasks() {
+            // Two sequential valid requests → queue should hold exactly two tasks
+            let queue = Arc::new(SimpleTaskQueue::new());
+            let app1 = Router::new()
+                .route("/trigger", post(trigger_task_handler))
+                .with_state(queue.clone());
+            let app2 = Router::new()
+                .route("/trigger", post(trigger_task_handler))
+                .with_state(queue.clone());
+
+            app1.oneshot(json_request(&valid_body())).await.unwrap();
+            app2.oneshot(json_request(&valid_body())).await.unwrap();
+
+            assert!(queue.pop().is_some());
+            assert!(queue.pop().is_some());
+            assert!(
+                queue.pop().is_none(),
+                "queue should be empty after two pops"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_rejected_request_does_not_enqueue() {
+            let (app, queue) = make_app();
+            let payload = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000000",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      [0xAB, 0xCD, 0xEF, 0x01],
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 1
+                }
+            })
+            .to_string();
+
+            app.oneshot(json_request(&payload)).await.unwrap();
+            assert!(
+                queue.pop().is_none(),
+                "invalid task must not be pushed to queue"
+            );
+        }
+    }
 }
