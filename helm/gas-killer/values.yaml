@@ -110,12 +110,12 @@ signer:
 # Gas Killer Node configuration
 node:
   image:
-    # For local development, build and load the image into kind:
-    # docker build -t service:node-local -f node/Dockerfile .
-    # kind load docker-image service:node-local --name <cluster-name>
-    repository: service
-    tag: node-local
-    pullPolicy: Never
+    # Production image built and pushed by the Docker CI/CD workflow on merge to main / release.
+    # For local development, override with:
+    #   --set node.image.repository=service --set node.image.tag=node-local --set node.image.pullPolicy=Never
+    repository: ghcr.io/gas-killer/service
+    tag: node-latest
+    pullPolicy: Always
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
   resources:
@@ -129,12 +129,12 @@ node:
 # Gas Killer Router configuration
 router:
   image:
-    # For local development, build and load the image into kind:
-    # docker build -t service:router-local -f router/Dockerfile .
-    # kind load docker-image service:router-local --name <cluster-name>
-    repository: service
-    tag: router-local
-    pullPolicy: Never
+    # Production image built and pushed by the Docker CI/CD workflow on merge to main / release.
+    # For local development, override with:
+    #   --set router.image.repository=service --set router.image.tag=router-local --set router.image.pullPolicy=Never
+    repository: ghcr.io/gas-killer/service
+    tag: router-latest
+    pullPolicy: Always
   port: 3000
   ingressPort: 8080
   # Aggregation window duration in seconds. Must exceed the time nodes need to compute

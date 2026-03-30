@@ -6,7 +6,6 @@ on:
       - main
       - dev
       - staging
-  pull_request:
   release:
     types: [created]
   workflow_dispatch:
@@ -36,15 +35,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image tag
-        id: tag
+      - name: Generate image tags
+        id: tags
         run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service"
+          SHA_TAG="${IMAGE}:node-${{ github.sha }}"
+
           if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "tag=pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            VERSION="${{ github.ref_name }}"
+            MINOR="$(echo "$VERSION" | sed 's/\.[^.]*$//')"
+            MAJOR="$(echo "$VERSION" | sed 's/\.[^.]*$//' | sed 's/\.[^.]*$//')"
+            echo "tags=${SHA_TAG},${IMAGE}:node-${VERSION},${IMAGE}:node-${MINOR},${IMAGE}:node-${MAJOR},${IMAGE}:node-latest" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            echo "tags=${SHA_TAG},${IMAGE}:node-latest" >> $GITHUB_OUTPUT
           else
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "tags=${SHA_TAG},${IMAGE}:node-${{ github.ref_name }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Build and push node image
@@ -54,9 +59,7 @@ jobs:
           file: node/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:node-${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:node-${{ github.sha }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha,scope=node
           cache-to: type=gha,mode=max,scope=node
           build-args: |
@@ -86,15 +89,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image tag
-        id: tag
+      - name: Generate image tags
+        id: tags
         run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service"
+          SHA_TAG="${IMAGE}:router-${{ github.sha }}"
+
           if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "tag=pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            VERSION="${{ github.ref_name }}"
+            MINOR="$(echo "$VERSION" | sed 's/\.[^.]*$//')"
+            MAJOR="$(echo "$VERSION" | sed 's/\.[^.]*$//' | sed 's/\.[^.]*$//')"
+            echo "tags=${SHA_TAG},${IMAGE}:router-${VERSION},${IMAGE}:router-${MINOR},${IMAGE}:router-${MAJOR},${IMAGE}:router-latest" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            echo "tags=${SHA_TAG},${IMAGE}:router-latest" >> $GITHUB_OUTPUT
           else
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "tags=${SHA_TAG},${IMAGE}:router-${{ github.ref_name }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Build and push router image
@@ -104,9 +113,7 @@ jobs:
           file: router/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:router-${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:router-${{ github.sha }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha,scope=router
           cache-to: type=gha,mode=max,scope=router
           build-args: |
