@@ -1,6 +1,11 @@
 use crate::creator::{SimpleTaskQueue, TaskQueue};
 use alloy_primitives::{Address, U256};
-use axum::{Json, Router, extract::State, http::StatusCode, routing::{get, post}};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+};
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
 use serde::{Deserialize, Serialize};
 use std::fmt;
