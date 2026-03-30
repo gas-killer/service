@@ -151,26 +151,26 @@ spec:
               value: "1"
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"
+            - name: HEALTHZ_PORT
+              value: {{ $root.Values.node.healthzPort | quote }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}
               protocol: TCP
-          # TODO: Replace with an httpGet probe once the node exposes a /healthz endpoint
+            - name: healthz
+              containerPort: {{ $root.Values.node.healthzPort }}
+              protocol: TCP
           readinessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - "cat /proc/1/cmdline | grep -q gas-killer"
+            httpGet:
+              path: /healthz
+              port: healthz
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 12
           livenessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - "cat /proc/1/cmdline | grep -q gas-killer"
+            httpGet:
+              path: /healthz
+              port: healthz
             initialDelaySeconds: 30
             periodSeconds: 15
             failureThreshold: 4

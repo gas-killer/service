@@ -3,6 +3,7 @@
 //! This node participates in BN254 signature aggregation for gas-efficient
 //! state transitions on EigenLayer.
 
+use axum::{Router, http::StatusCode, routing::get};
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{Bn254, PublicKey, get_signer};
 use commonware_avs_node::contributor::{AggregationInput, Contribute, Contributor};
@@ -327,6 +328,27 @@ fn main() {
             Some(aggregation_input),
         )
         .with_validator(validator);
+
+        // Spawn healthz HTTP server for Kubernetes readiness/liveness probes
+        let healthz_port: u16 = std::env::var("HEALTHZ_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8080);
+        let healthz_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), healthz_port);
+        context.clone().spawn(move |_| async move {
+            let app = Router::new().route("/healthz", get(|| async { StatusCode::OK }));
+            match ::tokio::net::TcpListener::bind(healthz_addr).await {
+                Ok(listener) => {
+                    tracing::info!(%healthz_addr, "healthz server running");
+                    if let Err(e) = axum::serve(listener, app).await {
+                        tracing::error!("healthz server error: {}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(%healthz_addr, "failed to bind healthz server: {}", e);
+                }
+            }
+        });
 
         // Spawn contributor task
         context.spawn(|_| async move {
