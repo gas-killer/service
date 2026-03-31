@@ -144,16 +144,15 @@ async fn healthz_handler() -> StatusCode {
     StatusCode::OK
 }
 
-pub fn build_app(queue: Arc<SimpleTaskQueue>) -> Router {
+pub fn build_app() -> Router<Arc<SimpleTaskQueue>> {
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/trigger", post(trigger_task_handler))
-        .with_state(queue)
 }
 
 // Start the HTTP server in a background task
 pub async fn start_gas_killer_http_server(queue: Arc<SimpleTaskQueue>, addr: &str) {
-    let app = build_app(queue);
+    let app = build_app().with_state(queue);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind HTTP server");
@@ -338,7 +337,7 @@ mod tests {
 
         fn make_app() -> (Router, Arc<SimpleTaskQueue>) {
             let queue = Arc::new(SimpleTaskQueue::new());
-            let app = build_app(queue.clone());
+            let app = build_app().with_state(queue.clone());
             (app, queue)
         }
 
@@ -605,8 +604,8 @@ mod tests {
         async fn test_valid_request_does_not_leave_extra_tasks() {
             // Two sequential valid requests → queue should hold exactly two tasks
             let queue = Arc::new(SimpleTaskQueue::new());
-            let app1 = build_app(queue.clone());
-            let app2 = build_app(queue.clone());
+            let app1 = build_app().with_state(queue.clone());
+            let app2 = build_app().with_state(queue.clone());
 
             app1.oneshot(json_request(&valid_body())).await.unwrap();
             app2.oneshot(json_request(&valid_body())).await.unwrap();
