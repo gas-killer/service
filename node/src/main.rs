@@ -3,7 +3,7 @@
 //! This node participates in BN254 signature aggregation for gas-efficient
 //! state transitions on EigenLayer.
 
-use axum::{Router, http::StatusCode, routing::get};
+use axum::{Router, extract::State, http::StatusCode, routing::get};
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{Bn254, PublicKey, get_signer};
 use commonware_avs_node::contributor::{AggregationInput, Contribute, Contributor};
@@ -21,10 +21,19 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Unique namespace to avoid message replay attacks
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
+
+async fn healthz_handler(State(ready): State<Arc<AtomicBool>>) -> StatusCode {
+    if ready.load(Ordering::Relaxed) {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
 
 /// Resolve a hostname:port with retry logic for Docker DNS readiness
 fn resolve_with_retry(
@@ -329,14 +338,20 @@ fn main() {
         )
         .with_validator(validator);
 
+        // Readiness flag: set to true after contributor is spawned and network is starting
+        let ready = Arc::new(AtomicBool::new(false));
+
         // Spawn healthz HTTP server for Kubernetes readiness/liveness probes
         let healthz_port: u16 = std::env::var("HEALTHZ_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8080);
         let healthz_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), healthz_port);
+        let ready_clone = Arc::clone(&ready);
         context.clone().spawn(move |_| async move {
-            let app = Router::new().route("/healthz", get(|| async { StatusCode::OK }));
+            let app = Router::new()
+                .route("/healthz", get(healthz_handler))
+                .with_state(ready_clone);
             match ::tokio::net::TcpListener::bind(healthz_addr).await {
                 Ok(listener) => {
                     tracing::info!(%healthz_addr, "healthz server running");
@@ -356,6 +371,9 @@ fn main() {
                 tracing::error!("Contributor error: {}", e);
             }
         });
+
+        // BLS key loaded and contributor spawned — node is ready to participate
+        ready.store(true, Ordering::Relaxed);
 
         // Start network
         _ = network.start().await;
