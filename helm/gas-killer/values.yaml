@@ -145,6 +145,10 @@ router:
   ingressPort: 8080
   # Port for the router's /healthz and /readyz HTTP endpoints (used by Kubernetes probes)
   healthzPort: 8081
+  # How long Kubernetes waits for a router to finish in-flight work after SIGTERM.
+  # Must be >= the time needed to complete an aggregation round. L2 computation
+  # takes up to ~60s (see aggregationFrequency comment), so 120s gives a safe buffer.
+  terminationGracePeriodSeconds: 120
   # Aggregation window duration in seconds. Must exceed the time nodes need to compute
   # EVMSketch storage updates. L2 computation takes ~60s, so 90s gives a safe margin.
   aggregationFrequency: "90"

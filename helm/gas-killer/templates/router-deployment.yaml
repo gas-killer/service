@@ -17,7 +17,7 @@ spec:
         {{- include "gas-killer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: router
     spec:
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: {{ .Values.router.terminationGracePeriodSeconds }}
       initContainers:
         # Wait for setup job to fully complete (check for .setup_complete marker)
         - name: wait-for-setup

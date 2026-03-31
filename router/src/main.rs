@@ -1,3 +1,4 @@
+use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
 use ark_serialize::CanonicalDeserialize;
 use axum::{Router, extract::State, http::StatusCode, routing::get};
@@ -282,7 +283,7 @@ fn main() {
                 .route("/healthz", get(healthz_handler))
                 .route("/readyz", get(readyz_handler))
                 .with_state(ready_clone);
-            match ::tokio::net::TcpListener::bind(healthz_addr).await {
+            match TcpListener::bind(healthz_addr).await {
                 Ok(listener) => {
                     tracing::info!(%healthz_addr, "healthz server running");
                     if let Err(e) = axum::serve(listener, app).await {
