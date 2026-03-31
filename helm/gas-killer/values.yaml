@@ -120,6 +120,10 @@ node:
   basePort: 3001
   # Port for the node's /healthz HTTP endpoint (used by Kubernetes probes)
   healthzPort: 8080
+  # How long Kubernetes waits for a node to finish in-flight work after SIGTERM.
+  # Must be >= the time needed to complete a validation + sign cycle. L2 computation
+  # takes up to ~60s (see aggregationFrequency comment), so 120s gives a safe buffer.
+  terminationGracePeriodSeconds: 120
   resources:
     requests:
       memory: "256Mi"
