@@ -1,0 +1,74 @@
+{{- if .Values.alloy.enabled }}
+{{- $lokiUrl := printf "http://%s-loki:3100/loki/api/v1/push" .Release.Name }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Named to match the alloy subchart's fullname so it picks this up
+  # when alloy.alloy.configMap.create is false.
+  name: {{ .Release.Name }}-alloy
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+data:
+  config.alloy: |-
+    // Discover pods labelled with the gas-killer release
+    discovery.kubernetes "gas_killer_pods" {
+      role = "pod"
+
+      selectors {
+        role  = "pod"
+        label = "app.kubernetes.io/instance={{ .Release.Name }}"
+      }
+    }
+
+    // Relabel: extract component, pod, namespace, and container labels
+    discovery.relabel "gas_killer_pods" {
+      targets = discovery.kubernetes.gas_killer_pods.targets
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_component"]
+        target_label  = "component"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }
+    }
+
+    // Tail pod logs from the relabelled targets
+    loki.source.kubernetes "gas_killer_pods" {
+      targets    = discovery.relabel.gas_killer_pods.output
+      forward_to = [loki.process.gas_killer.receiver]
+    }
+
+    // Parse structured JSON logs and promote level as a stream label
+    loki.process "gas_killer" {
+      stage.json {
+        expressions = {
+          level     = "level",
+          message   = "message",
+          timestamp = "timestamp",
+        }
+      }
+      stage.labels {
+        values = {
+          level = "",
+        }
+      }
+      forward_to = [loki.write.default.receiver]
+    }
+
+    // Write to the Loki instance deployed by this chart
+    loki.write "default" {
+      endpoint {
+        url = "{{ $lokiUrl }}"
+      }
+    }
+{{- end }}
