@@ -263,7 +263,9 @@ fn main() {
             .await
             .expect("Failed to build orchestrator");
 
-        context.clone().spawn(|_| async move { orchestrator.run(sender, receiver).await });
+        context
+            .clone()
+            .spawn(|_| async move { orchestrator.run(sender, receiver).await });
 
         // Readiness flag: set to true after orchestrator is spawned and network is starting
         let ready = Arc::new(AtomicBool::new(false));
