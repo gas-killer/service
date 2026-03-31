@@ -145,6 +145,13 @@ spec:
             {{- if and (eq $root.Values.global.environment "LOCAL") $root.Values.l2.enabled }}
             - name: L2_HTTP_RPC
               value: "http://{{ include "gas-killer.l2.fullname" $root }}:{{ $root.Values.l2.service.port }}"
+            {{- else if and (eq $root.Values.global.environment "TESTNET") $root.Values.l2.httpRpc }}
+            # TESTNET mode: Use external L2 RPC for cross-chain validation
+            - name: L2_HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" $root }}
+                  key: L2_HTTP_RPC
             {{- end }}
             - name: RUST_BACKTRACE
               value: "1"

@@ -1,35 +1,53 @@
-# Override for running gas-killer against a target L2 chain.
+# Override for running gas-killer against a local L2 Anvil fork (Gnosis).
 #
 # Usage:
 #   docker-compose -f docker-compose.yml -f docker-compose.l2.yml up
 #
 # Required additions to .env:
-#   L2_HTTP_RPC=https://rpc.gnosischain.com  # or your preferred L2 RPC
-#   PRIVATE_KEY=0x...                        # must have native gas token on L2 to pay for bridge deployment txns
-#   SET_CONTRACT_VALUES_MANUALLY=true        # set to true to skip YieldDistributor update
+#   L2_FORK_URL=https://rpc.gnosischain.com           # RPC to fork for local L2 Anvil
+#   YIELD_DISTRIBUTOR_ADDRESS=0x37A9CC16412CDA9b4f9B1ABdedd3e10BAD8A06da
+#   YIELD_DISTRIBUTOR_OWNER_ADDRESS=0x5DD2e7db868e33c03daB85d0C623048A7980634E
+#
+# Optional:
+#   BLS_SIG_CHECK_ADDRESS=0x056A41125bB62168B464ddDECd995e8494448913  # on L2 fork
+#   YIELD_CYCLE_LENGTH=1                                               # test-friendly
+#   YIELD_BLOCK_STALE_MEASURE=100000000                                # disable staleness
 #
 # Flow:
-#   eigenlayer  →  bridge  →  node-1/2/3 + router
-#
-# After the bridge completes, manually call setAvsAddress and setBlsSignatureChecker
-# on your YieldDistributor contract using the addresses from config/.nodes/l2-deploy.json.
-# Then trigger distribution via the router ingress at http://localhost:8080.
+#   eigenlayer  →  bridge (gnosis + eigenlayer)  →  yield-distribution  →  node-1/2/3 + router
 
 services:
+  # ─── L2 Anvil (Gnosis fork) ──────────────────────────────────────────────
+  gnosis:
+    platform: linux/amd64
+    image: ghcr.io/breadchaincoop/ethereum:dev
+    env_file:
+      - .env
+    ports:
+      - "8546:8545"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        anvil --fork-url ${L2_FORK_URL:-https://rpc.gnosischain.com} --host 0.0.0.0 --port 8545 --code-size-limit 65536 \
+          --timeout 120000 \
+          --retries 5 \
+          --compute-units-per-second 300
+
   # ─── Bridge ──────────────────────────────────────────────────────────────────
-  # Deploys RegistryCoordinatorMimic + BLSSignatureChecker to target L2 chain,
-  # bridging EigenLayer operator state from the local Anvil Sepolia fork.
+  # Deploys RegistryCoordinatorMimic + BLSSignatureChecker to the local L2 Anvil,
+  # bridging EigenLayer operator state from the local L1 Sepolia fork.
   bridge:
     platform: linux/amd64
     image: ghcr.io/breadchaincoop/target-contracts/bridge:latest
     depends_on:
       eigenlayer:
         condition: service_completed_successfully
+      gnosis:
+        condition: service_started
     environment:
       - PRIVATE_KEY=${PRIVATE_KEY}
       - L1_HTTP_RPC=http://ethereum:8545
-      - L2_HTTP_RPC=${L2_HTTP_RPC}
-      - YIELD_DISTRIBUTOR_ADDRESS=${YIELD_DISTRIBUTOR_ADDRESS}
+      - L2_HTTP_RPC=http://gnosis:8545
     volumes:
       - ./config/.nodes:/app/.nodes
     entrypoint:
@@ -46,7 +64,7 @@ services:
         # L1_KEY: Anvil's pre-funded test account — nonce 0 on any fresh Sepolia fork,
         # so its CREATE addresses are guaranteed fresh (no CreateCollision).
         L1_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-        # L2_KEY: your key — must hold the native token on the L2 chain for L2 contract deployments.
+        # L2_KEY: Anvil's pre-funded account works on the local L2 fork too.
         L2_KEY="$$PRIVATE_KEY"
 
         REGISTRY_COORDINATOR_ADDRESS=$$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' /app/.nodes/avs_deploy.json)
@@ -156,23 +174,234 @@ services:
         echo "=== l2-deploy.json ===" | tee -a "$$LOG_FILE"
         cat /app/.nodes/l2-deploy.json | tee -a "$$LOG_FILE"
 
-        # ── Step 6: Update YieldDistributor with new contract addresses ────────────
-        if [ -n "$$SET_CONTRACT_VALUES_MANUALLY" ]; then
-          echo "[BRIDGE] SET_CONTRACT_VALUES_MANUALLY set, skipping YieldDistributor update. Manually set on YieldDistributor=$$YIELD_DISTRIBUTOR_ADDRESS: setAvsAddress($$MIMIC), setBlsSignatureChecker($$BLS_SIG_CHECKER)" | tee -a "$$LOG_FILE"
-        elif [ -n "$$YIELD_DISTRIBUTOR_ADDRESS" ]; then
-          echo "=== Step 6: Updating YieldDistributor at $$YIELD_DISTRIBUTOR_ADDRESS ===" | tee -a "$$LOG_FILE"
-          cast send --rpc-url "$$L2_HTTP_RPC" --private-key "$$L2_KEY" \
-            "$$YIELD_DISTRIBUTOR_ADDRESS" "setAvsAddress(address)" "$$MIMIC" 2>&1 | tee -a "$$LOG_FILE"
-          cast send --rpc-url "$$L2_HTTP_RPC" --private-key "$$L2_KEY" \
-            "$$YIELD_DISTRIBUTOR_ADDRESS" "setBlsSignatureChecker(address)" "$$BLS_SIG_CHECKER" 2>&1 | tee -a "$$LOG_FILE"
-          echo "[BRIDGE] YieldDistributor updated" | tee -a "$$LOG_FILE"
-        else
-          echo "[BRIDGE] YIELD_DISTRIBUTOR_ADDRESS not set, skipping YieldDistributor update" | tee -a "$$LOG_FILE"
-        fi
-
         touch /app/.nodes/.bridge_complete
         chmod 644 /app/.nodes/.bridge_complete
         echo "=== Bridge complete at $$(date) ===" | tee -a "$$LOG_FILE"
+    restart: "no"
+
+  # ─── Yield Distribution ──────────────────────────────────────────────────────
+  # Configures YieldDistributor on the local L2 Anvil fork with bridge-deployed
+  # addresses, casts a test vote, advances time, and verifies resolveYieldDistribution.
+  # Mirrors the Helm yield-distribution-job.yaml.
+  yield-distribution:
+    platform: linux/amd64
+    image: ghcr.io/breadchaincoop/target-contracts/bridge:latest
+    depends_on:
+      bridge:
+        condition: service_completed_successfully
+    environment:
+      - L2_HTTP_RPC=http://gnosis:8545
+      - YIELD_DISTRIBUTOR_ADDRESS=${YIELD_DISTRIBUTOR_ADDRESS:-0x37A9CC16412CDA9b4f9B1ABdedd3e10BAD8A06da}
+      - YIELD_DISTRIBUTOR_OWNER_ADDRESS=${YIELD_DISTRIBUTOR_OWNER_ADDRESS:-0x5DD2e7db868e33c03daB85d0C623048A7980634E}
+      - BLS_SIG_CHECK_ADDRESS=${BLS_SIG_CHECK_ADDRESS:-0x056A41125bB62168B464ddDECd995e8494448913}
+      - YIELD_CYCLE_LENGTH=${YIELD_CYCLE_LENGTH:-1}
+      - YIELD_BLOCK_STALE_MEASURE=${YIELD_BLOCK_STALE_MEASURE:-100000000}
+    volumes:
+      - ./config/.nodes:/app/.nodes
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -ex
+        LOG_FILE="/app/.nodes/yield-distribution.log"
+
+        {
+          echo "=== Yield Distribution Starting at $$(date) ==="
+
+          # ── Parse bridge output ────────────────────────────────────────────────
+          BLS_CHECKER=$$(jq -r '.blsSignatureChecker' /app/.nodes/l2-deploy.json)
+          REG_COORD=$$(jq -r '.registryCoordinatorMimic' /app/.nodes/l2-deploy.json)
+
+          echo "BLSSignatureChecker (from bridge): $$BLS_CHECKER"
+          echo "RegistryCoordinatorMimic (from bridge): $$REG_COORD"
+
+          if [ -z "$$BLS_CHECKER" ] || [ "$$BLS_CHECKER" = "null" ] || [ -z "$$REG_COORD" ] || [ "$$REG_COORD" = "null" ]; then
+            echo "ERROR: Failed to parse addresses from l2-deploy.json"
+            exit 1
+          fi
+
+          # ── Create l2_avs_deploy.json for the router ───────────────────────────
+          BLS_APK_REGISTRY=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$REG_COORD" "blsApkRegistry()(address)")
+          echo "BLSApkRegistry: $$BLS_APK_REGISTRY"
+
+          cat > /app/.nodes/l2_avs_deploy.json <<DEPLOYEOF
+          {
+            "addresses": {
+              "registryCoordinator": "$$REG_COORD",
+              "blsapkRegistry": "$$BLS_APK_REGISTRY",
+              "blsSigCheck": "$$BLS_SIG_CHECK_ADDRESS",
+              "counter": "0x0000000000000000000000000000000000000000"
+            }
+          }
+        DEPLOYEOF
+          echo "=== Created l2_avs_deploy.json ==="
+          cat /app/.nodes/l2_avs_deploy.json
+
+          # ── Step 1: Sanity-check contract owner ────────────────────────────────
+          echo ""
+          echo "=== Step 1: Getting contract owner ==="
+          OWNER_ONCHAIN=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "owner()(address)")
+          echo "Owner (onchain): $$OWNER_ONCHAIN"
+
+          # ── Step 2: Configure YieldDistributor ─────────────────────────────────
+          echo ""
+          echo "=== Step 2: Configuring YieldDistributor ==="
+
+          CURRENT_BLS=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "blsSignatureChecker()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
+          CURRENT_AVS=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "avsAddress()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
+          echo "Current blsSignatureChecker: $$CURRENT_BLS"
+          echo "Current avsAddress: $$CURRENT_AVS"
+          echo "New blsSignatureChecker (from bridge): $$BLS_CHECKER"
+          echo "New avsAddress (from bridge): $$REG_COORD"
+
+          echo "Impersonating owner to apply config..."
+          cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_impersonateAccount "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS"
+          cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_setBalance "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS" "0x56BC75E2D63100000"
+
+          cast send --rpc-url "$$L2_HTTP_RPC" --from "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS" --unlocked \
+            "$$YIELD_DISTRIBUTOR_ADDRESS" "setAvsAddress(address)" "$$REG_COORD"
+          cast send --rpc-url "$$L2_HTTP_RPC" --from "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS" --unlocked \
+            "$$YIELD_DISTRIBUTOR_ADDRESS" "setBlsSignatureChecker(address)" "$$BLS_CHECKER"
+          cast send --rpc-url "$$L2_HTTP_RPC" --from "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS" --unlocked \
+            "$$YIELD_DISTRIBUTOR_ADDRESS" "setBlockStaleMeasure(uint256)" "$$YIELD_BLOCK_STALE_MEASURE"
+          cast send --rpc-url "$$L2_HTTP_RPC" --from "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS" --unlocked \
+            "$$YIELD_DISTRIBUTOR_ADDRESS" "setCycleLength(uint256)" "$$YIELD_CYCLE_LENGTH"
+
+          cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_stopImpersonatingAccount "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS"
+
+          # ── Step 3: Cast a vote so currentVotes > 0 ────────────────────────────
+          echo ""
+          echo "=== Step 3: Casting vote from owner ==="
+
+          VOTING_DIST_RAW=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "getCurrentVotingDistribution()(address[],uint256[])" 2>/dev/null || echo "")
+          if [ -z "$$VOTING_DIST_RAW" ]; then
+            echo "ERROR: Failed to read current voting distribution"
+            exit 1
+          fi
+
+          PROJECTS_HEX=$$(echo "$$VOTING_DIST_RAW" | head -n1)
+          PROJECT_COUNT=$$(echo "$$PROJECTS_HEX" | grep -o "0x" | wc -l | tr -d '[:space:]')
+          if [ "$$PROJECT_COUNT" -le 0 ]; then
+            echo "ERROR: No projects found for voting (projectCount=$$PROJECT_COUNT)"
+            exit 1
+          fi
+          echo "Detected $$PROJECT_COUNT projects for voting"
+
+          POINTS_CSV=""
+          for i in $$(seq 1 "$$PROJECT_COUNT"); do
+            if [ -z "$$POINTS_CSV" ]; then
+              POINTS_CSV="1"
+            else
+              POINTS_CSV="$$POINTS_CSV,1"
+            fi
+          done
+          POINTS_ARG="[$$POINTS_CSV]"
+          echo "Voting points vector: $$POINTS_ARG"
+
+          cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_impersonateAccount "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS"
+          cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_setBalance "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS" "0x56BC75E2D63100000"
+
+          if ! cast send --rpc-url "$$L2_HTTP_RPC" --from "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS" --unlocked \
+            "$$YIELD_DISTRIBUTOR_ADDRESS" "castVote(uint256[])" "$$POINTS_ARG"; then
+            echo "ERROR: castVote from owner failed"
+            cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_stopImpersonatingAccount "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS" || true
+            exit 1
+          fi
+
+          cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_stopImpersonatingAccount "$$YIELD_DISTRIBUTOR_OWNER_ADDRESS"
+
+          CURRENT_VOTES=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "currentVotes()(uint256)" 2>/dev/null | tr -d '[:space:]' | grep -oE '^[0-9]+' || echo "0")
+          echo "currentVotes after test vote: $$CURRENT_VOTES"
+          if [ "$$CURRENT_VOTES" -le 0 ]; then
+            echo "ERROR: currentVotes is still zero after casting vote"
+            exit 1
+          fi
+
+          # ── Step 4: Advance time and mine blocks ───────────────────────────────
+          echo ""
+          echo "=== Step 4: Advancing time ==="
+
+          CURRENT_TIMESTAMP=$$(cast block --rpc-url "$$L2_HTTP_RPC" latest -f timestamp 2>&1 | grep -oE '^[0-9]+' | head -1 || echo "1770000000")
+          CURRENT_BLOCK=$$(cast block-number --rpc-url "$$L2_HTTP_RPC" | tr -d '[:space:]')
+          echo "Current timestamp: $$CURRENT_TIMESTAMP"
+          echo "Current block: $$CURRENT_BLOCK"
+
+          TIME_ADVANCE=$$((8 * 24 * 60 * 60))
+          NEW_TIMESTAMP=$$((CURRENT_TIMESTAMP + TIME_ADVANCE))
+          echo "Advancing time by $$TIME_ADVANCE seconds to timestamp $$NEW_TIMESTAMP"
+          cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_setNextBlockTimestamp $$(printf '0x%x' "$$NEW_TIMESTAMP")
+          cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_mine 0x1
+          cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_mine 0x2
+
+          NEW_BLOCK=$$(cast block-number --rpc-url "$$L2_HTTP_RPC" | tr -d '[:space:]')
+          echo "New block number: $$NEW_BLOCK"
+
+          # ── Step 5: Contract state after setup ─────────────────────────────────
+          echo ""
+          echo "=== Step 5: Contract state after setup ==="
+          echo "blsSignatureChecker:"
+          cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "blsSignatureChecker()(address)" 2>/dev/null || echo "N/A"
+          echo "avsAddress:"
+          cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "avsAddress()(address)" 2>/dev/null || echo "N/A"
+          echo "stateTransitionCount:"
+          cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "stateTransitionCount()(uint256)" 2>/dev/null || echo "N/A"
+          echo "lastClaimedBlockNumber:"
+          cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "lastClaimedBlockNumber()(uint256)" 2>/dev/null || echo "N/A"
+
+          # ── Step 6: Verify results ─────────────────────────────────────────────
+          echo ""
+          echo "=== Step 6: Verifying test results ==="
+
+          PASSED=true
+
+          FINAL_BLS=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "blsSignatureChecker()(address)" 2>/dev/null || echo "unknown")
+          echo "blsSignatureChecker: $$FINAL_BLS"
+          echo "Expected (from bridge): $$BLS_CHECKER"
+          if [ "$$FINAL_BLS" != "$$BLS_CHECKER" ]; then
+            echo "FAIL: blsSignatureChecker not set correctly"
+            PASSED=false
+          else
+            echo "OK: blsSignatureChecker matches bridge deployment"
+          fi
+
+          FINAL_AVS=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "avsAddress()(address)" 2>/dev/null || echo "unknown")
+          echo "avsAddress: $$FINAL_AVS"
+          echo "Expected (from bridge): $$REG_COORD"
+          if [ "$$FINAL_AVS" != "$$REG_COORD" ]; then
+            echo "FAIL: avsAddress not set correctly"
+            PASSED=false
+          else
+            echo "OK: avsAddress matches bridge deployment"
+          fi
+
+          echo ""
+          echo "Checking resolveYieldDistribution..."
+          RESOLVER_RAW=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$YIELD_DISTRIBUTOR_ADDRESS" "resolveYieldDistribution()(bool,bytes)" 2>&1) || RESOLVER_RAW="call failed"
+          echo "Resolver result: $$RESOLVER_RAW"
+          if echo "$$RESOLVER_RAW" | grep -q "true"; then
+            echo "OK: resolveYieldDistribution returns true"
+          else
+            echo "FAIL: resolveYieldDistribution did not return true"
+            PASSED=false
+          fi
+
+          echo ""
+          if [ "$$PASSED" = "true" ]; then
+            echo "=========================================="
+            echo "=== YIELD DISTRIBUTION TEST PASSED ==="
+            echo "=========================================="
+            touch /app/.nodes/.yield_distribution_complete
+            exit 0
+          else
+            echo "=========================================="
+            echo "=== YIELD DISTRIBUTION TEST FAILED ==="
+            echo "=========================================="
+            exit 1
+          fi
+        } 2>&1 | tee -a "$$LOG_FILE"
+
+        EXIT_CODE=$${PIPESTATUS[0]}
+        exit $$EXIT_CODE
     restart: "no"
 
   # ─── Nodes (L2 overrides) ─────────────────────────────────────────────────
@@ -181,24 +410,24 @@ services:
   # L2_HTTP_RPC enables GasKillerValidator to simulate tasks on the L2 chain.
   node-1:
     depends_on:
-      bridge:
+      yield-distribution:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=${L2_HTTP_RPC}
+      - L2_HTTP_RPC=http://gnosis:8545
 
   node-2:
     depends_on:
-      bridge:
+      yield-distribution:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=${L2_HTTP_RPC}
+      - L2_HTTP_RPC=http://gnosis:8545
 
   node-3:
     depends_on:
-      bridge:
+      yield-distribution:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=${L2_HTTP_RPC}
+      - L2_HTTP_RPC=http://gnosis:8545
 
   # ─── Router (L2 overrides) ────────────────────────────────────────────────
   # HTTP_RPC stays on Sepolia Anvil so operator state (BLS keys, pubkeyHashToOperator)
@@ -206,7 +435,7 @@ services:
   # wallet provider for submitting verifyAndUpdate transactions on the L2 chain.
   router:
     depends_on:
-      bridge:
+      yield-distribution:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=${L2_HTTP_RPC}
+      - L2_HTTP_RPC=http://gnosis:8545

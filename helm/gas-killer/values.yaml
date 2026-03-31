@@ -175,11 +175,13 @@ orchestrator:
   # WARNING: The image contains a default private key. For production, always provide your own!
   routerPrivateKey: ""
 
-# L2 (Anvil fork) configuration - only used in LOCAL mode
-# Defaults to disabled; enable explicitly via --set l2.enabled=true (e.g. in CI)
+# L2 configuration
+# LOCAL mode:  set l2.enabled=true to spin up a local Anvil fork (requires secrets.l2ForkUrl)
+# TESTNET mode: set l2.httpRpc to connect nodes/router/bridge to a live L2 chain (e.g. Gnosis mainnet)
 l2:
   enabled: false
   # Direct RPC URL for L2 in TESTNET mode (contains API key - sensitive!)
+  # When set, nodes and router receive L2_HTTP_RPC for cross-chain validation/execution
   # Override with: --set l2.httpRpc=<your-l2-rpc-url>
   # Example: --set l2.httpRpc=https://rpc.gnosischain.com
   httpRpc: ""
@@ -215,16 +217,20 @@ bridge:
       memory: "1Gi"
       cpu: "500m"
 
-# Yield Distribution test configuration - only used in LOCAL mode with l2.enabled
-# Defaults to disabled; enable explicitly via --set yieldDistribution.enabled=true (e.g. in CI)
+# Yield Distribution configuration
+# LOCAL mode: enable to run yield distribution test job (requires l2.enabled, uses Anvil impersonation)
+# TESTNET mode: set contractAddress to have the bridge configure a live YieldDistributor
+#               (PRIVATE_KEY must be the contract owner)
 yieldDistribution:
   enabled: false
   # YieldDistributor contract address on L2
+  # In TESTNET mode, the bridge will call setAvsAddress/setBlsSignatureChecker on this contract
   contractAddress: "0x37A9CC16412CDA9b4f9B1ABdedd3e10BAD8A06da"
-  # Owner of the YieldDistributor on the fork (used for anvil impersonation)
+  # Owner of the YieldDistributor on the fork (used for anvil impersonation in LOCAL mode only)
   ownerAddress: "0x5DD2e7db868e33c03daB85d0C623048A7980634E"
-  # BLSSigCheckOperatorStateRetriever address on the L2 fork
-  # In LOCAL mode this is the address present on the forked L2 chain
+  # BLSSigCheckOperatorStateRetriever address on the L2 fork (LOCAL mode only)
+  # Pre-existing contract on the forked Gnosis chain; not needed in TESTNET mode
+  # (the bridge deploys its own BLSSignatureChecker)
   blsSigCheckAddress: "0x056A41125bB62168B464ddDECd995e8494448913"
   # Test-friendly overrides applied via contract setters
   cycleLength: 1

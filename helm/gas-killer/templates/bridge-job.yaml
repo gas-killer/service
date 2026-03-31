@@ -162,6 +162,41 @@ spec:
               chmod 644 /app/.nodes/l2-deploy.json
               echo "l2-deploy.json copied to shared volume" | tee -a "$LOG_FILE"
 
+              # ── Create l2_avs_deploy.json for the router ──────────────────────────
+              echo "=== Creating l2_avs_deploy.json ===" | tee -a "$LOG_FILE"
+              L2_DEPLOY="/app/contracts/artifacts/l2-deploy.json"
+              MIMIC_ADDR=$(jq -r '.registryCoordinatorMimic' "$L2_DEPLOY")
+              BLS_CHECKER_ADDR=$(jq -r '.blsSignatureChecker' "$L2_DEPLOY")
+
+              BLS_APK_REGISTRY=$(cast call --rpc-url "$L2_HTTP_RPC" "$MIMIC_ADDR" "blsApkRegistry()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
+              echo "[BRIDGE] BLSApkRegistry: $BLS_APK_REGISTRY" | tee -a "$LOG_FILE"
+
+              cat > /app/.nodes/l2_avs_deploy.json <<DEPLOYEOF
+              {
+                "addresses": {
+                  "registryCoordinator": "$MIMIC_ADDR",
+                  "blsapkRegistry": "$BLS_APK_REGISTRY",
+                  "blsSigCheck": "$BLS_CHECKER_ADDR",
+                  "counter": "0x0000000000000000000000000000000000000000"
+                }
+              }
+          DEPLOYEOF
+              chmod 644 /app/.nodes/l2_avs_deploy.json
+              echo "l2_avs_deploy.json created" | tee -a "$LOG_FILE"
+              cat /app/.nodes/l2_avs_deploy.json | tee -a "$LOG_FILE"
+
+              # ── Optional: Update YieldDistributor with bridge-deployed addresses ──
+              if [ -n "$YIELD_DISTRIBUTOR_ADDRESS" ]; then
+                echo "=== Updating YieldDistributor at $YIELD_DISTRIBUTOR_ADDRESS ===" | tee -a "$LOG_FILE"
+                cast send --rpc-url "$L2_HTTP_RPC" --private-key "$PRIVATE_KEY" \
+                  "$YIELD_DISTRIBUTOR_ADDRESS" "setAvsAddress(address)" "$MIMIC_ADDR" 2>&1 | tee -a "$LOG_FILE"
+                cast send --rpc-url "$L2_HTTP_RPC" --private-key "$PRIVATE_KEY" \
+                  "$YIELD_DISTRIBUTOR_ADDRESS" "setBlsSignatureChecker(address)" "$BLS_CHECKER_ADDR" 2>&1 | tee -a "$LOG_FILE"
+                echo "[BRIDGE] YieldDistributor updated" | tee -a "$LOG_FILE"
+              else
+                echo "[BRIDGE] YIELD_DISTRIBUTOR_ADDRESS not set, skipping YieldDistributor update" | tee -a "$LOG_FILE"
+              fi
+
               # Write completion marker
               touch /app/.nodes/.bridge_complete
               chmod 644 /app/.nodes/.bridge_complete
@@ -200,6 +235,10 @@ spec:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: L2_HTTP_RPC
             {{- end }}
+            {{- end }}
+            {{- if .Values.yieldDistribution.contractAddress }}
+            - name: YIELD_DISTRIBUTOR_ADDRESS
+              value: {{ .Values.yieldDistribution.contractAddress | quote }}
             {{- end }}
           volumeMounts:
             - name: shared-data
