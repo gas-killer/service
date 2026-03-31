@@ -3,6 +3,7 @@
 //! This node participates in BN254 signature aggregation for gas-efficient
 //! state transitions on EigenLayer.
 
+use ::tokio::net::TcpListener;
 use axum::{Router, extract::State, http::StatusCode, routing::get};
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{Bn254, PublicKey, get_signer};
@@ -359,7 +360,7 @@ fn main() {
                 .route("/healthz", get(healthz_handler))
                 .route("/readyz", get(readyz_handler))
                 .with_state(ready_clone);
-            match ::tokio::net::TcpListener::bind(healthz_addr).await {
+            match TcpListener::bind(healthz_addr).await {
                 Ok(listener) => {
                     tracing::info!(%healthz_addr, "healthz server running");
                     if let Err(e) = axum::serve(listener, app).await {
