@@ -202,6 +202,8 @@ spec:
               value: {{ .Values.router.ingress.timeoutMs | quote }}
             - name: AGGREGATION_FREQUENCY
               value: {{ .Values.router.aggregationFrequency | quote }}
+            - name: HEALTHZ_PORT
+              value: {{ .Values.router.healthzPort | quote }}
             - name: PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
@@ -214,17 +216,20 @@ spec:
             - name: ingress
               containerPort: {{ .Values.router.ingressPort }}
               protocol: TCP
+            - name: healthz
+              containerPort: {{ .Values.router.healthzPort }}
+              protocol: TCP
           readinessProbe:
             httpGet:
-              path: /healthz
-              port: ingress
+              path: /readyz
+              port: healthz
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /healthz
-              port: ingress
+              port: healthz
             initialDelaySeconds: 30
             periodSeconds: 15
             failureThreshold: 4

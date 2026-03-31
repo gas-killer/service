@@ -28,7 +28,13 @@ use std::time::Duration;
 // Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 
-async fn healthz_handler(State(ready): State<Arc<AtomicBool>>) -> StatusCode {
+/// Liveness probe — always 200 if the process is running.
+async fn healthz_handler() -> StatusCode {
+    StatusCode::OK
+}
+
+/// Readiness probe — 503 until the network is starting and the orchestrator is spawned.
+async fn readyz_handler(State(ready): State<Arc<AtomicBool>>) -> StatusCode {
     if ready.load(Ordering::Relaxed) {
         StatusCode::OK
     } else {
@@ -266,12 +272,13 @@ fn main() {
         let healthz_port: u16 = std::env::var("HEALTHZ_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(8080);
+            .unwrap_or(8081);
         let healthz_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), healthz_port);
         let ready_clone = Arc::clone(&ready);
         context.clone().spawn(move |_| async move {
             let app = Router::new()
                 .route("/healthz", get(healthz_handler))
+                .route("/readyz", get(readyz_handler))
                 .with_state(ready_clone);
             match ::tokio::net::TcpListener::bind(healthz_addr).await {
                 Ok(listener) => {

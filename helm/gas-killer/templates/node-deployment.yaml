@@ -162,7 +162,7 @@ spec:
               protocol: TCP
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: healthz
             initialDelaySeconds: 5
             periodSeconds: 5

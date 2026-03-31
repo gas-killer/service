@@ -119,7 +119,7 @@ node:
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
   # Port for the node's /healthz HTTP endpoint (used by Kubernetes probes)
-  healthzPort: 8080
+  healthzPort: 8081
   # How long Kubernetes waits for a node to finish in-flight work after SIGTERM.
   # Must be >= the time needed to complete a validation + sign cycle. L2 computation
   # takes up to ~60s (see aggregationFrequency comment), so 120s gives a safe buffer.
@@ -143,6 +143,8 @@ router:
     pullPolicy: Never
   port: 3000
   ingressPort: 8080
+  # Port for the router's /healthz and /readyz HTTP endpoints (used by Kubernetes probes)
+  healthzPort: 8081
   # Aggregation window duration in seconds. Must exceed the time nodes need to compute
   # EVMSketch storage updates. L2 computation takes ~60s, so 90s gives a safe margin.
   aggregationFrequency: "90"
