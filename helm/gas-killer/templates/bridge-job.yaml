@@ -171,16 +171,9 @@ spec:
               BLS_APK_REGISTRY=$(cast call --rpc-url "$L2_HTTP_RPC" "$MIMIC_ADDR" "blsApkRegistry()(address)" 2>/dev/null || echo "0x0000000000000000000000000000000000000000")
               echo "[BRIDGE] BLSApkRegistry: $BLS_APK_REGISTRY" | tee -a "$LOG_FILE"
 
-              cat > /app/.nodes/l2_avs_deploy.json <<DEPLOYEOF
-              {
-                "addresses": {
-                  "registryCoordinator": "$MIMIC_ADDR",
-                  "blsapkRegistry": "$BLS_APK_REGISTRY",
-                  "blsSigCheck": "$BLS_CHECKER_ADDR",
-                  "counter": "0x0000000000000000000000000000000000000000"
-                }
-              }
-          DEPLOYEOF
+              printf '{"addresses":{"registryCoordinator":"%s","blsapkRegistry":"%s","blsSigCheck":"%s","counter":"0x0000000000000000000000000000000000000000"}}' \
+                "$MIMIC_ADDR" "$BLS_APK_REGISTRY" "$BLS_CHECKER_ADDR" \
+                | jq '.' > /app/.nodes/l2_avs_deploy.json
               chmod 644 /app/.nodes/l2_avs_deploy.json
               echo "l2_avs_deploy.json created" | tee -a "$LOG_FILE"
               cat /app/.nodes/l2_avs_deploy.json | tee -a "$LOG_FILE"
