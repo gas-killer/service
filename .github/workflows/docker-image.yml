@@ -53,6 +53,8 @@ jobs:
             echo "tags=${SHA_TAG},${IMAGE}:node-${VERSION},${IMAGE}:node-${MINOR},${IMAGE}:node-${MAJOR},${IMAGE}:node-latest" >> $GITHUB_OUTPUT
           elif [ "${{ github.ref_name }}" = "main" ]; then
             echo "tags=${SHA_TAG},${IMAGE}:node-latest" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "tags=${SHA_TAG},${IMAGE}:node-pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
           else
             echo "tags=${SHA_TAG},${IMAGE}:node-${{ github.ref_name }}" >> $GITHUB_OUTPUT
           fi
@@ -111,6 +113,8 @@ jobs:
             echo "tags=${SHA_TAG},${IMAGE}:router-${VERSION},${IMAGE}:router-${MINOR},${IMAGE}:router-${MAJOR},${IMAGE}:router-latest" >> $GITHUB_OUTPUT
           elif [ "${{ github.ref_name }}" = "main" ]; then
             echo "tags=${SHA_TAG},${IMAGE}:router-latest" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "tags=${SHA_TAG},${IMAGE}:router-pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
           else
             echo "tags=${SHA_TAG},${IMAGE}:router-${{ github.ref_name }}" >> $GITHUB_OUTPUT
           fi
