@@ -48,9 +48,18 @@ jobs:
               echo "ERROR: release tag '${VERSION}' is not a valid semver (expected vX.Y.Z)" >&2
               exit 1
             fi
-            MINOR="$(echo "$VERSION" | sed 's/\.[^.]*$//')"
-            MAJOR="$(echo "$VERSION" | sed 's/\.[^.]*$//' | sed 's/\.[^.]*$//')"
-            echo "tags=${SHA_TAG},${IMAGE}:node-${VERSION},${IMAGE}:node-${MINOR},${IMAGE}:node-${MAJOR},${IMAGE}:node-latest" >> $GITHUB_OUTPUT
+            # Strip leading 'v' and any pre-release/build metadata to get clean X.Y.Z core
+            BASE="${VERSION#v}"
+            CORE="${BASE%%-*}"
+            CORE="${CORE%%+*}"
+            MINOR="$(echo "$CORE" | cut -d. -f1-2)"
+            MAJOR="$(echo "$CORE" | cut -d. -f1)"
+            # Only publish floating MINOR/MAJOR/latest tags for stable releases
+            if [ "$BASE" = "$CORE" ]; then
+              echo "tags=${SHA_TAG},${IMAGE}:node-${VERSION},${IMAGE}:node-${MINOR},${IMAGE}:node-${MAJOR},${IMAGE}:node-latest" >> $GITHUB_OUTPUT
+            else
+              echo "tags=${SHA_TAG},${IMAGE}:node-${VERSION}" >> $GITHUB_OUTPUT
+            fi
           elif [ "${{ github.ref_name }}" = "main" ]; then
             echo "tags=${SHA_TAG},${IMAGE}:node-latest" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -109,9 +118,18 @@ jobs:
               echo "ERROR: release tag '${VERSION}' is not a valid semver (expected vX.Y.Z)" >&2
               exit 1
             fi
-            MINOR="$(echo "$VERSION" | sed 's/\.[^.]*$//')"
-            MAJOR="$(echo "$VERSION" | sed 's/\.[^.]*$//' | sed 's/\.[^.]*$//')"
-            echo "tags=${SHA_TAG},${IMAGE}:router-${VERSION},${IMAGE}:router-${MINOR},${IMAGE}:router-${MAJOR},${IMAGE}:router-latest" >> $GITHUB_OUTPUT
+            # Strip leading 'v' and any pre-release/build metadata to get clean X.Y.Z core
+            BASE="${VERSION#v}"
+            CORE="${BASE%%-*}"
+            CORE="${CORE%%+*}"
+            MINOR="$(echo "$CORE" | cut -d. -f1-2)"
+            MAJOR="$(echo "$CORE" | cut -d. -f1)"
+            # Only publish floating MINOR/MAJOR/latest tags for stable releases
+            if [ "$BASE" = "$CORE" ]; then
+              echo "tags=${SHA_TAG},${IMAGE}:router-${VERSION},${IMAGE}:router-${MINOR},${IMAGE}:router-${MAJOR},${IMAGE}:router-latest" >> $GITHUB_OUTPUT
+            else
+              echo "tags=${SHA_TAG},${IMAGE}:router-${VERSION}" >> $GITHUB_OUTPUT
+            fi
           elif [ "${{ github.ref_name }}" = "main" ]; then
             echo "tags=${SHA_TAG},${IMAGE}:router-latest" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
