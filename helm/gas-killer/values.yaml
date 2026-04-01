@@ -114,8 +114,8 @@ node:
     # For local development, override with:
     #   --set node.image.repository=service --set node.image.tag=node-local --set node.image.pullPolicy=Never
     repository: ghcr.io/gas-killer/service
-    tag: node-latest
-    pullPolicy: Always
+    tag: ""
+    pullPolicy: IfNotPresent
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
   # Port for the node's /healthz HTTP endpoint (used by Kubernetes probes)
@@ -139,8 +139,8 @@ router:
     # For local development, override with:
     #   --set router.image.repository=service --set router.image.tag=router-local --set router.image.pullPolicy=Never
     repository: ghcr.io/gas-killer/service
-    tag: router-latest
-    pullPolicy: Always
+    tag: ""
+    pullPolicy: IfNotPresent
   port: 3000
   ingressPort: 8080
   # Port for the router's /healthz and /readyz HTTP endpoints (used by Kubernetes probes)
