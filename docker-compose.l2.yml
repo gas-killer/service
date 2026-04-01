@@ -1,4 +1,4 @@
-# Override for running gas-killer against a local L2 Anvil fork (Gnosis).
+# Override for running gas-killer against a local L2 Anvil fork.
 #
 # Usage:
 #   docker-compose -f docker-compose.yml -f docker-compose.l2.yml up
@@ -9,29 +9,37 @@
 #   YIELD_DISTRIBUTOR_OWNER_ADDRESS=0x5DD2e7db868e33c03daB85d0C623048A7980634E
 #
 # Optional:
-#   BLS_SIG_CHECK_ADDRESS=0x056A41125bB62168B464ddDECd995e8494448913  # on L2 fork
+#   L2_PORT=8546                                                       # host port for L2 Anvil
 #   YIELD_CYCLE_LENGTH=1                                               # test-friendly
 #   YIELD_BLOCK_STALE_MEASURE=100000000                                # disable staleness
+#   YIELD_TIME_ADVANCE=691200                                          # seconds to advance (default 8 days)
 #
 # Flow:
-#   eigenlayer  →  bridge (gnosis + eigenlayer)  →  yield-distribution  →  node-1/2/3 + router
+#   eigenlayer  →  bridge (l2 + eigenlayer)  →  yield-distribution  →  node-1/2/3 + router
 
 services:
-  # ─── L2 Anvil (Gnosis fork) ──────────────────────────────────────────────
-  gnosis:
+  # ─── L2 Anvil fork ─────────────────────────────────────────────────────────
+  l2:
     platform: linux/amd64
     image: ghcr.io/breadchaincoop/ethereum:dev
     env_file:
       - .env
     ports:
-      - "8546:8545"
+      - "${L2_PORT:-8546}:8545"
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        anvil --fork-url ${L2_FORK_URL:-https://rpc.gnosischain.com} --host 0.0.0.0 --port 8545 --code-size-limit 65536 \
-          --timeout 120000 \
-          --retries 5 \
-          --compute-units-per-second 300
+        anvil --fork-url ${L2_FORK_URL:-https://rpc.gnosischain.com} --host 0.0.0.0 --port 8545 \
+          --code-size-limit ${ANVIL_CODE_SIZE_LIMIT:-65536} \
+          --timeout ${ANVIL_TIMEOUT:-120000} \
+          --retries ${ANVIL_RETRIES:-5} \
+          --compute-units-per-second ${ANVIL_COMPUTE_UNITS:-300}
+    healthcheck:
+      test: ["CMD-SHELL", "cast chain-id --rpc-url http://localhost:8545 || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
 
   # ─── Bridge ──────────────────────────────────────────────────────────────────
   # Deploys RegistryCoordinatorMimic + BLSSignatureChecker to the local L2 Anvil,
@@ -42,12 +50,12 @@ services:
     depends_on:
       eigenlayer:
         condition: service_completed_successfully
-      gnosis:
-        condition: service_started
+      l2:
+        condition: service_healthy
     environment:
       - PRIVATE_KEY=${PRIVATE_KEY}
       - L1_HTTP_RPC=http://ethereum:8545
-      - L2_HTTP_RPC=http://gnosis:8545
+      - L2_HTTP_RPC=http://l2:8545
     volumes:
       - ./config/.nodes:/app/.nodes
     entrypoint:
@@ -190,12 +198,12 @@ services:
       bridge:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=http://gnosis:8545
+      - L2_HTTP_RPC=http://l2:8545
       - YIELD_DISTRIBUTOR_ADDRESS=${YIELD_DISTRIBUTOR_ADDRESS:-0x37A9CC16412CDA9b4f9B1ABdedd3e10BAD8A06da}
       - YIELD_DISTRIBUTOR_OWNER_ADDRESS=${YIELD_DISTRIBUTOR_OWNER_ADDRESS:-0x5DD2e7db868e33c03daB85d0C623048A7980634E}
-      - BLS_SIG_CHECK_ADDRESS=${BLS_SIG_CHECK_ADDRESS:-0x056A41125bB62168B464ddDECd995e8494448913}
       - YIELD_CYCLE_LENGTH=${YIELD_CYCLE_LENGTH:-1}
       - YIELD_BLOCK_STALE_MEASURE=${YIELD_BLOCK_STALE_MEASURE:-100000000}
+      - YIELD_TIME_ADVANCE=${YIELD_TIME_ADVANCE:-691200}
     volumes:
       - ./config/.nodes:/app/.nodes
     entrypoint:
@@ -224,16 +232,9 @@ services:
           BLS_APK_REGISTRY=$$(cast call --rpc-url "$$L2_HTTP_RPC" "$$REG_COORD" "blsApkRegistry()(address)")
           echo "BLSApkRegistry: $$BLS_APK_REGISTRY"
 
-          cat > /app/.nodes/l2_avs_deploy.json <<DEPLOYEOF
-          {
-            "addresses": {
-              "registryCoordinator": "$$REG_COORD",
-              "blsapkRegistry": "$$BLS_APK_REGISTRY",
-              "blsSigCheck": "$$BLS_SIG_CHECK_ADDRESS",
-              "counter": "0x0000000000000000000000000000000000000000"
-            }
-          }
-        DEPLOYEOF
+          printf '{"addresses":{"registryCoordinator":"%s","blsapkRegistry":"%s","blsSigCheck":"%s"}}' \
+            "$$REG_COORD" "$$BLS_APK_REGISTRY" "$$BLS_CHECKER" \
+            | jq '.' > /app/.nodes/l2_avs_deploy.json
           echo "=== Created l2_avs_deploy.json ==="
           cat /app/.nodes/l2_avs_deploy.json
 
@@ -326,7 +327,7 @@ services:
           echo "Current timestamp: $$CURRENT_TIMESTAMP"
           echo "Current block: $$CURRENT_BLOCK"
 
-          TIME_ADVANCE=$$((8 * 24 * 60 * 60))
+          TIME_ADVANCE=$${YIELD_TIME_ADVANCE:-691200}
           NEW_TIMESTAMP=$$((CURRENT_TIMESTAMP + TIME_ADVANCE))
           echo "Advancing time by $$TIME_ADVANCE seconds to timestamp $$NEW_TIMESTAMP"
           cast rpc --rpc-url "$$L2_HTTP_RPC" anvil_setNextBlockTimestamp $$(printf '0x%x' "$$NEW_TIMESTAMP")
@@ -413,21 +414,21 @@ services:
       yield-distribution:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=http://gnosis:8545
+      - L2_HTTP_RPC=http://l2:8545
 
   node-2:
     depends_on:
       yield-distribution:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=http://gnosis:8545
+      - L2_HTTP_RPC=http://l2:8545
 
   node-3:
     depends_on:
       yield-distribution:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=http://gnosis:8545
+      - L2_HTTP_RPC=http://l2:8545
 
   # ─── Router (L2 overrides) ────────────────────────────────────────────────
   # HTTP_RPC stays on Sepolia Anvil so operator state (BLS keys, pubkeyHashToOperator)
@@ -438,4 +439,4 @@ services:
       yield-distribution:
         condition: service_completed_successfully
     environment:
-      - L2_HTTP_RPC=http://gnosis:8545
+      - L2_HTTP_RPC=http://l2:8545

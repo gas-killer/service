@@ -45,6 +45,11 @@ secrets:
   # Example: --set secrets.l2ForkUrl=https://rpc.gnosischain.com
   l2ForkUrl: ""
 
+  # Private key of the YieldDistributor contract owner (TESTNET mode only)
+  # Used by the bridge to call setAvsAddress/setBlsSignatureChecker on the live contract
+  # If not provided, PRIVATE_KEY is used as fallback (will fail if it's not the owner)
+  yieldDistributorOwnerKey: ""
+
 # L1 (Anvil) configuration - only used in LOCAL mode
 l1:
   enabled: true
