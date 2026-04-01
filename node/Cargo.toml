@@ -19,6 +19,9 @@ async-trait = { workspace = true }
 # Serialization
 bytes = { workspace = true }
 
+# Web / HTTP
+axum = { workspace = true }
+
 # CLI / Config
 clap = { workspace = true }
 # Upstream AVS crates

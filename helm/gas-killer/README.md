@@ -10,6 +10,14 @@ A Helm chart for deploying the Gas Killer Router AVS with EigenLayer integration
 
 ## Installation
 
+Fetch chart dependencies before installing:
+
+```bash
+helm dependency update ./helm/gas-killer
+```
+
+Then install:
+
 ```bash
 helm install gas-killer ./helm/gas-killer \
   --set secrets.forkUrl="https://your-rpc-url" \
