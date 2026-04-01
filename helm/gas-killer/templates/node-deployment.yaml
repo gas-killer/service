@@ -26,6 +26,7 @@ spec:
         app.kubernetes.io/component: node
         gas-killer/node-index: {{ $nodeIndex | quote }}
     spec:
+      terminationGracePeriodSeconds: {{ $root.Values.node.terminationGracePeriodSeconds }}
       initContainers:
         # Wait for setup job to fully complete (check for .setup_complete marker)
         # This ensures operators are registered in the quorum before nodes start
@@ -150,32 +151,29 @@ spec:
               value: "1"
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"
+            - name: HEALTHZ_PORT
+              value: {{ $root.Values.node.healthzPort | quote }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}
               protocol: TCP
-          # TODO: Implement a proper readiness endpoint in the node application
-          # that verifies RPC connection, BLS key loaded, and P2P connectivity
-          # Use exec probe to check if process is running
-          # Check /proc/1/cmdline since our process is PID 1 in the container
+            - name: healthz
+              containerPort: {{ $root.Values.node.healthzPort }}
+              protocol: TCP
           readinessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - "cat /proc/1/cmdline | grep -q gas-killer"
+            httpGet:
+              path: /readyz
+              port: healthz
             initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 60
+            failureThreshold: 12
           livenessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - "cat /proc/1/cmdline | grep -q gas-killer"
+            httpGet:
+              path: /healthz
+              port: healthz
             initialDelaySeconds: 30
-            periodSeconds: 30
-            failureThreshold: 5
+            periodSeconds: 15
+            failureThreshold: 4
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes

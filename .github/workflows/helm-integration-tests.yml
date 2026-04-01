@@ -106,6 +106,9 @@ jobs:
           kubectl get nodes
           kubectl get pods -A
 
+      - name: Fetch Helm dependencies
+        run: helm dependency update ./helm/gas-killer
+
       - name: Install Helm chart
         run: |
           # Set L1 fork URL from secret or use public Sepolia

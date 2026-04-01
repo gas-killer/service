@@ -1,6 +1,11 @@
 use crate::creator::{SimpleTaskQueue, TaskQueue};
 use alloy_primitives::{Address, U256};
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+};
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -135,11 +140,19 @@ pub async fn trigger_task_handler(
     }
 }
 
+async fn healthz_handler() -> StatusCode {
+    StatusCode::OK
+}
+
+pub fn build_app() -> Router<Arc<SimpleTaskQueue>> {
+    Router::new()
+        .route("/healthz", get(healthz_handler))
+        .route("/trigger", post(trigger_task_handler))
+}
+
 // Start the HTTP server in a background task
 pub async fn start_gas_killer_http_server(queue: Arc<SimpleTaskQueue>, addr: &str) {
-    let app = Router::new()
-        .route("/trigger", post(trigger_task_handler))
-        .with_state(queue);
+    let app = build_app().with_state(queue);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind HTTP server");
@@ -322,11 +335,9 @@ mod tests {
         use axum::http::{Method, Request, StatusCode};
         use tower::util::ServiceExt; // for `oneshot`
 
-        fn make_app() -> (Router<()>, Arc<SimpleTaskQueue>) {
+        fn make_app() -> (Router, Arc<SimpleTaskQueue>) {
             let queue = Arc::new(SimpleTaskQueue::new());
-            let app: Router<()> = Router::new()
-                .route("/trigger", post(trigger_task_handler))
-                .with_state(queue.clone());
+            let app = build_app().with_state(queue.clone());
             (app, queue)
         }
 
@@ -358,6 +369,19 @@ mod tests {
                 .await
                 .unwrap();
             serde_json::from_slice(&bytes).unwrap()
+        }
+
+        #[tokio::test]
+        async fn test_healthz_returns_200() {
+            let (app, _queue) = make_app();
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
         }
 
         #[tokio::test]
@@ -580,12 +604,8 @@ mod tests {
         async fn test_valid_request_does_not_leave_extra_tasks() {
             // Two sequential valid requests → queue should hold exactly two tasks
             let queue = Arc::new(SimpleTaskQueue::new());
-            let app1 = Router::new()
-                .route("/trigger", post(trigger_task_handler))
-                .with_state(queue.clone());
-            let app2 = Router::new()
-                .route("/trigger", post(trigger_task_handler))
-                .with_state(queue.clone());
+            let app1 = build_app().with_state(queue.clone());
+            let app2 = build_app().with_state(queue.clone());
 
             app1.oneshot(json_request(&valid_body())).await.unwrap();
             app2.oneshot(json_request(&valid_body())).await.unwrap();

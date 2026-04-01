@@ -3760,6 +3760,7 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
+ "axum 0.7.9",
  "bytes",
  "clap",
  "commonware-avs-core",

@@ -16,6 +16,9 @@ test_processes.pids
 # Script build artifacts
 scripts/target
 
+# Helm chart dependencies (fetch via `helm dependency update`)
+helm/gas-killer/charts/*.tgz
+
 # Terraform state (should use remote backend)
 terraform.tfstate
 terraform.tfstate.*
