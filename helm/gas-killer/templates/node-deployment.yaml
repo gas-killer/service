@@ -108,7 +108,7 @@ spec:
 
       containers:
         - name: node
-          image: "{{ $root.Values.node.image.repository }}:{{ $root.Values.node.image.tag }}"
+          image: "{{ $root.Values.node.image.repository }}:{{ required "node.image.tag must be set" $root.Values.node.image.tag }}"
           imagePullPolicy: {{ $root.Values.node.image.pullPolicy }}
           args:
             - "--key-file"

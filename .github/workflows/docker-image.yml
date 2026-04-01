@@ -16,11 +16,18 @@ env:
   ORG_NAME: gas-killer
 
 jobs:
-  build-node:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        include:
+          - component: node
+            dockerfile: node/Dockerfile
+          - component: router
+            dockerfile: router/Dockerfile
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,79 +43,47 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image tag
-        id: tag
+      - name: Generate image tags
+        id: tags
         run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service"
+          SHA_TAG="${IMAGE}:${{ matrix.component }}-${{ github.sha }}"
+
           if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            VERSION="${{ github.ref_name }}"
+            if ! echo "$VERSION" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "ERROR: release tag '${VERSION}' is not a valid semver (expected vX.Y.Z)" >&2
+              exit 1
+            fi
+            BASE="${VERSION#v}"
+            CORE="${BASE%%-*}"
+            CORE="${CORE%%+*}"
+            MINOR="$(echo "$CORE" | cut -d. -f1-2)"
+            MAJOR="$(echo "$CORE" | cut -d. -f1)"
+            if [ "$BASE" = "$CORE" ]; then
+              echo "tags=${SHA_TAG},${IMAGE}:${{ matrix.component }}-${VERSION},${IMAGE}:${{ matrix.component }}-${MINOR},${IMAGE}:${{ matrix.component }}-${MAJOR},${IMAGE}:${{ matrix.component }}-latest" >> $GITHUB_OUTPUT
+            else
+              echo "tags=${SHA_TAG},${IMAGE}:${{ matrix.component }}-${VERSION}" >> $GITHUB_OUTPUT
+            fi
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            echo "tags=${SHA_TAG},${IMAGE}:${{ matrix.component }}-latest" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "tag=pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            echo "tags=${SHA_TAG},${IMAGE}:${{ matrix.component }}-pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
           else
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            SAFE_REF="$(echo "${{ github.ref_name }}" | tr '/' '-' | tr '[:upper:]' '[:lower:]')"
+            echo "tags=${SHA_TAG},${IMAGE}:${{ matrix.component }}-${SAFE_REF}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build and push node image
+      - name: Build and push ${{ matrix.component }} image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: node/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:node-${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:node-${{ github.sha }}
-          cache-from: type=gha,scope=node
-          cache-to: type=gha,mode=max,scope=node
-          build-args: |
-            CARGO_NET_GIT_FETCH_WITH_CLI=true
-            GIT_TERMINAL_PROMPT=0
-            GIT_ASKPASS=/bin/echo
-          secrets: |
-            GIT_AUTH_TOKEN=${{ secrets.GH_PAT }}
-
-  build-router:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          submodules: recursive
-          token: ${{ secrets.GH_PAT }}
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate image tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "tag=pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Build and push router image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: router/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:router-${{ steps.tag.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service:router-${{ github.sha }}
-          cache-from: type=gha,scope=router
-          cache-to: type=gha,mode=max,scope=router
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
           build-args: |
             CARGO_NET_GIT_FETCH_WITH_CLI=true
             GIT_TERMINAL_PROMPT=0
