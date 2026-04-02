@@ -140,18 +140,13 @@ fn main() {
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
     let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
     let my_local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let mut p2p_cfg = lookup::Config::local(
+    let p2p_cfg = lookup::Config::local(
         signer.clone(),
         APPLICATION_NAMESPACE,
         my_addr,
         my_local_addr,
         MAX_MESSAGE_SIZE,
     );
-
-    // Allow handshakes from IPs that aren't yet in the registered peer set
-    // TODO: Remove this once we have a proper way to handle handshakes
-    // https://github.com/gas-killer/avs/issues/82
-    p2p_cfg.attempt_unregistered_handshakes = true;
 
     // Start runtime
     runner.start(|context| async move {
