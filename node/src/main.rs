@@ -321,8 +321,7 @@ fn main() {
             g1_map.insert(g2_key, g1_key);
         }
 
-        // Calculate threshold (e.g., 2/3 + 1)
-        let threshold = (operators.len() * 2 / 3) + 1;
+        let threshold = quorum_infos[quorum_number].threshold;
         let aggregation_input = AggregationInput::new(threshold, g1_map);
 
         // Create network channel

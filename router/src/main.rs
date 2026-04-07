@@ -243,7 +243,7 @@ fn main() {
             contributors_map.insert(verifier, verifier_g1);
         }
 
-        let threshold = quorum_infos[quorum_number].operator_count;
+        let threshold = quorum_infos[quorum_number].threshold;
 
         // Run as the orchestrator using the builder pattern
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;

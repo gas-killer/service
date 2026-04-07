@@ -2154,7 +2154,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "commonware-avs-bindings"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#3543eaf815697fdb1d29f6911ee03dc21854e556"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Faggregation-threshold-from-operator-count#cf73a9ba8530d3b0d43046637007b034272ce97a"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -2169,7 +2169,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-core"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#3543eaf815697fdb1d29f6911ee03dc21854e556"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Faggregation-threshold-from-operator-count#cf73a9ba8530d3b0d43046637007b034272ce97a"
 dependencies = [
  "alloy",
  "anyhow",
@@ -2191,10 +2191,11 @@ dependencies = [
 [[package]]
 name = "commonware-avs-eigenlayer"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#3543eaf815697fdb1d29f6911ee03dc21854e556"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Faggregation-threshold-from-operator-count#cf73a9ba8530d3b0d43046637007b034272ce97a"
 dependencies = [
  "alloy-primitives",
  "alloy-provider",
+ "commonware-avs-bindings",
  "commonware-avs-core",
  "eigen-client-avsregistry",
  "eigen-common",
@@ -2208,7 +2209,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-node"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#3543eaf815697fdb1d29f6911ee03dc21854e556"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Faggregation-threshold-from-operator-count#cf73a9ba8530d3b0d43046637007b034272ce97a"
 dependencies = [
  "alloy",
  "alloy-network",
@@ -2253,7 +2254,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-router"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#3543eaf815697fdb1d29f6911ee03dc21854e556"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Faggregation-threshold-from-operator-count#cf73a9ba8530d3b0d43046637007b034272ce97a"
 dependencies = [
  "alloy",
  "alloy-primitives",
