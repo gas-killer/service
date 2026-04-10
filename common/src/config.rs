@@ -1,11 +1,9 @@
 //! Shared configuration types and utilities for Gas Killer AVS components
 
-use alloy_primitives::Address;
 use commonware_avs_eigenlayer::{EigenStakingClient, QuorumInfo};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::str::FromStr;
 
 /// Chain role identifiers — L1 (primary) and L2 (optional secondary).
 ///
@@ -142,7 +140,6 @@ pub fn load_orchestrator_config(path: &str) -> OrchestratorConfig {
 /// - `HTTP_RPC`: HTTP RPC endpoint
 /// - `WS_RPC`: WebSocket RPC endpoint
 /// - `AVS_DEPLOYMENT_PATH`: Path to AVS deployment JSON
-/// - `SERVICE_MANAGER_ADDRESS`: Address of the AVS service manager contract
 ///
 /// # Errors
 /// Returns an error if environment variables are missing or RPC calls fail
@@ -153,13 +150,7 @@ pub async fn get_operator_states() -> Result<Vec<QuorumInfo>, Box<dyn std::error
     let ws_rpc = env::var("WS_RPC").expect("WS_RPC must be set");
     let avs_deployment_path =
         env::var("AVS_DEPLOYMENT_PATH").expect("AVS_DEPLOYMENT_PATH must be set");
-    let service_manager_address = Address::from_str(
-        &env::var("SERVICE_MANAGER_ADDRESS").expect("SERVICE_MANAGER_ADDRESS must be set"),
-    )
-    .expect("SERVICE_MANAGER_ADDRESS must be a valid Ethereum address");
 
-    let client =
-        EigenStakingClient::new(http_rpc, ws_rpc, avs_deployment_path, service_manager_address)
-            .await?;
+    let client = EigenStakingClient::new(http_rpc, ws_rpc, avs_deployment_path).await?;
     client.get_operator_states().await
 }
