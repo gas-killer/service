@@ -1,6 +1,6 @@
 // Re-export common bindings from commonware-avs-router
 pub use commonware_avs_router::bindings::{
-    ReadOnlyProvider, WalletProvider, blsapkregistry, blssigcheckoperatorstateretriever,
+    ReadOnlyProvider, WalletProvider, bls_apk_registry, bls_sig_check_operator_state_retriever,
 };
 
 #[allow(
