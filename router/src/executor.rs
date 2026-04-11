@@ -188,6 +188,33 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
             }
         };
 
+        // Preflight check: verify stateTransitionCount matches transition_index before calling
+        // send(). The CachedNonceManager increments its counter during prepare() (before
+        // eth_estimateGas), so a failed send() due to a stale transition_index would consume
+        // a nonce without broadcasting a transaction, corrupting nonce sequencing for subsequent
+        // rounds. The orchestrator can trigger double-execution when all N operators sign: the
+        // Nth signature arrives after threshold is met and fires another execute_verification with
+        // the same (now-stale) transition_index. Catching staleness here avoids the nonce leak.
+        match gas_killer_sdk.stateTransitionCount().call().await {
+            Ok(count) => {
+                if count != transition_index {
+                    warn!(
+                        on_chain_count = %count,
+                        transition_index = %transition_index,
+                        "Stale execution: stateTransitionCount does not match transition_index, skipping"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Stale execution: stateTransitionCount {} != transition_index {}",
+                        count,
+                        transition_index
+                    ));
+                }
+            }
+            Err(e) => {
+                warn!("stateTransitionCount call failed, proceeding anyway: {}", e);
+            }
+        }
+
         // Execute the gas killer verifyAndUpdate
         // Use referenceBlockNumber = current_block_number - 1 so that eth_estimateGas (which
         // simulates at the current block) satisfies the on-chain check:
