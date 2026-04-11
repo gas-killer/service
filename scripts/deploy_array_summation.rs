@@ -13,8 +13,8 @@ struct AvsDeploymentJson {
 
 #[derive(Debug, Deserialize)]
 struct AvsAddresses {
-    #[serde(rename = "IncredibleSquaringServiceManager")]
-    incredible_squaring_service_manager: String,
+    #[serde(rename = "avsServiceManagerWrapper")]
+    avs_service_manager_wrapper: String,
     #[serde(rename = "IncredibleSquaringTaskManager")]
     bls_sig_check: String,
 }
@@ -61,9 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let avs_address: Address = avs_deployment
         .addresses
-        .incredible_squaring_service_manager
+        .avs_service_manager_wrapper
         .parse()
-        .map_err(|_| "Invalid AVS address format in deployment JSON")?;
+        .map_err(|_| "Invalid avsServiceManagerWrapper address format in deployment JSON")?;
 
     // Get BLS signature checker address from deployment JSON
     let bls_address: Address = avs_deployment
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map_err(|e| format!("Failed to get code for AVS address {}: {}", avs_address, e))?;
     if code_avs.as_ref().is_empty() {
         return Err(format!(
-            "AVS address {} has no code deployed. Check AVS_DEPLOYMENT_PATH.",
+            "AvsServiceManagerWrapper {} has no code deployed. Check AVS_DEPLOYMENT_PATH.",
             avs_address
         )
         .into());
@@ -218,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         println!("  ArraySummation Contract: {}", deployed_address);
     }
-    println!("  AVS Service: {}", avs_address);
+    println!("  AVS Service Manager Wrapper: {}", avs_address);
     println!("  BLS Sig Check: {}", bls_address);
 
     Ok(())
