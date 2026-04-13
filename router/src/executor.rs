@@ -1,10 +1,10 @@
-use gas_killer_common::WalletProvider;
 use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
 use gas_killer_common::ChainId;
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever::getNonSignerStakesAndSignatureReturn;
 use commonware_avs_router::executor::bls::BlsSignatureVerificationHandler;
 use commonware_avs_router::executor::ExecutionResult;
 use crate::task_data::GasKillerTaskData;
+use alloy::network::Ethereum;
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
 use anyhow::Result;
@@ -13,31 +13,31 @@ use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
-pub struct GasKillerHandler {
+pub struct GasKillerHandler<P> {
     /// Wallet providers keyed by chain ID
-    providers: HashMap<ChainId, WalletProvider>,
+    providers: HashMap<ChainId, P>,
 }
 
-impl GasKillerHandler {
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
     /// Creates a new handler with a single provider (for backwards compatibility)
-    pub fn new(provider: WalletProvider) -> Self {
+    pub fn new(provider: P) -> Self {
         let mut providers = HashMap::new();
         providers.insert(ChainId::L1, provider);
         Self { providers }
     }
 
     /// Creates a new handler with providers for multiple chains
-    pub fn with_providers(providers: HashMap<ChainId, WalletProvider>) -> Self {
+    pub fn with_providers(providers: HashMap<ChainId, P>) -> Self {
         Self { providers }
     }
 
     /// Adds a provider for a specific chain
-    pub fn add_provider(&mut self, chain_id: ChainId, provider: WalletProvider) {
+    pub fn add_provider(&mut self, chain_id: ChainId, provider: P) {
         self.providers.insert(chain_id, provider);
     }
 
     /// Gets the provider for a specific chain
-    fn get_provider(&self, chain_id: ChainId) -> Option<&WalletProvider> {
+    fn get_provider(&self, chain_id: ChainId) -> Option<&P> {
         self.providers.get(&chain_id)
     }
 
@@ -63,7 +63,9 @@ impl GasKillerHandler {
 }
 
 #[async_trait]
-impl BlsSignatureVerificationHandler for GasKillerHandler {
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerificationHandler
+    for GasKillerHandler<P>
+{
     type TaskData = GasKillerTaskData;
     async fn handle_verification(
         &mut self,
@@ -187,33 +189,6 @@ impl BlsSignatureVerificationHandler for GasKillerHandler {
                 return Err(anyhow::anyhow!("supportsInterface call failed: {}", e));
             }
         };
-
-        // Preflight check: verify stateTransitionCount matches transition_index before calling
-        // send(). The CachedNonceManager increments its counter during prepare() (before
-        // eth_estimateGas), so a failed send() due to a stale transition_index would consume
-        // a nonce without broadcasting a transaction, corrupting nonce sequencing for subsequent
-        // rounds. The orchestrator can trigger double-execution when all N operators sign: the
-        // Nth signature arrives after threshold is met and fires another execute_verification with
-        // the same (now-stale) transition_index. Catching staleness here avoids the nonce leak.
-        match gas_killer_sdk.stateTransitionCount().call().await {
-            Ok(count) => {
-                if count != transition_index {
-                    warn!(
-                        on_chain_count = %count,
-                        transition_index = %transition_index,
-                        "Stale execution: stateTransitionCount does not match transition_index, skipping"
-                    );
-                    return Err(anyhow::anyhow!(
-                        "Stale execution: stateTransitionCount {} != transition_index {}",
-                        count,
-                        transition_index
-                    ));
-                }
-            }
-            Err(e) => {
-                warn!("stateTransitionCount call failed, proceeding anyway: {}", e);
-            }
-        }
 
         // Execute the gas killer verifyAndUpdate
         // Use referenceBlockNumber = current_block_number - 1 so that eth_estimateGas (which

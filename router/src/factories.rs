@@ -4,17 +4,43 @@ use crate::creator::{
     SimpleTaskQueue,
 };
 use crate::ingress::start_gas_killer_http_server;
-use alloy_provider::ProviderBuilder;
+use alloy::network::{Ethereum, EthereumWallet};
+use alloy_provider::{
+    Identity, ProviderBuilder, RootProvider,
+    fillers::{
+        BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller,
+        SimpleNonceManager, WalletFiller,
+    },
+};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
 use commonware_avs_eigenlayer::AvsDeployment;
 use commonware_avs_router::bindings::bls_apk_registry::BLSApkRegistry;
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
-use gas_killer_common::{ChainId, GasKillerValidator, WalletProvider};
+use gas_killer_common::{ChainId, GasKillerValidator};
 use std::collections::HashMap;
 use std::{env, str::FromStr, sync::Arc};
 use tracing::info;
+
+/// Wallet provider that uses SimpleNonceManager to always fetch the pending nonce from the
+/// chain rather than caching it locally. This prevents nonce corruption when a transaction
+/// fails during gas estimation (e.g., due to a stale transition_index from double-execution),
+/// because the cached counter is never pre-incremented before the tx is actually broadcast.
+pub type SimpleWalletProvider = FillProvider<
+    JoinFill<
+        JoinFill<
+            Identity,
+            JoinFill<
+                GasFiller,
+                JoinFill<BlobGasFiller, JoinFill<NonceFiller<SimpleNonceManager>, ChainIdFiller>>,
+            >,
+        >,
+        WalletFiller<EthereumWallet>,
+    >,
+    RootProvider,
+    Ethereum,
+>;
 
 /// Factory function to create a default creator
 pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
@@ -38,11 +64,16 @@ pub async fn create_listening_creator_with_server(
     Ok(GasKillerCreatorType::Listening(creator))
 }
 
-/// Creates a wallet provider for a specific chain
+/// Creates a wallet provider for a specific chain using SimpleNonceManager.
+///
+/// SimpleNonceManager always fetches the pending nonce from the node on every transaction
+/// rather than caching it locally. This ensures that if a transaction fails during gas
+/// estimation (e.g., double-execution with a stale transition_index), the local nonce counter
+/// is never corrupted, keeping subsequent rounds healthy.
 async fn create_wallet_provider_for_chain(
     chain_id: ChainId,
     private_key: &str,
-) -> Result<WalletProvider> {
+) -> Result<SimpleWalletProvider> {
     let http_rpc = match chain_id {
         ChainId::L1 => env::var("HTTP_RPC")
             .map_err(|_| anyhow::anyhow!("HTTP_RPC must be set for L1 chain"))?,
@@ -53,7 +84,17 @@ async fn create_wallet_provider_for_chain(
     let ecdsa_signer = PrivateKeySigner::from_str(private_key)
         .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
 
-    let provider = ProviderBuilder::new()
+    let provider = ProviderBuilder::default()
+        .filler(JoinFill::new(
+            GasFiller,
+            JoinFill::new(
+                BlobGasFiller::default(),
+                JoinFill::new(
+                    NonceFiller::<SimpleNonceManager>::default(),
+                    ChainIdFiller::default(),
+                ),
+            ),
+        ))
         .wallet(ecdsa_signer)
         .connect(&http_rpc)
         .await
@@ -70,7 +111,8 @@ async fn create_wallet_provider_for_chain(
 ///
 /// `L2_HTTP_RPC` is used exclusively for the write side: submitting `verifyAndUpdate`
 /// transactions on L2 when the target contract lives there.
-pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler>> {
+pub async fn create_gas_killer_executor()
+-> Result<BlsEigenlayerExecutor<GasKillerHandler<SimpleWalletProvider>>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
@@ -98,7 +140,7 @@ pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKil
         })?;
 
     // Create wallet providers for each supported chain
-    let mut providers: HashMap<ChainId, WalletProvider> = HashMap::new();
+    let mut providers: HashMap<ChainId, SimpleWalletProvider> = HashMap::new();
 
     // L1 provider (required)
     let l1_provider = create_wallet_provider_for_chain(ChainId::L1, &private_key).await?;
