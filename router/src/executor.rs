@@ -63,7 +63,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 }
 
 #[async_trait]
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerificationHandler for GasKillerHandler<P> {
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerificationHandler
+    for GasKillerHandler<P>
+{
     type TaskData = GasKillerTaskData;
     async fn handle_verification(
         &mut self,

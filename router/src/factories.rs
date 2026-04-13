@@ -89,7 +89,10 @@ async fn create_wallet_provider_for_chain(
             GasFiller,
             JoinFill::new(
                 BlobGasFiller::default(),
-                JoinFill::new(NonceFiller::<SimpleNonceManager>::default(), ChainIdFiller::default()),
+                JoinFill::new(
+                    NonceFiller::<SimpleNonceManager>::default(),
+                    ChainIdFiller::default(),
+                ),
             ),
         ))
         .wallet(ecdsa_signer)
@@ -108,7 +111,8 @@ async fn create_wallet_provider_for_chain(
 ///
 /// `L2_HTTP_RPC` is used exclusively for the write side: submitting `verifyAndUpdate`
 /// transactions on L2 when the target contract lives there.
-pub async fn create_gas_killer_executor() -> Result<BlsEigenlayerExecutor<GasKillerHandler<SimpleWalletProvider>>> {
+pub async fn create_gas_killer_executor()
+-> Result<BlsEigenlayerExecutor<GasKillerHandler<SimpleWalletProvider>>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
