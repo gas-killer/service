@@ -27,7 +27,44 @@ spec:
         gas-killer/node-index: {{ $nodeIndex | quote }}
     spec:
       terminationGracePeriodSeconds: {{ $root.Values.node.terminationGracePeriodSeconds }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $root.Values.secretManager.enabled }}
+      serviceAccountName: {{ include "gas-killer.serviceaccount.fullname" $root }}
+      {{- end }}
       initContainers:
+        {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+        # Fetch BLS key and avs_deploy.json from GCP Secret Manager.
+        # Workload Identity provides authentication — no static credentials needed.
+        - name: fetch-secrets
+          image: google/cloud-sdk:slim
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              PROJECT="{{ $root.Values.secretManager.projectId }}"
+              PREFIX="{{ $root.Values.secretManager.keyPrefix }}"
+
+              echo "Fetching BLS key for node {{ $nodeIndex }}..."
+              gcloud secrets versions access latest \
+                --secret="${PREFIX}-node-{{ $nodeIndex }}-bls-key" \
+                --project="$PROJECT" \
+                > /app/secrets/bls-key.json
+
+              echo "Fetching avs_deploy.json..."
+              gcloud secrets versions access latest \
+                --secret="${PREFIX}-avs-deploy" \
+                --project="$PROJECT" \
+                > /app/secrets/avs_deploy.json
+
+              echo "Secrets fetched successfully"
+          volumeMounts:
+            - name: node-secrets
+              mountPath: /app/secrets
+        {{- else }}
         # Wait for setup job to fully complete (check for .setup_complete marker)
         # This ensures operators are registered in the quorum before nodes start
         - name: wait-for-setup
@@ -54,6 +91,7 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+        {{- end }}
 
         {{- if $root.Values.bridge.waitForBridge }}
         # Wait for bridge job to complete before starting the node
@@ -112,7 +150,11 @@ spec:
           imagePullPolicy: {{ $root.Values.node.image.pullPolicy }}
           args:
             - "--key-file"
+            {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+            - "/app/secrets/bls-key.json"
+            {{- else }}
             - "/app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json"
+            {{- end }}
             - "--port"
             - {{ $nodePort | quote }}
             - "--orchestrator"
@@ -150,7 +192,11 @@ spec:
             - name: RUST_BACKTRACE
               value: "1"
             - name: AVS_DEPLOYMENT_PATH
+              {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+              value: "/app/secrets/avs_deploy.json"
+              {{- else }}
               value: "/app/.nodes/avs_deploy.json"
+              {{- end }}
             - name: HEALTHZ_PORT
               value: {{ $root.Values.node.healthzPort | quote }}
           ports:
@@ -178,6 +224,11 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+            {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+            - name: node-secrets
+              mountPath: /app/secrets
+              readOnly: true
+            {{- end }}
             {{- if $root.Values.orchestrator.publicConfig }}
             - name: config
               mountPath: /app/public_orchestrator.json
@@ -191,6 +242,10 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" $root }}
+        {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+        - name: node-secrets
+          emptyDir: {}
+        {{- end }}
         {{- if $root.Values.orchestrator.publicConfig }}
         - name: config
           configMap:

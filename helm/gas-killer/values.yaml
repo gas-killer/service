@@ -1,5 +1,15 @@
 # Default values for gas-killer Helm chart
 
+# Image pull secrets for private registries (e.g. ghcr.io/gas-killer/service).
+# Create the secret first:
+#   kubectl create secret docker-registry ghcr-pull-secret \
+#     --docker-server=ghcr.io \
+#     --docker-username=<github-username> \
+#     --docker-password=<github-pat>
+# Then reference it here:
+#   --set 'imagePullSecrets[0].name=ghcr-pull-secret'
+imagePullSecrets: []
+
 # Global settings
 global:
   # Environment mode: LOCAL or TESTNET
@@ -15,6 +25,30 @@ global:
 
   # Timeout for init containers waiting for dependencies (in seconds)
   initTimeout: 300
+
+# GCP Secret Manager configuration for TESTNET deployments
+# When enabled, operator BLS keys and avs_deploy.json are read from GCP Secret Manager
+# rather than the shared PVC. This makes keys durable across cluster recreations.
+#
+# Setup:
+#   1. Run terraform apply in terraform/ to provision the GKE cluster and GCP SA
+#   2. Copy the gcp_service_account_email output into secretManager.gcpServiceAccount below
+#   3. Set secretManager.projectId to your GCP project ID
+#
+# Secret naming in GCP Secret Manager:
+#   {keyPrefix}-node-{N}-bls-key   (one per operator node)
+#   {keyPrefix}-avs-deploy          (avs_deploy.json from the setup job)
+#
+# These secrets are created automatically by the key-export job on first helm install.
+secretManager:
+  enabled: false
+  projectId: ""
+  keyPrefix: "gas-killer"
+  # GCP Service Account email for Workload Identity. Copy from terraform output:
+  #   terraform output gcp_service_account_email
+  gcpServiceAccount: ""
+  # Must match terraform var kubernetes_service_account_name (default: "gas-killer")
+  serviceAccountName: "gas-killer"
 
 # Secrets configuration
 # All sensitive values should be provided via --set or existingSecret

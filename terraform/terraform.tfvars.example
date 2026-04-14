@@ -1,0 +1,15 @@
+project_id = "your-gcp-project-id"
+region     = "us-east4"
+zone       = "us-east4-b"
+kubernetes_service_account_name = "gas-killer-sa"
+
+# Testnet / dev overrides — flip these to reduce cost and allow easy teardown:
+# deletion_protection = false   # allows `terraform destroy` without manual intervention
+# spot_nodes          = true    # ~70% cheaper but nodes can be preempted at any time
+
+# Optional overrides (defaults are usually fine):
+# cluster_name                    = "gas-killer"
+# node_count                      = 1
+# machine_type                    = "e2-standard-4"
+# disk_size_gb                    = 20
+# kubernetes_namespace            = "default"

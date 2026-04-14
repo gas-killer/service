@@ -10,7 +10,7 @@ metadata:
     app.kubernetes.io/component: setup
   annotations:
     # Only run on fresh install, not on upgrades (to preserve existing deployment state)
-    "helm.sh/hook": post-install
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:
@@ -67,6 +67,16 @@ spec:
                 echo "=== Setup Job Starting at $(date -Iseconds) ==="
                 echo "Logs being written to: $LOG_FILE"
                 echo ""
+
+                # Skip re-running setup on helm upgrade if setup already completed.
+                # Re-running would re-deploy contracts + re-generate operator keys, which would
+                # diverge from on-chain state and (in TESTNET+secretManager mode) from Secret Manager.
+                if [ -f /root/.nodes/.setup_complete ]; then
+                  echo "Setup already completed (.setup_complete marker found). Skipping re-run."
+                  echo "=== Setup Job SKIPPED (already complete) at $(date -Iseconds) ==="
+                  exit 0
+                fi
+
                 echo "=== Setup Job Starting ==="
                 echo "ENVIRONMENT: $ENVIRONMENT"
                 echo "TEST_ACCOUNTS: $TEST_ACCOUNTS"
@@ -94,6 +104,14 @@ spec:
                 echo "Contents of /root/.nodes/operator_keys:"
                 ls -la /root/.nodes/operator_keys/ 2>/dev/null || echo "Directory does not exist or is empty"
                 echo ""
+
+                # Fail immediately if main.sh exited non-zero — file existence alone is not
+                # sufficient proof of success (files may be left over from a prior run).
+                if [ $MAIN_EXIT_CODE -ne 0 ]; then
+                  echo "Error: /main.sh failed with exit code $MAIN_EXIT_CODE"
+                  echo "=== Setup Job FAILED at $(date -Iseconds) ==="
+                  exit 1
+                fi
 
                 # Verify that required files were created
                 if [ -f /root/.nodes/avs_deploy.json ]; then
