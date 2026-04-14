@@ -243,9 +243,7 @@ fn main() {
             contributors_map.insert(verifier, verifier_g1);
         }
 
-        // TODO: Retrieve threshold from EigenLayer smart contracts after middleware refactor
-        // https://github.com/BreadchainCoop/commonware-restaking/issues/135
-        let threshold = 3; // hardcoded for now
+        let threshold = quorum_infos[quorum_number].threshold;
 
         // Run as the orchestrator using the builder pattern
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
