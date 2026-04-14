@@ -189,6 +189,13 @@ spec:
             # LOCAL mode: L2 RPC for cross-chain execution (yield distribution) via Anvil fork
             - name: L2_HTTP_RPC
               value: "http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
+            {{- else if and (eq .Values.global.environment "TESTNET") .Values.l2.httpRpc }}
+            # TESTNET mode: Use external L2 RPC for cross-chain execution
+            - name: L2_HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_HTTP_RPC
             {{- end }}
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"

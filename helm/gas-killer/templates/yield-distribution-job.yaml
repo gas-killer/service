@@ -93,17 +93,9 @@ spec:
               echo "BLSSigCheckOperatorStateRetriever (from L2 fork): $BLS_SIG_CHECK"
 
               # Create l2_avs_deploy.json with L2 AVS addresses for future use
-              # Format matches AvsDeployment { addresses: { registryCoordinator, blsapkRegistry, blsSigCheck, counter } }
-              cat > /app/.nodes/l2_avs_deploy.json <<DEPLOYEOF
-              {
-                "addresses": {
-                  "registryCoordinator": "$REG_COORD",
-                  "blsapkRegistry": "$BLS_APK_REGISTRY",
-                  "blsSigCheck": "$BLS_SIG_CHECK",
-                  "counter": "0x0000000000000000000000000000000000000000"
-                }
-              }
-              DEPLOYEOF
+              printf '{"addresses":{"registryCoordinator":"%s","blsapkRegistry":"%s","blsSigCheck":"%s"}}' \
+                "$REG_COORD" "$BLS_APK_REGISTRY" "$BLS_SIG_CHECK" \
+                | jq '.' > /app/.nodes/l2_avs_deploy.json
 
               echo "=== Created l2_avs_deploy.json ==="
               cat /app/.nodes/l2_avs_deploy.json

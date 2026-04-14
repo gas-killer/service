@@ -162,6 +162,45 @@ spec:
               chmod 644 /app/.nodes/l2-deploy.json
               echo "l2-deploy.json copied to shared volume" | tee -a "$LOG_FILE"
 
+              # ── Create l2_avs_deploy.json for the router ──────────────────────────
+              echo "=== Creating l2_avs_deploy.json ===" | tee -a "$LOG_FILE"
+              L2_DEPLOY="/app/contracts/artifacts/l2-deploy.json"
+              MIMIC_ADDR=$(jq -r '.registryCoordinatorMimic' "$L2_DEPLOY")
+              BLS_CHECKER_ADDR=$(jq -r '.blsSignatureChecker' "$L2_DEPLOY")
+
+              BLS_APK_REGISTRY=$(cast call --rpc-url "$L2_HTTP_RPC" "$MIMIC_ADDR" "blsApkRegistry()(address)")
+              if [ -z "$BLS_APK_REGISTRY" ] || [ "$BLS_APK_REGISTRY" = "0x0000000000000000000000000000000000000000" ]; then
+                echo "ERROR: blsApkRegistry() returned empty/zero — L2 RPC may not be ready or contract missing" | tee -a "$LOG_FILE"
+                exit 1
+              fi
+              echo "[BRIDGE] BLSApkRegistry: $BLS_APK_REGISTRY" | tee -a "$LOG_FILE"
+
+              printf '{"addresses":{"registryCoordinator":"%s","blsapkRegistry":"%s","blsSigCheck":"%s"}}' \
+                "$MIMIC_ADDR" "$BLS_APK_REGISTRY" "$BLS_CHECKER_ADDR" \
+                | jq '.' > /app/.nodes/l2_avs_deploy.json
+              chmod 644 /app/.nodes/l2_avs_deploy.json
+              echo "l2_avs_deploy.json created" | tee -a "$LOG_FILE"
+              cat /app/.nodes/l2_avs_deploy.json | tee -a "$LOG_FILE"
+
+              # ── Optional: Update YieldDistributor with bridge-deployed addresses ──
+              if [ -n "$YIELD_DISTRIBUTOR_ADDRESS" ]; then
+                YD_KEY="${YIELD_DISTRIBUTOR_OWNER_KEY:-$PRIVATE_KEY}"
+                echo "=== Updating YieldDistributor at $YIELD_DISTRIBUTOR_ADDRESS ===" | tee -a "$LOG_FILE"
+                if ! cast send --rpc-url "$L2_HTTP_RPC" --private-key "$YD_KEY" \
+                  "$YIELD_DISTRIBUTOR_ADDRESS" "setAvsAddress(address)" "$MIMIC_ADDR" 2>&1 | tee -a "$LOG_FILE"; then
+                  echo "ERROR: setAvsAddress failed — is the key the contract owner?" | tee -a "$LOG_FILE"
+                  exit 1
+                fi
+                if ! cast send --rpc-url "$L2_HTTP_RPC" --private-key "$YD_KEY" \
+                  "$YIELD_DISTRIBUTOR_ADDRESS" "setBlsSignatureChecker(address)" "$BLS_CHECKER_ADDR" 2>&1 | tee -a "$LOG_FILE"; then
+                  echo "ERROR: setBlsSignatureChecker failed — is the key the contract owner?" | tee -a "$LOG_FILE"
+                  exit 1
+                fi
+                echo "[BRIDGE] YieldDistributor updated" | tee -a "$LOG_FILE"
+              else
+                echo "[BRIDGE] YIELD_DISTRIBUTOR_ADDRESS not set, skipping YieldDistributor update" | tee -a "$LOG_FILE"
+              fi
+
               # Write completion marker
               touch /app/.nodes/.bridge_complete
               chmod 644 /app/.nodes/.bridge_complete
@@ -200,6 +239,17 @@ spec:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: L2_HTTP_RPC
             {{- end }}
+            {{- end }}
+            {{- if .Values.yieldDistribution.contractAddress }}
+            - name: YIELD_DISTRIBUTOR_ADDRESS
+              value: {{ .Values.yieldDistribution.contractAddress | quote }}
+            {{- end }}
+            {{- if .Values.secrets.yieldDistributorOwnerKey }}
+            - name: YIELD_DISTRIBUTOR_OWNER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: YIELD_DISTRIBUTOR_OWNER_KEY
             {{- end }}
           volumeMounts:
             - name: shared-data
