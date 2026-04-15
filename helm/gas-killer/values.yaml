@@ -53,6 +53,18 @@ secretManager:
   # Override to use a newer version: --set secretManager.cloudSdkImage=google/cloud-sdk:500.0.0-slim
   cloudSdkImage: "google/cloud-sdk:496.0.0-slim"
 
+# Manual retry flags for one-time hook jobs.
+# On helm install these jobs run automatically. On helm upgrade they are suppressed
+# unless you explicitly opt in — preventing unrelated upgrades from re-triggering
+# long-running operations.
+#
+# Usage:
+#   helm upgrade gas-killer ./helm/gas-killer --set rerun.bridge=true
+rerun:
+  setup: false
+  bridge: false
+  keyExport: false
+
 # Secrets configuration
 # All sensitive values should be provided via --set or existingSecret
 secrets:
