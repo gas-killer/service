@@ -57,7 +57,7 @@ spec:
             - |
               set -euo pipefail
 
-              PROJECT="{{ .Values.secretManager.projectId }}"
+              PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" .Values.secretManager.projectId }}"
               PREFIX="{{ .Values.secretManager.keyPrefix }}"
 
               # Export a file to GCP Secret Manager, creating the secret if needed and always

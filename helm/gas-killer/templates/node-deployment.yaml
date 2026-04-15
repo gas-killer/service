@@ -45,7 +45,7 @@ spec:
             - -c
             - |
               set -euo pipefail
-              PROJECT="{{ $root.Values.secretManager.projectId }}"
+              PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" $root.Values.secretManager.projectId }}"
               PREFIX="{{ $root.Values.secretManager.keyPrefix }}"
 
               echo "Fetching BLS key for node {{ $nodeIndex }}..."
