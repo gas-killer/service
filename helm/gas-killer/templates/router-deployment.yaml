@@ -38,13 +38,24 @@ spec:
               set -euo pipefail
               PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" .Values.secretManager.projectId }}"
               PREFIX="{{ .Values.secretManager.keyPrefix }}"
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
 
-              echo "Fetching avs_deploy.json..."
-              gcloud secrets versions access latest \
+              # Retry until the secret exists — on a fresh install the key-export hook
+              # job may still be running when this init container starts.
+              echo "Fetching avs_deploy.json (timeout: ${TIMEOUT}s)..."
+              until gcloud secrets versions access latest \
                 --secret="${PREFIX}-avs-deploy" \
                 --project="$PROJECT" \
-                > /app/secrets/avs_deploy.json
-
+                > /app/secrets/avs_deploy.json 2>/dev/null; do
+                if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+                  echo "ERROR: Timeout waiting for secret ${PREFIX}-avs-deploy after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Secret ${PREFIX}-avs-deploy not available yet, retrying... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
               echo "avs_deploy.json fetched successfully"
           volumeMounts:
             - name: router-secrets

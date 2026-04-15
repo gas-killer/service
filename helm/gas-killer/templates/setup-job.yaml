@@ -49,8 +49,6 @@ spec:
 
       containers:
         # Run EigenLayer setup (creates operator keys and avs_deploy.json)
-        # Note: The eigenlayer container may exit with non-zero code even on success,
-        # so we wrap it to check if files were created and exit 0 if so
         - name: eigenlayer-setup
           image: "{{ .Values.eigenlayer.image.repository }}:{{ .Values.eigenlayer.image.tag }}"
           imagePullPolicy: {{ .Values.eigenlayer.image.pullPolicy }}
