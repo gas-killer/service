@@ -47,8 +47,26 @@ secretManager:
   # GCP Service Account email for Workload Identity. Copy from terraform output:
   #   terraform output gcp_service_account_email
   gcpServiceAccount: ""
-  # Must match terraform var kubernetes_service_account_name (default: "gas-killer")
-  serviceAccountName: "gas-killer"
+  # Kubernetes ServiceAccount name. Defaults to <release>-sa (e.g. "gas-killer-sa").
+  # Must match terraform var kubernetes_service_account_name.
+  # Override if your release name differs from what Terraform expects:
+  #   --set secretManager.serviceAccountName=my-release-sa
+  serviceAccountName: ""
+  # Pinned Google Cloud SDK image used by key-export, fetch-secrets, and fetch-avs-deploy containers.
+  # Override to use a newer version: --set secretManager.cloudSdkImage=google/cloud-sdk:500.0.0-slim
+  cloudSdkImage: "google/cloud-sdk:496.0.0-slim"
+
+# Manual retry flags for one-time hook jobs.
+# On helm install these jobs run automatically. On helm upgrade they are suppressed
+# unless you explicitly opt in — preventing unrelated upgrades from re-triggering
+# long-running operations.
+#
+# Usage:
+#   helm upgrade gas-killer ./helm/gas-killer --set rerun.bridge=true
+rerun:
+  setup: false
+  bridge: false
+  keyExport: false
 
 # Secrets configuration
 # All sensitive values should be provided via --set or existingSecret

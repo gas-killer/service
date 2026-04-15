@@ -1,6 +1,6 @@
 {{- /* Setup job runs in both LOCAL and TESTNET modes */ -}}
 {{- $runSetup := or (and .Values.secrets.forkUrl (eq .Values.global.environment "LOCAL")) (and .Values.secrets.httpRpc (eq .Values.global.environment "TESTNET")) -}}
-{{- if $runSetup }}
+{{- if and $runSetup (or .Release.IsInstall .Values.rerun.setup) }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -9,7 +9,7 @@ metadata:
     {{- include "gas-killer.labels" . | nindent 4 }}
     app.kubernetes.io/component: setup
   annotations:
-    # Only run on fresh install, not on upgrades (to preserve existing deployment state)
+    # Runs automatically on helm install. On helm upgrade, only fires when rerun.setup=true.
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation
@@ -49,8 +49,6 @@ spec:
 
       containers:
         # Run EigenLayer setup (creates operator keys and avs_deploy.json)
-        # Note: The eigenlayer container may exit with non-zero code even on success,
-        # so we wrap it to check if files were created and exit 0 if so
         - name: eigenlayer-setup
           image: "{{ .Values.eigenlayer.image.repository }}:{{ .Values.eigenlayer.image.tag }}"
           imagePullPolicy: {{ .Values.eigenlayer.image.pullPolicy }}
