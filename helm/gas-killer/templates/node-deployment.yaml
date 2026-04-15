@@ -39,7 +39,7 @@ spec:
         # Fetch BLS key and avs_deploy.json from GCP Secret Manager.
         # Workload Identity provides authentication — no static credentials needed.
         - name: fetch-secrets
-          image: google/cloud-sdk:slim
+          image: {{ $root.Values.secretManager.cloudSdkImage | quote }}
           command:
             - bash
             - -c

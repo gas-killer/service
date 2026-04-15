@@ -49,6 +49,9 @@ secretManager:
   gcpServiceAccount: ""
   # Must match terraform var kubernetes_service_account_name (default: "gas-killer")
   serviceAccountName: "gas-killer"
+  # Pinned Google Cloud SDK image used by key-export, fetch-secrets, and fetch-avs-deploy containers.
+  # Override to use a newer version: --set secretManager.cloudSdkImage=google/cloud-sdk:500.0.0-slim
+  cloudSdkImage: "google/cloud-sdk:496.0.0-slim"
 
 # Secrets configuration
 # All sensitive values should be provided via --set or existingSecret

@@ -51,7 +51,7 @@ spec:
 
       containers:
         - name: export-keys
-          image: google/cloud-sdk:slim
+          image: {{ .Values.secretManager.cloudSdkImage | quote }}
           command:
             - bash
             - -c

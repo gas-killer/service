@@ -30,7 +30,7 @@ spec:
         # Fetch avs_deploy.json from GCP Secret Manager.
         # Workload Identity provides authentication — no static credentials needed.
         - name: fetch-avs-deploy
-          image: google/cloud-sdk:slim
+          image: {{ .Values.secretManager.cloudSdkImage | quote }}
           command:
             - bash
             - -c
