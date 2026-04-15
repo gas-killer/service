@@ -177,6 +177,10 @@ router:
     pullPolicy: IfNotPresent
   port: 3000
   ingressPort: 8080
+  # Bind host for the task-ingress HTTP server.
+  # 0.0.0.0 (all interfaces) is required in Kubernetes so the pod can receive
+  # traffic from the Service. Override to 127.0.0.1 for local-only access.
+  ingressBindHost: "0.0.0.0"
   # Port for the router's /healthz and /readyz HTTP endpoints (used by Kubernetes probes)
   healthzPort: 8081
   # How long Kubernetes waits for a router to finish in-flight work after SIGTERM.
@@ -341,6 +345,7 @@ alloy:
 # =============================================================================
 # Kubernetes Ingress for external access (optional)
 # =============================================================================
+# See helm/gas-killer/README.md for TLS / cert-manager setup instructions.
 ingress:
   enabled: false
   className: ""
