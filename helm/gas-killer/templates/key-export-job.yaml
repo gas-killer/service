@@ -21,7 +21,7 @@ spec:
         app.kubernetes.io/component: key-export
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: {{ include "gas-killer.serviceaccount.fullname" . }}
+      serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" .) .Values.secretManager.serviceAccountName }}
       initContainers:
         # Wait for the setup job to finish generating BLS keys before exporting them
         - name: wait-for-setup
