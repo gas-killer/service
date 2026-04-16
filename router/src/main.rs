@@ -1,7 +1,9 @@
 use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
 use ark_serialize::CanonicalDeserialize;
-use axum::{Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get};
+use axum::{
+    Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
+};
 use clap::{Arg, Command, value_parser};
 use commonware_avs_core::bn254::{PublicKey, get_signer};
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
@@ -52,7 +54,10 @@ async fn readyz_handler(State(s): State<HealthState>) -> StatusCode {
 /// Prometheus metrics endpoint — encodes commonware runtime metrics in text format.
 async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         s.context.encode(),
     )
 }
