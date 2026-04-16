@@ -361,6 +361,113 @@ alloy:
       create: false
 
 # =============================================================================
+# Monitoring — kube-prometheus-stack (Prometheus Operator, Grafana, AlertManager)
+# =============================================================================
+# Enable with: --set monitoring.enabled=true
+#
+# Usage:
+#   helm dependency update ./helm/gas-killer
+#   helm upgrade --install gas-killer ./helm/gas-killer \
+#     --set monitoring.enabled=true \
+#     --set kube-prometheus-stack.grafana.adminPassword=<password>
+#
+# Grafana will be reachable inside the cluster at:
+#   http://{{ .Release.Name }}-grafana
+#
+# For external access, enable the Grafana ingress:
+#   --set monitoring.grafana.ingress.enabled=true \
+#   --set monitoring.grafana.ingress.host=grafana-testnet.gaskiller.xyz
+#
+monitoring:
+  enabled: false
+
+  grafana:
+    ingress:
+      enabled: false
+      className: ""
+      annotations: {}
+      host: grafana-testnet.gaskiller.xyz
+      tls: []
+
+  # Per-component scrape toggles
+  serviceMonitor:
+    router:
+      enabled: true
+      interval: 15s
+    node:
+      enabled: true
+      interval: 15s
+    signer:
+      enabled: true
+      interval: 15s
+
+kube-prometheus-stack:
+  prometheus:
+    prometheusSpec:
+      # Match all ServiceMonitors in the namespace, not only ones created by this chart
+      serviceMonitorSelector: {}
+      serviceMonitorNamespaceSelector: {}
+      retention: 7d
+      resources:
+        requests:
+          memory: 512Mi
+          cpu: 200m
+        limits:
+          memory: 1Gi
+          cpu: 500m
+
+  grafana:
+    # nameOverride keeps the service name predictable: {release}-grafana
+    nameOverride: grafana
+    adminPassword: changeme
+    resources:
+      requests:
+        memory: 128Mi
+        cpu: 100m
+      limits:
+        memory: 256Mi
+        cpu: 200m
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+
+  alertmanager:
+    alertmanagerSpec:
+      resources:
+        requests:
+          memory: 64Mi
+          cpu: 10m
+        limits:
+          memory: 128Mi
+          cpu: 50m
+
+  # kube-state-metrics and node-exporter give us pod/node resource signals
+  kubeStateMetrics:
+    enabled: true
+  nodeExporter:
+    enabled: true
+
+  # Disable k8s control-plane exporters — not accessible on GKE
+  kubelet:
+    enabled: false
+  kubeApiServer:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeProxy:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+
+  # We define our own alerting rules
+  defaultRules:
+    create: false
+
+# =============================================================================
 # Kubernetes Ingress for external access (optional)
 # =============================================================================
 # See helm/gas-killer/README.md for TLS / cert-manager setup instructions.

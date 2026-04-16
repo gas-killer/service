@@ -1,0 +1,168 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gas-killer.fullname" . }}-dashboard
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  gas-killer.json: |-
+    {
+      "title": "Gas Killer",
+      "uid": "gas-killer",
+      "schemaVersion": 38,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "constant",
+            "query": "{{ .Release.Namespace }}"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "text",
+          "title": "Node Health",
+          "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+          "options": { "mode": "markdown", "content": "## Node Health" }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Router Up",
+          "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
+          "targets": [{
+            "expr": "up{job=~\".*gas-killer.*router.*\"}",
+            "legendFormat": "router"
+          }],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+              ]
+            }
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Nodes Up",
+          "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
+          "targets": [{
+            "expr": "count(up{job=~\".*gas-killer.*nodes.*\"} == 1)",
+            "legendFormat": "up"
+          }],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Pod Restarts (1h)",
+          "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
+          "targets": [{
+            "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"{{ .Release.Namespace }}\", pod=~\"{{ include "gas-killer.fullname" . }}-.*\"}[1h]))",
+            "legendFormat": "restarts"
+          }],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "background",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": 0 },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red", "value": 3 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 10,
+          "type": "text",
+          "title": "Resource Usage",
+          "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 },
+          "options": { "mode": "markdown", "content": "## Resource Usage" }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "CPU Usage",
+          "gridPos": { "x": 0, "y": 6, "w": 12, "h": 8 },
+          "targets": [{
+            "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"{{ .Release.Namespace }}\", pod=~\"{{ include "gas-killer.fullname" . }}-.*\", container!=\"\"}[2m]))",
+            "legendFormat": "{{ "{{" }} pod {{ "}}" }}"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": { "lineWidth": 1 }
+            }
+          }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Memory Usage",
+          "gridPos": { "x": 12, "y": 6, "w": 12, "h": 8 },
+          "targets": [{
+            "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"{{ .Release.Namespace }}\", pod=~\"{{ include "gas-killer.fullname" . }}-.*\", container!=\"\"})",
+            "legendFormat": "{{ "{{" }} pod {{ "}}" }}"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": { "lineWidth": 1 }
+            }
+          }
+        },
+        {
+          "id": 20,
+          "type": "text",
+          "title": "Aggregation (instrumentation pending)",
+          "gridPos": { "x": 0, "y": 14, "w": 24, "h": 1 },
+          "options": { "mode": "markdown", "content": "## Aggregation — requires custom metric instrumentation in executor/creator code paths" }
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "Aggregation Rounds (pending instrumentation)",
+          "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
+          "targets": [{
+            "expr": "rate(gas_killer_aggregation_rounds_total[2m])",
+            "legendFormat": "rounds/s"
+          }]
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Ingress Request Rate (pending instrumentation)",
+          "gridPos": { "x": 12, "y": 15, "w": 12, "h": 8 },
+          "targets": [{
+            "expr": "rate(gas_killer_ingress_requests_total[2m])",
+            "legendFormat": "{{ "{{" }} status {{ "}}" }}"
+          }]
+        }
+      ]
+    }
+{{- end }}

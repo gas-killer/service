@@ -1,0 +1,60 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "gas-killer.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: gas-killer.availability
+      interval: 30s
+      rules:
+        - alert: GasKillerNodeDown
+          expr: up{job=~".*gas-killer.*nodes.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Gas Killer node {{ "{{" }} $labels.pod {{ "}}" }} is down"
+            description: "Node {{ "{{" }} $labels.pod {{ "}}" }} has been unreachable for more than 2 minutes."
+
+        - alert: GasKillerRouterDown
+          expr: up{job=~".*gas-killer.*router.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Gas Killer router is down"
+            description: "The router has been unreachable for more than 2 minutes."
+
+    - name: gas-killer.resources
+      interval: 60s
+      rules:
+        - alert: GasKillerHighMemory
+          expr: |
+            (
+              container_memory_working_set_bytes{namespace="{{ .Release.Namespace }}", container!=""}
+              / on(pod, container)
+              container_spec_memory_limit_bytes{namespace="{{ .Release.Namespace }}", container!=""}
+            ) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ "{{" }} $labels.pod {{ "}}" }}/{{ "{{" }} $labels.container {{ "}}" }} memory above 85%"
+            description: "Memory usage has been above 85% of the limit for 5 minutes."
+
+        - alert: GasKillerPodCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{
+              namespace="{{ .Release.Namespace }}",
+              pod=~"{{ include "gas-killer.fullname" . }}-.*"
+            }[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ "{{" }} $labels.pod {{ "}}" }} is crash-looping"
+            description: "Pod has restarted at least once in the last 15 minutes."
+{{- end }}

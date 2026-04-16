@@ -1,0 +1,21 @@
+monitoring:
+  enabled: true
+  grafana:
+    ingress:
+      enabled: true
+      className: nginx
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+        nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      host: grafana-testnet.gaskiller.xyz
+      tls:
+        - hosts:
+            - grafana-testnet.gaskiller.xyz
+          secretName: grafana-tls
+
+kube-prometheus-stack:
+  grafana:
+    # Set via --set kube-prometheus-stack.grafana.adminPassword=<password>
+    # or via a pre-existing secret:
+    #   adminPasswordSecret: grafana-admin-secret
+    adminPassword: ""

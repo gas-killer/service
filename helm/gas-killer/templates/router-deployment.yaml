@@ -329,6 +329,10 @@ spec:
       targetPort: ingress
       protocol: TCP
       name: ingress
+    - port: {{ .Values.router.healthzPort }}
+      targetPort: healthz
+      protocol: TCP
+      name: metrics
   selector:
     {{- include "gas-killer.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: router
