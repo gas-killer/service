@@ -220,13 +220,13 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
                 return Ok(task);
             }
             attempts += 1;
-            if let Some(max) = max_attempts {
-                if attempts >= max {
-                    return Err(anyhow::anyhow!(
-                        "Timeout waiting for task after {}ms",
-                        self.config.timeout_ms
-                    ));
-                }
+            if let Some(max) = max_attempts
+                && attempts >= max
+            {
+                return Err(anyhow::anyhow!(
+                    "Timeout waiting for task after {}ms",
+                    self.config.timeout_ms
+                ));
             }
             sleep(Duration::from_millis(self.config.polling_interval_ms)).await;
         }
