@@ -228,10 +228,17 @@ spec:
             - name: WS_RPC
               value: "ws://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
             {{- end }}
-            {{- if and (eq .Values.global.environment "LOCAL") .Values.l2.enabled }}
-            # LOCAL mode: L2 RPC for cross-chain execution (yield distribution) via Anvil fork
+            {{- if .Values.l2.enabled }}
+            {{- if eq .Values.global.environment "LOCAL" }}
             - name: L2_HTTP_RPC
               value: "http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
+            {{- else if eq .Values.global.environment "TESTNET" }}
+            - name: L2_HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: L2_HTTP_RPC
+            {{- end }}
             {{- end }}
             - name: AVS_DEPLOYMENT_PATH
               {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}

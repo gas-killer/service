@@ -240,7 +240,7 @@ helm upgrade --install gas-killer ./helm/gas-killer \
   --set secrets.privateKey=0x... \
   --set secrets.fundedKey=0x... \
   --set secrets.httpRpc=https://... \
-  --set l2.httpRpc=https://... \
+  --set secrets.l2HttpRpc=https://... \
   --set router.image.tag=router-<sha> \
   --set node.image.tag=node-<sha> \
   --set kube-prometheus-stack.grafana.adminPassword=<password>
