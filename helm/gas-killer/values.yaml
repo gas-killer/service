@@ -215,9 +215,9 @@ router:
   aggregationFrequency: "90"
   ingress:
     enabled: true
-    # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation (3e+06)
-    # which Rust's u64 parser cannot handle
-    timeoutMs: "3000000"  # 50 minutes
+    # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation.
+    # "0" means no timeout — router waits indefinitely for an incoming task.
+    timeoutMs: "0"
   service:
     type: ClusterIP
     port: 3000

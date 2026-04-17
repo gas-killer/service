@@ -28,3 +28,7 @@ monitoring:
     ingress:
       enabled: true
       host: grafana-testnet.gaskiller.xyz
+
+router:
+  ingress:
+    timeoutMs: "0"

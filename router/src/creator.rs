@@ -136,7 +136,7 @@ impl Default for GasKillerConfig {
         let timeout_ms: u64 = env::var("INGRESS_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(30_000);
+            .unwrap_or(0);
 
         Self {
             polling_interval_ms: 100,
@@ -208,22 +208,28 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
 
     async fn wait_for_task(&self) -> Result<GasKillerTaskRequest> {
         use tokio::time::{Duration, sleep};
-        let mut attempts = 0;
-        let max_attempts = self.config.timeout_ms / self.config.polling_interval_ms;
+        // timeout_ms == 0 means wait indefinitely
+        let max_attempts = if self.config.timeout_ms == 0 {
+            None
+        } else {
+            Some(self.config.timeout_ms / self.config.polling_interval_ms)
+        };
+        let mut attempts = 0u64;
         loop {
             if let Some(task) = self.queue.pop() {
                 return Ok(task);
             }
             attempts += 1;
-            if attempts >= max_attempts {
-                break;
+            if let Some(max) = max_attempts {
+                if attempts >= max {
+                    return Err(anyhow::anyhow!(
+                        "Timeout waiting for task after {}ms",
+                        self.config.timeout_ms
+                    ));
+                }
             }
             sleep(Duration::from_millis(self.config.polling_interval_ms)).await;
         }
-        Err(anyhow::anyhow!(
-            "Timeout waiting for task after {}ms",
-            self.config.timeout_ms
-        ))
     }
 }
 
