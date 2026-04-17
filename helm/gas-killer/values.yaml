@@ -384,10 +384,14 @@ monitoring:
   grafana:
     ingress:
       enabled: false
-      className: ""
-      annotations: {}
-      host: grafana-testnet.gaskiller.xyz
-      tls: []
+      # Required when enabled — the public hostname for the Grafana UI.
+      host: ""
+      className: nginx
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+        nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      # Secret name for TLS certificate. Leave empty to disable TLS.
+      tlsSecretName: grafana-tls
 
   # Per-component scrape toggles
   serviceMonitor:

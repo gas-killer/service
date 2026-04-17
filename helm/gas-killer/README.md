@@ -169,21 +169,25 @@ kubectl get svc ingress-nginx-controller \
 
 ### Deploy with TLS
 
-Enable ingress and pass your hostname at install/upgrade time:
+Enable ingress and pass your hostnames at install/upgrade time:
 
 ```bash
 helm upgrade --install gas-killer ./helm/gas-killer \
   --set ingress.enabled=true \
   --set ingress.host=testnet.gaskiller.xyz \
+  --set monitoring.grafana.ingress.enabled=true \
+  --set monitoring.grafana.ingress.host=grafana-testnet.gaskiller.xyz \
+  --set kube-prometheus-stack.grafana.adminPassword="..." \
   --set secrets.privateKey="0x..." \
   ...
 ```
 
-The chart defaults to `nginx` as the ingress class, cert-manager's `letsencrypt-prod`
-cluster issuer, and `gaskiller-tls` as the TLS secret name. Override any of these with
-`--set ingress.className=...`, `--set ingress.tlsSecretName=...`, etc.
+Both ingresses default to `nginx` as the ingress class, cert-manager's `letsencrypt-prod`
+cluster issuer, and `gaskiller-tls` / `grafana-tls` as their TLS secret names respectively.
+Override any of these with `--set ingress.tlsSecretName=...`,
+`--set monitoring.grafana.ingress.tlsSecretName=...`, etc.
 
-cert-manager will automatically provision the TLS certificate. The nginx-ingress
+cert-manager will automatically provision the TLS certificates. The nginx-ingress
 controller handles HTTP → HTTPS redirects automatically.
 
 ## Troubleshooting
