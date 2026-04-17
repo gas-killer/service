@@ -356,7 +356,7 @@ pub enum GasKillerCreatorType {
     /// Basic gas killer creator without ingress
     Basic(GasKillerCreator),
     /// Listening gas killer creator with HTTP ingress
-    Listening(ListeningGasKillerCreator<GasKillerTaskQueue>),
+    Listening(Box<ListeningGasKillerCreator<GasKillerTaskQueue>>),
 }
 
 #[async_trait]

@@ -63,7 +63,7 @@ pub async fn create_listening_creator_with_server(
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });
-    Ok(GasKillerCreatorType::Listening(creator))
+    Ok(GasKillerCreatorType::Listening(Box::new(creator)))
 }
 
 /// Creates a wallet provider for a specific chain using SimpleNonceManager.

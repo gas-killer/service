@@ -48,7 +48,7 @@ impl MetricsCollector {
         );
 
         let storage_computation_seconds =
-            Histogram::new([0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0, 300.0].into_iter());
+            Histogram::new([0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0, 300.0]);
         registry.register(
             "gas_killer_storage_computation_seconds",
             "EVM storage-update computation duration in seconds",
@@ -70,7 +70,7 @@ impl MetricsCollector {
         );
 
         let execution_duration_seconds =
-            Histogram::new([1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0].into_iter());
+            Histogram::new([1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]);
         registry.register(
             "gas_killer_execution_duration_seconds",
             "Duration of handle_verification including all contract calls and tx submission",
