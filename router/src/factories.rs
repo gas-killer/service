@@ -3,7 +3,8 @@ use crate::creator::{
     GasKillerConfig, GasKillerCreator, GasKillerCreatorType, ListeningGasKillerCreator,
     SimpleTaskQueue,
 };
-use crate::ingress::start_gas_killer_http_server;
+use crate::ingress::{IngressState, start_gas_killer_http_server};
+use crate::metrics::MetricsCollector;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_provider::{
     Identity, ProviderBuilder, RootProvider,
@@ -52,14 +53,15 @@ pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
 pub async fn create_listening_creator_with_server(
     addr: String,
     validator: Arc<GasKillerValidator>,
+    metrics: Arc<MetricsCollector>,
 ) -> anyhow::Result<GasKillerCreatorType> {
     let queue = SimpleTaskQueue::new();
     let config = GasKillerConfig::default();
-    let creator = ListeningGasKillerCreator::new(queue.clone(), config, validator);
-    // Wrap the queue in Arc for the HTTP server
-    let queue_for_server = Arc::new(queue);
+    let creator = ListeningGasKillerCreator::new(queue.clone(), config, validator)
+        .with_metrics(Arc::clone(&metrics));
+    let ingress_state = IngressState::new(Arc::new(queue), metrics);
     tokio::spawn(async move {
-        start_gas_killer_http_server(queue_for_server, &addr).await;
+        start_gas_killer_http_server(ingress_state, &addr).await;
     });
     Ok(GasKillerCreatorType::Listening(creator))
 }
@@ -111,8 +113,9 @@ async fn create_wallet_provider_for_chain(
 ///
 /// `L2_HTTP_RPC` is used exclusively for the write side: submitting `verifyAndUpdate`
 /// transactions on L2 when the target contract lives there.
-pub async fn create_gas_killer_executor()
--> Result<BlsEigenlayerExecutor<GasKillerHandler<SimpleWalletProvider>>> {
+pub async fn create_gas_killer_executor(
+    metrics: Arc<MetricsCollector>,
+) -> Result<BlsEigenlayerExecutor<GasKillerHandler<SimpleWalletProvider>>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
@@ -174,7 +177,7 @@ pub async fn create_gas_killer_executor()
     );
 
     // Create handler with multi-chain providers
-    let gas_killer_handler = GasKillerHandler::with_providers(providers);
+    let gas_killer_handler = GasKillerHandler::with_providers(providers).with_metrics(metrics);
 
     Ok(BlsEigenlayerExecutor::new(
         view_only_provider,

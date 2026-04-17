@@ -1,0 +1,17 @@
+# Stable testnet configuration. Pass on every testnet upgrade.
+#
+# Usage:
+#   helm upgrade --install gas-killer ./helm/gas-killer \
+#     -f helm/gas-killer/testnet-overrides.yaml \
+#     --set secrets.privateKey=0x... \
+#     --set secrets.fundedKey=0x... \
+#     --set secrets.httpRpc=https://... \
+#     --set l2.httpRpc=https://... \
+#     --set router.image.tag=router-<sha> \
+#     --set node.image.tag=node-<sha>
+
+global:
+  environment: TESTNET
+
+imagePullSecrets:
+  - name: ghcr-pull-secret

@@ -463,6 +463,12 @@ kube-prometheus-stack:
   kubeEtcd:
     enabled: false
 
+  prometheusOperator:
+    admissionWebhooks:
+      enabled: false
+    tls:
+      enabled: false
+
   # We define our own alerting rules
   defaultRules:
     create: false

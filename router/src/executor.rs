@@ -1,3 +1,4 @@
+use crate::metrics::MetricsCollector;
 use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
 use gas_killer_common::ChainId;
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever::getNonSignerStakesAndSignatureReturn;
@@ -10,12 +11,15 @@ use alloy_provider::Provider;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
 pub struct GasKillerHandler<P> {
     /// Wallet providers keyed by chain ID
     providers: HashMap<ChainId, P>,
+    metrics: Option<Arc<MetricsCollector>>,
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
@@ -23,12 +27,23 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     pub fn new(provider: P) -> Self {
         let mut providers = HashMap::new();
         providers.insert(ChainId::L1, provider);
-        Self { providers }
+        Self {
+            providers,
+            metrics: None,
+        }
     }
 
     /// Creates a new handler with providers for multiple chains
     pub fn with_providers(providers: HashMap<ChainId, P>) -> Self {
-        Self { providers }
+        Self {
+            providers,
+            metrics: None,
+        }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<MetricsCollector>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Adds a provider for a specific chain
@@ -60,20 +75,14 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         })
         .await
     }
-}
 
-#[async_trait]
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerificationHandler
-    for GasKillerHandler<P>
-{
-    type TaskData = GasKillerTaskData;
-    async fn handle_verification(
+    async fn execute_verification(
         &mut self,
         msg_hash: FixedBytes<32>,
         quorum_numbers: Bytes,
         current_block_number: u32,
         non_signer_data: getNonSignerStakesAndSignatureReturn,
-        task_data: Option<&Self::TaskData>,
+        task_data: Option<&GasKillerTaskData>,
     ) -> Result<ExecutionResult> {
         // Unwrap the return type to get the actual data
         let data = non_signer_data._0;
@@ -230,5 +239,48 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
             status: Some(receipt.status()),
             contract_address: receipt.contract_address.map(|addr| format!("{:?}", addr)),
         })
+    }
+}
+
+#[async_trait]
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerificationHandler
+    for GasKillerHandler<P>
+{
+    type TaskData = GasKillerTaskData;
+
+    async fn handle_verification(
+        &mut self,
+        msg_hash: FixedBytes<32>,
+        quorum_numbers: Bytes,
+        current_block_number: u32,
+        non_signer_data: getNonSignerStakesAndSignatureReturn,
+        task_data: Option<&Self::TaskData>,
+    ) -> Result<ExecutionResult> {
+        let exec_start = Instant::now();
+
+        let result = self
+            .execute_verification(
+                msg_hash,
+                quorum_numbers,
+                current_block_number,
+                non_signer_data,
+                task_data,
+            )
+            .await;
+
+        if let Some(m) = &self.metrics {
+            m.execution_duration_seconds
+                .observe(exec_start.elapsed().as_secs_f64());
+            match &result {
+                Ok(_) => {
+                    m.aggregation_rounds_completed.inc();
+                }
+                Err(_) => {
+                    m.aggregation_rounds_failed.inc();
+                }
+            }
+        }
+
+        result
     }
 }

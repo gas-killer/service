@@ -183,6 +183,89 @@ helm upgrade --install gas-killer ./helm/gas-killer \
 cert-manager will automatically provision the TLS certificate. The nginx-ingress
 controller handles HTTP → HTTPS redirects automatically when `ssl-redirect` is set.
 
+## Monitoring (Prometheus + Grafana)
+
+Metrics are exposed at `/metrics` on port 8081 of the router and node pods. The monitoring stack
+(Prometheus Operator, Grafana, AlertManager) is deployed as a subchart and is off by default.
+
+### One-time cluster setup
+
+The Prometheus Operator CRDs must exist in the cluster before the chart can create
+`ServiceMonitor`, `Prometheus`, `Alertmanager`, and `PrometheusRule` resources. This only needs
+to be done once per cluster.
+
+**1. Fetch chart dependencies** (if not already done):
+```bash
+helm dependency update ./helm/gas-killer
+```
+
+**2. Install Prometheus Operator CRDs:**
+```bash
+helm show crds helm/gas-killer/charts/kube-prometheus-stack-*.tgz | kubectl apply --server-side -f -
+```
+
+**3. Wait for CRDs to be registered** before running the helm upgrade:
+```bash
+kubectl wait --for=condition=Established \
+  crd/prometheuses.monitoring.coreos.com \
+  crd/servicemonitors.monitoring.coreos.com \
+  crd/prometheusrules.monitoring.coreos.com \
+  crd/alertmanagers.monitoring.coreos.com \
+  --timeout=30s
+```
+
+**4. Create a DNS A-record** pointing `grafana-testnet.gaskiller.xyz` at the nginx-ingress
+LoadBalancer IP (same IP used for the router ingress):
+```bash
+kubectl get svc ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+```
+
+### Deploy with monitoring enabled
+
+An example override file is provided at `helm/gas-killer/testnet-monitoring-overrides.yaml`.
+
+```bash
+helm upgrade --install gas-killer ./helm/gas-killer \
+  -f helm/gas-killer/testnet-overrides.yaml \
+  -f helm/gas-killer/testnet-ingress-overrides.yaml \
+  -f helm/gas-killer/testnet-monitoring-overrides.yaml \
+  --set secrets.privateKey=0x... \
+  --set secrets.fundedKey=0x... \
+  --set secrets.httpRpc=https://... \
+  --set l2.httpRpc=https://... \
+  --set router.image.tag=router-<sha> \
+  --set node.image.tag=node-<sha> \
+  --set kube-prometheus-stack.grafana.adminPassword=<password>
+```
+
+### Accessing Grafana
+
+Once deployed, Grafana is available at `https://grafana-testnet.gaskiller.xyz` (if the ingress
+is enabled and DNS is configured), or via port-forward:
+
+```bash
+kubectl port-forward svc/gas-killer-grafana 3000:80
+```
+
+Then open `http://localhost:3000` and log in with username `admin` and the password you set.
+
+The **Gas Killer** dashboard is pre-loaded automatically via the Grafana sidecar. It includes:
+- Router and node up/down status
+- Pod restart counts
+- CPU and memory usage per pod
+- Placeholder panels for aggregation and ingress metrics (populated once custom metrics are instrumented)
+
+### Verifying scrape targets
+
+Port-forward the Prometheus UI and check that all targets show as `UP`:
+
+```bash
+kubectl port-forward svc/gas-killer-kube-prometheus-prometheus 9090:9090
+```
+
+Then open `http://localhost:9090/targets`.
+
 ## Troubleshooting
 
 ### Pods stuck in Init state

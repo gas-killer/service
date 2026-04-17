@@ -1,6 +1,7 @@
 use crate::factories::{
     create_creator, create_gas_killer_executor, create_listening_creator_with_server,
 };
+use crate::metrics::MetricsCollector;
 use crate::{GasKillerCreatorType, GasKillerOrchestrator, GasKillerValidator};
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
 
@@ -28,6 +29,7 @@ impl GasKillerOrchestratorBuilder {
     /// * `Result<GasKillerOrchestrator<C>>` - The constructed gas killer orchestrator
     pub async fn build<C: Clock>(
         builder: OrchestratorBuilder<C>,
+        metrics: Arc<MetricsCollector>,
     ) -> Result<GasKillerOrchestrator<C>, Box<dyn std::error::Error>> {
         // Create shared validator first - used by both creator and orchestrator
         let validator = Arc::new(GasKillerValidator::new()?);
@@ -38,13 +40,14 @@ impl GasKillerOrchestratorBuilder {
             let addr =
                 std::env::var("INGRESS_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
             info!(address = %addr, "Using GasKiller creator with HTTP server");
-            create_listening_creator_with_server(addr, Arc::clone(&validator)).await?
+            create_listening_creator_with_server(addr, Arc::clone(&validator), Arc::clone(&metrics))
+                .await?
         } else {
             info!("Using GasKiller creator without ingress");
             create_creator().await?
         };
 
-        let executor = create_gas_killer_executor().await?;
+        let executor = create_gas_killer_executor(metrics).await?;
 
         // Unwrap the Arc to get the validator for the orchestrator
         // This is safe because we control all references
