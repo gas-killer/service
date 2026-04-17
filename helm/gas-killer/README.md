@@ -120,6 +120,72 @@ Components start in a specific order enforced by init containers:
 4. Nodes wait for setup completion and Ethereum availability
 5. Router waits for setup, Ethereum, and all nodes
 
+## HTTPS / TLS Ingress
+
+To expose the router ingress over HTTPS on a public domain, use the nginx-ingress
+controller with cert-manager for automated Let's Encrypt certificates.
+
+### One-time cluster setup
+
+**1. Install nginx-ingress:**
+```bash
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm install ingress-nginx ingress-nginx/ingress-nginx
+```
+
+**2. Install cert-manager:**
+```bash
+helm repo add jetstack https://charts.jetstack.io
+helm install cert-manager jetstack/cert-manager --set crds.enabled=true
+```
+
+**3. Create a Let's Encrypt ClusterIssuer** (substitute your email):
+```bash
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: dev@gaskiller.xyz
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+EOF
+```
+
+**4. Get the LoadBalancer IP** assigned to the nginx-ingress controller:
+```bash
+kubectl get svc ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+```
+
+**5. Create a DNS A-record** pointing your domain at that IP.
+
+### Deploy with TLS
+
+Enable ingress and pass your hostname at install/upgrade time:
+
+```bash
+helm upgrade --install gas-killer ./helm/gas-killer \
+  --set ingress.enabled=true \
+  --set ingress.host=testnet.gaskiller.xyz \
+  --set secrets.privateKey="0x..." \
+  ...
+```
+
+The chart defaults to `nginx` as the ingress class, cert-manager's `letsencrypt-prod`
+cluster issuer, and `gaskiller-tls` as the TLS secret name. Override any of these with
+`--set ingress.className=...`, `--set ingress.tlsSecretName=...`, etc.
+
+cert-manager will automatically provision the TLS certificate. The nginx-ingress
+controller handles HTTP → HTTPS redirects automatically.
+
 ## Troubleshooting
 
 ### Pods stuck in Init state
