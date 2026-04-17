@@ -169,19 +169,22 @@ kubectl get svc ingress-nginx-controller \
 
 ### Deploy with TLS
 
-An example override file is provided at `helm/gas-killer/testnet-ingress-overrides.yaml`.
-Copy and adapt it for your environment (update the host and `secretName` to match your domain),
-then pass it at install/upgrade time:
+Enable ingress and pass your hostname at install/upgrade time:
 
 ```bash
 helm upgrade --install gas-killer ./helm/gas-killer \
-  -f helm/gas-killer/testnet-ingress-overrides.yaml \
+  --set ingress.enabled=true \
+  --set ingress.host=testnet.gaskiller.xyz \
   --set secrets.privateKey="0x..." \
   ...
 ```
 
+The chart defaults to `nginx` as the ingress class, cert-manager's `letsencrypt-prod`
+cluster issuer, and `gaskiller-tls` as the TLS secret name. Override any of these with
+`--set ingress.className=...`, `--set ingress.tlsSecretName=...`, etc.
+
 cert-manager will automatically provision the TLS certificate. The nginx-ingress
-controller handles HTTP → HTTPS redirects automatically when `ssl-redirect` is set.
+controller handles HTTP → HTTPS redirects automatically.
 
 ## Troubleshooting
 
