@@ -364,13 +364,19 @@ alloy:
 # Kubernetes Ingress for external access (optional)
 # =============================================================================
 # See helm/gas-killer/README.md for TLS / cert-manager setup instructions.
+#
+# Usage:
+#   helm upgrade --install gas-killer ./helm/gas-killer \
+#     --set ingress.enabled=true \
+#     --set ingress.host=testnet.gaskiller.xyz
+#
 ingress:
   enabled: false
-  className: ""
-  annotations: {}
-  hosts:
-    - host: gas-killer.local
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
+  # Required when enabled — the public hostname for the router ingress.
+  host: ""
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  # Secret name for TLS certificate. Leave empty to disable TLS.
+  tlsSecretName: gaskiller-tls
