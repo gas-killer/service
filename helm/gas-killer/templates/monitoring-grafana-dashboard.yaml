@@ -60,7 +60,7 @@ data:
           "title": "Nodes Up",
           "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
           "targets": [{
-            "expr": "count(up{job=~\".*gas-killer.*nodes.*\"} == 1)",
+            "expr": "count(up{job=~\".*gas-killer.*nodes*.*\"} == 1)",
             "legendFormat": "up"
           }],
           "options": {
