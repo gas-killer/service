@@ -1,0 +1,112 @@
+{{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled (or .Release.IsInstall .Values.rerun.keyExport) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gas-killer.keyexport.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: key-export
+  annotations:
+    # Runs automatically on helm install. On helm upgrade, only fires when rerun.keyExport=true.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "gas-killer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: key-export
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" .) .Values.secretManager.serviceAccountName }}
+      initContainers:
+        # Wait for the setup job to finish generating BLS keys before exporting them
+        - name: wait-for-setup
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for setup to complete (timeout: {{ .Values.global.initTimeout }}s)..."
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until [ -f /app/.nodes/.setup_complete ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: Timeout waiting for setup after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Setup not complete, waiting... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "Setup complete!"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+
+      containers:
+        - name: export-keys
+          image: {{ .Values.secretManager.cloudSdkImage | quote }}
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+
+              PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" .Values.secretManager.projectId }}"
+              PREFIX="{{ .Values.secretManager.keyPrefix }}"
+
+              # Export a file to GCP Secret Manager, creating the secret if needed and always
+              # adding a new version. This means re-runs (e.g. after a fresh helm install
+              # that regenerated keys) will overwrite with the latest values.
+              export_secret() {
+                local name="$1"
+                local file="$2"
+
+                if ! gcloud secrets describe "$name" --project="$PROJECT" &>/dev/null; then
+                  echo "Creating secret $name..."
+                  gcloud secrets create "$name" \
+                    --project="$PROJECT" \
+                    --replication-policy=automatic
+                fi
+
+                echo "Adding version to $name..."
+                gcloud secrets versions add "$name" \
+                  --project="$PROJECT" \
+                  --data-file="$file"
+                echo "Exported $name"
+              }
+
+              # Export avs_deploy.json (contract addresses needed by all nodes and router)
+              export_secret "${PREFIX}-avs-deploy" /app/.nodes/avs_deploy.json
+
+              # Export each operator's BLS key
+              {{- $nodeCount := int .Values.global.nodeCount }}
+              {{- range $i := until $nodeCount }}
+              {{- $nodeIndex := add $i 1 }}
+              export_secret "${PREFIX}-node-{{ $nodeIndex }}-bls-key" \
+                /app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json
+              {{- end }}
+
+              echo "All secrets exported successfully"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: {{ include "gas-killer.shareddata.fullname" . }}
+{{- end }}

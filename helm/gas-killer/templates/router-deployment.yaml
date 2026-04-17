@@ -18,7 +18,49 @@ spec:
         app.kubernetes.io/component: router
     spec:
       terminationGracePeriodSeconds: {{ .Values.router.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.secretManager.enabled }}
+      serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" .) .Values.secretManager.serviceAccountName }}
+      {{- end }}
       initContainers:
+        {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
+        # Fetch avs_deploy.json from GCP Secret Manager.
+        # Workload Identity provides authentication — no static credentials needed.
+        - name: fetch-avs-deploy
+          image: {{ .Values.secretManager.cloudSdkImage | quote }}
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" .Values.secretManager.projectId }}"
+              PREFIX="{{ .Values.secretManager.keyPrefix }}"
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+
+              # Retry until the secret exists — on a fresh install the key-export hook
+              # job may still be running when this init container starts.
+              echo "Fetching avs_deploy.json (timeout: ${TIMEOUT}s)..."
+              until gcloud secrets versions access latest \
+                --secret="${PREFIX}-avs-deploy" \
+                --project="$PROJECT" \
+                > /app/secrets/avs_deploy.json 2>/dev/null; do
+                if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+                  echo "ERROR: Timeout waiting for secret ${PREFIX}-avs-deploy after ${TIMEOUT}s"
+                  exit 1
+                fi
+                echo "Secret ${PREFIX}-avs-deploy not available yet, retrying... (${ELAPSED}s elapsed)"
+                sleep 10
+                ELAPSED=$((ELAPSED + 10))
+              done
+              echo "avs_deploy.json fetched successfully"
+          volumeMounts:
+            - name: router-secrets
+              mountPath: /app/secrets
+        {{- else }}
         # Wait for setup job to fully complete (check for .setup_complete marker)
         - name: wait-for-setup
           image: busybox:1.36
@@ -43,6 +85,7 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+        {{- end }}
 
         {{- if .Values.bridge.waitForBridge }}
         # Wait for bridge job to complete before starting the router
@@ -191,7 +234,11 @@ spec:
               value: "http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
             {{- end }}
             - name: AVS_DEPLOYMENT_PATH
+              {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
+              value: "/app/secrets/avs_deploy.json"
+              {{- else }}
               value: "/app/.nodes/avs_deploy.json"
+              {{- end }}
             - name: INGRESS
               value: {{ .Values.router.ingress.enabled | quote }}
             - name: INGRESS_ADDRESS
@@ -237,6 +284,11 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+            {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
+            - name: router-secrets
+              mountPath: /app/secrets
+              readOnly: true
+            {{- end }}
             {{- if .Values.orchestrator.routerPrivateKey }}
             - name: router-key
               mountPath: /app/router_orchestrator.json
@@ -250,6 +302,10 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" . }}
+        {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
+        - name: router-secrets
+          emptyDir: {}
+        {{- end }}
         {{- if .Values.orchestrator.routerPrivateKey }}
         - name: router-key
           emptyDir: {}

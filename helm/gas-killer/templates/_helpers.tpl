@@ -109,6 +109,20 @@ Secret name - supports existing secret or creates new one
 {{- end }}
 
 {{/*
+Kubernetes ServiceAccount name (for Workload Identity with GCP Secret Manager)
+*/}}
+{{- define "gas-killer.serviceaccount.fullname" -}}
+{{- printf "%s-sa" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Key export job name
+*/}}
+{{- define "gas-killer.keyexport.fullname" -}}
+{{- printf "%s-key-export" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Bridge job name
 */}}
 {{- define "gas-killer.bridge.fullname" -}}

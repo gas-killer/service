@@ -1,5 +1,5 @@
 {{- /* Bridge job runs after setup to bridge operator state from L1 to L2 */ -}}
-{{- if .Values.bridge.enabled }}
+{{- if and .Values.bridge.enabled (or .Release.IsInstall .Values.rerun.bridge) }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -8,8 +8,8 @@ metadata:
     {{- include "gas-killer.labels" . | nindent 4 }}
     app.kubernetes.io/component: bridge
   annotations:
-    # Run after the main setup job completes
-    "helm.sh/hook": post-install
+    # Runs automatically on helm install. On helm upgrade, only fires when rerun.bridge=true.
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "10"
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:
