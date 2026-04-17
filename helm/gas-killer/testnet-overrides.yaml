@@ -8,10 +8,22 @@
 #     --set secrets.httpRpc=https://... \
 #     --set l2.httpRpc=https://... \
 #     --set router.image.tag=router-<sha> \
-#     --set node.image.tag=node-<sha>
+#     --set node.image.tag=node-<sha> \
+#     --set kube-prometheus-stack.grafana.adminPassword=<password>
 
 global:
   environment: TESTNET
 
 imagePullSecrets:
   - name: ghcr-pull-secret
+
+ingress:
+  enabled: true
+  host: testnet.gaskiller.xyz
+
+monitoring:
+  enabled: true
+  grafana:
+    ingress:
+      enabled: true
+      host: grafana-testnet.gaskiller.xyz
