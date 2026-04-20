@@ -1,4 +1,7 @@
 {{- if .Values.monitoring.enabled }}
+{{- if not (index .Values "kube-prometheus-stack" "grafana" "adminPassword") }}
+{{- fail "monitoring.enabled=true requires kube-prometheus-stack.grafana.adminPassword to be set. Pass --set kube-prometheus-stack.grafana.adminPassword=<password>" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

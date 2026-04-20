@@ -235,8 +235,6 @@ An example override file is provided at `helm/gas-killer/testnet-monitoring-over
 ```bash
 helm upgrade --install gas-killer ./helm/gas-killer \
   -f helm/gas-killer/testnet-overrides.yaml \
-  -f helm/gas-killer/testnet-ingress-overrides.yaml \
-  -f helm/gas-killer/testnet-monitoring-overrides.yaml \
   --set secrets.privateKey=0x... \
   --set secrets.fundedKey=0x... \
   --set secrets.httpRpc=https://... \
