@@ -206,9 +206,17 @@ spec:
             - name: WS_RPC
               value: "ws://{{ include "gas-killer.l1.fullname" $root }}:{{ $root.Values.l1.service.port }}"
             {{- end }}
-            {{- if and (eq $root.Values.global.environment "LOCAL") $root.Values.l2.enabled }}
+            {{- if $root.Values.l2.enabled }}
+            {{- if eq $root.Values.global.environment "LOCAL" }}
             - name: L2_HTTP_RPC
               value: "http://{{ include "gas-killer.l2.fullname" $root }}:{{ $root.Values.l2.service.port }}"
+            {{- else if eq $root.Values.global.environment "TESTNET" }}
+            - name: L2_HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" $root }}
+                  key: L2_HTTP_RPC
+            {{- end }}
             {{- end }}
             - name: RUST_BACKTRACE
               value: "1"
