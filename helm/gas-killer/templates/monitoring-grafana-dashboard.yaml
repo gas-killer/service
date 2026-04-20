@@ -1,4 +1,7 @@
 {{- if .Values.monitoring.enabled }}
+{{- if not (index .Values "kube-prometheus-stack" "grafana" "adminPassword") }}
+{{- fail "monitoring.enabled=true requires kube-prometheus-stack.grafana.adminPassword to be set. Pass --set kube-prometheus-stack.grafana.adminPassword=<password>" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -60,7 +63,7 @@ data:
           "title": "Nodes Up",
           "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
           "targets": [{
-            "expr": "count(up{job=~\".*gas-killer.*nodes.*\"} == 1)",
+            "expr": "count(up{job=~\".*gas-killer.*nodes*.*\"} == 1)",
             "legendFormat": "up"
           }],
           "options": {
@@ -139,29 +142,99 @@ data:
         {
           "id": 20,
           "type": "text",
-          "title": "Aggregation (instrumentation pending)",
+          "title": "Aggregation",
           "gridPos": { "x": 0, "y": 14, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Aggregation — requires custom metric instrumentation in executor/creator code paths" }
+          "options": { "mode": "markdown", "content": "## Aggregation" }
         },
         {
           "id": 21,
           "type": "timeseries",
-          "title": "Aggregation Rounds (pending instrumentation)",
-          "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
-          "targets": [{
-            "expr": "rate(gas_killer_aggregation_rounds_total[2m])",
-            "legendFormat": "rounds/s"
-          }]
+          "title": "Aggregation Rounds / min",
+          "gridPos": { "x": 0, "y": 15, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "rate(gas_killer_aggregation_rounds_completed_total[2m]) * 60",
+              "legendFormat": "completed"
+            },
+            {
+              "expr": "rate(gas_killer_aggregation_rounds_failed_total[2m]) * 60",
+              "legendFormat": "failed"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
         },
         {
           "id": 22,
           "type": "timeseries",
-          "title": "Ingress Request Rate (pending instrumentation)",
-          "gridPos": { "x": 12, "y": 15, "w": 12, "h": 8 },
+          "title": "Execution Duration (p50/p95)",
+          "gridPos": { "x": 8, "y": 15, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_execution_duration_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_execution_duration_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 23,
+          "type": "timeseries",
+          "title": "Storage Computation Duration (p50/p95)",
+          "gridPos": { "x": 16, "y": 15, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_storage_computation_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_storage_computation_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 30,
+          "type": "text",
+          "title": "Ingress",
+          "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
+          "options": { "mode": "markdown", "content": "## Ingress" }
+        },
+        {
+          "id": 31,
+          "type": "timeseries",
+          "title": "Ingress Request Rate / min",
+          "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "rate(gas_killer_ingress_requests_accepted_total[2m]) * 60",
+              "legendFormat": "accepted"
+            },
+            {
+              "expr": "rate(gas_killer_ingress_requests_rejected_total[2m]) * 60",
+              "legendFormat": "rejected"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 32,
+          "type": "stat",
+          "title": "Tasks Created (total)",
+          "gridPos": { "x": 12, "y": 24, "w": 6, "h": 8 },
           "targets": [{
-            "expr": "rate(gas_killer_ingress_requests_total[2m])",
-            "legendFormat": "{{ "{{" }} status {{ "}}" }}"
-          }]
+            "expr": "gas_killer_tasks_created_total",
+            "legendFormat": "tasks"
+          }],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "background",
+            "graphMode": "area"
+          }
         }
       ]
     }

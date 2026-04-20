@@ -1,11 +1,12 @@
 {{- if .Values.monitoring.enabled }}
-{{- if .Values.monitoring.serviceMonitor.router.enabled }}
+{{- if (dig "serviceMonitor" "router" "enabled" true .Values.monitoring) }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ include "gas-killer.fullname" . }}-router
   labels:
     {{- include "gas-killer.labels" . | nindent 4 }}
+    release: {{ .Release.Name }}
 spec:
   selector:
     matchLabels:
@@ -14,16 +15,17 @@ spec:
   endpoints:
     - port: metrics
       path: /metrics
-      interval: {{ .Values.monitoring.serviceMonitor.router.interval }}
+      interval: {{ dig "serviceMonitor" "router" "interval" "15s" .Values.monitoring }}
 {{- end }}
 ---
-{{- if .Values.monitoring.serviceMonitor.node.enabled }}
+{{- if (dig "serviceMonitor" "node" "enabled" true .Values.monitoring) }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ include "gas-killer.fullname" . }}-nodes
   labels:
     {{- include "gas-killer.labels" . | nindent 4 }}
+    release: {{ .Release.Name }}
 spec:
   selector:
     matchLabels:
@@ -32,16 +34,17 @@ spec:
   endpoints:
     - port: metrics
       path: /metrics
-      interval: {{ .Values.monitoring.serviceMonitor.node.interval }}
+      interval: {{ dig "serviceMonitor" "node" "interval" "15s" .Values.monitoring }}
 {{- end }}
 ---
-{{- if .Values.monitoring.serviceMonitor.signer.enabled }}
+{{- if (dig "serviceMonitor" "signer" "enabled" true .Values.monitoring) }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ include "gas-killer.fullname" . }}-signer
   labels:
     {{- include "gas-killer.labels" . | nindent 4 }}
+    release: {{ .Release.Name }}
 spec:
   selector:
     matchLabels:
@@ -50,6 +53,6 @@ spec:
   endpoints:
     - port: metrics
       path: /metrics
-      interval: {{ .Values.monitoring.serviceMonitor.signer.interval }}
+      interval: {{ dig "serviceMonitor" "signer" "interval" "15s" .Values.monitoring }}
 {{- end }}
 {{- end }}

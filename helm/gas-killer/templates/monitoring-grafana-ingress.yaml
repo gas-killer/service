@@ -30,7 +30,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ printf "%s-grafana" (include "gas-killer.fullname" .) }}
+                name: {{ printf "%s-grafana" .Release.Name }}
                 port:
                   number: 80
 {{- end }}

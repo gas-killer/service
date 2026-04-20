@@ -408,7 +408,10 @@ monitoring:
 kube-prometheus-stack:
   prometheus:
     prometheusSpec:
-      # Match all ServiceMonitors in the namespace, not only ones created by this chart
+      # Match all ServiceMonitors — disable the helm-values override that would
+      # silently replace {} with {matchLabels: {release: gas-killer}}
+      serviceMonitorSelectorNilUsesHelmValues: false
+      serviceMonitorNamespaceSelectorNilUsesHelmValues: false
       serviceMonitorSelector: {}
       serviceMonitorNamespaceSelector: {}
       retention: 7d
@@ -423,7 +426,9 @@ kube-prometheus-stack:
   grafana:
     # nameOverride keeps the service name predictable: {release}-grafana
     nameOverride: grafana
-    adminPassword: changeme
+    # REQUIRED when monitoring.enabled=true — set via:
+    #   --set kube-prometheus-stack.grafana.adminPassword=<password>
+    adminPassword: ""
     resources:
       requests:
         memory: 128Mi
@@ -453,8 +458,12 @@ kube-prometheus-stack:
   nodeExporter:
     enabled: true
 
-  # Disable k8s control-plane exporters — not accessible on GKE
+  # Kubelet exposes cAdvisor metrics (container CPU/memory) — accessible on GKE worker nodes
   kubelet:
+    enabled: true
+
+  # Disable k8s control-plane exporters — not accessible on GKE
+  coreDns:
     enabled: false
   kubeApiServer:
     enabled: false
@@ -466,6 +475,12 @@ kube-prometheus-stack:
     enabled: false
   kubeEtcd:
     enabled: false
+
+  prometheusOperator:
+    admissionWebhooks:
+      enabled: false
+    tls:
+      enabled: false
 
   # We define our own alerting rules
   defaultRules:

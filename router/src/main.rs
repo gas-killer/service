@@ -20,6 +20,7 @@ use commonware_utils::set::OrderedAssociated;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{get_operator_states, load_key_from_file};
 use gas_killer_router::GasKillerOrchestratorBuilder;
+use gas_killer_router::metrics::MetricsCollector;
 use governor::Quota;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -35,6 +36,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 struct HealthState {
     ready: Arc<AtomicBool>,
     context: tokio::Context,
+    metrics: Arc<MetricsCollector>,
 }
 
 /// Liveness probe — always 200 if the process is running.
@@ -51,14 +53,16 @@ async fn readyz_handler(State(s): State<HealthState>) -> StatusCode {
     }
 }
 
-/// Prometheus metrics endpoint — encodes commonware runtime metrics in text format.
+/// Prometheus metrics endpoint — encodes commonware runtime metrics and gas-killer custom metrics.
 async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
+    let mut output = s.context.encode();
+    output.push_str(&s.metrics.encode());
     (
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        s.context.encode(),
+        output,
     )
 }
 
@@ -270,6 +274,9 @@ fn main() {
         let (sender, receiver) =
             network.register(0, Quota::per_second(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
 
+        // Custom Prometheus metrics — shared with executor, creator, and ingress via builder
+        let metrics = Arc::new(MetricsCollector::new());
+
         // Use the builder pattern to create the orchestrator
         let builder = OrchestratorBuilder::new(context.clone(), signer)
             .with_contributors(contributors)
@@ -277,7 +284,7 @@ fn main() {
             .with_threshold(threshold)
             .load_from_env(); // Read configuration from environment variables
 
-        let orchestrator = GasKillerOrchestratorBuilder::build(builder)
+        let orchestrator = GasKillerOrchestratorBuilder::build(builder, Arc::clone(&metrics))
             .await
             .expect("Failed to build orchestrator");
 
@@ -297,6 +304,7 @@ fn main() {
         let health_state = HealthState {
             ready: Arc::clone(&ready),
             context: context.clone(),
+            metrics: Arc::clone(&metrics),
         };
         context.clone().spawn(move |_| async move {
             let app = Router::new()

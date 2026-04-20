@@ -1,4 +1,5 @@
 use crate::ingress::GasKillerTaskRequest;
+use crate::metrics::MetricsCollector;
 use commonware_avs_router::creator::Creator;
 use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
@@ -185,6 +186,7 @@ pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     current_task: Mutex<Option<EnrichedTask>>,
     /// Round counter - incremented for each new task to ensure unique rounds
     round_counter: AtomicU64,
+    metrics: Option<Arc<MetricsCollector>>,
 }
 
 impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
@@ -195,7 +197,13 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
             validator,
             current_task: Mutex::new(None),
             round_counter: AtomicU64::new(0),
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<MetricsCollector>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     async fn wait_for_task(&self) -> Result<GasKillerTaskRequest> {
@@ -234,11 +242,16 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             "Creator received task"
         );
 
+        if let Some(m) = &self.metrics {
+            m.tasks_created.inc();
+        }
+
         // Compute storage updates - the validator automatically detects which chain has the contract
         debug!(
             "Computing storage updates for target {}",
             task.body.target_address
         );
+        let storage_start = Instant::now();
         let (storage_updates, block_height, detected_chain) = self
             .validator
             .compute_storage_updates_for_tx(
@@ -250,6 +263,10 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
+        if let Some(m) = &self.metrics {
+            m.storage_computation_seconds
+                .observe(storage_start.elapsed().as_secs_f64());
+        }
 
         // Debug: Log hash of full storage_updates to detect differences vs validators
         let mut storage_hasher = Sha256::new();
@@ -339,7 +356,7 @@ pub enum GasKillerCreatorType {
     /// Basic gas killer creator without ingress
     Basic(GasKillerCreator),
     /// Listening gas killer creator with HTTP ingress
-    Listening(ListeningGasKillerCreator<GasKillerTaskQueue>),
+    Listening(Box<ListeningGasKillerCreator<GasKillerTaskQueue>>),
 }
 
 #[async_trait]

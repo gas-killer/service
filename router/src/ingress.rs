@@ -1,4 +1,5 @@
 use crate::creator::{SimpleTaskQueue, TaskQueue};
+use crate::metrics::MetricsCollector;
 use alloy_primitives::{Address, U256};
 use axum::{
     Json, Router,
@@ -11,6 +12,28 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use tracing::{info, warn};
+
+#[derive(Clone)]
+pub struct IngressState {
+    pub queue: Arc<SimpleTaskQueue>,
+    pub metrics: Option<Arc<MetricsCollector>>,
+}
+
+impl IngressState {
+    pub fn new(queue: Arc<SimpleTaskQueue>, metrics: Arc<MetricsCollector>) -> Self {
+        Self {
+            queue,
+            metrics: Some(metrics),
+        }
+    }
+
+    pub fn without_metrics(queue: Arc<SimpleTaskQueue>) -> Self {
+        Self {
+            queue,
+            metrics: None,
+        }
+    }
+}
 
 /// Validation errors for incoming task requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +123,7 @@ pub struct GasKillerTaskResponse {
 
 // Handler for POST /trigger
 pub async fn trigger_task_handler(
-    State(queue): State<Arc<SimpleTaskQueue>>,
+    State(state): State<IngressState>,
     Json(request): Json<GasKillerTaskRequest>,
 ) -> (StatusCode, Json<GasKillerTaskResponse>) {
     match request.validate() {
@@ -112,7 +135,10 @@ pub async fn trigger_task_handler(
                 call_data_len = request.body.call_data.len(),
                 "Task accepted"
             );
-            queue.push(request);
+            if let Some(m) = &state.metrics {
+                m.ingress_accepted.inc();
+            }
+            state.queue.push(request);
             (
                 StatusCode::OK,
                 Json(GasKillerTaskResponse {
@@ -129,6 +155,9 @@ pub async fn trigger_task_handler(
                 error = %e,
                 "Task rejected"
             );
+            if let Some(m) = &state.metrics {
+                m.ingress_rejected.inc();
+            }
             (
                 StatusCode::BAD_REQUEST,
                 Json(GasKillerTaskResponse {
@@ -144,15 +173,15 @@ async fn healthz_handler() -> StatusCode {
     StatusCode::OK
 }
 
-pub fn build_app() -> Router<Arc<SimpleTaskQueue>> {
+pub fn build_app() -> Router<IngressState> {
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/trigger", post(trigger_task_handler))
 }
 
 // Start the HTTP server in a background task
-pub async fn start_gas_killer_http_server(queue: Arc<SimpleTaskQueue>, addr: &str) {
-    let app = build_app().with_state(queue);
+pub async fn start_gas_killer_http_server(state: IngressState, addr: &str) {
+    let app = build_app().with_state(state);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind HTTP server");
@@ -337,7 +366,8 @@ mod tests {
 
         fn make_app() -> (Router, Arc<SimpleTaskQueue>) {
             let queue = Arc::new(SimpleTaskQueue::new());
-            let app = build_app().with_state(queue.clone());
+            let state = IngressState::without_metrics(queue.clone());
+            let app = build_app().with_state(state);
             (app, queue)
         }
 
@@ -604,8 +634,8 @@ mod tests {
         async fn test_valid_request_does_not_leave_extra_tasks() {
             // Two sequential valid requests → queue should hold exactly two tasks
             let queue = Arc::new(SimpleTaskQueue::new());
-            let app1 = build_app().with_state(queue.clone());
-            let app2 = build_app().with_state(queue.clone());
+            let app1 = build_app().with_state(IngressState::without_metrics(queue.clone()));
+            let app2 = build_app().with_state(IngressState::without_metrics(queue.clone()));
 
             app1.oneshot(json_request(&valid_body())).await.unwrap();
             app2.oneshot(json_request(&valid_body())).await.unwrap();
