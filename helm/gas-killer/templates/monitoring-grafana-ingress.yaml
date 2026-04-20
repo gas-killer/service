@@ -1,0 +1,36 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.grafana.ingress.enabled }}
+{{- if not .Values.monitoring.grafana.ingress.host }}
+{{- fail "monitoring.grafana.ingress.host is required when monitoring.grafana.ingress.enabled is true" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "gas-killer.fullname" . }}-grafana
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+  {{- with .Values.monitoring.grafana.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.monitoring.grafana.ingress.className }}
+  ingressClassName: {{ .Values.monitoring.grafana.ingress.className }}
+  {{- end }}
+  {{- if .Values.monitoring.grafana.ingress.tlsSecretName }}
+  tls:
+    - hosts:
+        - {{ .Values.monitoring.grafana.ingress.host | quote }}
+      secretName: {{ .Values.monitoring.grafana.ingress.tlsSecretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.monitoring.grafana.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ printf "%s-grafana" (include "gas-killer.fullname" .) }}
+                port:
+                  number: 80
+{{- end }}

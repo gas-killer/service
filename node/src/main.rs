@@ -4,7 +4,9 @@
 //! state transitions on EigenLayer.
 
 use ::tokio::net::TcpListener;
-use axum::{Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
+};
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{Bn254, PublicKey, get_signer};
 use commonware_avs_node::contributor::{AggregationInput, Contribute, Contributor};
@@ -28,18 +30,35 @@ use std::time::Duration;
 /// Unique namespace to avoid message replay attacks
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 
+#[derive(Clone)]
+struct HealthState {
+    ready: Arc<AtomicBool>,
+    context: tokio::Context,
+}
+
 /// Liveness probe — always 200 if the process is running.
 async fn healthz_handler() -> StatusCode {
     StatusCode::OK
 }
 
 /// Readiness probe — 503 until the network is starting and the contributor is spawned.
-async fn readyz_handler(State(ready): State<Arc<AtomicBool>>) -> StatusCode {
-    if ready.load(Ordering::Relaxed) {
+async fn readyz_handler(State(s): State<HealthState>) -> StatusCode {
+    if s.ready.load(Ordering::Relaxed) {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     }
+}
+
+/// Prometheus metrics endpoint — encodes commonware runtime metrics in text format.
+async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        s.context.encode(),
+    )
 }
 
 /// Resolve a hostname:port with retry logic for Docker DNS readiness
@@ -347,18 +366,22 @@ fn main() {
         // Readiness flag: set to true after contributor is spawned and network is starting
         let ready = Arc::new(AtomicBool::new(false));
 
-        // Spawn healthz HTTP server for Kubernetes readiness/liveness probes
+        // Spawn healthz/metrics HTTP server for Kubernetes probes and Prometheus scraping
         let healthz_port: u16 = std::env::var("HEALTHZ_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8081);
         let healthz_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), healthz_port);
-        let ready_clone = Arc::clone(&ready);
+        let health_state = HealthState {
+            ready: Arc::clone(&ready),
+            context: context.clone(),
+        };
         context.clone().spawn(move |_| async move {
             let app = Router::new()
                 .route("/healthz", get(healthz_handler))
                 .route("/readyz", get(readyz_handler))
-                .with_state(ready_clone);
+                .route("/metrics", get(metrics_handler))
+                .with_state(health_state);
             match TcpListener::bind(healthz_addr).await {
                 Ok(listener) => {
                     tracing::info!(%healthz_addr, "healthz server running");
