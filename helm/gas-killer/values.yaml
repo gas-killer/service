@@ -97,6 +97,11 @@ secrets:
   # Example: --set secrets.l2ForkUrl=https://rpc.gnosischain.com
   l2ForkUrl: ""
 
+  # Direct RPC URL for L2 in TESTNET mode (contains API key - sensitive!)
+  # Override with: --set secrets.l2HttpRpc=<your-l2-rpc-url>
+  # Example: --set secrets.l2HttpRpc=https://rpc.gnosischain.com
+  l2HttpRpc: ""
+
 # L1 (Anvil) configuration - only used in LOCAL mode
 l1:
   enabled: true
@@ -247,10 +252,6 @@ orchestrator:
 # Defaults to disabled; enable explicitly via --set l2.enabled=true (e.g. in CI)
 l2:
   enabled: false
-  # Direct RPC URL for L2 in TESTNET mode (contains API key - sensitive!)
-  # Override with: --set l2.httpRpc=<your-l2-rpc-url>
-  # Example: --set l2.httpRpc=https://rpc.gnosischain.com
-  httpRpc: ""
   image:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: latest
