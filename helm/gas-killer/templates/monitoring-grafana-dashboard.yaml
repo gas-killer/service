@@ -171,11 +171,11 @@ data:
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_execution_duration_seconds_bucket[5m]))",
-              "legendFormat": "p50"
+              "legendFormat": "Typical (p50)"
             },
             {
               "expr": "histogram_quantile(0.95, rate(gas_killer_execution_duration_seconds_bucket[5m]))",
-              "legendFormat": "p95"
+              "legendFormat": "Slow tail (p95)"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "s" } }
@@ -188,11 +188,11 @@ data:
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_storage_computation_seconds_bucket[5m]))",
-              "legendFormat": "p50"
+              "legendFormat": "Typical (p50)"
             },
             {
               "expr": "histogram_quantile(0.95, rate(gas_killer_storage_computation_seconds_bucket[5m]))",
-              "legendFormat": "p95"
+              "legendFormat": "Slow tail (p95)"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "s" } }
