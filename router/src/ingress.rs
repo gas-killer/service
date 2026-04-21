@@ -250,32 +250,32 @@ pub async fn trigger_task_handler(
         );
     }
 
-    if !state.providers.is_empty() {
-        if let Err(e) = validate_onchain(&state.providers, &request.body).await {
-            let status = if matches!(e, OnchainValidationError::RpcError(_)) {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            warn!(
-                target_address = %request.body.target_address,
-                from_address = %request.body.from_address,
-                block_height = request.body.block_height,
-                transition_index = request.body.transition_index,
-                error = %e,
-                "Task rejected (onchain)"
-            );
-            if let Some(m) = &state.metrics {
-                m.ingress_rejected.inc();
-            }
-            return (
-                status,
-                Json(GasKillerTaskResponse {
-                    success: false,
-                    message: format!("Task rejected: {e}"),
-                }),
-            );
+    if !state.providers.is_empty()
+        && let Err(e) = validate_onchain(&state.providers, &request.body).await
+    {
+        let status = if matches!(e, OnchainValidationError::RpcError(_)) {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        warn!(
+            target_address = %request.body.target_address,
+            from_address = %request.body.from_address,
+            block_height = request.body.block_height,
+            transition_index = request.body.transition_index,
+            error = %e,
+            "Task rejected (onchain)"
+        );
+        if let Some(m) = &state.metrics {
+            m.ingress_rejected.inc();
         }
+        return (
+            status,
+            Json(GasKillerTaskResponse {
+                success: false,
+                message: format!("Task rejected: {e}"),
+            }),
+        );
     }
 
     info!(
