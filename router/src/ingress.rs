@@ -2,17 +2,17 @@ use crate::creator::{SimpleTaskQueue, TaskQueue};
 use crate::metrics::MetricsCollector;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
-use gas_killer_common::ReadOnlyProvider;
 use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
     routing::{get, post},
 };
+use gas_killer_common::ChainId;
+use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
-use gas_killer_common::ChainId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -861,7 +861,9 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainId::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            let err = validate_onchain(&providers, &valid_body())
+                .await
+                .unwrap_err();
             assert!(
                 matches!(err, OnchainValidationError::ContractNotFound),
                 "expected ContractNotFound, got {err}"
@@ -877,7 +879,9 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainId::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            let err = validate_onchain(&providers, &valid_body())
+                .await
+                .unwrap_err();
             assert!(
                 matches!(
                     err,
@@ -900,7 +904,9 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainId::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            let err = validate_onchain(&providers, &valid_body())
+                .await
+                .unwrap_err();
             assert!(
                 matches!(
                     err,
@@ -951,7 +957,9 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainId::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            let err = validate_onchain(&providers, &valid_body())
+                .await
+                .unwrap_err();
             assert!(
                 matches!(err, OnchainValidationError::RpcError(_)),
                 "expected RpcError, got {err}"
@@ -967,7 +975,9 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainId::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            let err = validate_onchain(&providers, &valid_body())
+                .await
+                .unwrap_err();
             assert!(
                 matches!(err, OnchainValidationError::RpcError(_)),
                 "expected RpcError, got {err}"
@@ -984,7 +994,9 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainId::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            let err = validate_onchain(&providers, &valid_body())
+                .await
+                .unwrap_err();
             assert!(
                 matches!(err, OnchainValidationError::RpcError(_)),
                 "expected RpcError, got {err}"
@@ -1022,7 +1034,9 @@ mod tests {
             providers.insert(ChainId::L1, l1_provider);
             providers.insert(ChainId::L2, l2_provider);
 
-            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            let err = validate_onchain(&providers, &valid_body())
+                .await
+                .unwrap_err();
             assert!(
                 matches!(err, OnchainValidationError::ContractNotFound),
                 "expected ContractNotFound, got {err}"
