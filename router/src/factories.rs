@@ -22,7 +22,7 @@ use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
 use gas_killer_common::{ChainId, GasKillerValidator};
 use std::collections::HashMap;
 use std::{env, str::FromStr, sync::Arc};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Wallet provider that uses SimpleNonceManager to always fetch the pending nonce from the
 /// chain rather than caching it locally. This prevents nonce corruption when a transaction
@@ -59,11 +59,38 @@ pub async fn create_listening_creator_with_server(
     let config = GasKillerConfig::default();
     let creator = ListeningGasKillerCreator::new(queue.clone(), config, validator)
         .with_metrics(Arc::clone(&metrics));
-    let ingress_state = IngressState::new(Arc::new(queue), metrics);
+    let providers = build_ingress_providers().await;
+    let ingress_state = IngressState::new(Arc::new(queue), metrics, providers);
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });
     Ok(GasKillerCreatorType::Listening(Box::new(creator)))
+}
+
+async fn build_ingress_providers() -> HashMap<ChainId, gas_killer_common::ReadOnlyProvider> {
+    let mut providers = HashMap::new();
+
+    if let Ok(rpc) = env::var("HTTP_RPC") {
+        match ProviderBuilder::new().connect(&rpc).await {
+            Ok(p) => {
+                providers.insert(ChainId::L1, p);
+                info!(chain = "l1", "Created L1 ingress read provider");
+            }
+            Err(e) => warn!(chain = "l1", error = %e, "Failed to create L1 ingress provider"),
+        }
+    }
+
+    if let Ok(rpc) = env::var("L2_HTTP_RPC") {
+        match ProviderBuilder::new().connect(&rpc).await {
+            Ok(p) => {
+                providers.insert(ChainId::L2, p);
+                info!(chain = "l2", "Created L2 ingress read provider");
+            }
+            Err(e) => warn!(chain = "l2", error = %e, "Failed to create L2 ingress provider"),
+        }
+    }
+
+    providers
 }
 
 /// Creates a wallet provider for a specific chain using SimpleNonceManager.

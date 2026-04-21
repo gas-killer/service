@@ -1,14 +1,20 @@
 use crate::creator::{SimpleTaskQueue, TaskQueue};
 use crate::metrics::MetricsCollector;
 use alloy_primitives::{Address, U256};
+use alloy_provider::Provider;
+use gas_killer_common::ReadOnlyProvider;
 use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
     routing::{get, post},
 };
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
+use gas_killer_common::config::CHAIN_DETECTION_ORDER;
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
+use gas_killer_common::ChainId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -17,13 +23,19 @@ use tracing::{info, warn};
 pub struct IngressState {
     pub queue: Arc<SimpleTaskQueue>,
     pub metrics: Option<Arc<MetricsCollector>>,
+    pub providers: HashMap<ChainId, ReadOnlyProvider>,
 }
 
 impl IngressState {
-    pub fn new(queue: Arc<SimpleTaskQueue>, metrics: Arc<MetricsCollector>) -> Self {
+    pub fn new(
+        queue: Arc<SimpleTaskQueue>,
+        metrics: Arc<MetricsCollector>,
+        providers: HashMap<ChainId, ReadOnlyProvider>,
+    ) -> Self {
         Self {
             queue,
             metrics: Some(metrics),
+            providers,
         }
     }
 
@@ -31,8 +43,100 @@ impl IngressState {
         Self {
             queue,
             metrics: None,
+            providers: HashMap::new(),
         }
     }
+}
+
+/// Onchain validation errors for incoming task requests.
+#[derive(Debug)]
+pub enum OnchainValidationError {
+    ContractNotFound,
+    TransitionIndexBehind { provided: u64, current: u64 },
+    BlockHeightInFuture { provided: u64, current: u64 },
+    RpcError(String),
+}
+
+impl fmt::Display for OnchainValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ContractNotFound => write!(f, "no contract found at target_address on any chain"),
+            Self::TransitionIndexBehind { provided, current } => write!(
+                f,
+                "transition_index {provided} is behind current onchain state {current}"
+            ),
+            Self::BlockHeightInFuture { provided, current } => write!(
+                f,
+                "block_height {provided} is ahead of current chain height {current}"
+            ),
+            Self::RpcError(msg) => write!(f, "RPC error during onchain validation: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for OnchainValidationError {}
+
+async fn detect_contract_chain<P: Provider + Clone>(
+    providers: &HashMap<ChainId, P>,
+    address: Address,
+) -> Result<ChainId, OnchainValidationError> {
+    let mut rpc_error: Option<String> = None;
+    for &chain_id in &CHAIN_DETECTION_ORDER {
+        if let Some(provider) = providers.get(&chain_id) {
+            match provider.get_code_at(address).await {
+                Ok(code) if !code.is_empty() => return Ok(chain_id),
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(chain = %chain_id, error = %e, "RPC error checking contract code");
+                    rpc_error = Some(e.to_string());
+                }
+            }
+        }
+    }
+    Err(match rpc_error {
+        Some(e) => OnchainValidationError::RpcError(e),
+        None => OnchainValidationError::ContractNotFound,
+    })
+}
+
+async fn validate_onchain<P: Provider + Clone>(
+    providers: &HashMap<ChainId, P>,
+    body: &GasKillerTaskRequestBody,
+) -> Result<(), OnchainValidationError> {
+    let chain_id = detect_contract_chain(providers, body.target_address).await?;
+
+    let provider = providers.get(&chain_id).unwrap();
+
+    let current_block = provider
+        .get_block_number()
+        .await
+        .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
+
+    if body.block_height > current_block {
+        return Err(OnchainValidationError::BlockHeightInFuture {
+            provided: body.block_height,
+            current: current_block,
+        });
+    }
+
+    let contract = GasKillerSDK::new(body.target_address, provider.clone());
+    let count = contract
+        .stateTransitionCount()
+        .call()
+        .await
+        .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
+    let current_count: u64 = count
+        .try_into()
+        .map_err(|_| OnchainValidationError::RpcError("stateTransitionCount overflow".into()))?;
+
+    if body.transition_index < current_count {
+        return Err(OnchainValidationError::TransitionIndexBehind {
+            provided: body.transition_index,
+            current: current_count,
+        });
+    }
+
+    Ok(())
 }
 
 /// Validation errors for incoming task requests.
@@ -126,47 +230,72 @@ pub async fn trigger_task_handler(
     State(state): State<IngressState>,
     Json(request): Json<GasKillerTaskRequest>,
 ) -> (StatusCode, Json<GasKillerTaskResponse>) {
-    match request.validate() {
-        Ok(()) => {
-            info!(
-                target_address = %request.body.target_address,
-                from_address = %request.body.from_address,
-                block_height = request.body.block_height,
-                call_data_len = request.body.call_data.len(),
-                "Task accepted"
-            );
-            if let Some(m) = &state.metrics {
-                m.ingress_accepted.inc();
-            }
-            state.queue.push(request);
-            (
-                StatusCode::OK,
-                Json(GasKillerTaskResponse {
-                    success: true,
-                    message: "Task queued".to_string(),
-                }),
-            )
+    if let Err(e) = request.validate() {
+        warn!(
+            target_address = %request.body.target_address,
+            from_address = %request.body.from_address,
+            block_height = request.body.block_height,
+            error = %e,
+            "Task rejected"
+        );
+        if let Some(m) = &state.metrics {
+            m.ingress_rejected.inc();
         }
-        Err(e) => {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(GasKillerTaskResponse {
+                success: false,
+                message: format!("Task rejected: {e}"),
+            }),
+        );
+    }
+
+    if !state.providers.is_empty() {
+        if let Err(e) = validate_onchain(&state.providers, &request.body).await {
+            let status = if matches!(e, OnchainValidationError::RpcError(_)) {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
             warn!(
                 target_address = %request.body.target_address,
                 from_address = %request.body.from_address,
                 block_height = request.body.block_height,
+                transition_index = request.body.transition_index,
                 error = %e,
-                "Task rejected"
+                "Task rejected (onchain)"
             );
             if let Some(m) = &state.metrics {
                 m.ingress_rejected.inc();
             }
-            (
-                StatusCode::BAD_REQUEST,
+            return (
+                status,
                 Json(GasKillerTaskResponse {
                     success: false,
                     message: format!("Task rejected: {e}"),
                 }),
-            )
+            );
         }
     }
+
+    info!(
+        target_address = %request.body.target_address,
+        from_address = %request.body.from_address,
+        block_height = request.body.block_height,
+        call_data_len = request.body.call_data.len(),
+        "Task accepted"
+    );
+    if let Some(m) = &state.metrics {
+        m.ingress_accepted.inc();
+    }
+    state.queue.push(request);
+    (
+        StatusCode::OK,
+        Json(GasKillerTaskResponse {
+            success: true,
+            message: "Task queued".to_string(),
+        }),
+    )
 }
 
 async fn healthz_handler() -> StatusCode {
@@ -667,6 +796,236 @@ mod tests {
             assert!(
                 queue.pop().is_none(),
                 "invalid task must not be pushed to queue"
+            );
+        }
+    }
+
+    // -- onchain validation unit tests --
+    //
+    // These tests exercise validate_onchain / detect_contract_chain directly using
+    // alloy's built-in mock transport (alloy_provider::mock::Asserter).  No live
+    // chain or forked node is required; responses are queued FIFO and consumed by
+    // each RPC call in order:
+    //   1. eth_getCode        (detect_contract_chain)
+    //   2. eth_blockNumber    (block-height check)
+    //   3. eth_call           (stateTransitionCount view call)
+
+    mod onchain {
+        use super::*;
+        use alloy::sol_types::SolValue;
+        use alloy_primitives::{Bytes, U64};
+        use alloy_provider::{ProviderBuilder, mock::Asserter};
+
+        fn mock_provider() -> (impl Provider + Clone, Asserter) {
+            let asserter = Asserter::new();
+            let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+            (provider, asserter)
+        }
+
+        fn valid_body() -> GasKillerTaskRequestBody {
+            GasKillerTaskRequestBody {
+                target_address: "0x0000000000000000000000000000000000000001"
+                    .parse()
+                    .unwrap(),
+                from_address: "0x0000000000000000000000000000000000000002"
+                    .parse()
+                    .unwrap(),
+                call_data: vec![0xAB, 0xCD, 0xEF, 0x01],
+                transition_index: 5,
+                value: U256::ZERO,
+                block_height: 50,
+            }
+        }
+
+        fn push_code_exists(asserter: &Asserter) {
+            asserter.push_success(&Bytes::from(vec![0x60u8]));
+        }
+
+        fn push_code_empty(asserter: &Asserter) {
+            asserter.push_success(&Bytes::new());
+        }
+
+        fn push_block_number(asserter: &Asserter, n: u64) {
+            asserter.push_success(&U64::from(n));
+        }
+
+        fn push_state_transition_count(asserter: &Asserter, count: u64) {
+            asserter.push_success(&Bytes::from(U256::from(count).abi_encode()));
+        }
+
+        #[tokio::test]
+        async fn test_contract_not_found() {
+            let (provider, asserter) = mock_provider();
+            push_code_empty(&asserter);
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::ContractNotFound),
+                "expected ContractNotFound, got {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_block_height_in_future() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, 40); // chain is at 40, request wants 50
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    OnchainValidationError::BlockHeightInFuture {
+                        provided: 50,
+                        current: 40
+                    }
+                ),
+                "expected BlockHeightInFuture, got {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_transition_index_behind() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, 100); // chain at 100, request wants 50 ✓
+            push_state_transition_count(&asserter, 10); // contract at 10, request provides 5 ✗
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    OnchainValidationError::TransitionIndexBehind {
+                        provided: 5,
+                        current: 10
+                    }
+                ),
+                "expected TransitionIndexBehind, got {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_valid_onchain_state_passes() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, 100); // chain at 100 >= request 50 ✓
+            push_state_transition_count(&asserter, 5); // contract at 5, request at 5 ✓
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            validate_onchain(&providers, &valid_body())
+                .await
+                .expect("valid onchain state should pass");
+        }
+
+        #[tokio::test]
+        async fn test_transition_index_ahead_passes() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, 100);
+            push_state_transition_count(&asserter, 3); // contract at 3, request at 5 → ahead ✓
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            validate_onchain(&providers, &valid_body())
+                .await
+                .expect("index ahead of contract state should be accepted");
+        }
+
+        #[tokio::test]
+        async fn test_rpc_error_on_get_code_treated_as_rpc_error() {
+            let (provider, asserter) = mock_provider();
+            asserter.push_failure_msg("connection refused");
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::RpcError(_)),
+                "expected RpcError, got {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_rpc_error_on_block_number() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            asserter.push_failure_msg("node overloaded");
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::RpcError(_)),
+                "expected RpcError, got {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_rpc_error_on_state_transition_count() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, 100);
+            asserter.push_failure_msg("call reverted");
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::RpcError(_)),
+                "expected RpcError, got {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_l2_fallback_when_l1_has_no_code() {
+            let (l1_provider, l1_asserter) = mock_provider();
+            let (l2_provider, l2_asserter) = mock_provider();
+
+            push_code_empty(&l1_asserter); // L1 has no code
+            push_code_exists(&l2_asserter); // L2 does
+            push_block_number(&l2_asserter, 100);
+            push_state_transition_count(&l2_asserter, 5);
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, l1_provider);
+            providers.insert(ChainId::L2, l2_provider);
+
+            validate_onchain(&providers, &valid_body())
+                .await
+                .expect("should find contract on L2");
+        }
+
+        #[tokio::test]
+        async fn test_not_found_when_all_chains_empty() {
+            let (l1_provider, l1_asserter) = mock_provider();
+            let (l2_provider, l2_asserter) = mock_provider();
+
+            push_code_empty(&l1_asserter);
+            push_code_empty(&l2_asserter);
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, l1_provider);
+            providers.insert(ChainId::L2, l2_provider);
+
+            let err = validate_onchain(&providers, &valid_body()).await.unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::ContractNotFound),
+                "expected ContractNotFound, got {err}"
             );
         }
     }
