@@ -4,31 +4,34 @@
 #   cargo run -p scripts --bin run_scenario -- scripts/run_scenario_example.toml
 
 router_url = "http://localhost:8080"
-http_rpc   = "http://localhost:8545"   # required when any request has block_height = 0
+http_rpc   = "http://localhost:8545"   # required when block_height = 0 or verify = true
 
-# ── Scenario 1: serial smoke test ────────────────────────────────────────────
+# ── Scenario 1: serial smoke test with on-chain verification ─────────────────
 [[scenarios]]
 name = "smoke"
 mode = "serial"
 delay_between_ms = 500   # wait 500ms between requests
 
   [[scenarios.requests]]
-  label          = "valid_tx"
-  target_address = "0xCONTRACT_ADDRESS_HERE"
-  call_data      = "0xabcdef01"       # ABI-encoded calldata (function selector + params)
-  from_address   = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-  transition_index = 0
-  value          = "0"
-  block_height   = 0                  # 0 = auto-fetch current block
+  label               = "valid_tx"
+  target_address      = "0xCONTRACT_ADDRESS_HERE"
+  call_data           = "0xabcdef01"   # ABI-encoded calldata (function selector + params)
+  from_address        = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+  transition_index    = 0
+  value               = "0"
+  block_height        = 0              # 0 = auto-fetch current block
+  verify              = true           # poll stateTransitionCount() to confirm verifyAndUpdate ran
+  verify_timeout_secs = 150            # default; omit to use 150s
 
   [[scenarios.requests]]
-  label          = "zero_target"      # expected to be rejected
+  label          = "zero_target"       # expected to be rejected by the API
   target_address = "0x0000000000000000000000000000000000000000"
   call_data      = "0xabcdef01"
   from_address   = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
   transition_index = 0
   value          = "0"
   block_height   = 0
+  verify         = false               # no point verifying a rejected request
 
 # ── Scenario 2: parallel stress test ─────────────────────────────────────────
 [[scenarios]]
@@ -36,28 +39,31 @@ name  = "stress"
 mode  = "parallel"
 
   [[scenarios.requests]]
-  label          = "stress_1"
-  target_address = "0xCONTRACT_ADDRESS_HERE"
-  call_data      = "0xabcdef01"
-  from_address   = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+  label            = "stress_1"
+  target_address   = "0xCONTRACT_ADDRESS_HERE"
+  call_data        = "0xabcdef01"
+  from_address     = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
   transition_index = 1
-  value          = "0"
-  block_height   = 0
+  value            = "0"
+  block_height     = 0
+  verify           = true
 
   [[scenarios.requests]]
-  label          = "stress_2"
-  target_address = "0xCONTRACT_ADDRESS_HERE"
-  call_data      = "0xabcdef01"
-  from_address   = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+  label            = "stress_2"
+  target_address   = "0xCONTRACT_ADDRESS_HERE"
+  call_data        = "0xabcdef01"
+  from_address     = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
   transition_index = 2
-  value          = "0"
-  block_height   = 0
+  value            = "0"
+  block_height     = 0
+  verify           = true
 
   [[scenarios.requests]]
-  label          = "stress_3"
-  target_address = "0xCONTRACT_ADDRESS_HERE"
-  call_data      = "0xabcdef01"
-  from_address   = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+  label            = "stress_3"
+  target_address   = "0xCONTRACT_ADDRESS_HERE"
+  call_data        = "0xabcdef01"
+  from_address     = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
   transition_index = 3
-  value          = "0"
-  block_height   = 0
+  value            = "0"
+  block_height     = 0
+  verify           = true

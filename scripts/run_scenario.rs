@@ -1,4 +1,7 @@
+use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
+use gas_killer_common::ReadOnlyProvider;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -12,7 +15,7 @@ use url::Url;
 struct Config {
     #[serde(default = "default_router_url")]
     router_url: String,
-    /// Required when any request uses `block_height = 0` (auto-fetch).
+    /// Required when any request uses `block_height = 0` or `verify = true`.
     http_rpc: Option<String>,
     #[serde(default)]
     scenarios: Vec<Scenario>,
@@ -71,10 +74,20 @@ struct RequestConfig {
     /// Set to 0 to auto-fetch the current block from `http_rpc`.
     #[serde(default)]
     block_height: u64,
+    /// When true, poll stateTransitionCount() after a 200 to confirm verifyAndUpdate ran.
+    #[serde(default)]
+    verify: bool,
+    /// How long to wait for on-chain confirmation (seconds, default: 150).
+    #[serde(default = "default_verify_timeout")]
+    verify_timeout_secs: u64,
 }
 
 fn default_value() -> String {
     "0".to_string()
+}
+
+fn default_verify_timeout() -> u64 {
+    150
 }
 
 // ── API wire types ────────────────────────────────────────────────────────────
@@ -102,17 +115,74 @@ struct ApiResponse {
 
 // ── Result types ──────────────────────────────────────────────────────────────
 
+enum OnChainResult {
+    Confirmed { elapsed: Duration },
+    TimedOut { elapsed: Duration },
+    Error(String),
+}
+
 struct RequestResult {
     label: String,
     status: u16,
     api_success: bool,
     message: String,
     elapsed: Duration,
+    on_chain: Option<OnChainResult>,
 }
 
 impl RequestResult {
     fn passed(&self) -> bool {
-        self.api_success && self.status == 200
+        if !self.api_success || self.status != 200 {
+            return false;
+        }
+        match &self.on_chain {
+            None => true,
+            Some(OnChainResult::Confirmed { .. }) => true,
+            Some(OnChainResult::TimedOut { .. }) | Some(OnChainResult::Error(_)) => false,
+        }
+    }
+}
+
+// ── On-chain verification ─────────────────────────────────────────────────────
+
+async fn verify_on_chain(
+    provider: &ReadOnlyProvider,
+    target: Address,
+    initial_count: u64,
+    timeout: Duration,
+) -> OnChainResult {
+    let contract = GasKillerSDK::new(target, provider.clone());
+    let poll_interval = Duration::from_secs(10);
+    let start = Instant::now();
+
+    loop {
+        match contract.stateTransitionCount().call().await {
+            Ok(count) => {
+                let count = count.to::<u64>();
+                println!(
+                    "       stateTransitionCount: {} (initial: {}, elapsed: {:.0}s)",
+                    count,
+                    initial_count,
+                    start.elapsed().as_secs_f64(),
+                );
+                if count > initial_count {
+                    return OnChainResult::Confirmed {
+                        elapsed: start.elapsed(),
+                    };
+                }
+            }
+            Err(e) => {
+                return OnChainResult::Error(format!("stateTransitionCount call failed: {e}"));
+            }
+        }
+
+        if start.elapsed() >= timeout {
+            return OnChainResult::TimedOut {
+                elapsed: start.elapsed(),
+            };
+        }
+
+        sleep(poll_interval).await;
     }
 }
 
@@ -123,6 +193,7 @@ async fn send_request(
     router_url: &str,
     cfg: &RequestConfig,
     current_block: u64,
+    provider: Option<&ReadOnlyProvider>,
     index: usize,
 ) -> RequestResult {
     let label = cfg
@@ -145,8 +216,54 @@ async fn send_request(
                 api_success: false,
                 message: format!("invalid call_data hex: {e}"),
                 elapsed: Duration::ZERO,
+                on_chain: None,
             };
         }
+    };
+
+    // Read initial stateTransitionCount before submitting if verification is requested
+    let initial_count: Option<u64> = if cfg.verify {
+        match (provider, cfg.target_address.parse::<Address>()) {
+            (Some(p), Ok(addr)) => match GasKillerSDK::new(addr, p.clone())
+                .stateTransitionCount()
+                .call()
+                .await
+            {
+                Ok(v) => Some(v.to::<u64>()),
+                Err(e) => {
+                    return RequestResult {
+                        label,
+                        status: 0,
+                        api_success: false,
+                        message: format!("failed to read stateTransitionCount: {e}"),
+                        elapsed: Duration::ZERO,
+                        on_chain: None,
+                    };
+                }
+            },
+            (None, _) => {
+                return RequestResult {
+                    label,
+                    status: 0,
+                    api_success: false,
+                    message: "`http_rpc` is required when `verify = true`".to_string(),
+                    elapsed: Duration::ZERO,
+                    on_chain: None,
+                };
+            }
+            (_, Err(e)) => {
+                return RequestResult {
+                    label,
+                    status: 0,
+                    api_success: false,
+                    message: format!("invalid target_address: {e}"),
+                    elapsed: Duration::ZERO,
+                    on_chain: None,
+                };
+            }
+        }
+    } else {
+        None
     };
 
     let payload = ApiRequest {
@@ -165,33 +282,43 @@ async fn send_request(
     let resp = client.post(&url).json(&payload).send().await;
     let elapsed = start.elapsed();
 
-    match resp {
-        Err(e) => RequestResult {
-            label,
-            status: 0,
-            api_success: false,
-            message: format!("connection error: {e}"),
-            elapsed,
-        },
+    let (status, api_success, message) = match resp {
+        Err(e) => (0u16, false, format!("connection error: {e}")),
         Ok(r) => {
             let status = r.status().as_u16();
             match r.json::<ApiResponse>().await {
-                Ok(body) => RequestResult {
-                    label,
-                    status,
-                    api_success: body.success,
-                    message: body.message,
-                    elapsed,
-                },
-                Err(e) => RequestResult {
-                    label,
-                    status,
-                    api_success: false,
-                    message: format!("failed to parse response: {e}"),
-                    elapsed,
-                },
+                Ok(body) => (status, body.success, body.message),
+                Err(e) => (status, false, format!("failed to parse response: {e}")),
             }
         }
+    };
+
+    // Verify on-chain only if the API accepted the request
+    let on_chain = if cfg.verify && api_success && status == 200 {
+        if let (Some(p), Some(count), Ok(addr)) = (
+            provider,
+            initial_count,
+            cfg.target_address.parse::<Address>(),
+        ) {
+            println!("       Waiting for on-chain confirmation...");
+            Some(
+                verify_on_chain(p, addr, count, Duration::from_secs(cfg.verify_timeout_secs))
+                    .await,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    RequestResult {
+        label,
+        status,
+        api_success,
+        message,
+        elapsed,
+        on_chain,
     }
 }
 
@@ -212,6 +339,24 @@ fn print_result(result: &RequestResult, index: usize, total: usize) {
         result.elapsed.as_millis(),
         result.message,
     );
+    match &result.on_chain {
+        Some(OnChainResult::Confirmed { elapsed }) => {
+            println!(
+                "         ⛓️  verifyAndUpdate confirmed  ({:.0}s)",
+                elapsed.as_secs_f64()
+            );
+        }
+        Some(OnChainResult::TimedOut { elapsed }) => {
+            println!(
+                "         ⛓️  ❌ verifyAndUpdate not seen after {:.0}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Some(OnChainResult::Error(e)) => {
+            println!("         ⛓️  ❌ on-chain check failed: {e}");
+        }
+        None => {}
+    }
 }
 
 async fn run_scenario(
@@ -219,6 +364,7 @@ async fn run_scenario(
     router_url: Arc<String>,
     scenario: &Scenario,
     current_block: u64,
+    provider: Option<Arc<ReadOnlyProvider>>,
 ) -> Vec<RequestResult> {
     let total = scenario.requests.len();
     println!(
@@ -237,7 +383,15 @@ async fn run_scenario(
         Mode::Serial => {
             let mut results = Vec::with_capacity(total);
             for (i, req_cfg) in scenario.requests.iter().enumerate() {
-                let result = send_request(&client, &router_url, req_cfg, current_block, i).await;
+                let result = send_request(
+                    &client,
+                    &router_url,
+                    req_cfg,
+                    current_block,
+                    provider.as_deref(),
+                    i,
+                )
+                .await;
                 print_result(&result, i, total);
                 results.push(result);
                 if i + 1 < total && scenario.delay_between_ms > 0 {
@@ -255,8 +409,17 @@ async fn run_scenario(
                     let client = client.clone();
                     let router_url = router_url.clone();
                     let req_cfg = req_cfg.clone();
+                    let provider = provider.clone();
                     tokio::spawn(async move {
-                        send_request(&client, &router_url, &req_cfg, current_block, i).await
+                        send_request(
+                            &client,
+                            &router_url,
+                            &req_cfg,
+                            current_block,
+                            provider.as_deref(),
+                            i,
+                        )
+                        .await
                     })
                 })
                 .collect();
@@ -265,7 +428,6 @@ async fn run_scenario(
             for handle in handles {
                 results.push(handle.await.expect("task panicked"));
             }
-            // Sort by original index so output is deterministic
             for (i, result) in results.iter().enumerate() {
                 print_result(result, i, total);
             }
@@ -277,8 +439,29 @@ async fn run_scenario(
 fn print_scenario_summary(results: &[RequestResult]) {
     let passed = results.iter().filter(|r| r.passed()).count();
     let total = results.len();
+    let verified = results
+        .iter()
+        .filter(|r| matches!(&r.on_chain, Some(OnChainResult::Confirmed { .. })))
+        .count();
+    let verify_requested = results
+        .iter()
+        .filter(|r| r.on_chain.is_some())
+        .count();
+
     if passed == total {
-        println!("  Summary: {}/{} passed ✅", passed, total);
+        if verify_requested > 0 {
+            println!(
+                "  Summary: {}/{} passed ✅  ({}/{} on-chain verified)",
+                passed, total, verified, verify_requested
+            );
+        } else {
+            println!("  Summary: {}/{} passed ✅", passed, total);
+        }
+    } else if verify_requested > 0 {
+        println!(
+            "  Summary: {}/{} passed ❌  ({}/{} on-chain verified)",
+            passed, total, verified, verify_requested
+        );
     } else {
         println!("  Summary: {}/{} passed ❌", passed, total);
     }
@@ -295,8 +478,10 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, alloy::hex::FromHexError> {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: diagnose <config.toml>");
-        eprintln!("Example: cargo run -p scripts --bin diagnose -- scripts/diagnose_example.toml");
+        eprintln!("Usage: run_scenario <config.toml>");
+        eprintln!(
+            "Example: cargo run -p scripts --bin run_scenario -- scripts/run_scenario_example.toml"
+        );
         std::process::exit(1);
     }
 
@@ -311,31 +496,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::process::exit(1);
     }
 
-    // Resolve current block once if any request needs it
-    let needs_block = config
+    let needs_rpc = config
         .scenarios
         .iter()
         .flat_map(|s| s.requests.iter())
-        .any(|r| r.block_height == 0);
+        .any(|r| r.block_height == 0 || r.verify);
 
-    let current_block = if needs_block {
+    let provider: Option<Arc<ReadOnlyProvider>> = if needs_rpc {
         let rpc = config
             .http_rpc
             .as_deref()
-            .ok_or("`http_rpc` is required when block_height = 0")?;
-        let provider = ProviderBuilder::new().connect_http(Url::parse(rpc)?);
-        let block = provider.get_block_number().await?;
+            .ok_or("`http_rpc` is required when block_height = 0 or verify = true")?;
+        Some(Arc::new(
+            ProviderBuilder::new().connect_http(Url::parse(rpc)?),
+        ))
+    } else {
+        None
+    };
+
+    let current_block = if config
+        .scenarios
+        .iter()
+        .flat_map(|s| s.requests.iter())
+        .any(|r| r.block_height == 0)
+    {
+        let block = provider.as_ref().unwrap().get_block_number().await?;
         println!("Current block: {block}");
         block
     } else {
         0
     };
 
-    let client = Arc::new(
-        Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?,
-    );
+    let client = Arc::new(Client::builder().timeout(Duration::from_secs(30)).build()?);
     let router_url = Arc::new(config.router_url.clone());
 
     println!("Router: {}", config.router_url);
@@ -343,13 +535,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut all_results: Vec<RequestResult> = Vec::new();
 
     for scenario in &config.scenarios {
-        let results =
-            run_scenario(client.clone(), router_url.clone(), scenario, current_block).await;
+        let results = run_scenario(
+            client.clone(),
+            router_url.clone(),
+            scenario,
+            current_block,
+            provider.clone(),
+        )
+        .await;
         print_scenario_summary(&results);
         all_results.extend(results);
     }
 
-    // Overall summary
     let total = all_results.len();
     let passed = all_results.iter().filter(|r| r.passed()).count();
     let failed = total - passed;
@@ -358,10 +555,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if failed > 0 {
         println!("     Failed requests:");
         for r in all_results.iter().filter(|r| !r.passed()) {
-            println!(
-                "       ❌ {}  ({})  \"{}\"",
-                r.label, r.status, r.message
-            );
+            println!("       ❌ {}  ({})  \"{}\"", r.label, r.status, r.message);
         }
         std::process::exit(1);
     }
