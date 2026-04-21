@@ -14,6 +14,7 @@ The service coordinates multiple operator nodes to sign messages, aggregates the
 - **`router/`** — Orchestrator service: aggregates signatures and executes onchain
 - **`node/`** — Operator node: validates and signs tasks
 - **`common/`** — Shared types, validation logic, and EVM gas analysis
+- **`config/`** — Operator and orchestrator key/config files
 - **`scripts/`** — Helper binaries for deployment and end-to-end testing
 - **`helm/`** — Kubernetes Helm chart for full-stack deployment
 - **`docker-compose.yml`** — One-command local deployment
@@ -31,12 +32,7 @@ The service coordinates multiple operator nodes to sign messages, aggregates the
 cp example.env .env
 ```
 
-For LOCAL mode (default), the example.env is pre-configured. You'll need to set a private key:
-```bash
-# Use Anvil's default test key for local development
-echo "PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" >> .env
-echo "FUNDED_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" >> .env
-```
+The example.env is pre-configured for LOCAL mode with Anvil test keys. No changes are needed to run locally.
 
 2. **Start all services:**
 ```bash
@@ -44,11 +40,11 @@ docker compose up -d
 ```
 
 This will automatically pull the latest pre-built images from the GitHub Container Registry (ghcr.io) and start:
-- Ethereum node (Anvil fork)
+- Ethereum node (Anvil fork of Sepolia)
 - EigenLayer contract deployment
 - 3 operator nodes
 - Router/orchestrator
-- Signer service
+- Signer service (Cerberus)
 
 3. **Monitor services:**
 ```bash
@@ -94,65 +90,30 @@ The system consists of:
 - **Validator**: Validates messages and signatures using EVM gas analysis
 - **Contributors**: Operator nodes that sign messages (implemented in `node/`)
 
-### Usecases
-
-The router supports multiple usecases for different onchain operations:
-
-- **[Counter Usecase](src/usecases/counter/README.md)**: Simple counter increment with BLS signature aggregation
-- More usecases can be added by implementing the `Creator` and `Executor` traits
-
-See individual usecase READMEs for detailed architecture diagrams and implementation details.
-
 ## Configuration
 
 ### Environment Variables
 
 Required environment variables:
+- `ENVIRONMENT`: `LOCAL` or `TESTNET`
 - `HTTP_RPC`: HTTP RPC endpoint
 - `WS_RPC`: WebSocket RPC endpoint
 - `AVS_DEPLOYMENT_PATH`: Path to deployment JSON file
-- `CONTRIBUTOR_X_KEYFILE`: BLS key files for contributors
-- `PRIVATE_KEY`: Private key for transactions. **NOTE:** Address must be funded on Sepolia testnet
+- `PRIVATE_KEY`: Private key for transactions
+- `FUNDED_KEY`: Funded key for testnet ETH (required for `TESTNET` mode)
+
+LOCAL-mode-only:
+- `FORK_URL`: Sepolia RPC URL to fork from (Anvil uses this)
 
 Optional environment variables:
-- `AGGREGATION_FREQUENCY`: Signature aggregation frequency in seconds, supports fractional values (default: 30)
-  - Examples: `30` (30 seconds), `1` (1 second), `0.1` (100ms), `0.5` (500ms)
+- `AGGREGATION_FREQUENCY`: Signature aggregation frequency in seconds (default: 90)
 - `THRESHOLD`: Minimum signatures required for aggregation
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
-- `INGRESS_TIMEOUT_MS`: Timeout for waiting for ingress tasks in milliseconds (default: 30000)
+- `INGRESS_TIMEOUT_MS`: Timeout for waiting on ingress tasks in milliseconds (default: 0, no timeout)
+- `QUORUM_NUMBER`: Quorum number to use (default: 0)
 
-Contract addresses are automatically loaded from the deployment JSON file.
-
-### Docker
-
-Pull the latest image:
-```bash
-docker pull ghcr.io/gas-killer/service:latest
-```
-
-Run with Docker Compose:
-```yaml
-version: '3.8'
-services:
-  orchestrator:
-    image: ghcr.io/gas-killer/service:latest
-    volumes:
-      - ./config:/app/config
-      - ./keys:/app/keys
-    environment:
-      - HTTP_RPC=${HTTP_RPC}
-      - WS_RPC=${WS_RPC}
-      - AVS_DEPLOYMENT_PATH=/app/config/avs_deploy.json
-      - PRIVATE_KEY=${PRIVATE_KEY}
-      - AGGREGATION_FREQUENCY=${AGGREGATION_FREQUENCY:-30}
-      - CONTRIBUTOR_1_KEYFILE=/app/keys/contributor1.bls.key.json
-      - CONTRIBUTOR_2_KEYFILE=/app/keys/contributor2.bls.key.json
-      - CONTRIBUTOR_3_KEYFILE=/app/keys/contributor3.bls.key.json
-    ports:
-      - "3000:3000"
-    command: ["--key-file", "/app/config/orchestrator.json", "--port", "3000"]
-```
+Contributor key files are generated automatically by the Docker setup and do not need to be set manually.
 
 ## Ingress Mode
 
@@ -172,7 +133,21 @@ docker compose restart router
 ```bash
 curl -X POST http://localhost:8080/trigger \
   -H "Content-Type: application/json" \
-  -d '{"body": {"metadata": {"request_id": "1", "action": "increment"}}}'
+  -d '{
+    "body": {
+      "target_address": "0x...",
+      "call_data": "0x...",
+      "transition_index": 1,
+      "from_address": "0x...",
+      "value": 0,
+      "block_height": 0
+    }
+  }'
+```
+
+Use the `trigger_gas_killer` script for a complete end-to-end trigger against an ArraySummation contract:
+```bash
+cargo run -p scripts --bin trigger_gas_killer
 ```
 
 ## Development
@@ -180,10 +155,10 @@ curl -X POST http://localhost:8080/trigger \
 ### Dependencies
 - `alloy`: Ethereum interaction
 - `commonware-avs-*`: AVS protocol types, node, and router libraries
-- `gas-analyzer`: EVM gas analysis and storage update computation
-- `commonware_cryptography`: Cryptographic operations
-- `commonware_p2p`: P2P networking
-- `commonware_runtime`: Runtime utilities
+- `gas-analyzer-evmsketch`: EVM gas analysis and storage update computation
+- `commonware-cryptography`: Cryptographic operations
+- `commonware-p2p`: P2P networking
+- `commonware-runtime`: Runtime utilities
 
 ### Code Quality
 ```bash
