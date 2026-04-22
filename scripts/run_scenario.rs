@@ -327,9 +327,20 @@ async fn send_request(
         Err(e) => (0u16, false, format!("connection error: {e}")),
         Ok(r) => {
             let status = r.status().as_u16();
-            match r.json::<ApiResponse>().await {
-                Ok(body) => (status, body.success, body.message),
-                Err(e) => (status, false, format!("failed to parse response: {e}")),
+            match r.text().await {
+                Ok(body_text) => match serde_json::from_str::<ApiResponse>(&body_text) {
+                    Ok(body) => (status, body.success, body.message),
+                    Err(e) => {
+                        let trimmed = body_text.trim();
+                        let msg = if trimmed.is_empty() {
+                            format!("non-ApiResponse body (HTTP {status}); parse error: {e}")
+                        } else {
+                            format!("{trimmed} (non-ApiResponse: {e})")
+                        };
+                        (status, false, msg)
+                    }
+                },
+                Err(e) => (status, false, format!("failed to read response body: {e}")),
             }
         }
     };
