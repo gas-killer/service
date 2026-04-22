@@ -10,7 +10,7 @@ http_rpc   = "$GNOSIS_RPC_URL"
 [[scenarios]]
 name = "smoke"
 mode = "serial"
-delay_between_ms = 500
+delay_between_ms = 0
 
   [[scenarios.requests]]
   label               = "array_summation_sum"

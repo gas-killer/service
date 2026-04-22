@@ -43,6 +43,11 @@ impl<'de> serde::Deserialize<'de> for TransitionIndex {
             fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
                 Ok(TransitionIndex::Fixed(v))
             }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                u64::try_from(v)
+                    .map(TransitionIndex::Fixed)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(v), &self))
+            }
             fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
                 if v == "auto" {
                     Ok(TransitionIndex::Auto)
