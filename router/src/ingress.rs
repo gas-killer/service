@@ -269,11 +269,16 @@ pub async fn trigger_task_handler(
         if let Some(m) = &state.metrics {
             m.ingress_rejected.inc();
         }
+        let client_message = if matches!(e, OnchainValidationError::RpcError(_)) {
+            "Service temporarily unavailable".to_string()
+        } else {
+            format!("Task rejected: {e}")
+        };
         return (
             status,
             Json(GasKillerTaskResponse {
                 success: false,
-                message: format!("Task rejected: {e}"),
+                message: client_message,
             }),
         );
     }
