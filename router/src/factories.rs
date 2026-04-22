@@ -59,11 +59,41 @@ pub async fn create_listening_creator_with_server(
     let config = GasKillerConfig::default();
     let creator = ListeningGasKillerCreator::new(queue.clone(), config, validator)
         .with_metrics(Arc::clone(&metrics));
-    let ingress_state = IngressState::new(Arc::new(queue), metrics);
+    let providers = build_ingress_providers().await?;
+    let ingress_state = IngressState::new(Arc::new(queue), metrics, providers);
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });
     Ok(GasKillerCreatorType::Listening(Box::new(creator)))
+}
+
+async fn build_ingress_providers()
+-> anyhow::Result<HashMap<ChainId, gas_killer_common::ReadOnlyProvider>> {
+    let mut providers = HashMap::new();
+
+    if let Ok(rpc) = env::var("HTTP_RPC") {
+        let p = ProviderBuilder::new()
+            .connect(&rpc)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create L1 ingress provider: {e}"))?;
+        providers.insert(ChainId::L1, p);
+        info!(chain = "l1", "Created L1 ingress read provider");
+    }
+
+    if let Ok(rpc) = env::var("L2_HTTP_RPC") {
+        let p = ProviderBuilder::new()
+            .connect(&rpc)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create L2 ingress provider: {e}"))?;
+        providers.insert(ChainId::L2, p);
+        info!(chain = "l2", "Created L2 ingress read provider");
+    }
+
+    if providers.is_empty() {
+        anyhow::bail!("no ingress providers could be created: set HTTP_RPC and/or L2_HTTP_RPC");
+    }
+
+    Ok(providers)
 }
 
 /// Creates a wallet provider for a specific chain using SimpleNonceManager.
