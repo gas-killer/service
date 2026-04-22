@@ -1,10 +1,10 @@
 # Gas Killer Scenario Config
 #
 # Run with:
-#   cargo run -p scripts --bin run_scenario -- scripts/run_scenario_example.toml
+#   cargo run -p scripts --bin run_scenario -- scripts/scenarios/example.toml
 
 router_url = "http://localhost:8080"
-http_rpc   = "http://localhost:8545"   # required when block_height = 0 or verify = true
+http_rpc   = "http://localhost:8545"   # required when block_height = 0, verify = true, or transition_index = "auto"
 
 # ── Scenario 1: serial smoke test with on-chain verification ─────────────────
 [[scenarios]]
@@ -17,7 +17,7 @@ delay_between_ms = 500   # wait 500ms between requests
   target_address      = "0xCONTRACT_ADDRESS_HERE"
   call_data           = "0xabcdef01"   # ABI-encoded calldata (function selector + params)
   from_address        = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-  transition_index    = 0
+  # transition_index omitted — defaults to "auto", fetches stateTransitionCount() from the contract
   value               = "0"
   block_height        = 0              # 0 = auto-fetch current block
   verify              = true           # poll stateTransitionCount() to confirm verifyAndUpdate ran
@@ -28,7 +28,7 @@ delay_between_ms = 500   # wait 500ms between requests
   target_address = "0x0000000000000000000000000000000000000000"
   call_data      = "0xabcdef01"
   from_address   = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-  transition_index = 0
+  transition_index = "auto"
   value          = "0"
   block_height   = 0
   verify         = false               # no point verifying a rejected request
@@ -43,7 +43,7 @@ mode  = "parallel"
   target_address   = "0xCONTRACT_ADDRESS_HERE"
   call_data        = "0xabcdef01"
   from_address     = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-  transition_index = 1
+  transition_index = "auto"
   value            = "0"
   block_height     = 0
   verify           = true
@@ -53,7 +53,7 @@ mode  = "parallel"
   target_address   = "0xCONTRACT_ADDRESS_HERE"
   call_data        = "0xabcdef01"
   from_address     = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-  transition_index = 2
+  transition_index = "auto"
   value            = "0"
   block_height     = 0
   verify           = true
@@ -63,7 +63,7 @@ mode  = "parallel"
   target_address   = "0xCONTRACT_ADDRESS_HERE"
   call_data        = "0xabcdef01"
   from_address     = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-  transition_index = 3
+  transition_index = "auto"
   value            = "0"
   block_height     = 0
   verify           = true

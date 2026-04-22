@@ -76,7 +76,7 @@ echo "Logs directory: $LOG_DIR"
 echo -e "${YELLOW}Step 1: Building scripts...${NC}"
 cd "$PROJECT_ROOT/scripts"
 cargo build --release -p scripts --bin deploy_array_summation
-cargo build --release -p scripts --bin trigger_gas_killer
+cargo build --release -p scripts --bin send_request
 cd "$PROJECT_ROOT"
 
 # Step 2: Assume .env already exists and contains required values
@@ -200,7 +200,7 @@ sleep 5
 echo -e "${YELLOW}Step 10: Triggering task and verifying execution...${NC}"
 echo "Sending a test task to the router..."
 cd "$PROJECT_ROOT/scripts"
-cargo run --release -p scripts --bin trigger_gas_killer
+cargo run --release -p scripts --bin send_request
 TRIGGER_STATUS=$?
 cd "$PROJECT_ROOT"
 

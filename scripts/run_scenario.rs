@@ -15,7 +15,7 @@ use url::Url;
 struct Config {
     #[serde(default = "default_router_url")]
     router_url: String,
-    /// Required when any request uses `block_height = 0` or `verify = true`.
+    /// Required when any request uses `block_height = 0`, `verify = true`, or `transition_index = "auto"`.
     http_rpc: Option<String>,
     #[serde(default)]
     scenarios: Vec<Scenario>,
@@ -23,6 +23,41 @@ struct Config {
 
 fn default_router_url() -> String {
     "http://localhost:8080".to_string()
+}
+
+#[derive(Debug, Clone)]
+enum TransitionIndex {
+    Auto,
+    Fixed(u64),
+}
+
+impl Default for TransitionIndex {
+    fn default() -> Self {
+        TransitionIndex::Auto
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TransitionIndex {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = TransitionIndex;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, r#"an integer or "auto""#)
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(TransitionIndex::Fixed(v))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                if v == "auto" {
+                    Ok(TransitionIndex::Auto)
+                } else {
+                    Err(E::invalid_value(serde::de::Unexpected::Str(v), &self))
+                }
+            }
+        }
+        d.deserialize_any(Visitor)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
@@ -66,8 +101,9 @@ struct RequestConfig {
     /// ABI-encoded call data as a 0x-prefixed hex string.
     call_data: String,
     from_address: String,
+    /// State transition sequence number. Set to "auto" or omit to fetch stateTransitionCount() from the contract (requires `http_rpc`).
     #[serde(default)]
-    transition_index: u64,
+    transition_index: TransitionIndex,
     /// Wei value as a decimal or 0x-prefixed hex string (default: "0").
     #[serde(default = "default_value")]
     value: String,
@@ -221,14 +257,25 @@ async fn send_request(
         }
     };
 
-    // Read initial stateTransitionCount before submitting if verification is requested
-    let initial_count: Option<u64> = if cfg.verify {
-        match (provider, cfg.target_address.parse::<Address>()) {
-            (Some(p), Ok(addr)) => match GasKillerSDK::new(addr, p.clone())
-                .stateTransitionCount()
-                .call()
-                .await
-            {
+    let needs_count = matches!(cfg.transition_index, TransitionIndex::Auto) || cfg.verify;
+
+    // Fetch stateTransitionCount once — used for auto transition_index and/or verify baseline.
+    let on_chain_count: Option<u64> = if needs_count {
+        let addr = match cfg.target_address.parse::<Address>() {
+            Ok(a) => a,
+            Err(e) => {
+                return RequestResult {
+                    label,
+                    status: 0,
+                    api_success: false,
+                    message: format!("invalid target_address: {e}"),
+                    elapsed: Duration::ZERO,
+                    on_chain: None,
+                };
+            }
+        };
+        match provider {
+            Some(p) => match GasKillerSDK::new(addr, p.clone()).stateTransitionCount().call().await {
                 Ok(v) => Some(v.to::<u64>()),
                 Err(e) => {
                     return RequestResult {
@@ -241,22 +288,17 @@ async fn send_request(
                     };
                 }
             },
-            (None, _) => {
-                return RequestResult {
-                    label,
-                    status: 0,
-                    api_success: false,
-                    message: "`http_rpc` is required when `verify = true`".to_string(),
-                    elapsed: Duration::ZERO,
-                    on_chain: None,
+            None => {
+                let reason = if matches!(cfg.transition_index, TransitionIndex::Auto) {
+                    "`http_rpc` is required when `transition_index = \"auto\"`"
+                } else {
+                    "`http_rpc` is required when `verify = true`"
                 };
-            }
-            (_, Err(e)) => {
                 return RequestResult {
                     label,
                     status: 0,
                     api_success: false,
-                    message: format!("invalid target_address: {e}"),
+                    message: reason.to_string(),
                     elapsed: Duration::ZERO,
                     on_chain: None,
                 };
@@ -266,11 +308,16 @@ async fn send_request(
         None
     };
 
+    let transition_index = match cfg.transition_index {
+        TransitionIndex::Fixed(n) => n,
+        TransitionIndex::Auto => on_chain_count.unwrap(),
+    };
+
     let payload = ApiRequest {
         body: ApiRequestBody {
             target_address: cfg.target_address.clone(),
             call_data,
-            transition_index: cfg.transition_index,
+            transition_index,
             from_address: cfg.from_address.clone(),
             value: cfg.value.clone(),
             block_height,
@@ -297,7 +344,7 @@ async fn send_request(
     let on_chain = if cfg.verify && api_success && status == 200 {
         if let (Some(p), Some(count), Ok(addr)) = (
             provider,
-            initial_count,
+            on_chain_count,
             cfg.target_address.parse::<Address>(),
         ) {
             println!("       Waiting for on-chain confirmation...");
@@ -478,18 +525,34 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, alloy::hex::FromHexError> {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: run_scenario <config.toml>");
+        eprintln!("Usage: run_scenario <config.toml> [--scenarios <name1,name2,...>]");
         eprintln!(
-            "Example: cargo run -p scripts --bin run_scenario -- scripts/run_scenario_example.toml"
+            "Example: cargo run -p scripts --bin run_scenario -- scripts/scenarios/example.toml"
         );
+        eprintln!("Example: cargo run -p scripts --bin run_scenario -- scripts/scenarios/example.toml --scenarios smoke,stress");
         std::process::exit(1);
     }
 
     let config_path = &args[1];
     let config_str = std::fs::read_to_string(config_path)
         .map_err(|e| format!("failed to read {config_path}: {e}"))?;
-    let config: Config =
+    let mut config: Config =
         toml::from_str(&config_str).map_err(|e| format!("failed to parse config: {e}"))?;
+
+    if let Some(pos) = args.iter().position(|a| a == "--scenarios") {
+        let names: Vec<&str> = args
+            .get(pos + 1)
+            .ok_or("--scenarios requires a comma-separated list of names")?
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        config.scenarios.retain(|s| names.contains(&s.name.as_str()));
+        if config.scenarios.is_empty() {
+            eprintln!("No scenarios matched: {}", names.join(", "));
+            std::process::exit(1);
+        }
+    }
 
     if config.scenarios.is_empty() {
         eprintln!("No scenarios defined in config.");
@@ -500,13 +563,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .scenarios
         .iter()
         .flat_map(|s| s.requests.iter())
-        .any(|r| r.block_height == 0 || r.verify);
+        .any(|r| r.block_height == 0 || r.verify || matches!(r.transition_index, TransitionIndex::Auto));
 
     let provider: Option<Arc<ReadOnlyProvider>> = if needs_rpc {
         let rpc = config
             .http_rpc
             .as_deref()
-            .ok_or("`http_rpc` is required when block_height = 0 or verify = true")?;
+            .ok_or("`http_rpc` is required when block_height = 0, verify = true, or transition_index = \"auto\"")?;
         Some(Arc::new(
             ProviderBuilder::new().connect_http(Url::parse(rpc)?),
         ))

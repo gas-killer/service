@@ -12,8 +12,8 @@ name = "deploy_array_summation"
 path = "deploy_array_summation.rs"
 
 [[bin]]
-name = "trigger_gas_killer"
-path = "trigger_gas_killer.rs"
+name = "send_request"
+path = "send_request.rs"
 
 [[bin]]
 name = "run_scenario"

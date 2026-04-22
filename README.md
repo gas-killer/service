@@ -145,9 +145,9 @@ curl -X POST http://localhost:8080/trigger \
   }'
 ```
 
-Use the `trigger_gas_killer` script for a complete end-to-end trigger against an ArraySummation contract:
+Use the `send_request` script for a complete end-to-end trigger against an ArraySummation contract:
 ```bash
-cargo run -p scripts --bin trigger_gas_killer
+cargo run -p scripts --bin send_request
 ```
 
 ## Development

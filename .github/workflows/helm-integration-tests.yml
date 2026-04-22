@@ -68,7 +68,7 @@ jobs:
       - name: Build test scripts
         run: |
           cargo build --release -p scripts --bin deploy_array_summation
-          cargo build --release -p scripts --bin trigger_gas_killer
+          cargo build --release -p scripts --bin send_request
 
       - name: Build Docker images
         run: |
@@ -404,7 +404,7 @@ jobs:
           for i in $(seq 1 $NUM_TRIGGERS); do
             echo "=== Triggering task $i of $NUM_TRIGGERS ==="
             # Use pre-built binary for speed
-            if ./target/release/trigger_gas_killer; then
+            if ./target/release/send_request; then
               echo "✅ Task $i completed successfully"
               SUCCESSFUL=$((SUCCESSFUL + 1))
             else
