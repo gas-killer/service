@@ -23,7 +23,7 @@ use tracing::{info, warn};
 pub struct IngressState {
     pub queue: Arc<SimpleTaskQueue>,
     pub metrics: Option<Arc<MetricsCollector>>,
-    pub providers: HashMap<ChainId, ReadOnlyProvider>,
+    pub providers: Arc<HashMap<ChainId, ReadOnlyProvider>>,
 }
 
 impl IngressState {
@@ -35,7 +35,7 @@ impl IngressState {
         Self {
             queue,
             metrics: Some(metrics),
-            providers,
+            providers: Arc::new(providers),
         }
     }
 
@@ -43,7 +43,7 @@ impl IngressState {
         Self {
             queue,
             metrics: None,
-            providers: HashMap::new(),
+            providers: Arc::new(HashMap::new()),
         }
     }
 }
@@ -251,7 +251,7 @@ pub async fn trigger_task_handler(
     }
 
     if !state.providers.is_empty()
-        && let Err(e) = validate_onchain(&state.providers, &request.body).await
+        && let Err(e) = validate_onchain(&*state.providers, &request.body).await
     {
         let status = if matches!(e, OnchainValidationError::RpcError(_)) {
             StatusCode::SERVICE_UNAVAILABLE
