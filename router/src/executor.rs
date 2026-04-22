@@ -258,7 +258,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                         }
                     }
                 }
-                return Err(anyhow::anyhow!("Failed to send verifyAndUpdate transaction: {}", e));
+                return Err(anyhow::anyhow!(
+                    "Failed to send verifyAndUpdate transaction: {}",
+                    e
+                ));
             }
         };
 
