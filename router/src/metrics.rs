@@ -18,6 +18,8 @@ pub struct MetricsCollector {
     pub aggregation_rounds_completed: Counter<u64, AtomicU64>,
     /// Aggregation rounds that failed (hash mismatch, tx error, etc.).
     pub aggregation_rounds_failed: Counter<u64, AtomicU64>,
+    /// Aggregation rounds where another operator won the submission race (InvalidTransitionIndex).
+    pub aggregation_rounds_lost_race: Counter<u64, AtomicU64>,
     /// Full handle_verification duration including contract calls and tx submission (seconds).
     pub execution_duration_seconds: Histogram,
 }
@@ -69,6 +71,13 @@ impl MetricsCollector {
             aggregation_rounds_failed.clone(),
         );
 
+        let aggregation_rounds_lost_race = Counter::default();
+        registry.register(
+            "gas_killer_aggregation_rounds_lost_race",
+            "Total aggregation rounds where another operator already submitted the transition (InvalidTransitionIndex)",
+            aggregation_rounds_lost_race.clone(),
+        );
+
         let execution_duration_seconds =
             Histogram::new([1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]);
         registry.register(
@@ -85,6 +94,7 @@ impl MetricsCollector {
             storage_computation_seconds,
             aggregation_rounds_completed,
             aggregation_rounds_failed,
+            aggregation_rounds_lost_race,
             execution_duration_seconds,
         }
     }

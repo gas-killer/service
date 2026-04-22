@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use alloy::sol_types::SolError;
 use tracing::{debug, info, warn};
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
@@ -76,6 +77,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         .await
     }
 
+    /// Returns `Ok(Some(_))` on success, `Ok(None)` when another operator won the submission
+    /// race for this transition, or `Err` for genuine failures.
     async fn execute_verification(
         &mut self,
         msg_hash: FixedBytes<32>,
@@ -83,7 +86,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         current_block_number: u32,
         non_signer_data: getNonSignerStakesAndSignatureReturn,
         task_data: Option<&GasKillerTaskData>,
-    ) -> Result<ExecutionResult> {
+    ) -> Result<Option<ExecutionResult>> {
         // Unwrap the return type to get the actual data
         let data = non_signer_data._0;
 
@@ -206,7 +209,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         // Without the decrement, eth_estimateGas at block N sees referenceBlockNumber == N
         // and reverts with FutureBlockNumber.
         info!("Sending verifyAndUpdate transaction");
-        let call_return = gas_killer_sdk
+        let send_result = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
                 quorum_numbers,
@@ -217,8 +220,47 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 non_signer_struct_data,
             )
             .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send verifyAndUpdate transaction: {}", e))?;
+            .await;
+
+        let call_return = match send_result {
+            Ok(pending) => pending,
+            Err(e) => {
+                let err_str = format!("{}", e);
+                let invalid_transition_selector = format!(
+                    "0x{}",
+                    hex::encode(GasKillerSDK::InvalidTransitionIndex::SELECTOR)
+                );
+                if err_str.contains(&invalid_transition_selector) {
+                    // Query stateTransitionCount to distinguish a race loss (another operator
+                    // completed this transition) from a genuinely stale transition index.
+                    match gas_killer_sdk.stateTransitionCount().call().await {
+                        Ok(count) if count == transition_index + U256::from(1) => {
+                            info!(
+                                transition_index = %transition_index,
+                                state_transition_count = %count,
+                                "Transition race lost: another operator already submitted this transition"
+                            );
+                            return Ok(None);
+                        }
+                        Ok(count) => {
+                            return Err(anyhow::anyhow!(
+                                "InvalidTransitionIndex: stateTransitionCount is {}, expected {}; transition_index={}",
+                                count,
+                                transition_index + U256::from(1),
+                                transition_index
+                            ));
+                        }
+                        Err(query_err) => {
+                            warn!(
+                                err = %query_err,
+                                "Failed to query stateTransitionCount after InvalidTransitionIndex"
+                            );
+                        }
+                    }
+                }
+                return Err(anyhow::anyhow!("Failed to send verifyAndUpdate transaction: {}", e));
+            }
+        };
 
         let receipt = call_return
             .get_receipt()
@@ -232,13 +274,13 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             "verifyAndUpdate receipt"
         );
 
-        Ok(ExecutionResult {
+        Ok(Some(ExecutionResult {
             transaction_hash: format!("{:?}", receipt.transaction_hash),
             block_number: receipt.block_number,
             gas_used: Some(receipt.gas_used),
             status: Some(receipt.status()),
             contract_address: receipt.contract_address.map(|addr| format!("{:?}", addr)),
-        })
+        }))
     }
 }
 
@@ -271,16 +313,33 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
         if let Some(m) = &self.metrics {
             m.execution_duration_seconds
                 .observe(exec_start.elapsed().as_secs_f64());
-            match &result {
-                Ok(_) => {
-                    m.aggregation_rounds_completed.inc();
-                }
-                Err(_) => {
-                    m.aggregation_rounds_failed.inc();
-                }
-            }
         }
 
-        result
+        match result {
+            Ok(Some(exec_result)) => {
+                if let Some(m) = &self.metrics {
+                    m.aggregation_rounds_completed.inc();
+                }
+                Ok(exec_result)
+            }
+            Ok(None) => {
+                if let Some(m) = &self.metrics {
+                    m.aggregation_rounds_lost_race.inc();
+                }
+                Ok(ExecutionResult {
+                    transaction_hash: String::new(),
+                    block_number: None,
+                    gas_used: None,
+                    status: None,
+                    contract_address: None,
+                })
+            }
+            Err(e) => {
+                if let Some(m) = &self.metrics {
+                    m.aggregation_rounds_failed.inc();
+                }
+                Err(e)
+            }
+        }
     }
 }

@@ -159,6 +159,10 @@ data:
             {
               "expr": "rate(gas_killer_aggregation_rounds_failed_total[2m]) * 60",
               "legendFormat": "failed"
+            },
+            {
+              "expr": "rate(gas_killer_aggregation_rounds_lost_race_total[2m]) * 60",
+              "legendFormat": "lost race"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "short" } }
