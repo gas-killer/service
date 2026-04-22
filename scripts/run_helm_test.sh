@@ -11,7 +11,7 @@
 # - Foundry (cast, anvil)
 #
 # Usage:
-#   ./scripts/helm_test.sh [options]
+#   ./scripts/run_helm_test.sh [options]
 #
 # Options:
 #   --skip-build       Skip building Docker images
@@ -258,7 +258,7 @@ echo -e "${YELLOW}Step 10: Building test scripts...${NC}"
 
 cd "$PROJECT_ROOT/scripts"
 cargo build --release -p scripts --bin deploy_array_summation
-cargo build --release -p scripts --bin trigger_gas_killer
+cargo build --release -p scripts --bin send_request
 cd "$PROJECT_ROOT"
 
 # Step 11: Deploy ArraySummation contract
@@ -285,7 +285,7 @@ echo -e "${YELLOW}Step 12: Triggering Gas Killer task...${NC}"
 cd scripts
 export GAS_KILLER_ROUTER_URL=http://localhost:8080
 
-cargo run --release -p scripts --bin trigger_gas_killer
+cargo run --release -p scripts --bin send_request
 TRIGGER_STATUS=$?
 cd "$PROJECT_ROOT"
 
