@@ -67,8 +67,8 @@ pub async fn create_listening_creator_with_server(
     Ok(GasKillerCreatorType::Listening(Box::new(creator)))
 }
 
-async fn build_ingress_providers(
-) -> anyhow::Result<HashMap<ChainId, gas_killer_common::ReadOnlyProvider>> {
+async fn build_ingress_providers()
+-> anyhow::Result<HashMap<ChainId, gas_killer_common::ReadOnlyProvider>> {
     let mut providers = HashMap::new();
 
     if let Ok(rpc) = env::var("HTTP_RPC") {
@@ -90,9 +90,7 @@ async fn build_ingress_providers(
     }
 
     if providers.is_empty() {
-        anyhow::bail!(
-            "no ingress providers could be created: set HTTP_RPC and/or L2_HTTP_RPC"
-        );
+        anyhow::bail!("no ingress providers could be created: set HTTP_RPC and/or L2_HTTP_RPC");
     }
 
     Ok(providers)
