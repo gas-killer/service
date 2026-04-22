@@ -1,7 +1,7 @@
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
-use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::ReadOnlyProvider;
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -25,16 +25,11 @@ fn default_router_url() -> String {
     "http://localhost:8080".to_string()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum TransitionIndex {
+    #[default]
     Auto,
     Fixed(u64),
-}
-
-impl Default for TransitionIndex {
-    fn default() -> Self {
-        TransitionIndex::Auto
-    }
 }
 
 impl<'de> serde::Deserialize<'de> for TransitionIndex {
@@ -60,17 +55,12 @@ impl<'de> serde::Deserialize<'de> for TransitionIndex {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 enum Mode {
+    #[default]
     Serial,
     Parallel,
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Serial
-    }
 }
 
 impl std::fmt::Display for Mode {
@@ -275,7 +265,11 @@ async fn send_request(
             }
         };
         match provider {
-            Some(p) => match GasKillerSDK::new(addr, p.clone()).stateTransitionCount().call().await {
+            Some(p) => match GasKillerSDK::new(addr, p.clone())
+                .stateTransitionCount()
+                .call()
+                .await
+            {
                 Ok(v) => Some(v.to::<u64>()),
                 Err(e) => {
                     return RequestResult {
@@ -349,8 +343,7 @@ async fn send_request(
         ) {
             println!("       Waiting for on-chain confirmation...");
             Some(
-                verify_on_chain(p, addr, count, Duration::from_secs(cfg.verify_timeout_secs))
-                    .await,
+                verify_on_chain(p, addr, count, Duration::from_secs(cfg.verify_timeout_secs)).await,
             )
         } else {
             None
@@ -414,16 +407,14 @@ async fn run_scenario(
     provider: Option<Arc<ReadOnlyProvider>>,
 ) -> Vec<RequestResult> {
     let total = scenario.requests.len();
+    let delay_str = if scenario.mode == Mode::Serial && scenario.delay_between_ms > 0 {
+        format!(", {}ms delay", scenario.delay_between_ms)
+    } else {
+        String::new()
+    };
     println!(
-        "\n━━━  {}  [{}{}{}]  ━━━",
-        scenario.name,
-        scenario.mode,
-        if scenario.mode == Mode::Serial && scenario.delay_between_ms > 0 {
-            format!(", {}ms delay", scenario.delay_between_ms)
-        } else {
-            String::new()
-        },
-        format!(", {} requests", total),
+        "\n━━━  {}  [{}{}, {} requests]  ━━━",
+        scenario.name, scenario.mode, delay_str, total,
     );
 
     match scenario.mode {
@@ -490,10 +481,7 @@ fn print_scenario_summary(results: &[RequestResult]) {
         .iter()
         .filter(|r| matches!(&r.on_chain, Some(OnChainResult::Confirmed { .. })))
         .count();
-    let verify_requested = results
-        .iter()
-        .filter(|r| r.on_chain.is_some())
-        .count();
+    let verify_requested = results.iter().filter(|r| r.on_chain.is_some()).count();
 
     if passed == total {
         if verify_requested > 0 {
@@ -529,7 +517,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         eprintln!(
             "Example: cargo run -p scripts --bin run_scenario -- scripts/scenarios/example.toml"
         );
-        eprintln!("Example: cargo run -p scripts --bin run_scenario -- scripts/scenarios/example.toml --scenarios smoke,stress");
+        eprintln!(
+            "Example: cargo run -p scripts --bin run_scenario -- scripts/scenarios/example.toml --scenarios smoke,stress"
+        );
         std::process::exit(1);
     }
 
@@ -547,7 +537,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .collect();
-        config.scenarios.retain(|s| names.contains(&s.name.as_str()));
+        config
+            .scenarios
+            .retain(|s| names.contains(&s.name.as_str()));
         if config.scenarios.is_empty() {
             eprintln!("No scenarios matched: {}", names.join(", "));
             std::process::exit(1);
@@ -563,7 +555,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .scenarios
         .iter()
         .flat_map(|s| s.requests.iter())
-        .any(|r| r.block_height == 0 || r.verify || matches!(r.transition_index, TransitionIndex::Auto));
+        .any(|r| {
+            r.block_height == 0 || r.verify || matches!(r.transition_index, TransitionIndex::Auto)
+        });
 
     let provider: Option<Arc<ReadOnlyProvider>> = if needs_rpc {
         let rpc = config
