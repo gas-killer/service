@@ -4,7 +4,7 @@
 #   cargo run -p scripts --bin run_scenario -- scripts/scenarios/example.toml
 
 router_url = "http://localhost:8080"
-http_rpc   = "http://localhost:8545"   # required when block_height = 0, verify = true, or transition_index = "auto"
+http_rpc   = "$HTTP_RPC"         # env var interpolation supported; required when block_height = 0, verify = true, or transition_index = "auto"
 
 # ── Scenario 1: serial smoke test with on-chain verification ─────────────────
 [[scenarios]]

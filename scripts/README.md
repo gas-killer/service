@@ -74,6 +74,12 @@ The `run_scenario` script runs a collection of requests against a live router in
 cargo run -p scripts --bin run_scenario -- scripts/scenarios/example.toml
 ```
 
+Any string value in the config can reference an environment variable using `$VAR_NAME` syntax. The script loads `.env` automatically, so no manual sourcing is needed:
+
+```toml
+http_rpc = "$HTTP_RPC"
+```
+
 To run specific scenarios by name, pass `--scenarios` with a comma-separated list:
 
 ```bash

@@ -507,6 +507,36 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, alloy::hex::FromHexError> {
     alloy::hex::decode(stripped)
 }
 
+/// Replace `$VAR_NAME` tokens in `s` with values from the environment.
+fn interpolate_env(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let mut name = String::new();
+        while let Some(&nc) = chars.peek() {
+            if nc.is_ascii_alphanumeric() || nc == '_' {
+                name.push(nc);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if name.is_empty() {
+            out.push('$');
+        } else {
+            match std::env::var(&name) {
+                Ok(val) => out.push_str(&val),
+                Err(_) => return Err(format!("env var ${name} is not set")),
+            }
+        }
+    }
+    Ok(out)
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -523,9 +553,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::process::exit(1);
     }
 
+    dotenv::dotenv().ok();
+
     let config_path = &args[1];
-    let config_str = std::fs::read_to_string(config_path)
+    let raw = std::fs::read_to_string(config_path)
         .map_err(|e| format!("failed to read {config_path}: {e}"))?;
+    let config_str = interpolate_env(&raw).map_err(|e| format!("config error: {e}"))?;
     let mut config: Config =
         toml::from_str(&config_str).map_err(|e| format!("failed to parse config: {e}"))?;
 
