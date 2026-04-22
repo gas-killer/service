@@ -1,7 +1,7 @@
 # Gas Killer Scenario Config
 #
 # Run with:
-#   cargo run -p scripts --bin run_scenario -- scripts/scenarios/serial_smoke.toml
+#   cargo run -p scripts --bin run_scenario -- scripts/scenarios/testnet_smoke.toml
 
 router_url = "https://testnet.gaskiller.xyz"
 http_rpc   = "$GNOSIS_RPC_URL"
