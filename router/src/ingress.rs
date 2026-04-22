@@ -52,7 +52,7 @@ impl IngressState {
 #[derive(Debug)]
 pub enum OnchainValidationError {
     ContractNotFound,
-    TransitionIndexBehind { provided: u64, current: u64 },
+    TransitionIndexMismatch { provided: u64, current: u64 },
     BlockHeightInFuture { provided: u64, current: u64 },
     RpcError(String),
 }
@@ -61,9 +61,9 @@ impl fmt::Display for OnchainValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ContractNotFound => write!(f, "no contract found at target_address on any chain"),
-            Self::TransitionIndexBehind { provided, current } => write!(
+            Self::TransitionIndexMismatch { provided, current } => write!(
                 f,
-                "transition_index {provided} is behind current onchain state {current}"
+                "transition_index {provided} does not match current onchain state {current}"
             ),
             Self::BlockHeightInFuture { provided, current } => write!(
                 f,
@@ -129,8 +129,8 @@ async fn validate_onchain<P: Provider + Clone>(
         .try_into()
         .map_err(|_| OnchainValidationError::RpcError("stateTransitionCount overflow".into()))?;
 
-    if body.transition_index < current_count {
-        return Err(OnchainValidationError::TransitionIndexBehind {
+    if body.transition_index != current_count {
+        return Err(OnchainValidationError::TransitionIndexMismatch {
             provided: body.transition_index,
             current: current_count,
         });
@@ -915,12 +915,12 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    OnchainValidationError::TransitionIndexBehind {
+                    OnchainValidationError::TransitionIndexMismatch {
                         provided: 5,
                         current: 10
                     }
                 ),
-                "expected TransitionIndexBehind, got {err}"
+                "expected TransitionIndexMismatch, got {err}"
             );
         }
 
@@ -940,18 +940,28 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_transition_index_ahead_passes() {
+        async fn test_transition_index_ahead() {
             let (provider, asserter) = mock_provider();
             push_code_exists(&asserter);
             push_block_number(&asserter, 100);
-            push_state_transition_count(&asserter, 3); // contract at 3, request at 5 → ahead ✓
+            push_state_transition_count(&asserter, 3); // contract at 3, request at 5 → ahead ✗
 
             let mut providers = HashMap::new();
             providers.insert(ChainId::L1, provider);
 
-            validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, &valid_body())
                 .await
-                .expect("index ahead of contract state should be accepted");
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    OnchainValidationError::TransitionIndexMismatch {
+                        provided: 5,
+                        current: 3
+                    }
+                ),
+                "expected TransitionIndexMismatch, got {err}"
+            );
         }
 
         #[tokio::test]
