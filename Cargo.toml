@@ -24,11 +24,11 @@ async-trait = "0.1"
 axum = "0.7"
 bytes = "1.10.1"
 clap = "4.5.37"
-commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-retrigger-after-threshold-bug" }
+commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-retrigger-after-threshold-bug" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-retrigger-after-threshold-bug" }
+commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-retrigger-after-threshold-bug" }
+commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/fix-retrigger-after-threshold-bug" }
 commonware-codec = "0.0.63"
 commonware-cryptography = "0.0.63"
 commonware-macros = "0.0.63"
