@@ -1,0 +1,46 @@
+# Stable mainnet configuration. Pass on every mainnet upgrade.
+#
+# Usage:
+#   helm upgrade --install gas-killer ./helm/gas-killer \
+#     -f helm/gas-killer/mainnet-overrides.yaml \
+#     --set secrets.privateKey=0x... \
+#     --set secrets.fundedKey=0x... \
+#     --set secrets.httpRpc=https://... \
+#     --set secrets.l2HttpRpc=https://... \
+#     --set l2.enabled=true \
+#     --set router.image.tag=router-<sha> \
+#     --set node.image.tag=node-<sha> \
+#     --set kube-prometheus-stack.grafana.adminPassword=<password>
+
+global:
+  environment: TESTNET
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+eigenlayer:
+  contracts:
+    delegationManager: "0x39053D51B77DC0d36036Fc1fCc8Cb819df8Ef37A"
+    strategyManager: "0x858646372CC42E1A627fcE94aa7A7033e7CF075A"
+    lstContract: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+    lstStrategy: "0x93c4b944D05dfe6df7645A86cd2206016c51564D"
+    allocationManager: "0x948a420b8CC1d6BFd0B6087C2E7c344a2CD0bc39"
+
+secretManager:
+  enabled: true
+  keyPrefix: "gas-killer-mainnet"
+
+ingress:
+  enabled: true
+  host: mainnet.gaskiller.xyz
+
+monitoring:
+  enabled: true
+  grafana:
+    ingress:
+      enabled: true
+      host: grafana.gaskiller.xyz
+
+router:
+  ingress:
+    timeoutMs: "0"
