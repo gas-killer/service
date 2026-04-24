@@ -244,16 +244,16 @@ pub async fn trigger_task_handler(
     headers: HeaderMap,
     Json(request): Json<GasKillerTaskRequest>,
 ) -> (StatusCode, Json<GasKillerTaskResponse>) {
-    if let Some(password) = &state.password {
-        if !check_bearer_auth(&headers, password) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(GasKillerTaskResponse {
-                    success: false,
-                    message: "Unauthorized".to_string(),
-                }),
-            );
-        }
+    if let Some(password) = &state.password
+        && !check_bearer_auth(&headers, password)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(GasKillerTaskResponse {
+                success: false,
+                message: "Unauthorized".to_string(),
+            }),
+        );
     }
 
     if let Err(e) = request.validate() {
