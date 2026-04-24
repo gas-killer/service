@@ -122,6 +122,13 @@ jobs:
           PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
           FUNDED_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
+          # Sepolia EigenLayer contract addresses (matches the Sepolia fork URL above)
+          DELEGATION_MANAGER="0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
+          STRATEGY_MANAGER="0x2E3D6c0744b10eb0A4e6F679F71554a39Ec47a5D"
+          LST_CONTRACT="0x00c71b0fcadE911B2feeE9912De4Fe19eB04ca56"
+          LST_STRATEGY="0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574"
+          ALLOCATION_MANAGER="0x42583067658071247ec8CE0A516A58f682002d07"
+
           echo "Installing Helm chart with fork URL: $FORK_URL"
 
           # Set L2 fork URL for local L2 Anvil (LOCAL mode)
@@ -136,6 +143,11 @@ jobs:
           helm install gas-killer ./helm/gas-killer \
             --set global.environment=LOCAL \
             --set global.nodeCount=3 \
+            --set eigenlayer.contracts.delegationManager="$DELEGATION_MANAGER" \
+            --set eigenlayer.contracts.strategyManager="$STRATEGY_MANAGER" \
+            --set eigenlayer.contracts.lstContract="$LST_CONTRACT" \
+            --set eigenlayer.contracts.lstStrategy="$LST_STRATEGY" \
+            --set eigenlayer.contracts.allocationManager="$ALLOCATION_MANAGER" \
             --set secrets.forkUrl="$FORK_URL" \
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
