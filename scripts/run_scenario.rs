@@ -325,7 +325,13 @@ async fn send_request(
 
     let url = format!("{}/trigger", router_url.trim_end_matches('/'));
     let start = Instant::now();
-    let resp = client.post(&url).json(&payload).send().await;
+    let mut req = client.post(&url).json(&payload);
+    if let Ok(password) = std::env::var("INGRESS_PASSWORD") {
+        if !password.is_empty() {
+            req = req.header("Authorization", format!("Bearer {password}"));
+        }
+    }
+    let resp = req.send().await;
     let elapsed = start.elapsed();
 
     let (status, api_success, message) = match resp {

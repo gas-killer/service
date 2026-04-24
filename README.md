@@ -111,6 +111,7 @@ Optional environment variables:
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
 - `INGRESS_TIMEOUT_MS`: Timeout for waiting on ingress tasks in milliseconds (default: 0, no timeout)
+- `INGRESS_PASSWORD`: Static Bearer token password for ingress authentication. Omit or leave empty to disable auth.
 - `QUORUM_NUMBER`: Quorum number to use (default: 0)
 
 Contributor key files are generated automatically by the Docker setup and do not need to be set manually.
@@ -143,6 +144,14 @@ curl -X POST http://localhost:8080/trigger \
       "block_height": 0
     }
   }'
+```
+
+If `INGRESS_PASSWORD` is set, include the Bearer token:
+```bash
+curl -X POST http://localhost:8080/trigger \
+  -H "Authorization: Bearer <your-password>" \
+  -H "Content-Type: application/json" \
+  -d '...'
 ```
 
 Use the `send_request` script for a complete end-to-end trigger against an ArraySummation contract:

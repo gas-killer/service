@@ -254,6 +254,13 @@ spec:
               value: "1"
             - name: INGRESS_TIMEOUT_MS
               value: {{ .Values.router.ingress.timeoutMs | quote }}
+            {{- if .Values.secrets.ingressPassword }}
+            - name: INGRESS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: INGRESS_PASSWORD
+            {{- end }}
             - name: AGGREGATION_FREQUENCY
               value: {{ .Values.router.aggregationFrequency | quote }}
             - name: HEALTHZ_PORT
