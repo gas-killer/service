@@ -134,10 +134,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let client = reqwest::Client::new();
     let mut req = client.post(&url).json(&payload);
-    if let Ok(password) = env::var("INGRESS_PASSWORD") {
-        if !password.is_empty() {
-            req = req.header("Authorization", format!("Bearer {password}"));
-        }
+    if let Ok(password) = env::var("INGRESS_PASSWORD")
+        && !password.is_empty()
+    {
+        req = req.header("Authorization", format!("Bearer {password}"));
     }
     let resp = req.send().await?;
 
