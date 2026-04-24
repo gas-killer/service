@@ -60,7 +60,8 @@ pub async fn create_listening_creator_with_server(
     let creator = ListeningGasKillerCreator::new(queue.clone(), config, validator)
         .with_metrics(Arc::clone(&metrics));
     let providers = build_ingress_providers().await?;
-    let ingress_state = IngressState::new(Arc::new(queue), metrics, providers);
+    let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
+    let ingress_state = IngressState::new(Arc::new(queue), metrics, providers, ingress_password);
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });

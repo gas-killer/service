@@ -102,6 +102,12 @@ secrets:
   # Example: --set secrets.l2HttpRpc=https://rpc.gnosischain.com
   l2HttpRpc: ""
 
+  # Static Bearer token password for ingress authentication.
+  # Requests to /trigger must include: Authorization: Bearer <password>
+  # Leave empty to disable authentication (default).
+  # Override with: --set secrets.ingressPassword=<your-password>
+  ingressPassword: ""
+
 # L1 (Anvil) configuration - only used in LOCAL mode
 l1:
   enabled: true

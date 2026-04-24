@@ -7,6 +7,7 @@
 #     --set secrets.fundedKey=0x... \
 #     --set secrets.httpRpc=https://... \
 #     --set secrets.l2HttpRpc=https://... \
+#     --set secrets.ingressPassword=password \
 #     --set l2.enabled=true \
 #     --set router.image.tag=router-<sha> \
 #     --set node.image.tag=node-<sha> \

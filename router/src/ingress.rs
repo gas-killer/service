@@ -5,7 +5,7 @@ use alloy_provider::Provider;
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
 use gas_killer_common::ChainId;
@@ -24,6 +24,8 @@ pub struct IngressState {
     pub queue: Arc<SimpleTaskQueue>,
     pub metrics: Option<Arc<MetricsCollector>>,
     pub providers: Arc<HashMap<ChainId, ReadOnlyProvider>>,
+    /// Bearer token password. `None` disables authentication.
+    pub password: Option<String>,
 }
 
 impl IngressState {
@@ -31,11 +33,13 @@ impl IngressState {
         queue: Arc<SimpleTaskQueue>,
         metrics: Arc<MetricsCollector>,
         providers: HashMap<ChainId, ReadOnlyProvider>,
+        password: Option<String>,
     ) -> Self {
         Self {
             queue,
             metrics: Some(metrics),
             providers: Arc::new(providers),
+            password,
         }
     }
 
@@ -44,8 +48,27 @@ impl IngressState {
             queue,
             metrics: None,
             providers: Arc::new(HashMap::new()),
+            password: None,
         }
     }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
 }
 
 /// Onchain validation errors for incoming task requests.
@@ -228,8 +251,21 @@ pub struct GasKillerTaskResponse {
 // Handler for POST /trigger
 pub async fn trigger_task_handler(
     State(state): State<IngressState>,
+    headers: HeaderMap,
     Json(request): Json<GasKillerTaskRequest>,
 ) -> (StatusCode, Json<GasKillerTaskResponse>) {
+    if let Some(password) = &state.password
+        && !check_bearer_auth(&headers, password)
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(GasKillerTaskResponse {
+                success: false,
+                message: "Unauthorized".to_string(),
+            }),
+        );
+    }
+
     if let Err(e) = request.validate() {
         warn!(
             target_address = %request.body.target_address,
@@ -501,6 +537,14 @@ mod tests {
         fn make_app() -> (Router, Arc<SimpleTaskQueue>) {
             let queue = Arc::new(SimpleTaskQueue::new());
             let state = IngressState::without_metrics(queue.clone());
+            let app = build_app().with_state(state);
+            (app, queue)
+        }
+
+        fn make_app_with_password(password: &str) -> (Router, Arc<SimpleTaskQueue>) {
+            let queue = Arc::new(SimpleTaskQueue::new());
+            let mut state = IngressState::without_metrics(queue.clone());
+            state.password = Some(password.to_string());
             let app = build_app().with_state(state);
             (app, queue)
         }
@@ -780,6 +824,62 @@ mod tests {
                 queue.pop().is_none(),
                 "queue should be empty after two pops"
             );
+        }
+
+        // -- auth tests --
+
+        #[tokio::test]
+        async fn test_no_auth_header_returns_401_when_password_set() {
+            let (app, _queue) = make_app_with_password("secret");
+            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn test_wrong_password_returns_401() {
+            let (app, _queue) = make_app_with_password("secret");
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/trigger")
+                .header("content-type", "application/json")
+                .header("Authorization", "Bearer wrong")
+                .body(Body::from(valid_body()))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn test_correct_password_returns_200() {
+            let (app, _queue) = make_app_with_password("secret");
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/trigger")
+                .header("content-type", "application/json")
+                .header("Authorization", "Bearer secret")
+                .body(Body::from(valid_body()))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn test_no_password_configured_accepts_unauthenticated() {
+            let (app, _queue) = make_app();
+            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn test_healthz_unauthenticated_even_when_password_set() {
+            let (app, _queue) = make_app_with_password("secret");
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
         }
 
         #[tokio::test]

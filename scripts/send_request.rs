@@ -133,7 +133,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Posting GasKiller task to {}", url);
 
     let client = reqwest::Client::new();
-    let resp = client.post(&url).json(&payload).send().await?;
+    let mut req = client.post(&url).json(&payload);
+    if let Ok(password) = env::var("INGRESS_PASSWORD")
+        && !password.is_empty()
+    {
+        req = req.header("Authorization", format!("Bearer {password}"));
+    }
+    let resp = req.send().await?;
 
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
