@@ -130,13 +130,15 @@ eigenlayer:
     repository: ghcr.io/breadchaincoop/eigenlayer
     tag: latest
     pullPolicy: IfNotPresent
-  # L1 contract addresses (forked by Anvil in LOCAL mode)
+  # L1 contract addresses — required in all modes. In LOCAL mode these must match the
+  # network being forked (forkUrl); in TESTNET mode they must match the live network.
+  # No defaults: set these explicitly via an overrides file (e.g. testnet-overrides.yaml).
   contracts:
-    delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
-    strategyManager: "0x2E3D6c0744b10eb0A4e6F679F71554a39Ec47a5D"
-    lstContract: "0x00c71b0fcadE911B2feeE9912De4Fe19eB04ca56"
-    lstStrategy: "0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574"
-    allocationManager: "0x42583067658071247ec8CE0A516A58f682002d07"
+    delegationManager: ""
+    strategyManager: ""
+    lstContract: ""
+    lstStrategy: ""
+    allocationManager: ""
   resources:
     requests:
       memory: "1Gi"

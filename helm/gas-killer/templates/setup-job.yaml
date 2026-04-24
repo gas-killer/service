@@ -175,15 +175,15 @@ spec:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: FUNDED_KEY
             - name: DELEGATION_MANAGER_ADDRESS
-              value: {{ .Values.eigenlayer.contracts.delegationManager | quote }}
+              value: {{ required "eigenlayer.contracts.delegationManager must be set (use an overrides file matching your target network)" .Values.eigenlayer.contracts.delegationManager | quote }}
             - name: STRATEGY_MANAGER_ADDRESS
-              value: {{ .Values.eigenlayer.contracts.strategyManager | quote }}
+              value: {{ required "eigenlayer.contracts.strategyManager must be set (use an overrides file matching your target network)" .Values.eigenlayer.contracts.strategyManager | quote }}
             - name: LST_CONTRACT_ADDRESS
-              value: {{ .Values.eigenlayer.contracts.lstContract | quote }}
+              value: {{ required "eigenlayer.contracts.lstContract must be set (use an overrides file matching your target network)" .Values.eigenlayer.contracts.lstContract | quote }}
             - name: LST_STRATEGY_ADDRESS
-              value: {{ .Values.eigenlayer.contracts.lstStrategy | quote }}
+              value: {{ required "eigenlayer.contracts.lstStrategy must be set (use an overrides file matching your target network)" .Values.eigenlayer.contracts.lstStrategy | quote }}
             - name: ALLOCATION_MANAGER_ADDRESS
-              value: {{ .Values.eigenlayer.contracts.allocationManager | quote }}
+              value: {{ required "eigenlayer.contracts.allocationManager must be set (use an overrides file matching your target network)" .Values.eigenlayer.contracts.allocationManager | quote }}
           volumeMounts:
             - name: shared-data
               mountPath: /root/.nodes
