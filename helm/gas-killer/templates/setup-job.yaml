@@ -23,8 +23,13 @@ spec:
         app.kubernetes.io/component: setup
     spec:
       restartPolicy: OnFailure
-      {{- if eq .Values.global.environment "LOCAL" }}
+      {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
+      serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" .) .Values.secretManager.serviceAccountName }}
+      {{- end }}
+      {{- $needsInitContainers := or (eq .Values.global.environment "LOCAL") (and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled) }}
+      {{- if $needsInitContainers }}
       initContainers:
+        {{- if eq .Values.global.environment "LOCAL" }}
         # Wait for L1 to be ready (LOCAL mode only)
         - name: wait-for-l1
           image: busybox:1.36
@@ -45,6 +50,79 @@ spec:
                 ELAPSED=$((ELAPSED + 5))
               done
               echo "L1 is ready!"
+        {{- end }}
+        {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
+        # Restore avs_deploy.json and BLS keys from Secret Manager if the PVC is empty
+        # (e.g. after cluster recreation). If secrets don't exist yet this is a fresh
+        # install — exit 0 and let eigenlayer-setup run normally.
+        - name: fetch-avs-deploy
+          image: {{ .Values.secretManager.cloudSdkImage | quote }}
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+
+              PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" .Values.secretManager.projectId }}"
+              PREFIX="{{ .Values.secretManager.keyPrefix }}"
+              DEPLOY_SECRET="${PREFIX}-avs-deploy"
+
+              echo "Checking Secret Manager for existing deployment state (secret: ${DEPLOY_SECRET})..."
+
+              # No avs_deploy secret yet → fresh install, let eigenlayer-setup run normally.
+              if ! gcloud secrets describe "${DEPLOY_SECRET}" --project="${PROJECT}" &>/dev/null; then
+                echo "Secret ${DEPLOY_SECRET} not found. Proceeding with fresh setup."
+                exit 0
+              fi
+
+              # PVC already has a completed setup (normal helm upgrade) → nothing to restore.
+              if [ -f /root/.nodes/.setup_complete ]; then
+                echo "PVC already has .setup_complete marker. Skipping restore."
+                exit 0
+              fi
+
+              echo "Secret found and PVC is empty. Restoring state from Secret Manager..."
+              mkdir -p /root/.nodes/operator_keys
+
+              # Restore avs_deploy.json
+              gcloud secrets versions access latest \
+                --secret="${DEPLOY_SECRET}" \
+                --project="${PROJECT}" \
+                > /root/.nodes/avs_deploy.json
+              echo "Restored avs_deploy.json"
+
+              # Restore each operator's BLS key — fails fast if any secret is missing.
+              {{- $nodeCount := int .Values.global.nodeCount }}
+              {{- range $i := until $nodeCount }}
+              {{- $nodeIndex := add $i 1 }}
+              gcloud secrets versions access latest \
+                --secret="${PREFIX}-node-{{ $nodeIndex }}-bls-key" \
+                --project="${PROJECT}" \
+                > /root/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json
+              echo "Restored testacc{{ $nodeIndex }} BLS key"
+              {{- end }}
+
+              # Fix permissions so non-root containers can read the files
+              chmod -R 755 /root/.nodes
+              chmod 644 /root/.nodes/avs_deploy.json
+              chmod 644 /root/.nodes/operator_keys/*.json
+
+              # Signal eigenlayer-setup to skip re-running
+              touch /root/.nodes/.setup_complete
+              chmod 644 /root/.nodes/.setup_complete
+
+              echo "State restored from Secret Manager. Setup will be skipped."
+          volumeMounts:
+            - name: shared-data
+              mountPath: /root/.nodes
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+        {{- end }}
       {{- end }}
 
       containers:
