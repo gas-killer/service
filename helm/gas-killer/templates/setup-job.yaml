@@ -70,9 +70,14 @@ spec:
               echo "Checking Secret Manager for existing deployment state (secret: ${DEPLOY_SECRET})..."
 
               # No avs_deploy secret yet → fresh install, let eigenlayer-setup run normally.
-              if ! gcloud secrets describe "${DEPLOY_SECRET}" --project="${PROJECT}" &>/dev/null; then
-                echo "Secret ${DEPLOY_SECRET} not found. Proceeding with fresh setup."
-                exit 0
+              # Capture stderr so we can distinguish NOT_FOUND from auth/permission failures.
+              if ! describe_error="$(gcloud secrets describe "${DEPLOY_SECRET}" --project="${PROJECT}" 2>&1 >/dev/null)"; then
+                if printf '%s\n' "${describe_error}" | grep -Eqi '(^|[[:space:][:punct:]])NOT_FOUND([[:space:][:punct:]]|$)|not found'; then
+                  echo "Secret ${DEPLOY_SECRET} not found. Proceeding with fresh setup."
+                  exit 0
+                fi
+                echo "Failed to check Secret Manager for ${DEPLOY_SECRET}: ${describe_error}" >&2
+                exit 1
               fi
 
               # PVC already has a completed setup (normal helm upgrade) → nothing to restore.
@@ -81,7 +86,14 @@ spec:
                 exit 0
               fi
 
-              echo "Secret found and PVC is empty. Restoring state from Secret Manager..."
+              # If setup files already exist without the completion marker, do not overwrite them.
+              # This guards against a partial prior run (e.g. crash after avs_deploy.json was
+              # written but before .setup_complete was created).
+              if [ -f /root/.nodes/avs_deploy.json ] || find /root/.nodes/operator_keys -maxdepth 1 -type f -name '*.json' 2>/dev/null | grep -q .; then
+                echo "Detected existing setup files in PVC without .setup_complete marker. Refusing to restore over partial state." >&2
+                exit 1
+              fi
+              echo "Secret found and no existing restore target files were detected. Restoring state from Secret Manager..."
               mkdir -p /root/.nodes/operator_keys
 
               # Restore avs_deploy.json
