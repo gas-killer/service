@@ -645,11 +645,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         0
     };
 
-    let client = Arc::new(
-        Client::builder()
-            .timeout(Duration::from_secs(config.ingress_timeout_secs))
-            .build()?,
-    );
+    let mut client_builder = Client::builder();
+    if config.ingress_timeout_secs > 0 {
+        client_builder = client_builder.timeout(Duration::from_secs(config.ingress_timeout_secs));
+    }
+    let client = Arc::new(client_builder.build()?);
     let router_url = Arc::new(config.router_url.clone());
 
     println!("Router: {}", config.router_url);
