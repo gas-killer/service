@@ -10,9 +10,7 @@
 # Structure:
 #   1. smoke   — single serial request with on-chain verification; confirms the
 #                stack is healthy before applying load
-#   2. burst_10 — 10 concurrent requests to a separate duplicate contract; all
-#                fire with the same transition_index (each fetches it
-#                independently at send time, so they collide intentionally).
+#   2. burst_10 — 10 concurrent requests to a separate duplicate contract;
 #                verify = false so results return immediately without waiting
 #                for on-chain confirmation.
 
