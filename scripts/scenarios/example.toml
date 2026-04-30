@@ -3,8 +3,9 @@
 # Run with:
 #   cargo run -p scripts --bin run_scenario -- scripts/scenarios/example.toml
 
-router_url = "http://localhost:8080"
-http_rpc   = "$HTTP_RPC"         # env var interpolation supported; required when block_height = 0, verify = true, or transition_index = "auto"
+router_url           = "http://localhost:8080"
+http_rpc             = "$HTTP_RPC"  # env var interpolation supported; required when block_height = 0, verify = true, or transition_index = "auto"
+# ingress_timeout_secs = 30         # HTTP client timeout for all requests in this scenario file (default: 30, 0 = no timeout)
 
 # ── Scenario 1: serial smoke test with on-chain verification ─────────────────
 [[scenarios]]
