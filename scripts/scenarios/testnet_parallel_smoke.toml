@@ -1,0 +1,42 @@
+# Gas Killer Parallel Smoke Test — testnet.gaskiller.xyz
+#
+# Two concurrent requests to separate contracts, both verified on-chain.
+# Confirms the router and nodes can handle parallel submissions to distinct
+# contracts and that verifyAndUpdate runs for each independently.
+#
+# Run with:
+#   cargo run -p scripts --bin run_scenario -- scripts/scenarios/testnet_parallel_smoke.toml
+#
+# Requires:
+#   GNOSIS_RPC_URL    — Gnosis chain HTTP RPC endpoint
+#   INGRESS_PASSWORD  — Bearer token for /trigger (if enabled on the server)
+
+router_url           = "https://testnet.gaskiller.xyz"
+http_rpc             = "$GNOSIS_RPC_URL"
+ingress_timeout_secs = 60
+
+[[scenarios]]
+name = "parallel_smoke"
+mode = "parallel"
+
+  [[scenarios.requests]]
+  label               = "contract_a"
+  target_address      = "0x5DC77FCc9E71F3A0DD0EffC144B697B74F5C5287"
+  call_data           = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address        = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index    = "auto"
+  value               = "0"
+  block_height        = 0
+  verify              = true
+  verify_timeout_secs = 300
+
+  [[scenarios.requests]]
+  label               = "contract_b"
+  target_address      = "0x4a9CDaeadC1E996c956a31A2760405E6d3274Fbd"
+  call_data           = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address        = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index    = "auto"
+  value               = "0"
+  block_height        = 0
+  verify              = true
+  verify_timeout_secs = 300
