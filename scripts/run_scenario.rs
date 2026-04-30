@@ -17,12 +17,18 @@ struct Config {
     router_url: String,
     /// Required when any request uses `block_height = 0`, `verify = true`, or `transition_index = "auto"`.
     http_rpc: Option<String>,
+    #[serde(default = "default_ingress_timeout_secs")]
+    ingress_timeout_secs: u64,
     #[serde(default)]
     scenarios: Vec<Scenario>,
 }
 
 fn default_router_url() -> String {
     "http://localhost:8080".to_string()
+}
+
+fn default_ingress_timeout_secs() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, Default)]
@@ -639,7 +645,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         0
     };
 
-    let client = Arc::new(Client::builder().timeout(Duration::from_secs(30)).build()?);
+    let client = Arc::new(
+        Client::builder()
+            .timeout(Duration::from_secs(config.ingress_timeout_secs))
+            .build()?,
+    );
     let router_url = Arc::new(config.router_url.clone());
 
     println!("Router: {}", config.router_url);
