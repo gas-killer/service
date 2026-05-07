@@ -28,6 +28,10 @@ pub trait TaskQueue: Send + Sync {
 
     /// Current number of pending tasks in the queue
     fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Simple in-memory task queue using Arc<Mutex> with proper error handling
