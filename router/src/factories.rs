@@ -1,7 +1,7 @@
 use crate::GasKillerHandler;
 use crate::creator::{
-    GasKillerConfig, GasKillerCreator, GasKillerCreatorType, ListeningGasKillerCreator,
-    SimpleTaskQueue,
+    DispatchTime, GasKillerConfig, GasKillerCreator, GasKillerCreatorType,
+    ListeningGasKillerCreator, SimpleTaskQueue,
 };
 use crate::ingress::{IngressState, start_gas_killer_http_server};
 use crate::metrics::MetricsCollector;
@@ -54,14 +54,18 @@ pub async fn create_listening_creator_with_server(
     addr: String,
     validator: Arc<GasKillerValidator>,
     metrics: Arc<MetricsCollector>,
+    dispatch_time: DispatchTime,
 ) -> anyhow::Result<GasKillerCreatorType> {
     let queue = SimpleTaskQueue::new();
     let config = GasKillerConfig::default();
-    let creator = ListeningGasKillerCreator::new(queue.clone(), config, validator)
-        .with_metrics(Arc::clone(&metrics));
+    let creator =
+        ListeningGasKillerCreator::new(queue.clone(), config, validator, dispatch_time)
+            .with_metrics(Arc::clone(&metrics));
     let providers = build_ingress_providers().await?;
     let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
-    let ingress_state = IngressState::new(Arc::new(queue), metrics, providers, ingress_password);
+    let queue_arc = Arc::new(queue);
+    let ingress_state =
+        IngressState::new(Arc::clone(&queue_arc), metrics, providers, ingress_password);
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });
@@ -146,6 +150,7 @@ async fn create_wallet_provider_for_chain(
 /// transactions on L2 when the target contract lives there.
 pub async fn create_gas_killer_executor(
     metrics: Arc<MetricsCollector>,
+    dispatch_time: DispatchTime,
 ) -> Result<BlsEigenlayerExecutor<GasKillerHandler<SimpleWalletProvider>>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
@@ -208,7 +213,9 @@ pub async fn create_gas_killer_executor(
     );
 
     // Create handler with multi-chain providers
-    let gas_killer_handler = GasKillerHandler::with_providers(providers).with_metrics(metrics);
+    let gas_killer_handler = GasKillerHandler::with_providers(providers)
+        .with_metrics(metrics)
+        .with_dispatch_time(dispatch_time);
 
     Ok(BlsEigenlayerExecutor::new(
         view_only_provider,

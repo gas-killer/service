@@ -38,3 +38,6 @@ tokio = { workspace = true }
 # Logging
 tracing = { workspace = true }
 url = { workspace = true }
+
+# Metrics
+prometheus-client = { workspace = true }

@@ -74,6 +74,7 @@ services:
       ]
     ports:
       - "4001:3001"
+      - "9001:8081"  # metrics / healthz
     restart: unless-stopped
 
   node-2:
@@ -107,6 +108,7 @@ services:
       ]
     ports:
       - "4002:3002"
+      - "9002:8081"  # metrics / healthz
     restart: unless-stopped
 
   node-3:
@@ -140,6 +142,7 @@ services:
       ]
     ports:
       - "4003:3003"
+      - "9003:8081"  # metrics / healthz
     restart: unless-stopped
 
   router:
@@ -171,4 +174,5 @@ services:
     ports:
       - "4000:3000"
       - "8080:8080"
+      - "8081:8081"  # metrics / healthz
     restart: unless-stopped

@@ -1,8 +1,9 @@
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 
 pub struct MetricsCollector {
     registry: Registry,
@@ -20,6 +21,11 @@ pub struct MetricsCollector {
     pub aggregation_rounds_failed: Counter<u64, AtomicU64>,
     /// Full handle_verification duration including contract calls and tx submission (seconds).
     pub execution_duration_seconds: Histogram,
+    /// Time from creator dispatching a task to the executor receiving threshold signatures (seconds).
+    /// Captures P2P transit + node EVMSketch + BLS signing + aggregation.
+    pub p2p_round_trip_seconds: Histogram,
+    /// Current number of tasks sitting in the ingress queue waiting to be processed.
+    pub task_queue_depth: Gauge<i64, AtomicI64>,
 }
 
 impl MetricsCollector {
@@ -77,6 +83,21 @@ impl MetricsCollector {
             execution_duration_seconds.clone(),
         );
 
+        let p2p_round_trip_seconds =
+            Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]);
+        registry.register(
+            "gas_killer_p2p_round_trip_seconds",
+            "Time from creator dispatching a task to executor receiving threshold signatures (P2P transit + node EVMSketch + BLS signing + aggregation)",
+            p2p_round_trip_seconds.clone(),
+        );
+
+        let task_queue_depth = Gauge::default();
+        registry.register(
+            "gas_killer_task_queue_depth",
+            "Current number of tasks in the ingress queue awaiting processing",
+            task_queue_depth.clone(),
+        );
+
         Self {
             registry,
             ingress_accepted,
@@ -86,6 +107,8 @@ impl MetricsCollector {
             aggregation_rounds_completed,
             aggregation_rounds_failed,
             execution_duration_seconds,
+            p2p_round_trip_seconds,
+            task_queue_depth,
         }
     }
 

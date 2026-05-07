@@ -16,8 +16,8 @@ use commonware_runtime::{Metrics, Runner, Spawner, tokio};
 use commonware_utils::{NZU32, set::OrderedAssociated};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
-    GasKillerTaskData, GasKillerValidator, OrchestratorConfig, get_operator_states,
-    load_key_from_file, load_orchestrator_config,
+    GasKillerTaskData, GasKillerValidator, OrchestratorConfig, ValidatorMetrics,
+    get_operator_states, load_key_from_file, load_orchestrator_config,
 };
 use governor::Quota;
 use std::collections::HashMap;
@@ -34,6 +34,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 struct HealthState {
     ready: Arc<AtomicBool>,
     context: tokio::Context,
+    validator_metrics: Arc<ValidatorMetrics>,
 }
 
 /// Liveness probe — always 200 if the process is running.
@@ -50,14 +51,16 @@ async fn readyz_handler(State(s): State<HealthState>) -> StatusCode {
     }
 }
 
-/// Prometheus metrics endpoint — encodes commonware runtime metrics in text format.
+/// Prometheus metrics endpoint — commonware runtime metrics + node validator timing.
 async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
+    let mut output = s.context.encode();
+    output.push_str(&s.validator_metrics.encode());
     (
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        s.context.encode(),
+        output,
     )
 }
 
@@ -348,10 +351,12 @@ fn main() {
         let (sender, receiver) =
             network.register(0, Quota::per_second(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
 
-        // Create validator for the gas killer use case (uses full gas-analyzer validation)
+        // Create validator metrics and validator for the gas killer use case
+        let validator_metrics = Arc::new(ValidatorMetrics::new());
         let validator = Arc::new(
             GasKillerValidator::new()
-                .expect("HTTP_RPC environment variable must be set for gas analyzer"),
+                .expect("HTTP_RPC environment variable must be set for gas analyzer")
+                .with_validator_metrics(Arc::clone(&validator_metrics)),
         );
 
         // Create contributor with GasKillerTaskData as the metadata type
@@ -375,6 +380,7 @@ fn main() {
         let health_state = HealthState {
             ready: Arc::clone(&ready),
             context: context.clone(),
+            validator_metrics,
         };
         context.clone().spawn(move |_| async move {
             let app = Router::new()

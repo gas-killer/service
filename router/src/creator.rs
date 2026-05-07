@@ -14,6 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
+/// Shared timestamp set by the creator when it dispatches a task and read by the executor
+/// to compute the P2P round-trip duration.
+pub type DispatchTime = Arc<Mutex<Option<Instant>>>;
+
 /// A queue that can hold and provide task requests
 pub trait TaskQueue: Send + Sync {
     /// Add a task to the queue
@@ -21,6 +25,9 @@ pub trait TaskQueue: Send + Sync {
 
     /// Remove and return the next task from the queue
     fn pop(&self) -> Option<GasKillerTaskRequest>;
+
+    /// Current number of pending tasks in the queue
+    fn len(&self) -> usize;
 }
 
 /// Simple in-memory task queue using Arc<Mutex> with proper error handling
@@ -100,6 +107,10 @@ impl Default for GasKillerTaskQueue {
 pub type SimpleTaskQueue = GasKillerTaskQueue;
 
 impl TaskQueue for GasKillerTaskQueue {
+    fn len(&self) -> usize {
+        self.queue.lock().map(|q| q.len()).unwrap_or(0)
+    }
+
     fn push(&self, task: GasKillerTaskRequest) {
         match self.try_lock_with_timeout() {
             Ok(mut queue) => {
@@ -187,10 +198,17 @@ pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     /// Round counter - incremented for each new task to ensure unique rounds
     round_counter: AtomicU64,
     metrics: Option<Arc<MetricsCollector>>,
+    /// Shared with the executor to measure P2P round-trip duration.
+    dispatch_time: DispatchTime,
 }
 
 impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
-    pub fn new(queue: Q, config: GasKillerConfig, validator: Arc<GasKillerValidator>) -> Self {
+    pub fn new(
+        queue: Q,
+        config: GasKillerConfig,
+        validator: Arc<GasKillerValidator>,
+        dispatch_time: DispatchTime,
+    ) -> Self {
         Self {
             queue: Arc::new(queue),
             config,
@@ -198,6 +216,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
             current_task: Mutex::new(None),
             round_counter: AtomicU64::new(0),
             metrics: None,
+            dispatch_time,
         }
     }
 
@@ -217,6 +236,9 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
         let mut attempts = 0u64;
         loop {
             if let Some(task) = self.queue.pop() {
+                if let Some(m) = &self.metrics {
+                    m.task_queue_depth.set(self.queue.len() as i64);
+                }
                 return Ok(task);
             }
             attempts += 1;
@@ -317,6 +339,11 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         // Nodes will refuse to sign the same round twice
         let round = self.round_counter.fetch_add(1, Ordering::SeqCst);
         info!(round = round, "Creator returning payload with round");
+
+        // Stamp the dispatch time so the executor can compute P2P round-trip duration.
+        if let Ok(mut t) = self.dispatch_time.lock() {
+            *t = Some(Instant::now());
+        }
 
         Ok((payload, round))
     }
