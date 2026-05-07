@@ -58,9 +58,8 @@ pub async fn create_listening_creator_with_server(
 ) -> anyhow::Result<GasKillerCreatorType> {
     let queue = SimpleTaskQueue::new();
     let config = GasKillerConfig::default();
-    let creator =
-        ListeningGasKillerCreator::new(queue.clone(), config, validator, dispatch_time)
-            .with_metrics(Arc::clone(&metrics));
+    let creator = ListeningGasKillerCreator::new(queue.clone(), config, validator, dispatch_time)
+        .with_metrics(Arc::clone(&metrics));
     let providers = build_ingress_providers().await?;
     let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
     let queue_arc = Arc::new(queue);

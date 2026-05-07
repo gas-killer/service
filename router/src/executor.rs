@@ -270,7 +270,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
         if let Ok(mut t) = self.dispatch_time.lock() {
             if let Some(start) = t.take() {
                 if let Some(m) = &self.metrics {
-                    m.p2p_round_trip_seconds.observe(start.elapsed().as_secs_f64());
+                    m.p2p_round_trip_seconds
+                        .observe(start.elapsed().as_secs_f64());
                 }
             }
         }
