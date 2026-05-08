@@ -196,13 +196,74 @@ impl fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+/// Deserializes `transition_index` from JSON.
+///
+/// Accepted values:
+/// - `null` or missing field → `None` (auto: server assigns the next slot)
+/// - `"auto"` → `None`
+/// - non-negative integer → `Some(n)` (explicit fixed index)
+///
+/// Any other string or non-integer type is rejected with a descriptive error.
+fn deserialize_transition_index<'de, D>(d: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, Unexpected, Visitor};
+
+    struct TransitionIndexVisitor;
+
+    impl<'de> Visitor<'de> for TransitionIndexVisitor {
+        type Value = Option<u64>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, r#"a non-negative integer, "auto", or null"#)
+        }
+
+        fn visit_unit<E: Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: serde::Deserializer<'de>>(
+            self,
+            d: D2,
+        ) -> Result<Self::Value, D2::Error> {
+            d.deserialize_any(self)
+        }
+
+        fn visit_u64<E: Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: Error>(self, v: i64) -> Result<Self::Value, E> {
+            u64::try_from(v)
+                .map(Some)
+                .map_err(|_| E::invalid_value(Unexpected::Signed(v), &self))
+        }
+
+        fn visit_str<E: Error>(self, v: &str) -> Result<Self::Value, E> {
+            if v == "auto" {
+                Ok(None)
+            } else {
+                Err(E::invalid_value(Unexpected::Str(v), &self))
+            }
+        }
+    }
+
+    d.deserialize_option(TransitionIndexVisitor)
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GasKillerTaskRequestBody {
     pub target_address: Address,
     pub call_data: Vec<u8>,
-    /// `None` (or JSON `null`) means "auto": the server resolves the next
-    /// available slot at dequeue time, enabling safe parallel submissions.
-    #[serde(default)]
+    /// `None`, JSON `null`, `"auto"`, or a missing field all mean "auto":
+    /// the server resolves the next available slot at dequeue time,
+    /// enabling safe parallel submissions.
+    #[serde(default, deserialize_with = "deserialize_transition_index")]
     pub transition_index: Option<u64>,
     pub from_address: Address,
     pub value: U256,
@@ -910,6 +971,70 @@ mod tests {
                 queue.pop().is_none(),
                 "invalid task must not be pushed to queue"
             );
+        }
+    }
+
+    // -- transition_index deserialization tests --
+
+    mod transition_index_deser {
+        use crate::ingress::GasKillerTaskRequestBody;
+
+        fn deser(json: &str) -> Result<Option<u64>, serde_json::Error> {
+            let body: GasKillerTaskRequestBody = serde_json::from_str(json)?;
+            Ok(body.transition_index)
+        }
+
+        fn body_with(transition_index_json: &str) -> String {
+            format!(
+                r#"{{"target_address":"0x0000000000000000000000000000000000000001","call_data":[1,2,3,4],"from_address":"0x0000000000000000000000000000000000000002","value":"0x0","block_height":1,"transition_index":{}}}"#,
+                transition_index_json
+            )
+        }
+
+        #[test]
+        fn test_numeric_gives_some() {
+            assert_eq!(deser(&body_with("42")).unwrap(), Some(42));
+        }
+
+        #[test]
+        fn test_zero_gives_some_zero() {
+            assert_eq!(deser(&body_with("0")).unwrap(), Some(0));
+        }
+
+        #[test]
+        fn test_null_gives_none() {
+            assert_eq!(deser(&body_with("null")).unwrap(), None);
+        }
+
+        #[test]
+        fn test_auto_string_gives_none() {
+            assert_eq!(deser(&body_with(r#""auto""#)).unwrap(), None);
+        }
+
+        #[test]
+        fn test_missing_field_gives_none() {
+            let json = r#"{"target_address":"0x0000000000000000000000000000000000000001","call_data":[1,2,3,4],"from_address":"0x0000000000000000000000000000000000000002","value":"0x0","block_height":1}"#;
+            assert_eq!(deser(json).unwrap(), None);
+        }
+
+        #[test]
+        fn test_unknown_string_is_rejected() {
+            assert!(deser(&body_with(r#""foo""#)).is_err());
+        }
+
+        #[test]
+        fn test_empty_string_is_rejected() {
+            assert!(deser(&body_with(r#""""#)).is_err());
+        }
+
+        #[test]
+        fn test_negative_integer_is_rejected() {
+            assert!(deser(&body_with("-1")).is_err());
+        }
+
+        #[test]
+        fn test_boolean_is_rejected() {
+            assert!(deser(&body_with("true")).is_err());
         }
     }
 
