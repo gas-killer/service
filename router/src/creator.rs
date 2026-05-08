@@ -112,7 +112,8 @@ pub type SimpleTaskQueue = GasKillerTaskQueue;
 
 impl TaskQueue for GasKillerTaskQueue {
     fn len(&self) -> usize {
-        self.queue.lock().map(|q| q.len()).unwrap_or(0)
+        // try_lock avoids blocking indefinitely
+        self.queue.try_lock().map(|q| q.len()).unwrap_or(0)
     }
 
     fn push(&self, task: GasKillerTaskRequest) {

@@ -18,7 +18,7 @@
 #   - gas_killer_task_queue_depth               (router)
 #
 # Interpretation guide:
-#   p2p_transport_estimate ≈ round_trip_p99 − node_evmsketch_p99 − storage_computation_p99
+#   p2p_transport_estimate ≈ round_trip_p99 − node_evmsketch_p99
 #   If task_queue_depth > 0 during burst_5, the 1 msg/sec rate limit is the bottleneck.
 
 router_url           = "https://testnet.gaskiller.xyz"

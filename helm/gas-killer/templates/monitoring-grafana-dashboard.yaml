@@ -202,7 +202,7 @@ data:
           "type": "text",
           "title": "Latency Breakdown",
           "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Latency Breakdown\n\nP2P round-trip = time from creator dispatching a task to the executor receiving threshold signatures (includes P2P transit ×2, node EVMSketch, BLS signing, and aggregation).\n\nEstimated transport+signing overhead ≈ round-trip − router-side EVMSketch. Node EVMSketch duration comes from the node's `/metrics`." }
+          "options": { "mode": "markdown", "content": "## Latency Breakdown\n\nP2P round-trip = time from creator dispatching a task (after router-side storage computation) to the executor receiving threshold signatures. Includes P2P transit ×2, node EVMSketch, BLS signing, and aggregation.\n\nEstimated transport+signing overhead ≈ round-trip − node EVMSketch. Router-side storage computation is **not** part of the round-trip measurement (it completes before the dispatch timestamp is stamped)." }
         },
         {
           "id": 41,

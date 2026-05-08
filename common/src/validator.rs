@@ -39,7 +39,7 @@ impl ValidatorMetrics {
             Histogram::new([0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0]);
         registry.register(
             "gas_killer_node_evmsketch_duration_seconds",
-            "Duration of call_to_encoded_state_updates_with_evmsketch on the node (cache-miss only)",
+            "Duration of gas analysis (EVMSketch + RPC calls) on the node, cache-miss path only. Excludes chain detection.",
             evmsketch_duration_seconds.clone(),
         );
         Self {
@@ -425,6 +425,7 @@ impl GasKillerValidator {
             "Computing storage updates for detected chain"
         );
 
+        let evmsketch_start = Instant::now();
         let result = Self::analyze_transaction(
             rpc_url,
             task_data.target_address,
@@ -434,6 +435,10 @@ impl GasKillerValidator {
             task_data.block_height,
         )
         .await?;
+        if let Some(m) = &self.validator_metrics {
+            m.evmsketch_duration_seconds
+                .observe(evmsketch_start.elapsed().as_secs_f64());
+        }
         Ok(result.storage_updates)
     }
 
@@ -466,12 +471,7 @@ impl GasKillerValidator {
         }
 
         // Not cached — compute storage updates (the expensive EVMSketch path)
-        let evmsketch_start = Instant::now();
         let storage_updates = self.compute_storage_updates(task_data).await?;
-        if let Some(m) = &self.validator_metrics {
-            m.evmsketch_duration_seconds
-                .observe(evmsketch_start.elapsed().as_secs_f64());
-        }
 
         // Build expected payload hash using computed storage updates
         let payload_hash = self.build_payload_hash(task_data, &storage_updates);
