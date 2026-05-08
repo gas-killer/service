@@ -204,6 +204,33 @@ impl GasKillerValidator {
         .await
     }
 
+    /// Fetches the current `stateTransitionCount()` from the contract.
+    ///
+    /// Detects which chain the contract lives on, then calls the view function.
+    /// Used by the creator to resolve an "auto" transition index at dequeue time.
+    pub async fn get_state_transition_count(
+        &self,
+        address: alloy::primitives::Address,
+    ) -> Result<u64> {
+        use crate::bindings::gaskillersdk::GasKillerSDK;
+        use alloy_provider::ProviderBuilder;
+
+        let chain_id = self.detect_chain_for_address(address).await?;
+        let rpc_url = self
+            .rpc_url_for_chain(chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_id))?;
+        let url = Url::parse(rpc_url)?;
+        let provider = ProviderBuilder::new().connect_http(url);
+        let count = GasKillerSDK::new(address, provider)
+            .stateTransitionCount()
+            .call()
+            .await
+            .map_err(|e| anyhow::anyhow!("stateTransitionCount call failed: {}", e))?;
+        count
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("stateTransitionCount overflow"))
+    }
+
     /// Computes storage updates for a transaction using gas-analyzer.
     ///
     /// Automatically detects which chain the contract is on, then computes storage updates.

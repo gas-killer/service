@@ -192,6 +192,8 @@ struct EnrichedTask {
     task: GasKillerTaskRequest,
     storage_updates: Vec<u8>,
     block_height: u64,
+    /// Resolved transition index (sentinel `None` → concrete count from chain).
+    transition_index: u64,
 }
 
 /// Creator for the gas killer usecase that listens for external requests
@@ -270,7 +272,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         info!(
             target = format!("{:?}", task.body.target_address),
             from = format!("{:?}", task.body.from_address),
-            transition_index = task.body.transition_index,
+            transition_index = ?task.body.transition_index,
             call_data_len = task.body.call_data.len(),
             "Creator received task"
         );
@@ -278,6 +280,24 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         if let Some(m) = &self.metrics {
             m.tasks_created.inc();
         }
+
+        // Resolve "auto" transition_index to the current on-chain slot at dequeue time.
+        // This ensures parallel requests each receive a distinct sequential index.
+        let resolved_transition_index = match task.body.transition_index {
+            Some(idx) => idx,
+            None => {
+                info!(
+                    target_address = %task.body.target_address,
+                    "Resolving auto transition_index from chain"
+                );
+                self.validator
+                    .get_state_transition_count(task.body.target_address)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to resolve auto transition_index: {}", e)
+                    })?
+            }
+        };
 
         // Compute storage updates - the validator automatically detects which chain has the contract
         debug!(
@@ -310,7 +330,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             storage_updates_len = storage_updates.len(),
             storage_updates_hash = %storage_hash_hex,
             block_height = block_height,
-            transition_index = task.body.transition_index,
+            transition_index = resolved_transition_index,
             target_address = %task.body.target_address,
             target_function = %task.body.call_data.get(..4).map(hex::encode).unwrap_or_default(),
             chain = %detected_chain,
@@ -322,6 +342,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             task,
             storage_updates,
             block_height,
+            transition_index: resolved_transition_index,
         };
 
         if let Ok(mut current_task) = self.current_task.lock() {
@@ -363,7 +384,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
 
                     return GasKillerTaskData {
                         storage_updates: enriched.storage_updates.clone(),
-                        transition_index: enriched.task.body.transition_index,
+                        transition_index: enriched.transition_index,
                         target_address: enriched.task.body.target_address,
                         call_data: enriched.task.body.call_data.clone(),
                         from_address: enriched.task.body.from_address,
@@ -491,7 +512,7 @@ mod tests {
             body: crate::ingress::GasKillerTaskRequestBody {
                 target_address: Address::from([1u8; 20]),
                 call_data: vec![0x12, 0x34, 0x56, 0x78],
-                transition_index: 1,
+                transition_index: Some(1),
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
                 block_height: 12345,
@@ -501,7 +522,7 @@ mod tests {
         queue.push(task.clone());
         let popped = queue.pop();
         assert!(popped.is_some());
-        assert_eq!(popped.unwrap().body.transition_index, 1);
+        assert_eq!(popped.unwrap().body.transition_index, Some(1));
     }
 
     #[test]
@@ -510,7 +531,7 @@ mod tests {
             body: crate::ingress::GasKillerTaskRequestBody {
                 target_address: Address::from([1u8; 20]),
                 call_data: vec![0x12, 0x34, 0x56, 0x78],
-                transition_index: 42,
+                transition_index: Some(42),
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
                 block_height: 12345,
@@ -519,7 +540,7 @@ mod tests {
 
         let task_data = GasKillerTaskData {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04], // would be computed by GasAnalyzer
-            transition_index: task.body.transition_index,
+            transition_index: task.body.transition_index.unwrap_or(0),
             target_address: task.body.target_address,
             call_data: task.body.call_data.clone(),
             from_address: task.body.from_address,

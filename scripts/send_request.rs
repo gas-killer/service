@@ -29,7 +29,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let target_address: Address = env_var("GAS_KILLER_TARGET_ADDRESS")?.parse()?;
         let call_data_hex = env_var("GAS_KILLER_CALL_DATA")?;
         let from_address: Address = env_var("GAS_KILLER_FROM_ADDRESS")?.parse()?;
-        let transition_index: u64 = env_var("GAS_KILLER_TRANSITION_INDEX")?.parse()?;
+        let transition_index: Option<u64> = {
+            let raw = env_var("GAS_KILLER_TRANSITION_INDEX")?;
+            if raw == "auto" || raw == "null" {
+                None
+            } else {
+                Some(raw.parse::<u64>()?)
+            }
+        };
 
         // Optional env vars
         let value: U256 = env::var("GAS_KILLER_VALUE")
@@ -49,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Resolve block_height for deterministic execution
         let block_height = resolve_block_height(&provider_for_block).await?;
 
-        // Build request
+        // Build request (None = auto, resolved server-side)
         let body = GasKillerTaskRequestBody {
             target_address,
             call_data,
@@ -81,11 +88,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         String::from("")
     };
+    let transition_index_display = match request.body.transition_index {
+        Some(idx) => idx.to_string(),
+        None => "auto".to_string(),
+    };
     println!(
         "Debug request summary:\n  target_address: {:?}\n  from_address: {:?}\n  transition_index: {}\n  value: {}\n  block_height: {}\n  call_data_len: {} (selector: 0x{})",
         request.body.target_address,
         request.body.from_address,
-        request.body.transition_index,
+        transition_index_display,
         request.body.value,
         request.body.block_height,
         request.body.call_data.len(),
@@ -151,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             status,
             request.body.target_address,
             request.body.from_address,
-            request.body.transition_index,
+            transition_index_display,
             request.body.value,
             request.body.block_height,
             request.body.call_data.len(),
@@ -288,8 +299,7 @@ async fn build_mock_request()
     let body = GasKillerTaskRequestBody {
         target_address,
         call_data,
-        // transitionIndex must equal the current stateTransitionCount() at call time
-        transition_index: current_count,
+        transition_index: Some(current_count),
         from_address,
         value,
         block_height,

@@ -142,21 +142,25 @@ async fn validate_onchain<P: Provider + Clone>(
         });
     }
 
-    let contract = GasKillerSDK::new(body.target_address, provider.clone());
-    let count = contract
-        .stateTransitionCount()
-        .call()
-        .await
-        .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
-    let current_count: u64 = count
-        .try_into()
-        .map_err(|_| OnchainValidationError::RpcError("stateTransitionCount overflow".into()))?;
+    // Only validate the transition index if explicitly provided.
+    // None means "auto" — the server resolves the index at dequeue time.
+    if let Some(provided) = body.transition_index {
+        let contract = GasKillerSDK::new(body.target_address, provider.clone());
+        let count = contract
+            .stateTransitionCount()
+            .call()
+            .await
+            .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
+        let current_count: u64 = count.try_into().map_err(|_| {
+            OnchainValidationError::RpcError("stateTransitionCount overflow".into())
+        })?;
 
-    if body.transition_index != current_count {
-        return Err(OnchainValidationError::TransitionIndexMismatch {
-            provided: body.transition_index,
-            current: current_count,
-        });
+        if provided != current_count {
+            return Err(OnchainValidationError::TransitionIndexMismatch {
+                provided,
+                current: current_count,
+            });
+        }
     }
 
     Ok(())
@@ -196,7 +200,10 @@ impl std::error::Error for ValidationError {}
 pub struct GasKillerTaskRequestBody {
     pub target_address: Address,
     pub call_data: Vec<u8>,
-    pub transition_index: u64,
+    /// `None` (or JSON `null`) means "auto": the server resolves the next
+    /// available slot at dequeue time, enabling safe parallel submissions.
+    #[serde(default)]
+    pub transition_index: Option<u64>,
     pub from_address: Address,
     pub value: U256,
     pub block_height: u64,
@@ -298,7 +305,7 @@ pub async fn trigger_task_handler(
             target_address = %request.body.target_address,
             from_address = %request.body.from_address,
             block_height = request.body.block_height,
-            transition_index = request.body.transition_index,
+            transition_index = ?request.body.transition_index,
             error = %e,
             "Task rejected (onchain)"
         );
@@ -377,7 +384,7 @@ mod tests {
                     .parse()
                     .unwrap(),
                 call_data: vec![0xAB, 0xCD, 0xEF, 0x01], // 4-byte selector
-                transition_index: 0,
+                transition_index: Some(0),
                 value: U256::ZERO,
                 block_height: 1,
             },
@@ -511,7 +518,7 @@ mod tests {
                 target_address: Address::ZERO,
                 from_address: Address::ZERO,
                 call_data: vec![],
-                transition_index: u64::MAX,
+                transition_index: Some(u64::MAX),
                 value: U256::MAX,
                 block_height: 0,
             },
@@ -937,7 +944,7 @@ mod tests {
                     .parse()
                     .unwrap(),
                 call_data: vec![0xAB, 0xCD, 0xEF, 0x01],
-                transition_index: 5,
+                transition_index: Some(5),
                 value: U256::ZERO,
                 block_height: 50,
             }
@@ -1117,6 +1124,24 @@ mod tests {
                 matches!(err, OnchainValidationError::RpcError(_)),
                 "expected RpcError, got {err}"
             );
+        }
+
+        #[tokio::test]
+        async fn test_auto_transition_index_skips_count_check() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, 100);
+            // No push_state_transition_count — the mock asserter would fail if it were called.
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            let mut body = valid_body();
+            body.transition_index = None;
+
+            validate_onchain(&providers, &body)
+                .await
+                .expect("auto transition_index should skip count check and pass");
         }
 
         #[tokio::test]
