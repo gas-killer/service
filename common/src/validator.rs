@@ -23,7 +23,7 @@ use commonware_avs_router::wire;
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::TransactionRequest;
-use gas_analyzer::call_to_encoded_state_updates_with_evmsketch;
+use gas_analyzer::{EvmSketchExecutorCache, call_to_encoded_state_updates_with_evmsketch};
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
 pub struct ValidatorMetrics {
@@ -73,6 +73,12 @@ pub struct AnalysisResult {
     pub block_height: u64,
 }
 
+/// Default LRU capacity for the executor cache.
+///
+/// 4 entries covers all realistic burst scenarios on mainnet (~12 s blocks):
+/// one entry per chain (mainnet + L2) at the current and previous block height.
+const DEFAULT_EXECUTOR_CACHE_CAPACITY: usize = 4;
+
 /// Validator implementation for the gas killer use case with multi-chain support
 #[derive(Clone)]
 pub struct GasKillerValidator {
@@ -84,6 +90,10 @@ pub struct GasKillerValidator {
     /// Prevents re-running expensive EVMSketch for the same round when the
     /// orchestrator validates multiple signatures for identical task data.
     digest_cache: Arc<Mutex<HashMap<(u64, u64), Digest>>>,
+    /// LRU cache of pre-built EvmSketch executors keyed by (rpc_url, block_number).
+    /// Eliminates the 2× eth_getBlockByNumber build cost (~80–120 ms) for the
+    /// 2nd…Nth request at the same block height.
+    executor_cache: Arc<EvmSketchExecutorCache>,
     /// Optional Prometheus metrics — injected on the node, absent on the router.
     validator_metrics: Option<Arc<ValidatorMetrics>>,
 }
@@ -113,6 +123,7 @@ impl GasKillerValidator {
             chain_rpc_urls,
             default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
             validator_metrics: None,
         })
     }
@@ -127,6 +138,7 @@ impl GasKillerValidator {
             chain_rpc_urls,
             default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
             validator_metrics: None,
         }
     }
@@ -137,6 +149,7 @@ impl GasKillerValidator {
             chain_rpc_urls,
             default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
             validator_metrics: None,
         }
     }
@@ -256,7 +269,7 @@ impl GasKillerValidator {
             .rpc_url_for_chain(chain_id)
             .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
 
-        let result = Self::analyze_transaction(
+        let result = self.analyze_transaction(
             rpc_url,
             contract_address,
             call_data,
@@ -370,16 +383,16 @@ impl GasKillerValidator {
         payload_hash
     }
 
-    /// Performs the core gas analysis using gas-analyzer
+    /// Performs the core gas analysis using gas-analyzer.
     ///
-    /// This method contains the core logic for:
-    /// 1. Forking the blockchain state
-    /// 2. Executing the transaction
-    /// 3. Extracting storage changes and gas information
+    /// Uses the shared executor cache to skip the 2× `eth_getBlockByNumber` build
+    /// cost (~80–120 ms) when a request arrives at the same block height as a
+    /// recent prior request.
     ///
     /// Takes an explicit RPC URL parameter for flexibility.
     /// Forks at the specified block for deterministic results.
     pub async fn analyze_transaction(
+        &self,
         rpc_url: &str,
         contract_address: alloy::primitives::Address,
         call_data: &[u8],
@@ -404,9 +417,12 @@ impl GasKillerValidator {
             .value(tx_value)
             .input(alloy::primitives::Bytes::copy_from_slice(call_data).into());
 
-        // Call gas-analyzer to get storage updates and gas estimate using EvmSketch
+        // Call gas-analyzer to get storage updates and gas estimate using EvmSketch.
+        // The executor cache eliminates the build cost on repeated requests at the
+        // same block height.
         let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
             call_to_encoded_state_updates_with_evmsketch(
+                &self.executor_cache,
                 rpc_url,
                 tx_request,
                 BlockNumberOrTag::Number(block_height),
@@ -453,7 +469,7 @@ impl GasKillerValidator {
         );
 
         let evmsketch_start = Instant::now();
-        let result = Self::analyze_transaction(
+        let result = self.analyze_transaction(
             rpc_url,
             task_data.target_address,
             &task_data.call_data,
