@@ -5,9 +5,13 @@ use anyhow::Result;
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
 use commonware_cryptography::{Hasher, Sha256};
+use prometheus_client::encoding::text::encode;
+use prometheus_client::metrics::histogram::Histogram;
+use prometheus_client::registry::Registry;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::debug;
 use url::Url;
@@ -20,6 +24,42 @@ use commonware_avs_router::wire;
 use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::TransactionRequest;
 use gas_analyzer::call_to_encoded_state_updates_with_evmsketch;
+
+/// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
+pub struct ValidatorMetrics {
+    registry: Registry,
+    /// Duration of the EVMSketch gas-analysis call (cache-miss path only).
+    pub evmsketch_duration_seconds: Histogram,
+}
+
+impl ValidatorMetrics {
+    pub fn new() -> Self {
+        let mut registry = Registry::default();
+        let evmsketch_duration_seconds =
+            Histogram::new([0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0]);
+        registry.register(
+            "gas_killer_node_evmsketch_duration_seconds",
+            "Duration of gas analysis (EVMSketch + RPC calls) on the node, cache-miss path only. Excludes chain detection.",
+            evmsketch_duration_seconds.clone(),
+        );
+        Self {
+            registry,
+            evmsketch_duration_seconds,
+        }
+    }
+
+    pub fn encode(&self) -> String {
+        let mut output = String::new();
+        encode(&mut output, &self.registry).expect("metrics encoding failed");
+        output
+    }
+}
+
+impl Default for ValidatorMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Result of gas analysis containing storage updates and gas information
 #[derive(Debug, Clone)]
@@ -44,6 +84,8 @@ pub struct GasKillerValidator {
     /// Prevents re-running expensive EVMSketch for the same round when the
     /// orchestrator validates multiple signatures for identical task data.
     digest_cache: Arc<Mutex<HashMap<(u64, u64), Digest>>>,
+    /// Optional Prometheus metrics — injected on the node, absent on the router.
+    validator_metrics: Option<Arc<ValidatorMetrics>>,
 }
 
 impl GasKillerValidator {
@@ -71,6 +113,7 @@ impl GasKillerValidator {
             chain_rpc_urls,
             default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            validator_metrics: None,
         })
     }
 
@@ -84,6 +127,7 @@ impl GasKillerValidator {
             chain_rpc_urls,
             default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            validator_metrics: None,
         }
     }
 
@@ -93,7 +137,14 @@ impl GasKillerValidator {
             chain_rpc_urls,
             default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            validator_metrics: None,
         }
+    }
+
+    /// Attaches Prometheus metrics; call this on the node before passing the validator to the contributor.
+    pub fn with_validator_metrics(mut self, metrics: Arc<ValidatorMetrics>) -> Self {
+        self.validator_metrics = Some(metrics);
+        self
     }
 
     /// Returns the RPC URL for the default chain
@@ -374,6 +425,7 @@ impl GasKillerValidator {
             "Computing storage updates for detected chain"
         );
 
+        let evmsketch_start = Instant::now();
         let result = Self::analyze_transaction(
             rpc_url,
             task_data.target_address,
@@ -383,6 +435,10 @@ impl GasKillerValidator {
             task_data.block_height,
         )
         .await?;
+        if let Some(m) = &self.validator_metrics {
+            m.evmsketch_duration_seconds
+                .observe(evmsketch_start.elapsed().as_secs_f64());
+        }
         Ok(result.storage_updates)
     }
 
@@ -414,7 +470,7 @@ impl GasKillerValidator {
             }
         }
 
-        // Not cached — compute storage updates
+        // Not cached — compute storage updates (the expensive EVMSketch path)
         let storage_updates = self.compute_storage_updates(task_data).await?;
 
         // Build expected payload hash using computed storage updates

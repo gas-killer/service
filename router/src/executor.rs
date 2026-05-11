@@ -1,3 +1,4 @@
+use crate::creator::DispatchTime;
 use crate::metrics::MetricsCollector;
 use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
 use gas_killer_common::ChainId;
@@ -20,6 +21,8 @@ pub struct GasKillerHandler<P> {
     /// Wallet providers keyed by chain ID
     providers: HashMap<ChainId, P>,
     metrics: Option<Arc<MetricsCollector>>,
+    /// Shared with the creator to measure P2P round-trip duration.
+    dispatch_time: DispatchTime,
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
@@ -30,6 +33,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Self {
             providers,
             metrics: None,
+            dispatch_time: Default::default(),
         }
     }
 
@@ -38,11 +42,17 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Self {
             providers,
             metrics: None,
+            dispatch_time: Default::default(),
         }
     }
 
     pub fn with_metrics(mut self, metrics: Arc<MetricsCollector>) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    pub fn with_dispatch_time(mut self, dispatch_time: DispatchTime) -> Self {
+        self.dispatch_time = dispatch_time;
         self
     }
 
@@ -256,6 +266,16 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
         non_signer_data: getNonSignerStakesAndSignatureReturn,
         task_data: Option<&Self::TaskData>,
     ) -> Result<ExecutionResult> {
+        // Record P2P round-trip: time from creator dispatch to threshold signatures received.
+        // Check metrics first so we never consume the timestamp when there's nowhere to record it.
+        if let Some(m) = &self.metrics
+            && let Ok(mut t) = self.dispatch_time.lock()
+            && let Some(start) = t.take()
+        {
+            m.p2p_round_trip_seconds
+                .observe(start.elapsed().as_secs_f64());
+        }
+
         let exec_start = Instant::now();
 
         let result = self

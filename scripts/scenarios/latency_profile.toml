@@ -1,0 +1,132 @@
+# Gas Killer — P2P Latency Profile
+#
+# Run against the staging/testnet deployment to gather the data requested in
+# https://github.com/gas-killer/service/issues/183.
+#
+# Usage:
+#   cargo run -p scripts --bin run_scenario -- \
+#     scripts/scenarios/latency_profile.toml
+#
+# Requires:
+#   GNOSIS_RPC_URL    — Gnosis chain HTTP RPC endpoint
+#   INGRESS_PASSWORD  — Bearer token for /trigger (if enabled)
+#
+# After running, pull metrics from Grafana:
+#   - gas_killer_p2p_round_trip_seconds        (router)
+#   - gas_killer_node_evmsketch_duration_seconds (node)
+#   - gas_killer_storage_computation_seconds    (router creator)
+#   - gas_killer_task_queue_depth               (router)
+#
+# Interpretation guide:
+#   p2p_transport_estimate ≈ round_trip_p99 − node_evmsketch_p99
+#   If task_queue_depth > 0 during burst_5, the 1 msg/sec rate limit is the bottleneck.
+
+router_url           = "https://testnet.gaskiller.xyz"
+http_rpc             = "$GNOSIS_RPC_URL"
+ingress_timeout_secs = 120
+
+# ── 1. Baseline — single serial requests with 5 s breathing room between them ─
+#
+# Purpose: establish P99 round-trip latency under zero queueing pressure.
+# Each request completes (or times out) before the next begins.
+# verify = true so we confirm the full flow end-to-end.
+[[scenarios]]
+name             = "serial_baseline"
+mode             = "serial"
+delay_between_ms = 5000
+
+  [[scenarios.requests]]
+  label               = "baseline_1"
+  target_address      = "0x5DC77FCc9E71F3A0DD0EffC144B697B74F5C5287"
+  call_data           = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address        = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index    = "auto"
+  value               = "0"
+  block_height        = 0
+  verify              = true
+  verify_timeout_secs = 300
+
+  [[scenarios.requests]]
+  label               = "baseline_2"
+  target_address      = "0x5DC77FCc9E71F3A0DD0EffC144B697B74F5C5287"
+  call_data           = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address        = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index    = "auto"
+  value               = "0"
+  block_height        = 0
+  verify              = true
+  verify_timeout_secs = 300
+
+  [[scenarios.requests]]
+  label               = "baseline_3"
+  target_address      = "0x5DC77FCc9E71F3A0DD0EffC144B697B74F5C5287"
+  call_data           = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address        = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index    = "auto"
+  value               = "0"
+  block_height        = 0
+  verify              = true
+  verify_timeout_secs = 300
+
+# ── 2. Burst — 5 concurrent requests ─────────────────────────────────────────
+#
+# Purpose: detect rate-limit queuing (Quota::per_second(1)) and backlog saturation.
+# All 5 requests hit the ingress simultaneously. The router processes them one at a
+# time; tasks 2-5 will queue. Watch task_queue_depth in Grafana: if it stays > 0
+# for > 1 s per queued task, the P2P rate limit is the bottleneck.
+#
+# verify = false so the HTTP client doesn't block waiting for on-chain confirmation
+# (the purpose here is to observe internal timing, not confirm execution).
+[[scenarios]]
+name = "burst_5"
+mode = "parallel"
+
+  [[scenarios.requests]]
+  label            = "burst_1"
+  target_address   = "0x4a9CDaeadC1E996c956a31A2760405E6d3274Fbd"
+  call_data        = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address     = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index = "auto"
+  value            = "0"
+  block_height     = 0
+  verify           = false
+
+  [[scenarios.requests]]
+  label            = "burst_2"
+  target_address   = "0x4a9CDaeadC1E996c956a31A2760405E6d3274Fbd"
+  call_data        = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address     = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index = "auto"
+  value            = "0"
+  block_height     = 0
+  verify           = false
+
+  [[scenarios.requests]]
+  label            = "burst_3"
+  target_address   = "0x4a9CDaeadC1E996c956a31A2760405E6d3274Fbd"
+  call_data        = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address     = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index = "auto"
+  value            = "0"
+  block_height     = 0
+  verify           = false
+
+  [[scenarios.requests]]
+  label            = "burst_4"
+  target_address   = "0x4a9CDaeadC1E996c956a31A2760405E6d3274Fbd"
+  call_data        = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address     = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index = "auto"
+  value            = "0"
+  block_height     = 0
+  verify           = false
+
+  [[scenarios.requests]]
+  label            = "burst_5"
+  target_address   = "0x4a9CDaeadC1E996c956a31A2760405E6d3274Fbd"
+  call_data        = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+  from_address     = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
+  transition_index = "auto"
+  value            = "0"
+  block_height     = 0
+  verify           = false

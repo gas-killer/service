@@ -9,7 +9,7 @@ pub use config::{
     load_key_from_file, load_orchestrator_config,
 };
 pub use task_data::GasKillerTaskData;
-pub use validator::GasKillerValidator;
+pub use validator::{GasKillerValidator, ValidatorMetrics};
 
 // Re-export QuorumInfo for convenience
 pub use commonware_avs_eigenlayer::QuorumInfo;

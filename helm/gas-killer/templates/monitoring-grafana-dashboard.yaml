@@ -198,17 +198,85 @@ data:
           "fieldConfig": { "defaults": { "unit": "s" } }
         },
         {
+          "id": 40,
+          "type": "text",
+          "title": "Latency Breakdown",
+          "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
+          "options": { "mode": "markdown", "content": "## Latency Breakdown\n\nP2P round-trip = time from creator dispatching a task (after router-side storage computation) to the executor receiving threshold signatures. Includes P2P transit ×2, node EVMSketch, BLS signing, and aggregation.\n\nEstimated transport+signing overhead ≈ round-trip − node EVMSketch. Router-side storage computation is **not** part of the round-trip measurement (it completes before the dispatch timestamp is stamped)." }
+        },
+        {
+          "id": 41,
+          "type": "timeseries",
+          "title": "P2P Round-Trip (p50 / p99)",
+          "gridPos": { "x": 0, "y": 24, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_p2p_round_trip_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.99, rate(gas_killer_p2p_round_trip_seconds_bucket[5m]))",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 42,
+          "type": "timeseries",
+          "title": "Node EVMSketch Duration (p50 / p99)",
+          "description": "Time for call_to_encoded_state_updates_with_evmsketch on the node (cache-miss path). Scraped from the node's /metrics endpoint.",
+          "gridPos": { "x": 8, "y": 24, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_node_evmsketch_duration_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.99, rate(gas_killer_node_evmsketch_duration_seconds_bucket[5m]))",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 43,
+          "type": "timeseries",
+          "title": "Task Queue Depth",
+          "description": "Number of tasks sitting in the ingress queue waiting to be processed. Sustained depth > 0 under burst load indicates the 1 msg/sec P2P rate limit is the bottleneck.",
+          "gridPos": { "x": 16, "y": 24, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "gas_killer_task_queue_depth",
+              "legendFormat": "queued tasks"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": 0 },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red", "value": 5 }
+                ]
+              }
+            }
+          }
+        },
+        {
           "id": 30,
           "type": "text",
           "title": "Ingress",
-          "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
+          "gridPos": { "x": 0, "y": 33, "w": 24, "h": 1 },
           "options": { "mode": "markdown", "content": "## Ingress" }
         },
         {
           "id": 31,
           "type": "timeseries",
           "title": "Ingress Request Rate / min",
-          "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+          "gridPos": { "x": 0, "y": 34, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "rate(gas_killer_ingress_requests_accepted_total[2m]) * 60",
@@ -225,7 +293,7 @@ data:
           "id": 32,
           "type": "stat",
           "title": "Tasks Created (total)",
-          "gridPos": { "x": 12, "y": 24, "w": 6, "h": 8 },
+          "gridPos": { "x": 12, "y": 34, "w": 6, "h": 8 },
           "targets": [{
             "expr": "gas_killer_tasks_created_total",
             "legendFormat": "tasks"

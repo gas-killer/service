@@ -326,10 +326,11 @@ pub async fn trigger_task_handler(
         call_data_len = request.body.call_data.len(),
         "Task accepted"
     );
+    state.queue.push(request);
     if let Some(m) = &state.metrics {
         m.ingress_accepted.inc();
+        m.task_queue_depth.set(state.queue.len() as i64);
     }
-    state.queue.push(request);
     (
         StatusCode::OK,
         Json(GasKillerTaskResponse {
