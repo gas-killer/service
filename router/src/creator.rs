@@ -9,13 +9,20 @@ use async_trait::async_trait;
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
 use std::env;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-/// Shared timestamp set by the creator when it dispatches a task and read by the executor
+/// Shared timestamp set by the creator when it dispatches a task and consumed by the executor
 /// to compute the P2P round-trip duration.
+///
+/// This is a single slot, not a per-round map. It is accurate as long as rounds are sequential
+/// (one task in flight at a time), which the commonware orchestrator currently guarantees.
+/// If a consensus round fails without calling `handle_verification`, the stale timestamp bleeds
+/// into the next round's measurement. A per-round `HashMap<u64, Instant>` would fix this, but
+/// requires `handle_verification` to receive the round number — tracked upstream in
+/// https://github.com/BreadchainCoop/commonware-restaking/issues/154.
 pub type DispatchTime = Arc<Mutex<Option<Instant>>>;
 
 /// A queue that can hold and provide task requests
@@ -40,6 +47,8 @@ pub struct GasKillerTaskQueue {
     queue: Arc<Mutex<Vec<GasKillerTaskRequest>>>,
     timeout_ms: u64,
     max_retries: u32,
+    /// Maintained atomically so `len()` is always accurate even when the mutex is held.
+    count: Arc<AtomicUsize>,
 }
 
 impl GasKillerTaskQueue {
@@ -48,6 +57,7 @@ impl GasKillerTaskQueue {
             queue: Arc::new(Mutex::new(Vec::new())),
             timeout_ms: 1000, // 1 second default timeout
             max_retries: 3,   // 3 retries by default
+            count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -56,6 +66,7 @@ impl GasKillerTaskQueue {
             queue: Arc::new(Mutex::new(Vec::new())),
             timeout_ms,
             max_retries: 3,
+            count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -64,6 +75,7 @@ impl GasKillerTaskQueue {
             queue: Arc::new(Mutex::new(Vec::new())),
             timeout_ms,
             max_retries,
+            count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -112,15 +124,15 @@ pub type SimpleTaskQueue = GasKillerTaskQueue;
 
 impl TaskQueue for GasKillerTaskQueue {
     fn len(&self) -> usize {
-        // try_lock avoids blocking indefinitely
-        self.queue.try_lock().map(|q| q.len()).unwrap_or(0)
+        self.count.load(Ordering::Relaxed)
     }
 
     fn push(&self, task: GasKillerTaskRequest) {
         match self.try_lock_with_timeout() {
             Ok(mut queue) => {
                 queue.push(task);
-                info!("Task enqueued: queue_len={} (after push)", queue.len());
+                let new_len = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+                info!("Task enqueued: queue_len={} (after push)", new_len);
             }
             Err(e) => {
                 error!("Failed to push task to queue: {}", e);
@@ -131,7 +143,13 @@ impl TaskQueue for GasKillerTaskQueue {
 
     fn pop(&self) -> Option<GasKillerTaskRequest> {
         match self.try_lock_with_timeout() {
-            Ok(mut queue) => queue.pop(),
+            Ok(mut queue) => {
+                let item = queue.pop();
+                if item.is_some() {
+                    self.count.fetch_sub(1, Ordering::Relaxed);
+                }
+                item
+            }
             Err(e) => {
                 error!("Failed to pop task from queue: {}", e);
                 None
@@ -281,25 +299,9 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             m.tasks_created.inc();
         }
 
-        // Resolve "auto" transition_index to the current on-chain slot at dequeue time.
-        // This ensures parallel requests each receive a distinct sequential index.
-        let resolved_transition_index = match task.body.transition_index {
-            Some(idx) => idx,
-            None => {
-                info!(
-                    target_address = %task.body.target_address,
-                    "Resolving auto transition_index from chain"
-                );
-                self.validator
-                    .get_state_transition_count(task.body.target_address)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to resolve auto transition_index: {}", e)
-                    })?
-            }
-        };
-
-        // Compute storage updates - the validator automatically detects which chain has the contract
+        // Compute storage updates - also detects which chain has the contract.
+        // We do this before resolving the auto transition_index so we can reuse the
+        // detected chain_id and avoid a redundant eth_getCode round-trip.
         debug!(
             "Computing storage updates for target {}",
             task.body.target_address
@@ -320,6 +322,32 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             m.storage_computation_seconds
                 .observe(storage_start.elapsed().as_secs_f64());
         }
+
+        // Resolve "auto" transition_index to the current on-chain slot at dequeue time.
+        // Reuses the already-detected chain_id to skip a second eth_getCode call.
+        // Because the creator dequeues one task at a time, each resolution runs after the
+        // previous round's verifyAndUpdate has been submitted — but note that correctness
+        // still depends on that transaction confirming on-chain before this read executes.
+        // Clients submitting explicit indices are unaffected.
+        let resolved_transition_index = match task.body.transition_index {
+            Some(idx) => idx,
+            None => {
+                info!(
+                    target_address = %task.body.target_address,
+                    chain = %detected_chain,
+                    "Resolving auto transition_index from chain"
+                );
+                self.validator
+                    .get_state_transition_count_on_chain(
+                        task.body.target_address,
+                        detected_chain,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to resolve auto transition_index: {}", e)
+                    })?
+            }
+        };
 
         // Debug: Log hash of full storage_updates to detect differences vs validators
         let mut storage_hasher = Sha256::new();
