@@ -282,15 +282,16 @@ impl GasKillerValidator {
             .rpc_url_for_chain(chain_id)
             .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
 
-        let result = self.analyze_transaction(
-            rpc_url,
-            contract_address,
-            call_data,
-            from_address,
-            value,
-            block_height,
-        )
-        .await?;
+        let result = self
+            .analyze_transaction(
+                rpc_url,
+                contract_address,
+                call_data,
+                from_address,
+                value,
+                block_height,
+            )
+            .await?;
         Ok((result.storage_updates, result.block_height, chain_id))
     }
 
@@ -482,15 +483,16 @@ impl GasKillerValidator {
         );
 
         let evmsketch_start = Instant::now();
-        let result = self.analyze_transaction(
-            rpc_url,
-            task_data.target_address,
-            &task_data.call_data,
-            Some(task_data.from_address),
-            Some(task_data.value),
-            task_data.block_height,
-        )
-        .await?;
+        let result = self
+            .analyze_transaction(
+                rpc_url,
+                task_data.target_address,
+                &task_data.call_data,
+                Some(task_data.from_address),
+                Some(task_data.value),
+                task_data.block_height,
+            )
+            .await?;
         if let Some(m) = &self.validator_metrics {
             m.evmsketch_duration_seconds
                 .observe(evmsketch_start.elapsed().as_secs_f64());
