@@ -142,21 +142,25 @@ async fn validate_onchain<P: Provider + Clone>(
         });
     }
 
-    let contract = GasKillerSDK::new(body.target_address, provider.clone());
-    let count = contract
-        .stateTransitionCount()
-        .call()
-        .await
-        .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
-    let current_count: u64 = count
-        .try_into()
-        .map_err(|_| OnchainValidationError::RpcError("stateTransitionCount overflow".into()))?;
+    // Only validate the transition index if explicitly provided.
+    // None means "auto" — the server resolves the index at dequeue time.
+    if let Some(provided) = body.transition_index {
+        let contract = GasKillerSDK::new(body.target_address, provider.clone());
+        let count = contract
+            .stateTransitionCount()
+            .call()
+            .await
+            .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
+        let current_count: u64 = count.try_into().map_err(|_| {
+            OnchainValidationError::RpcError("stateTransitionCount overflow".into())
+        })?;
 
-    if body.transition_index != current_count {
-        return Err(OnchainValidationError::TransitionIndexMismatch {
-            provided: body.transition_index,
-            current: current_count,
-        });
+        if provided != current_count {
+            return Err(OnchainValidationError::TransitionIndexMismatch {
+                provided,
+                current: current_count,
+            });
+        }
     }
 
     Ok(())
@@ -192,11 +196,72 @@ impl fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+/// Deserializes `transition_index` from JSON.
+///
+/// Accepted values:
+/// - `null` or missing field → `None` (auto: server assigns the next slot)
+/// - `"auto"` → `None`
+/// - non-negative integer → `Some(n)` (explicit fixed index)
+///
+/// Any other string or non-integer type is rejected with a descriptive error.
+fn deserialize_transition_index<'de, D>(d: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, Unexpected, Visitor};
+
+    struct TransitionIndexVisitor;
+
+    impl<'de> Visitor<'de> for TransitionIndexVisitor {
+        type Value = Option<u64>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, r#"a non-negative integer, "auto", or null"#)
+        }
+
+        fn visit_unit<E: Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: serde::Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            d.deserialize_any(self)
+        }
+
+        fn visit_u64<E: Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: Error>(self, v: i64) -> Result<Self::Value, E> {
+            u64::try_from(v)
+                .map(Some)
+                .map_err(|_| E::invalid_value(Unexpected::Signed(v), &self))
+        }
+
+        fn visit_str<E: Error>(self, v: &str) -> Result<Self::Value, E> {
+            if v == "auto" {
+                Ok(None)
+            } else {
+                Err(E::invalid_value(Unexpected::Str(v), &self))
+            }
+        }
+    }
+
+    d.deserialize_option(TransitionIndexVisitor)
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GasKillerTaskRequestBody {
     pub target_address: Address,
     pub call_data: Vec<u8>,
-    pub transition_index: u64,
+    /// `None`, JSON `null`, `"auto"`, or a missing field all mean "auto":
+    /// the server resolves the next available slot at dequeue time,
+    /// enabling safe parallel submissions.
+    #[serde(default, deserialize_with = "deserialize_transition_index")]
+    pub transition_index: Option<u64>,
     pub from_address: Address,
     pub value: U256,
     pub block_height: u64,
@@ -298,7 +363,7 @@ pub async fn trigger_task_handler(
             target_address = %request.body.target_address,
             from_address = %request.body.from_address,
             block_height = request.body.block_height,
-            transition_index = request.body.transition_index,
+            transition_index = ?request.body.transition_index,
             error = %e,
             "Task rejected (onchain)"
         );
@@ -377,7 +442,7 @@ mod tests {
                     .parse()
                     .unwrap(),
                 call_data: vec![0xAB, 0xCD, 0xEF, 0x01], // 4-byte selector
-                transition_index: 0,
+                transition_index: Some(0),
                 value: U256::ZERO,
                 block_height: 1,
             },
@@ -511,7 +576,7 @@ mod tests {
                 target_address: Address::ZERO,
                 from_address: Address::ZERO,
                 call_data: vec![],
-                transition_index: u64::MAX,
+                transition_index: Some(u64::MAX),
                 value: U256::MAX,
                 block_height: 0,
             },
@@ -906,6 +971,70 @@ mod tests {
         }
     }
 
+    // -- transition_index deserialization tests --
+
+    mod transition_index_deser {
+        use crate::ingress::GasKillerTaskRequestBody;
+
+        fn deser(json: &str) -> Result<Option<u64>, serde_json::Error> {
+            let body: GasKillerTaskRequestBody = serde_json::from_str(json)?;
+            Ok(body.transition_index)
+        }
+
+        fn body_with(transition_index_json: &str) -> String {
+            format!(
+                r#"{{"target_address":"0x0000000000000000000000000000000000000001","call_data":[1,2,3,4],"from_address":"0x0000000000000000000000000000000000000002","value":"0x0","block_height":1,"transition_index":{}}}"#,
+                transition_index_json
+            )
+        }
+
+        #[test]
+        fn test_numeric_gives_some() {
+            assert_eq!(deser(&body_with("42")).unwrap(), Some(42));
+        }
+
+        #[test]
+        fn test_zero_gives_some_zero() {
+            assert_eq!(deser(&body_with("0")).unwrap(), Some(0));
+        }
+
+        #[test]
+        fn test_null_gives_none() {
+            assert_eq!(deser(&body_with("null")).unwrap(), None);
+        }
+
+        #[test]
+        fn test_auto_string_gives_none() {
+            assert_eq!(deser(&body_with(r#""auto""#)).unwrap(), None);
+        }
+
+        #[test]
+        fn test_missing_field_gives_none() {
+            let json = r#"{"target_address":"0x0000000000000000000000000000000000000001","call_data":[1,2,3,4],"from_address":"0x0000000000000000000000000000000000000002","value":"0x0","block_height":1}"#;
+            assert_eq!(deser(json).unwrap(), None);
+        }
+
+        #[test]
+        fn test_unknown_string_is_rejected() {
+            assert!(deser(&body_with(r#""foo""#)).is_err());
+        }
+
+        #[test]
+        fn test_empty_string_is_rejected() {
+            assert!(deser(&body_with(r#""""#)).is_err());
+        }
+
+        #[test]
+        fn test_negative_integer_is_rejected() {
+            assert!(deser(&body_with("-1")).is_err());
+        }
+
+        #[test]
+        fn test_boolean_is_rejected() {
+            assert!(deser(&body_with("true")).is_err());
+        }
+    }
+
     // -- onchain validation unit tests --
     //
     // These tests exercise validate_onchain / detect_contract_chain directly using
@@ -937,7 +1066,7 @@ mod tests {
                     .parse()
                     .unwrap(),
                 call_data: vec![0xAB, 0xCD, 0xEF, 0x01],
-                transition_index: 5,
+                transition_index: Some(5),
                 value: U256::ZERO,
                 block_height: 50,
             }
@@ -1117,6 +1246,24 @@ mod tests {
                 matches!(err, OnchainValidationError::RpcError(_)),
                 "expected RpcError, got {err}"
             );
+        }
+
+        #[tokio::test]
+        async fn test_auto_transition_index_skips_count_check() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, 100);
+            // No push_state_transition_count — the mock asserter would fail if it were called.
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainId::L1, provider);
+
+            let mut body = valid_body();
+            body.transition_index = None;
+
+            validate_onchain(&providers, &body)
+                .await
+                .expect("auto transition_index should skip count check and pass");
         }
 
         #[tokio::test]

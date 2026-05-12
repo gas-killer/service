@@ -9,13 +9,20 @@ use async_trait::async_trait;
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
 use std::env;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-/// Shared timestamp set by the creator when it dispatches a task and read by the executor
+/// Shared timestamp set by the creator when it dispatches a task and consumed by the executor
 /// to compute the P2P round-trip duration.
+///
+/// This is a single slot, not a per-round map. It is accurate as long as rounds are sequential
+/// (one task in flight at a time), which the commonware orchestrator currently guarantees.
+/// If a consensus round fails without calling `handle_verification`, the stale timestamp bleeds
+/// into the next round's measurement. A per-round `HashMap<u64, Instant>` would fix this, but
+/// requires `handle_verification` to receive the round number — tracked upstream in
+/// https://github.com/BreadchainCoop/commonware-restaking/issues/154.
 pub type DispatchTime = Arc<Mutex<Option<Instant>>>;
 
 /// A queue that can hold and provide task requests
@@ -40,6 +47,8 @@ pub struct GasKillerTaskQueue {
     queue: Arc<Mutex<Vec<GasKillerTaskRequest>>>,
     timeout_ms: u64,
     max_retries: u32,
+    /// Maintained atomically so `len()` is always accurate even when the mutex is held.
+    count: Arc<AtomicUsize>,
 }
 
 impl GasKillerTaskQueue {
@@ -48,6 +57,7 @@ impl GasKillerTaskQueue {
             queue: Arc::new(Mutex::new(Vec::new())),
             timeout_ms: 1000, // 1 second default timeout
             max_retries: 3,   // 3 retries by default
+            count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -56,6 +66,7 @@ impl GasKillerTaskQueue {
             queue: Arc::new(Mutex::new(Vec::new())),
             timeout_ms,
             max_retries: 3,
+            count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -64,6 +75,7 @@ impl GasKillerTaskQueue {
             queue: Arc::new(Mutex::new(Vec::new())),
             timeout_ms,
             max_retries,
+            count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -112,15 +124,15 @@ pub type SimpleTaskQueue = GasKillerTaskQueue;
 
 impl TaskQueue for GasKillerTaskQueue {
     fn len(&self) -> usize {
-        // try_lock avoids blocking indefinitely
-        self.queue.try_lock().map(|q| q.len()).unwrap_or(0)
+        self.count.load(Ordering::Relaxed)
     }
 
     fn push(&self, task: GasKillerTaskRequest) {
         match self.try_lock_with_timeout() {
             Ok(mut queue) => {
                 queue.push(task);
-                info!("Task enqueued: queue_len={} (after push)", queue.len());
+                let new_len = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+                info!("Task enqueued: queue_len={} (after push)", new_len);
             }
             Err(e) => {
                 error!("Failed to push task to queue: {}", e);
@@ -131,7 +143,13 @@ impl TaskQueue for GasKillerTaskQueue {
 
     fn pop(&self) -> Option<GasKillerTaskRequest> {
         match self.try_lock_with_timeout() {
-            Ok(mut queue) => queue.pop(),
+            Ok(mut queue) => {
+                let item = queue.pop();
+                if item.is_some() {
+                    self.count.fetch_sub(1, Ordering::Relaxed);
+                }
+                item
+            }
             Err(e) => {
                 error!("Failed to pop task from queue: {}", e);
                 None
@@ -192,6 +210,8 @@ struct EnrichedTask {
     task: GasKillerTaskRequest,
     storage_updates: Vec<u8>,
     block_height: u64,
+    /// Resolved transition index (sentinel `None` → concrete count from chain).
+    transition_index: u64,
 }
 
 /// Creator for the gas killer usecase that listens for external requests
@@ -270,7 +290,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         info!(
             target = format!("{:?}", task.body.target_address),
             from = format!("{:?}", task.body.from_address),
-            transition_index = task.body.transition_index,
+            transition_index = ?task.body.transition_index,
             call_data_len = task.body.call_data.len(),
             "Creator received task"
         );
@@ -279,7 +299,9 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             m.tasks_created.inc();
         }
 
-        // Compute storage updates - the validator automatically detects which chain has the contract
+        // Compute storage updates - also detects which chain has the contract.
+        // We do this before resolving the auto transition_index so we can reuse the
+        // detected chain_id and avoid a redundant eth_getCode round-trip.
         debug!(
             "Computing storage updates for target {}",
             task.body.target_address
@@ -301,6 +323,29 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                 .observe(storage_start.elapsed().as_secs_f64());
         }
 
+        // Resolve "auto" transition_index to the current on-chain slot at dequeue time.
+        // Reuses the already-detected chain_id to skip a second eth_getCode call.
+        // Because the creator dequeues one task at a time, each resolution runs after the
+        // previous round's verifyAndUpdate has been submitted — but note that correctness
+        // still depends on that transaction confirming on-chain before this read executes.
+        // Clients submitting explicit indices are unaffected.
+        let resolved_transition_index = match task.body.transition_index {
+            Some(idx) => idx,
+            None => {
+                info!(
+                    target_address = %task.body.target_address,
+                    chain = %detected_chain,
+                    "Resolving auto transition_index from chain"
+                );
+                self.validator
+                    .get_state_transition_count_on_chain(task.body.target_address, detected_chain)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to resolve auto transition_index: {}", e)
+                    })?
+            }
+        };
+
         // Debug: Log hash of full storage_updates to detect differences vs validators
         let mut storage_hasher = Sha256::new();
         storage_hasher.update(&storage_updates);
@@ -310,7 +355,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             storage_updates_len = storage_updates.len(),
             storage_updates_hash = %storage_hash_hex,
             block_height = block_height,
-            transition_index = task.body.transition_index,
+            transition_index = resolved_transition_index,
             target_address = %task.body.target_address,
             target_function = %task.body.call_data.get(..4).map(hex::encode).unwrap_or_default(),
             chain = %detected_chain,
@@ -322,6 +367,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             task,
             storage_updates,
             block_height,
+            transition_index: resolved_transition_index,
         };
 
         if let Ok(mut current_task) = self.current_task.lock() {
@@ -363,7 +409,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
 
                     return GasKillerTaskData {
                         storage_updates: enriched.storage_updates.clone(),
-                        transition_index: enriched.task.body.transition_index,
+                        transition_index: enriched.transition_index,
                         target_address: enriched.task.body.target_address,
                         call_data: enriched.task.body.call_data.clone(),
                         from_address: enriched.task.body.from_address,
@@ -491,7 +537,7 @@ mod tests {
             body: crate::ingress::GasKillerTaskRequestBody {
                 target_address: Address::from([1u8; 20]),
                 call_data: vec![0x12, 0x34, 0x56, 0x78],
-                transition_index: 1,
+                transition_index: Some(1),
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
                 block_height: 12345,
@@ -501,7 +547,7 @@ mod tests {
         queue.push(task.clone());
         let popped = queue.pop();
         assert!(popped.is_some());
-        assert_eq!(popped.unwrap().body.transition_index, 1);
+        assert_eq!(popped.unwrap().body.transition_index, Some(1));
     }
 
     #[test]
@@ -510,7 +556,7 @@ mod tests {
             body: crate::ingress::GasKillerTaskRequestBody {
                 target_address: Address::from([1u8; 20]),
                 call_data: vec![0x12, 0x34, 0x56, 0x78],
-                transition_index: 42,
+                transition_index: Some(42),
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
                 block_height: 12345,
@@ -519,7 +565,7 @@ mod tests {
 
         let task_data = GasKillerTaskData {
             storage_updates: vec![0x01, 0x02, 0x03, 0x04], // would be computed by GasAnalyzer
-            transition_index: task.body.transition_index,
+            transition_index: task.body.transition_index.unwrap_or(0),
             target_address: task.body.target_address,
             call_data: task.body.call_data.clone(),
             from_address: task.body.from_address,

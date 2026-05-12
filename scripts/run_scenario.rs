@@ -15,7 +15,7 @@ use url::Url;
 struct Config {
     #[serde(default = "default_router_url")]
     router_url: String,
-    /// Required when any request uses `block_height = 0`, `verify = true`, or `transition_index = "auto"`.
+    /// Required when any request uses `block_height = 0` or `verify = true`.
     http_rpc: Option<String>,
     #[serde(default = "default_ingress_timeout_secs")]
     ingress_timeout_secs: u64,
@@ -102,7 +102,7 @@ struct RequestConfig {
     /// ABI-encoded call data as a 0x-prefixed hex string.
     call_data: String,
     from_address: String,
-    /// State transition sequence number. Set to "auto" or omit to fetch stateTransitionCount() from the contract (requires `http_rpc`).
+    /// State transition sequence number. Set to "auto" or omit to let the server assign the next available slot.
     #[serde(default)]
     transition_index: TransitionIndex,
     /// Wei value as a decimal or 0x-prefixed hex string (default: "0").
@@ -133,7 +133,8 @@ fn default_verify_timeout() -> u64 {
 struct ApiRequestBody {
     target_address: String,
     call_data: Vec<u8>,
-    transition_index: u64,
+    /// `None` serializes as JSON `null` → server resolves the index at dequeue time.
+    transition_index: Option<u64>,
     from_address: String,
     value: String,
     block_height: u64,
@@ -258,10 +259,9 @@ async fn send_request(
         }
     };
 
-    let needs_count = matches!(cfg.transition_index, TransitionIndex::Auto) || cfg.verify;
-
-    // Fetch stateTransitionCount once — used for auto transition_index and/or verify baseline.
-    let on_chain_count: Option<u64> = if needs_count {
+    // Fetch stateTransitionCount only when needed as a verify baseline.
+    // Auto transition_index is now resolved server-side; no client-side fetch required.
+    let on_chain_count: Option<u64> = if cfg.verify {
         let addr = match cfg.target_address.parse::<Address>() {
             Ok(a) => a,
             Err(e) => {
@@ -294,16 +294,11 @@ async fn send_request(
                 }
             },
             None => {
-                let reason = if matches!(cfg.transition_index, TransitionIndex::Auto) {
-                    "`http_rpc` is required when `transition_index = \"auto\"`"
-                } else {
-                    "`http_rpc` is required when `verify = true`"
-                };
                 return RequestResult {
                     label,
                     status: 0,
                     api_success: false,
-                    message: reason.to_string(),
+                    message: "`http_rpc` is required when `verify = true`".to_string(),
                     elapsed: Duration::ZERO,
                     on_chain: None,
                 };
@@ -313,9 +308,10 @@ async fn send_request(
         None
     };
 
-    let transition_index = match cfg.transition_index {
-        TransitionIndex::Fixed(n) => n,
-        TransitionIndex::Auto => on_chain_count.unwrap(),
+    // None → server resolves the next available slot; Some(n) → explicit fixed index.
+    let transition_index: Option<u64> = match cfg.transition_index {
+        TransitionIndex::Fixed(n) => Some(n),
+        TransitionIndex::Auto => None,
     };
 
     let payload = ApiRequest {
@@ -616,15 +612,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .scenarios
         .iter()
         .flat_map(|s| s.requests.iter())
-        .any(|r| {
-            r.block_height == 0 || r.verify || matches!(r.transition_index, TransitionIndex::Auto)
-        });
+        .any(|r| r.block_height == 0 || r.verify);
 
     let provider: Option<Arc<ReadOnlyProvider>> = if needs_rpc {
         let rpc = config
             .http_rpc
             .as_deref()
-            .ok_or("`http_rpc` is required when block_height = 0, verify = true, or transition_index = \"auto\"")?;
+            .ok_or("`http_rpc` is required when block_height = 0 or verify = true")?;
         Some(Arc::new(
             ProviderBuilder::new().connect_http(Url::parse(rpc)?),
         ))
