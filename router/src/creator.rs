@@ -338,10 +338,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                     "Resolving auto transition_index from chain"
                 );
                 self.validator
-                    .get_state_transition_count_on_chain(
-                        task.body.target_address,
-                        detected_chain,
-                    )
+                    .get_state_transition_count_on_chain(task.body.target_address, detected_chain)
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!("Failed to resolve auto transition_index: {}", e)
