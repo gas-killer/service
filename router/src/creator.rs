@@ -299,52 +299,72 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             m.tasks_created.inc();
         }
 
-        // Compute storage updates - also detects which chain has the contract.
-        // We do this before resolving the auto transition_index so we can reuse the
-        // detected chain_id and avoid a redundant eth_getCode round-trip.
         debug!(
             "Computing storage updates for target {}",
             task.body.target_address
         );
-        let storage_start = Instant::now();
-        let (storage_updates, block_height, detected_chain) = self
-            .validator
-            .compute_storage_updates_for_tx(
-                task.body.target_address,
-                &task.body.call_data,
-                Some(task.body.from_address),
-                Some(task.body.value),
-                task.body.block_height,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
+
+        // For explicit indices, run storage computation alone (count not needed).
+        // For auto mode, run stateTransitionCount() concurrently with EVMSketch: the
+        // count RPC call (~200ms) is fully hidden behind EVMSketch (seconds), so the
+        // auto path adds zero observable latency compared to the explicit-index path.
+        let (
+            storage_updates,
+            block_height,
+            detected_chain,
+            resolved_transition_index,
+            storage_elapsed,
+        ) = if let Some(idx) = task.body.transition_index {
+            let start = Instant::now();
+            let (updates, height, chain) = self
+                .validator
+                .compute_storage_updates_for_tx(
+                    task.body.target_address,
+                    &task.body.call_data,
+                    Some(task.body.from_address),
+                    Some(task.body.value),
+                    task.body.block_height,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
+            (updates, height, chain, idx, start.elapsed())
+        } else {
+            let count_validator = Arc::clone(&self.validator);
+            let target = task.body.target_address;
+            let count_fut = async move { count_validator.get_state_transition_count(target).await };
+            let storage_fut = async {
+                let start = Instant::now();
+                let result = self
+                    .validator
+                    .compute_storage_updates_for_tx(
+                        task.body.target_address,
+                        &task.body.call_data,
+                        Some(task.body.from_address),
+                        Some(task.body.value),
+                        task.body.block_height,
+                    )
+                    .await;
+                (result, start.elapsed())
+            };
+            let (count_result, (storage_result, storage_elapsed)) =
+                tokio::join!(count_fut, storage_fut);
+            let count = count_result
+                .map_err(|e| anyhow::anyhow!("Failed to resolve auto transition_index: {}", e))?;
+            let (updates, height, chain) = storage_result
+                .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
+            info!(
+                target_address = %task.body.target_address,
+                chain = %chain,
+                count,
+                "Resolved auto transition_index from chain"
+            );
+            (updates, height, chain, count, storage_elapsed)
+        };
+
         if let Some(m) = &self.metrics {
             m.storage_computation_seconds
-                .observe(storage_start.elapsed().as_secs_f64());
+                .observe(storage_elapsed.as_secs_f64());
         }
-
-        // Resolve "auto" transition_index to the current on-chain slot at dequeue time.
-        // Reuses the already-detected chain_id to skip a second eth_getCode call.
-        // Because the creator dequeues one task at a time, each resolution runs after the
-        // previous round's verifyAndUpdate has been submitted — but note that correctness
-        // still depends on that transaction confirming on-chain before this read executes.
-        // Clients submitting explicit indices are unaffected.
-        let resolved_transition_index = match task.body.transition_index {
-            Some(idx) => idx,
-            None => {
-                info!(
-                    target_address = %task.body.target_address,
-                    chain = %detected_chain,
-                    "Resolving auto transition_index from chain"
-                );
-                self.validator
-                    .get_state_transition_count_on_chain(task.body.target_address, detected_chain)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to resolve auto transition_index: {}", e)
-                    })?
-            }
-        };
 
         // Debug: Log hash of full storage_updates to detect differences vs validators
         let mut storage_hasher = Sha256::new();
