@@ -329,36 +329,56 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                 .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
             (updates, height, chain, idx, start.elapsed())
         } else {
+            // Detect chain once so both concurrent futures skip redundant eth_getCode probes.
+            let chain_id = self
+                .validator
+                .detect_chain_for_address(task.body.target_address)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to detect chain: {}", e))?;
+            let rpc_url = self
+                .validator
+                .rpc_url_for_chain(chain_id)
+                .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_id))?
+                .to_owned();
+
+            info!(
+                target_address = %task.body.target_address,
+                chain = %chain_id,
+                "Resolving auto transition_index concurrently with EVMSketch"
+            );
+
             let count_validator = Arc::clone(&self.validator);
             let target = task.body.target_address;
-            let count_fut = async move { count_validator.get_state_transition_count(target).await };
+            let count_fut = async move {
+                count_validator
+                    .get_state_transition_count_on_chain(target, chain_id)
+                    .await
+            };
             let storage_fut = async {
                 let start = Instant::now();
-                let result = self
-                    .validator
-                    .compute_storage_updates_for_tx(
+                self.validator
+                    .analyze_transaction(
+                        &rpc_url,
                         task.body.target_address,
                         &task.body.call_data,
                         Some(task.body.from_address),
                         Some(task.body.value),
                         task.body.block_height,
                     )
-                    .await;
-                (result, start.elapsed())
+                    .await
+                    .map(|r| (r.storage_updates, r.block_height, start.elapsed()))
             };
-            let (count_result, (storage_result, storage_elapsed)) =
-                tokio::join!(count_fut, storage_fut);
-            let count = count_result
-                .map_err(|e| anyhow::anyhow!("Failed to resolve auto transition_index: {}", e))?;
-            let (updates, height, chain) = storage_result
-                .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
+            // try_join! cancels the other future immediately on the first error.
+            let (count, (updates, height, storage_elapsed)) =
+                tokio::try_join!(count_fut, storage_fut)?;
+
             info!(
                 target_address = %task.body.target_address,
-                chain = %chain,
+                chain = %chain_id,
                 count,
                 "Resolved auto transition_index from chain"
             );
-            (updates, height, chain, count, storage_elapsed)
+            (updates, height, chain_id, count, storage_elapsed)
         };
 
         if let Some(m) = &self.metrics {
