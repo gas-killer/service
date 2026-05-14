@@ -21,7 +21,6 @@ use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
 use commonware_avs_router::wire;
 
-use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::TransactionRequest;
 use gas_analyzer::{EvmSketchExecutorCache, call_to_encoded_state_updates_with_evmsketch};
 
@@ -439,7 +438,7 @@ impl GasKillerValidator {
                 &self.executor_cache,
                 rpc_url,
                 tx_request,
-                BlockNumberOrTag::Number(block_height),
+                block_height,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
