@@ -141,7 +141,6 @@ jobs:
           # Install without --wait to avoid circular dependency
           # (pods wait for setup job, setup job is post-install hook)
           helm install gas-killer ./helm/gas-killer \
-            --no-hooks \
             --timeout 30m \
             --set global.environment=LOCAL \
             --set global.nodeCount=3 \
