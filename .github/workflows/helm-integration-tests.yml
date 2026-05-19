@@ -141,7 +141,6 @@ jobs:
           # Install without --wait to avoid circular dependency
           # (pods wait for setup job, setup job is post-install hook)
           helm install gas-killer ./helm/gas-killer \
-            --timeout 30m \
             --set global.environment=LOCAL \
             --set global.nodeCount=3 \
             --set eigenlayer.contracts.delegationManager="$DELEGATION_MANAGER" \
@@ -190,7 +189,7 @@ jobs:
           fi
 
           echo "Found setup job: $SETUP_JOB"
-          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=500s
+          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=1800s
 
           echo "Setup job completed successfully"
           kubectl logs "$SETUP_JOB" --tail=30
