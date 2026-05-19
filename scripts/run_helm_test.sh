@@ -163,6 +163,7 @@ if helm list -q | grep -q "^${HELM_RELEASE}$"; then
 fi
 
 helm install "$HELM_RELEASE" ./helm/gas-killer \
+    -f ./helm/gas-killer/local-overrides.yaml \
     --set global.environment=LOCAL \
     --set global.nodeCount="$NODE_COUNT" \
     --set secrets.forkUrl="$FORK_URL" \
