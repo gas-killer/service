@@ -46,8 +46,6 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: nightly
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -189,7 +187,7 @@ jobs:
           fi
 
           echo "Found setup job: $SETUP_JOB"
-          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=1800s
+          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=3600s
 
           echo "Setup job completed successfully"
           kubectl logs "$SETUP_JOB" --tail=30
