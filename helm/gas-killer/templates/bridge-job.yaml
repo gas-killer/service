@@ -9,9 +9,7 @@ metadata:
     app.kubernetes.io/component: bridge
   annotations:
     # Runs automatically on helm install. On helm upgrade, only fires when rerun.bridge=true.
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "10"
-    "helm.sh/hook-delete-policy": before-hook-creation
+    "helm.sh/resource-policy": keep
 spec:
   backoffLimit: 3
   ttlSecondsAfterFinished: 3600

@@ -8,10 +8,8 @@ metadata:
     {{- include "gas-killer.labels" . | nindent 4 }}
     app.kubernetes.io/component: yield-distribution
   annotations:
-    # Run after the bridge job completes (bridge is weight 10)
-    "helm.sh/hook": post-install
-    "helm.sh/hook-weight": "20"
-    "helm.sh/hook-delete-policy": before-hook-creation
+    # Runs automatically on helm install.
+    "helm.sh/resource-policy": keep
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 7200
