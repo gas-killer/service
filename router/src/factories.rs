@@ -62,6 +62,11 @@ pub async fn create_listening_creator_with_server(
         .with_metrics(Arc::clone(&metrics));
     let providers = build_ingress_providers().await?;
     let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
+    if ingress_password.is_none() {
+        tracing::warn!(
+            "INGRESS_PASSWORD is not set — /trigger endpoint is unauthenticated; set INGRESS_PASSWORD in production"
+        );
+    }
     let queue_arc = Arc::new(queue);
     let ingress_state =
         IngressState::new(Arc::clone(&queue_arc), metrics, providers, ingress_password);

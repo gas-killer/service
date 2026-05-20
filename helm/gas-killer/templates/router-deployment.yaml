@@ -254,7 +254,7 @@ spec:
               value: "1"
             - name: INGRESS_TIMEOUT_MS
               value: {{ .Values.router.ingress.timeoutMs | quote }}
-            {{- if .Values.secrets.ingressPassword }}
+            {{- if or (and (eq .Values.global.environment "TESTNET") .Values.router.ingress.enabled) .Values.secrets.ingressPassword }}
             - name: INGRESS_PASSWORD
               valueFrom:
                 secretKeyRef:
