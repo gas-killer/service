@@ -99,7 +99,7 @@ See `values.yaml` for all available configuration options.
 | `secrets.forkUrl` | Anvil fork URL (required for LOCAL mode) | `""` |
 | `secrets.privateKey` | Deployer private key | `""` |
 | `secrets.fundedKey` | Funded account private key | `""` |
-| `secrets.ingressPassword` | Bearer token password for `/trigger` auth; empty = no auth | `""` |
+| `secrets.ingressPassword` | Bearer token password for `/trigger` auth. **Required** when `global.environment=TESTNET` and `router.ingress.enabled=true`. Requests must include `Authorization: Bearer <value>`. | `""` |
 
 ## Architecture
 
