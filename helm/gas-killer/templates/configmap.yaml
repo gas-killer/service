@@ -10,13 +10,13 @@ data:
   config.json: |
     {
         "quorum": {
-            "minimumStake": "1",
-            "maxOperatorCount": 32,
-            "kickBIPsOfOperatorStake": 10000,
-            "kickBIPsOfTotalStake": 100
+            "minimumStake": {{ .Values.eigenlayer.quorum.minimumStake | quote }},
+            "maxOperatorCount": {{ .Values.eigenlayer.quorum.maxOperatorCount }},
+            "kickBIPsOfOperatorStake": {{ .Values.eigenlayer.quorum.kickBIPsOfOperatorStake }},
+            "kickBIPsOfTotalStake": {{ .Values.eigenlayer.quorum.kickBIPsOfTotalStake }}
         },
         "metadata": {
-            "uri": "metadataURI"
+            "uri": "{{ if .Values.ingress.host }}https://{{ .Values.ingress.host }}/avs-metadata{{ else }}metadataURI{{ end }}"
         },
         "operators": {
             {{- $nodeCount := int .Values.global.nodeCount }}

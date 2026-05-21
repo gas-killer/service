@@ -145,6 +145,19 @@ eigenlayer:
     lstContract: ""
     lstStrategy: ""
     allocationManager: ""
+  # Quorum parameters written on-chain by the setup job at first deploy.
+  # Changing these after initial deployment requires re-running the setup job (rerun.setup=true).
+  quorum:
+    # Minimum LST stake (in wei) required to register as an operator.
+    # Combined with the 1 ether strategy multiplier in SetupMiddleware.s.sol, this is
+    # effectively the minimum token amount. "1" = no real minimum (local/testnet only).
+    minimumStake: "1"
+    # Maximum number of operators in the quorum.
+    maxOperatorCount: 4
+    # BIPs of an operator's own stake that must be exceeded to kick them (10000 = 100%).
+    kickBIPsOfOperatorStake: 10000
+    # BIPs of total quorum stake below which an operator can be kicked (100 = 1%).
+    kickBIPsOfTotalStake: 100
   resources:
     requests:
       memory: "1Gi"
