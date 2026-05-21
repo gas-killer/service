@@ -90,7 +90,7 @@ jobs:
         run: |
           IMAGES=(
             "ghcr.io/breadchaincoop/ethereum:latest"
-            "ghcr.io/breadchaincoop/eigenlayer:latest"
+            "ghcr.io/breadchaincoop/eigenlayer:pr-bagelface-pin-bls-middleware-release"
             "ghcr.io/breadchaincoop/target-contracts/bridge:latest"
           )
           for IMAGE in "${IMAGES[@]}"; do

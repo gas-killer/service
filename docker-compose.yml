@@ -16,7 +16,7 @@ services:
 
   eigenlayer:
     platform: linux/amd64
-    image: ghcr.io/breadchaincoop/eigenlayer:latest
+    image: ghcr.io/breadchaincoop/eigenlayer:pr-bagelface-pin-bls-middleware-release
     depends_on:
       ethereum:
         condition: service_started
