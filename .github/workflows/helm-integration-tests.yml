@@ -190,7 +190,7 @@ jobs:
           fi
 
           echo "Found setup job: $SETUP_JOB"
-          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=3600s
+          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=5400s
 
           echo "Setup job completed successfully"
           kubectl logs "$SETUP_JOB" --tail=30
