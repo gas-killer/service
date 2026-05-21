@@ -3,7 +3,7 @@ use crate::creator::{
     DispatchTime, GasKillerConfig, GasKillerCreator, GasKillerCreatorType,
     ListeningGasKillerCreator, SimpleTaskQueue,
 };
-use crate::ingress::{IngressState, start_gas_killer_http_server};
+use crate::ingress::{AvsMetadata, IngressState, start_gas_killer_http_server};
 use crate::metrics::MetricsCollector;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_provider::{
@@ -68,8 +68,24 @@ pub async fn create_listening_creator_with_server(
         );
     }
     let queue_arc = Arc::new(queue);
-    let ingress_state =
-        IngressState::new(Arc::clone(&queue_arc), metrics, providers, ingress_password);
+    let avs_metadata = AvsMetadata {
+        name: env::var("AVS_METADATA_NAME").unwrap_or_else(|_| "Gas Killer".to_string()),
+        website: env::var("AVS_METADATA_WEBSITE")
+            .unwrap_or_else(|_| "https://gaskiller.xyz".to_string()),
+        description: env::var("AVS_METADATA_DESCRIPTION").unwrap_or_else(|_| {
+            "Verifiable off-chain compute service for EVM smart contracts via EigenLayer"
+                .to_string()
+        }),
+        logo: env::var("AVS_METADATA_LOGO").unwrap_or_default(),
+        twitter: env::var("AVS_METADATA_TWITTER").unwrap_or_default(),
+    };
+    let ingress_state = IngressState::new(
+        Arc::clone(&queue_arc),
+        metrics,
+        providers,
+        ingress_password,
+        avs_metadata,
+    );
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });

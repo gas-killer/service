@@ -261,6 +261,20 @@ spec:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: INGRESS_PASSWORD
             {{- end }}
+            - name: AVS_METADATA_NAME
+              value: {{ .Values.router.avsMetadata.name | quote }}
+            - name: AVS_METADATA_WEBSITE
+              value: {{ .Values.router.avsMetadata.website | quote }}
+            - name: AVS_METADATA_DESCRIPTION
+              value: {{ .Values.router.avsMetadata.description | quote }}
+            {{- if .Values.router.avsMetadata.logo }}
+            - name: AVS_METADATA_LOGO
+              value: {{ .Values.router.avsMetadata.logo | quote }}
+            {{- end }}
+            {{- if .Values.router.avsMetadata.twitter }}
+            - name: AVS_METADATA_TWITTER
+              value: {{ .Values.router.avsMetadata.twitter | quote }}
+            {{- end }}
             - name: AGGREGATION_FREQUENCY
               value: {{ .Values.router.aggregationFrequency | quote }}
             - name: HEALTHZ_PORT

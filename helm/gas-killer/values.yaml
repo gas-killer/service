@@ -226,6 +226,15 @@ router:
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation.
     # "0" means no timeout — router waits indefinitely for an incoming task.
     timeoutMs: "0"
+  # AVS identity metadata served at GET /avs-metadata.
+  # Set metadata.uri in config.json to the public URL of this endpoint
+  # (e.g. https://api.gaskiller.xyz/avs-metadata) before calling updateAVSMetadataURI.
+  avsMetadata:
+    name: "Gas Killer"
+    website: "https://gaskiller.xyz"
+    description: "Verifiable off-chain compute service for EVM smart contracts via EigenLayer"
+    logo: "https://gaskiller.xyz/brand/gk-wordmark-transparent.png"
+    twitter: "https://x.com/gaskiller_"
   service:
     type: ClusterIP
     port: 3000
