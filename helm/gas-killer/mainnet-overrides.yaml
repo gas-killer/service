@@ -26,7 +26,6 @@ eigenlayer:
     lstContract: "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
     lstStrategy: "0x93c4b944D05dfe6df7645A86cd2206016c51564D"
     allocationManager: "0x948a420b8CC1d6BFd0B6087C2E7c344a2CD0bc39"
-  # These are written on-chain by the setup job and cannot be changed without re-running it.
   quorum:
     minimumStake: "100000000000000000"   # 0.1 stETH
     maxOperatorCount: 4

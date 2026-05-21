@@ -104,8 +104,10 @@ pub async fn create_listening_creator_with_server(
             "Verifiable off-chain compute service for EVM smart contracts via EigenLayer"
                 .to_string()
         }),
-        logo: env::var("AVS_METADATA_LOGO").unwrap_or_default(),
-        twitter: env::var("AVS_METADATA_TWITTER").unwrap_or_default(),
+        logo: env::var("AVS_METADATA_LOGO").ok().filter(|s| !s.is_empty()),
+        twitter: env::var("AVS_METADATA_TWITTER")
+            .ok()
+            .filter(|s| !s.is_empty()),
         operator_sets,
     };
     let ingress_state = IngressState::new(

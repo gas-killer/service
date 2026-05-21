@@ -28,8 +28,10 @@ pub struct AvsMetadata {
     pub name: String,
     pub website: String,
     pub description: String,
-    pub logo: String,
-    pub twitter: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twitter: Option<String>,
     #[serde(rename = "operatorSets", skip_serializing_if = "Option::is_none")]
     pub operator_sets: Option<Vec<AvsOperatorSetMetadata>>,
 }
@@ -997,8 +999,8 @@ mod tests {
                 name: "Gas Killer".to_string(),
                 website: "https://gaskiller.xyz".to_string(),
                 description: "Test AVS".to_string(),
-                logo: "https://example.com/logo.png".to_string(),
-                twitter: "https://x.com/gaskiller".to_string(),
+                logo: Some("https://example.com/logo.png".to_string()),
+                twitter: Some("https://x.com/gaskiller".to_string()),
                 operator_sets: None,
             };
             let app = build_app().with_state(state);
