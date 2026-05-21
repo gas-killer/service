@@ -30,6 +30,25 @@ pub struct AvsMetadata {
     pub description: String,
     pub logo: String,
     pub twitter: String,
+    #[serde(rename = "operatorSets", skip_serializing_if = "Option::is_none")]
+    pub operator_sets: Option<Vec<AvsOperatorSetMetadata>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvsOperatorSetMetadata {
+    pub name: String,
+    pub id: String,
+    pub description: String,
+    pub software: Vec<AvsOperatorSetSoftware>,
+    #[serde(rename = "slashingConditions", skip_serializing_if = "Vec::is_empty")]
+    pub slashing_conditions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvsOperatorSetSoftware {
+    pub name: String,
+    pub description: String,
+    pub url: String,
 }
 
 #[derive(Clone)]
@@ -980,6 +999,7 @@ mod tests {
                 description: "Test AVS".to_string(),
                 logo: "https://example.com/logo.png".to_string(),
                 twitter: "https://x.com/gaskiller".to_string(),
+                operator_sets: None,
             };
             let app = build_app().with_state(state);
             let req = Request::builder()

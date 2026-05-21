@@ -248,6 +248,16 @@ router:
     description: "Verifiable off-chain compute service for EVM smart contracts via EigenLayer"
     logo: "https://gaskiller.xyz/brand/gk-wordmark-transparent.png"
     twitter: "https://x.com/gaskiller_"
+    # Operator set entry included in the metadata JSON once the quorum is created on-chain.
+    # Leave name empty to omit the operatorSets field (e.g. before first setup-job run).
+    operatorSet:
+      name: "Gas Analysis Quorum"
+      id: "0"
+      description: "BLS-aggregated operator set for verifiable gas analysis tasks"
+      softwareName: "gas-killer-node"
+      softwareDescription: "Receives tasks, runs EVM gas analysis, returns a BLS-signed result"
+      softwareUrl: "https://github.com/gas-killer/service"
+      slashingConditions: "Signing a conflicting result for the same task ID"
   service:
     type: ClusterIP
     port: 3000
