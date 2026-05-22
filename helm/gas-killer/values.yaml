@@ -145,6 +145,15 @@ eigenlayer:
     lstContract: ""
     lstStrategy: ""
     allocationManager: ""
+  # Immutable constructor parameters for AvsServiceManagerWrapper — baked into the
+  # contract at deploy time. Cannot be changed without redeploying (rerun.setup=true).
+  sdk:
+    # Fraction of stake-weighted operators that must co-sign a task: threshold/denominator.
+    # Default 2/3 = two-thirds supermajority.
+    quorumThreshold: "2"
+    thresholdDenominator: "3"
+    # Maximum age (in blocks) of a valid reference block. At ~12s/block, 300 ≈ 1 hour.
+    blockStaleMeasure: "300"
   resources:
     requests:
       memory: "1Gi"
