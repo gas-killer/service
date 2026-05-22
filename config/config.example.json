@@ -1,7 +1,7 @@
 {
     "quorum": {
         "minimumStake": "1",
-        "maxOperatorCount": 32,
+        "maxOperatorCount": 4,
         "kickBIPsOfOperatorStake": 10000,
         "kickBIPsOfTotalStake": 100
     },

@@ -145,6 +145,17 @@ eigenlayer:
     lstContract: ""
     lstStrategy: ""
     allocationManager: ""
+  quorum:
+    # Minimum LST stake (in wei) required to register as an operator.
+    # Combined with the 1 ether strategy multiplier in SetupMiddleware.s.sol, this is
+    # effectively the minimum token amount. "1" = no real minimum (local/testnet only).
+    minimumStake: "1"
+    # Maximum number of operators in the quorum.
+    maxOperatorCount: 4
+    # BIPs of an operator's own stake that must be exceeded to kick them (10000 = 100%).
+    kickBIPsOfOperatorStake: 10000
+    # BIPs of total quorum stake below which an operator can be kicked (100 = 1%).
+    kickBIPsOfTotalStake: 100
   # Immutable constructor parameters for AvsServiceManagerWrapper — baked into the
   # contract at deploy time. Cannot be changed without redeploying (rerun.setup=true).
   sdk:
@@ -235,6 +246,25 @@ router:
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation.
     # "0" means no timeout — router waits indefinitely for an incoming task.
     timeoutMs: "0"
+  # AVS identity metadata served at GET /avs-metadata.
+  # Set metadata.uri in config.json to the public URL of this endpoint
+  # (e.g. https://api.gaskiller.xyz/avs-metadata) before calling updateAVSMetadataURI.
+  avsMetadata:
+    name: "Gas Killer"
+    website: "https://gaskiller.xyz"
+    description: "Verifiable off-chain compute service for EVM smart contracts via EigenLayer"
+    logo: "https://gaskiller.xyz/brand/gk-wordmark-transparent.png"
+    twitter: "https://x.com/gaskiller_"
+    # Operator set entry included in the metadata JSON once the quorum is created on-chain.
+    # Leave name empty to omit the operatorSets field (e.g. before first setup-job run).
+    operatorSet:
+      name: "Gas Analysis Quorum"
+      id: "0"
+      description: "BLS-aggregated operator set for verifiable gas analysis tasks"
+      softwareName: "gas-killer-node"
+      softwareDescription: "Receives tasks, runs EVM gas analysis, returns a BLS-signed result"
+      softwareUrl: "https://github.com/gas-killer/service"
+      slashingConditions: "Signing a conflicting result for the same task ID"
   service:
     type: ClusterIP
     port: 3000

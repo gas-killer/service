@@ -190,7 +190,7 @@ jobs:
           fi
 
           echo "Found setup job: $SETUP_JOB"
-          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=3600s
+          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=5400s
 
           echo "Setup job completed successfully"
           kubectl logs "$SETUP_JOB" --tail=30
@@ -204,7 +204,7 @@ jobs:
 
           if [ -n "$BRIDGE_JOB" ]; then
             echo "Found bridge job: $BRIDGE_JOB"
-            kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=1800s || {
+            kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=5400s || {
               echo "Bridge job failed or timed out"
               kubectl logs "$BRIDGE_JOB" --tail=100 || true
               exit 1

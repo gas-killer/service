@@ -261,6 +261,36 @@ spec:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: INGRESS_PASSWORD
             {{- end }}
+            - name: AVS_METADATA_NAME
+              value: {{ .Values.router.avsMetadata.name | quote }}
+            - name: AVS_METADATA_WEBSITE
+              value: {{ .Values.router.avsMetadata.website | quote }}
+            - name: AVS_METADATA_DESCRIPTION
+              value: {{ .Values.router.avsMetadata.description | quote }}
+            {{- if .Values.router.avsMetadata.logo }}
+            - name: AVS_METADATA_LOGO
+              value: {{ .Values.router.avsMetadata.logo | quote }}
+            {{- end }}
+            {{- if .Values.router.avsMetadata.twitter }}
+            - name: AVS_METADATA_TWITTER
+              value: {{ .Values.router.avsMetadata.twitter | quote }}
+            {{- end }}
+            {{- if .Values.router.avsMetadata.operatorSet.name }}
+            - name: AVS_OPSET_NAME
+              value: {{ .Values.router.avsMetadata.operatorSet.name | quote }}
+            - name: AVS_OPSET_ID
+              value: {{ .Values.router.avsMetadata.operatorSet.id | quote }}
+            - name: AVS_OPSET_DESCRIPTION
+              value: {{ .Values.router.avsMetadata.operatorSet.description | quote }}
+            - name: AVS_OPSET_SOFTWARE_NAME
+              value: {{ .Values.router.avsMetadata.operatorSet.softwareName | quote }}
+            - name: AVS_OPSET_SOFTWARE_DESCRIPTION
+              value: {{ .Values.router.avsMetadata.operatorSet.softwareDescription | quote }}
+            - name: AVS_OPSET_SOFTWARE_URL
+              value: {{ .Values.router.avsMetadata.operatorSet.softwareUrl | quote }}
+            - name: AVS_OPSET_SLASHING_CONDITIONS
+              value: {{ .Values.router.avsMetadata.operatorSet.slashingConditions | quote }}
+            {{- end }}
             - name: AGGREGATION_FREQUENCY
               value: {{ .Values.router.aggregationFrequency | quote }}
             - name: HEALTHZ_PORT
