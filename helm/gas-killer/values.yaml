@@ -145,8 +145,6 @@ eigenlayer:
     lstContract: ""
     lstStrategy: ""
     allocationManager: ""
-  # Quorum parameters written on-chain by the setup job at first deploy.
-  # Changing these after initial deployment requires re-running the setup job (rerun.setup=true).
   quorum:
     # Minimum LST stake (in wei) required to register as an operator.
     # Combined with the 1 ether strategy multiplier in SetupMiddleware.s.sol, this is
@@ -158,6 +156,15 @@ eigenlayer:
     kickBIPsOfOperatorStake: 10000
     # BIPs of total quorum stake below which an operator can be kicked (100 = 1%).
     kickBIPsOfTotalStake: 100
+  # Immutable constructor parameters for AvsServiceManagerWrapper — baked into the
+  # contract at deploy time. Cannot be changed without redeploying (rerun.setup=true).
+  sdk:
+    # Fraction of stake-weighted operators that must co-sign a task: threshold/denominator.
+    # Default 2/3 = two-thirds supermajority.
+    quorumThreshold: "2"
+    thresholdDenominator: "3"
+    # Maximum age (in blocks) of a valid reference block. At ~12s/block, 300 ≈ 1 hour.
+    blockStaleMeasure: "300"
   resources:
     requests:
       memory: "1Gi"
