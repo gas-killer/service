@@ -272,6 +272,12 @@ spec:
               value: {{ required "eigenlayer.contracts.lstStrategy must be set (use an overrides file matching your target network)" .Values.eigenlayer.contracts.lstStrategy | quote }}
             - name: ALLOCATION_MANAGER_ADDRESS
               value: {{ required "eigenlayer.contracts.allocationManager must be set (use an overrides file matching your target network)" .Values.eigenlayer.contracts.allocationManager | quote }}
+            - name: QUORUM_THRESHOLD
+              value: {{ .Values.eigenlayer.sdk.quorumThreshold | quote }}
+            - name: THRESHOLD_DENOMINATOR
+              value: {{ .Values.eigenlayer.sdk.thresholdDenominator | quote }}
+            - name: BLOCK_STALE_MEASURE
+              value: {{ .Values.eigenlayer.sdk.blockStaleMeasure | quote }}
           volumeMounts:
             - name: shared-data
               mountPath: /root/.nodes
