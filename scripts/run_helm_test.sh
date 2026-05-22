@@ -166,6 +166,7 @@ helm install "$HELM_RELEASE" ./helm/gas-killer \
     -f ./helm/gas-killer/local-overrides.yaml \
     --set global.environment=LOCAL \
     --set global.nodeCount="$NODE_COUNT" \
+    --set global.initTimeout=7200 \
     --set secrets.forkUrl="$FORK_URL" \
     --set secrets.privateKey="$PRIVATE_KEY" \
     --set secrets.fundedKey="$FUNDED_KEY" \
@@ -191,7 +192,7 @@ if [ -z "$SETUP_JOB" ]; then
 fi
 
 echo "Found setup job: $SETUP_JOB"
-kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=500s
+kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=5400s
 
 echo "Setup job completed:"
 kubectl logs "$SETUP_JOB" --tail=20

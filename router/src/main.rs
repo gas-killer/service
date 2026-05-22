@@ -1,5 +1,6 @@
 use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
+use ark_ff::PrimeField;
 use ark_serialize::CanonicalDeserialize;
 use axum::{
     Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
@@ -66,6 +67,77 @@ async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
     )
 }
 
+/// Generate a fresh BLS keypair and write router_orchestrator.json + public_orchestrator.json
+/// to `output_dir`. Idempotent: skips if `.router_key_complete` already exists in that directory.
+fn generate_key_files(output_dir: &str) {
+    use rand::RngCore;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::path::Path::new(output_dir);
+
+    let marker = dir.join(".router_key_complete");
+    if marker.exists() {
+        println!(
+            "Router keypair already exists ({} found). Skipping.",
+            marker.display()
+        );
+        return;
+    }
+
+    // Generate 32 bytes of CSPRNG entropy, reduce into the BN254 scalar field.
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let sk = ark_bn254::Fr::from_be_bytes_mod_order(&bytes);
+    // Display for prime field elements is the canonical decimal integer.
+    let private_key_decimal = sk.to_string();
+
+    // Derive G2 public key via the commonware signer (same path used at runtime).
+    let signer = get_signer(&private_key_decimal);
+    let pub_key_bytes = signer.public_key();
+    let g2 = G2Affine::deserialize_compressed(pub_key_bytes.as_ref())
+        .expect("failed to deserialize G2 point from freshly generated key");
+
+    // Write private key file (mode 0600 — owner-readable only).
+    let priv_path = dir.join("router_orchestrator.json");
+    let priv_json =
+        serde_json::to_string_pretty(&serde_json::json!({ "privateKey": private_key_decimal }))
+            .expect("failed to serialize private key");
+    std::fs::write(&priv_path, &priv_json)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", priv_path.display()));
+    std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600))
+        .unwrap_or_else(|e| panic!("failed to chmod {}: {e}", priv_path.display()));
+
+    // Write public key file (mode 0644 — world-readable, not sensitive).
+    let pub_path = dir.join("public_orchestrator.json");
+    let pub_json = serde_json::to_string_pretty(&serde_json::json!({
+        "g2_x1": g2.x.c0.to_string(),
+        "g2_x2": g2.x.c1.to_string(),
+        "g2_y1": g2.y.c0.to_string(),
+        "g2_y2": g2.y.c1.to_string(),
+        "port": "3000",
+        "address": ""
+    }))
+    .expect("failed to serialize public key");
+    std::fs::write(&pub_path, &pub_json)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", pub_path.display()));
+    std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o644))
+        .unwrap_or_else(|e| panic!("failed to chmod {}: {e}", pub_path.display()));
+
+    // Write completion marker so re-runs skip key generation.
+    std::fs::write(&marker, b"")
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", marker.display()));
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644))
+        .unwrap_or_else(|e| panic!("failed to chmod {}: {e}", marker.display()));
+
+    println!("Generated router BLS keypair:");
+    println!("  private key → {}", priv_path.display());
+    println!("  public key  → {}", pub_path.display());
+    println!("  g2_x1: {}", g2.x.c0);
+    println!("  g2_x2: {}", g2.x.c1);
+    println!("  g2_y1: {}", g2.y.c0);
+    println!("  g2_y2: {}", g2.y.c1);
+}
+
 /// Resolve a hostname:port with retry logic for Docker DNS readiness
 fn resolve_with_retry(
     address: &str,
@@ -109,8 +181,18 @@ fn main() {
     let runner = tokio::Runner::new(runtime_cfg.clone());
 
     // Parse arguments
-    let matches = Command::new("orchestrator")
-        .about("generate and verify BN254 Multi-Signatures")
+    let matches = Command::new("gas-killer-router")
+        .about("Gas Killer BLS aggregation router")
+        .subcommand(
+            Command::new("generate-key")
+                .about("Generate a BLS keypair for the router orchestrator")
+                .arg(
+                    Arg::new("output-dir")
+                        .long("output-dir")
+                        .required(true)
+                        .help("Directory to write router_orchestrator.json and public_orchestrator.json"),
+                ),
+        )
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
@@ -121,16 +203,24 @@ fn main() {
         .arg(
             Arg::new("key-file")
                 .long("key-file")
-                .required(true)
-                .help("Path to the YAML file containing the private key"),
+                .required(false)
+                .help("Path to the JSON file containing the router BLS private key"),
         )
         .arg(
             Arg::new("port")
                 .long("port")
-                .required(true)
+                .required(false)
                 .help("Port to run the service on"),
         )
         .get_matches();
+
+    if let Some(keygen_matches) = matches.subcommand_matches("generate-key") {
+        let output_dir = keygen_matches
+            .get_one::<String>("output-dir")
+            .expect("--output-dir is required");
+        generate_key_files(output_dir);
+        return;
+    }
 
     // Configure my identity
     let key_file = matches
@@ -171,9 +261,11 @@ fn main() {
         MAX_MESSAGE_SIZE,
     );
 
-    // Required in Kubernetes (or similar) environments because Kubernetes DNAT/SNAT makes IP-based admission filtering inherently non-functional
-    // Source IPs observed at the listener will always be pod IPs, never the Service IPs registered in the oracle.
-    // The setting should be kept enabled if the router is deployed in a Kubernetes (or similar) environment.
+    // Must stay true for K8s deployments (DNAT/SNAT means source IPs at the listener are
+    // always pod IPs, never the registered ClusterIP addresses) and for mixed-network topologies
+    // where external operators are behind NAT. IP-based pre-filtering cannot work in either
+    // case; authentication relies entirely on the cryptographic handshake (peer public keys
+    // checked against the registered operator set), which is secure for both topologies.
     p2p_cfg.attempt_unregistered_handshakes = true;
 
     // Start runtime

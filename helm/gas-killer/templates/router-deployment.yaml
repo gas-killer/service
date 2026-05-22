@@ -27,9 +27,10 @@ spec:
       {{- end }}
       initContainers:
         {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
-        # Fetch avs_deploy.json from GCP Secret Manager.
+        # Fetch avs_deploy.json and the router private key from GCP Secret Manager.
         # Workload Identity provides authentication — no static credentials needed.
-        - name: fetch-avs-deploy
+        # Retries until the key-export job has run and the secrets exist.
+        - name: fetch-secrets
           image: {{ .Values.secretManager.cloudSdkImage | quote }}
           command:
             - bash
@@ -39,24 +40,28 @@ spec:
               PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" .Values.secretManager.projectId }}"
               PREFIX="{{ .Values.secretManager.keyPrefix }}"
               TIMEOUT={{ .Values.global.initTimeout }}
-              ELAPSED=0
 
-              # Retry until the secret exists — on a fresh install the key-export hook
-              # job may still be running when this init container starts.
-              echo "Fetching avs_deploy.json (timeout: ${TIMEOUT}s)..."
-              until gcloud secrets versions access latest \
-                --secret="${PREFIX}-avs-deploy" \
-                --project="$PROJECT" \
-                > /app/secrets/avs_deploy.json 2>/dev/null; do
-                if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-                  echo "ERROR: Timeout waiting for secret ${PREFIX}-avs-deploy after ${TIMEOUT}s"
-                  exit 1
-                fi
-                echo "Secret ${PREFIX}-avs-deploy not available yet, retrying... (${ELAPSED}s elapsed)"
-                sleep 10
-                ELAPSED=$((ELAPSED + 10))
-              done
-              echo "avs_deploy.json fetched successfully"
+              fetch_secret() {
+                local name="$1" dest="$2"
+                local elapsed=0
+                echo "Fetching ${name} (timeout: ${TIMEOUT}s)..."
+                until gcloud secrets versions access latest \
+                  --secret="$name" --project="$PROJECT" > "$dest" 2>/dev/null; do
+                  if [ "$elapsed" -ge "$TIMEOUT" ]; then
+                    echo "ERROR: Timeout waiting for ${name} after ${TIMEOUT}s"
+                    exit 1
+                  fi
+                  echo "Secret ${name} not available yet, retrying... (${elapsed}s elapsed)"
+                  sleep 10
+                  elapsed=$((elapsed + 10))
+                done
+                echo "Fetched ${name}"
+              }
+
+              fetch_secret "${PREFIX}-avs-deploy"       /app/secrets/avs_deploy.json
+              fetch_secret "${PREFIX}-router-private-key" /app/secrets/router_orchestrator.json
+              chmod 600 /app/secrets/router_orchestrator.json
+              echo "All router secrets fetched successfully"
           volumeMounts:
             - name: router-secrets
               mountPath: /app/secrets
@@ -165,8 +170,9 @@ spec:
               {{- end }}
               echo "All nodes are ready!"
 
-        {{- if .Values.orchestrator.routerPrivateKey }}
-        # Create router_orchestrator.json from secret if provided
+        {{- if and .Values.orchestrator.routerPrivateKey (not (and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled)) }}
+        # Create router_orchestrator.json from an explicitly-provided secret.
+        # Skipped when secretManager is enabled — the key is fetched from GCP instead.
         - name: setup-router-key
           image: busybox:1.36
           command:
@@ -192,11 +198,15 @@ spec:
           imagePullPolicy: {{ .Values.router.image.pullPolicy }}
           args:
             - "--key-file"
-            {{- if .Values.orchestrator.routerPrivateKey }}
+            {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
+            # Fetched from GCP Secret Manager by the fetch-secrets init container
+            - "/app/secrets/router_orchestrator.json"
+            {{- else if .Values.orchestrator.routerPrivateKey }}
+            # Written by the setup-router-key init container from an explicit secret
             - "/app/router_orchestrator.json"
             {{- else }}
-            # Use the orchestrator key from the image if not provided via secret
-            - "/app/config/router_orchestrator.json"
+            # Development default bundled in the image — NOT FOR PRODUCTION
+            - "/app/config/router_orchestrator.dev.json"
             {{- end }}
             - "--port"
             - {{ .Values.router.port | quote }}

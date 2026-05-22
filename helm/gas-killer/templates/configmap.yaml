@@ -27,8 +27,9 @@ data:
             {{- end }}
         }
     }
-  {{- if .Values.orchestrator.publicConfig }}
-  # Public orchestrator config - address is always set to the correct router service name
+  {{- if and .Values.orchestrator.publicConfig (not (and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled)) }}
+  # Public orchestrator config for LOCAL mode or TESTNET without secretManager.
+  # Omitted when secretManager is enabled — nodes fetch the router public key from GCP instead.
   public_orchestrator.json: |
     {
       "g2_x1": {{ .Values.orchestrator.publicConfig.g2_x1 | quote }},

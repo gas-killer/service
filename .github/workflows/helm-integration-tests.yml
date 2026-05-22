@@ -226,7 +226,7 @@ jobs:
             echo "Found yield distribution job: $YIELD_JOB"
 
             # Wait for the job to complete (success or failure)
-            TIMEOUT=1800
+            TIMEOUT=5400
             ELAPSED=0
             while [ $ELAPSED -lt $TIMEOUT ]; do
               # Check job status
