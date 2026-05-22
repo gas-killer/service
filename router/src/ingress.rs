@@ -19,6 +19,40 @@ use std::fmt;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+/// AVS identity metadata served at `GET /avs-metadata`.
+///
+/// The EigenLayer indexer fetches the URL passed to `updateAVSMetadataURI`
+/// and expects this exact JSON shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AvsMetadata {
+    pub name: String,
+    pub website: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twitter: Option<String>,
+    #[serde(rename = "operatorSets", skip_serializing_if = "Option::is_none")]
+    pub operator_sets: Option<Vec<AvsOperatorSetMetadata>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvsOperatorSetMetadata {
+    pub name: String,
+    pub id: String,
+    pub description: String,
+    pub software: Vec<AvsOperatorSetSoftware>,
+    #[serde(rename = "slashingConditions", skip_serializing_if = "Vec::is_empty")]
+    pub slashing_conditions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvsOperatorSetSoftware {
+    pub name: String,
+    pub description: String,
+    pub url: String,
+}
+
 #[derive(Clone)]
 pub struct IngressState {
     pub queue: Arc<SimpleTaskQueue>,
@@ -26,6 +60,7 @@ pub struct IngressState {
     pub providers: Arc<HashMap<ChainId, ReadOnlyProvider>>,
     /// Bearer token password. `None` disables authentication.
     pub password: Option<String>,
+    pub avs_metadata: AvsMetadata,
 }
 
 impl IngressState {
@@ -34,12 +69,14 @@ impl IngressState {
         metrics: Arc<MetricsCollector>,
         providers: HashMap<ChainId, ReadOnlyProvider>,
         password: Option<String>,
+        avs_metadata: AvsMetadata,
     ) -> Self {
         Self {
             queue,
             metrics: Some(metrics),
             providers: Arc::new(providers),
             password,
+            avs_metadata,
         }
     }
 
@@ -49,6 +86,7 @@ impl IngressState {
             metrics: None,
             providers: Arc::new(HashMap::new()),
             password: None,
+            avs_metadata: AvsMetadata::default(),
         }
     }
 }
@@ -409,9 +447,14 @@ async fn healthz_handler() -> StatusCode {
     StatusCode::OK
 }
 
+async fn avs_metadata_handler(State(state): State<IngressState>) -> Json<AvsMetadata> {
+    Json(state.avs_metadata.clone())
+}
+
 pub fn build_app() -> Router<IngressState> {
     Router::new()
         .route("/healthz", get(healthz_handler))
+        .route("/avs-metadata", get(avs_metadata_handler))
         .route("/trigger", post(trigger_task_handler))
 }
 
@@ -942,6 +985,49 @@ mod tests {
             let req = Request::builder()
                 .method(Method::GET)
                 .uri("/healthz")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn test_avs_metadata_returns_200_with_valid_json() {
+            let queue = Arc::new(SimpleTaskQueue::new());
+            let mut state = IngressState::without_metrics(queue.clone());
+            state.avs_metadata = AvsMetadata {
+                name: "Gas Killer".to_string(),
+                website: "https://gaskiller.xyz".to_string(),
+                description: "Test AVS".to_string(),
+                logo: Some("https://example.com/logo.png".to_string()),
+                twitter: Some("https://x.com/gaskiller".to_string()),
+                operator_sets: None,
+            };
+            let app = build_app().with_state(state);
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("/avs-metadata")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let metadata: AvsMetadata =
+                serde_json::from_slice(&bytes).expect("response should be valid AvsMetadata JSON");
+            assert_eq!(metadata.name, "Gas Killer");
+            assert_eq!(metadata.website, "https://gaskiller.xyz");
+        }
+
+        #[tokio::test]
+        async fn test_avs_metadata_accessible_without_auth_when_password_set() {
+            let (app, _queue) = make_app_with_password("secret");
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("/avs-metadata")
                 .body(Body::empty())
                 .unwrap();
             let resp = app.oneshot(req).await.unwrap();

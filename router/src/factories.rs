@@ -3,7 +3,10 @@ use crate::creator::{
     DispatchTime, GasKillerConfig, GasKillerCreator, GasKillerCreatorType,
     ListeningGasKillerCreator, SimpleTaskQueue,
 };
-use crate::ingress::{IngressState, start_gas_killer_http_server};
+use crate::ingress::{
+    AvsMetadata, AvsOperatorSetMetadata, AvsOperatorSetSoftware, IngressState,
+    start_gas_killer_http_server,
+};
 use crate::metrics::MetricsCollector;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_provider::{
@@ -68,8 +71,52 @@ pub async fn create_listening_creator_with_server(
         );
     }
     let queue_arc = Arc::new(queue);
-    let ingress_state =
-        IngressState::new(Arc::clone(&queue_arc), metrics, providers, ingress_password);
+    let operator_sets = {
+        let opset_name = env::var("AVS_OPSET_NAME").unwrap_or_default();
+        if opset_name.is_empty() {
+            None
+        } else {
+            let slashing_conditions = env::var("AVS_OPSET_SLASHING_CONDITIONS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            Some(vec![AvsOperatorSetMetadata {
+                name: opset_name,
+                id: env::var("AVS_OPSET_ID").unwrap_or_else(|_| "0".to_string()),
+                description: env::var("AVS_OPSET_DESCRIPTION").unwrap_or_default(),
+                software: vec![AvsOperatorSetSoftware {
+                    name: env::var("AVS_OPSET_SOFTWARE_NAME")
+                        .unwrap_or_else(|_| "gas-killer-node".to_string()),
+                    description: env::var("AVS_OPSET_SOFTWARE_DESCRIPTION").unwrap_or_default(),
+                    url: env::var("AVS_OPSET_SOFTWARE_URL").unwrap_or_default(),
+                }],
+                slashing_conditions,
+            }])
+        }
+    };
+    let avs_metadata = AvsMetadata {
+        name: env::var("AVS_METADATA_NAME").unwrap_or_else(|_| "Gas Killer".to_string()),
+        website: env::var("AVS_METADATA_WEBSITE")
+            .unwrap_or_else(|_| "https://gaskiller.xyz".to_string()),
+        description: env::var("AVS_METADATA_DESCRIPTION").unwrap_or_else(|_| {
+            "Verifiable off-chain compute service for EVM smart contracts via EigenLayer"
+                .to_string()
+        }),
+        logo: env::var("AVS_METADATA_LOGO").ok().filter(|s| !s.is_empty()),
+        twitter: env::var("AVS_METADATA_TWITTER")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        operator_sets,
+    };
+    let ingress_state = IngressState::new(
+        Arc::clone(&queue_arc),
+        metrics,
+        providers,
+        ingress_password,
+        avs_metadata,
+    );
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });
