@@ -16,6 +16,9 @@
 global:
   environment: TESTNET
 
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
 eigenlayer:
   contracts:
     delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
@@ -23,9 +26,19 @@ eigenlayer:
     lstContract: "0x00c71b0fcadE911B2feeE9912De4Fe19eB04ca56"
     lstStrategy: "0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574"
     allocationManager: "0x42583067658071247ec8CE0A516A58f682002d07"
+  quorum:
+    minimumStake: "100000000000000000"   # 0.1 stETH
+    maxOperatorCount: 4
+    kickBIPsOfOperatorStake: 10000
+    kickBIPsOfTotalStake: 100
+  sdk:
+    quorumThreshold: "2"
+    thresholdDenominator: "3"
+    blockStaleMeasure: "300"
 
-imagePullSecrets:
-  - name: ghcr-pull-secret
+secretManager:
+  enabled: true
+  keyPrefix: "gas-killer-testnet"
 
 ingress:
   enabled: true

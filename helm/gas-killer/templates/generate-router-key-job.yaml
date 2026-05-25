@@ -31,6 +31,8 @@ spec:
             - generate-key
             - --output-dir
             - /root/.nodes
+            - --router-address
+            - {{ include "gas-killer.router.fullname" . }}
           volumeMounts:
             - name: shared-data
               mountPath: /root/.nodes

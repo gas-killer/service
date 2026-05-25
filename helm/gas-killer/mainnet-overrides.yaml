@@ -31,6 +31,10 @@ eigenlayer:
     maxOperatorCount: 4
     kickBIPsOfOperatorStake: 10000
     kickBIPsOfTotalStake: 100
+  sdk:
+    quorumThreshold: "2"
+    thresholdDenominator: "3"
+    blockStaleMeasure: "300"
 
 secretManager:
   enabled: true

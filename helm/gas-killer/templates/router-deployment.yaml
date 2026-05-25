@@ -204,8 +204,10 @@ spec:
             {{- else if .Values.orchestrator.routerPrivateKey }}
             # Written by the setup-router-key init container from an explicit secret
             - "/app/router_orchestrator.json"
+            {{- else if eq .Values.global.environment "TESTNET" }}
+            {{- fail "TESTNET deployments require either secretManager.enabled=true or orchestrator.routerPrivateKey. Using the dev keypair in production is not allowed." }}
             {{- else }}
-            # Development default bundled in the image — NOT FOR PRODUCTION
+            # Development default bundled in the image — LOCAL only
             - "/app/config/router_orchestrator.dev.json"
             {{- end }}
             - "--port"

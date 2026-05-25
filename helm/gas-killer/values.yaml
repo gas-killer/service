@@ -207,7 +207,7 @@ node:
     pullPolicy: IfNotPresent
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
-# Port for the node's /healthz HTTP endpoint (used by Kubernetes probes)
+  # Port for the node's /healthz HTTP endpoint (used by Kubernetes probes)
   healthzPort: 8081
   # How long Kubernetes waits for a node to finish in-flight work after SIGTERM.
   # Must be >= the time needed to complete a validation + sign cycle. L2 computation

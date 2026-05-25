@@ -69,7 +69,7 @@ async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
 
 /// Generate a fresh BLS keypair and write router_orchestrator.json + public_orchestrator.json
 /// to `output_dir`. Idempotent: skips if `.router_key_complete` already exists in that directory.
-fn generate_key_files(output_dir: &str) {
+fn generate_key_files(output_dir: &str, router_address: &str) {
     use rand::RngCore;
     use std::os::unix::fs::PermissionsExt;
 
@@ -115,7 +115,7 @@ fn generate_key_files(output_dir: &str) {
         "g2_y1": g2.y.c0.to_string(),
         "g2_y2": g2.y.c1.to_string(),
         "port": "3000",
-        "address": ""
+        "address": router_address
     }))
     .expect("failed to serialize public key");
     std::fs::write(&pub_path, &pub_json)
@@ -191,6 +191,12 @@ fn main() {
                         .long("output-dir")
                         .required(true)
                         .help("Directory to write router_orchestrator.json and public_orchestrator.json"),
+                )
+                .arg(
+                    Arg::new("router-address")
+                        .long("router-address")
+                        .required(true)
+                        .help("Hostname or DNS name nodes use to reach this router (written into public_orchestrator.json)"),
                 ),
         )
         .arg(
@@ -218,7 +224,10 @@ fn main() {
         let output_dir = keygen_matches
             .get_one::<String>("output-dir")
             .expect("--output-dir is required");
-        generate_key_files(output_dir);
+        let router_address = keygen_matches
+            .get_one::<String>("router-address")
+            .expect("--router-address is required");
+        generate_key_files(output_dir, router_address);
         return;
     }
 
