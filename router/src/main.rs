@@ -68,8 +68,9 @@ async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
 }
 
 /// Generate a fresh BLS keypair and write router_orchestrator.json + public_orchestrator.json
-/// to `output_dir`. Idempotent: skips if `.router_key_complete` already exists in that directory.
-fn generate_key_files(output_dir: &str, router_address: &str) {
+/// to `output_dir`. Idempotent: skips if `.router_key_complete` already exists, unless `force` is
+/// true (used during intentional key rotation via `rerun.generateRouterKey`).
+fn generate_key_files(output_dir: &str, router_address: &str, router_port: u16, force: bool) {
     use rand::RngCore;
     use std::os::unix::fs::PermissionsExt;
 
@@ -77,11 +78,17 @@ fn generate_key_files(output_dir: &str, router_address: &str) {
 
     let marker = dir.join(".router_key_complete");
     if marker.exists() {
-        println!(
-            "Router keypair already exists ({} found). Skipping.",
-            marker.display()
-        );
-        return;
+        if force {
+            println!("--force set: removing existing marker to regenerate keypair.");
+            std::fs::remove_file(&marker)
+                .unwrap_or_else(|e| panic!("failed to remove {}: {e}", marker.display()));
+        } else {
+            println!(
+                "Router keypair already exists ({} found). Skipping.",
+                marker.display()
+            );
+            return;
+        }
     }
 
     // Generate 32 bytes of CSPRNG entropy, reduce into the BN254 scalar field.
@@ -114,7 +121,7 @@ fn generate_key_files(output_dir: &str, router_address: &str) {
         "g2_x2": g2.x.c1.to_string(),
         "g2_y1": g2.y.c0.to_string(),
         "g2_y2": g2.y.c1.to_string(),
-        "port": "3000",
+        "port": router_port.to_string(),
         "address": router_address
     }))
     .expect("failed to serialize public key");
@@ -197,6 +204,19 @@ fn main() {
                         .long("router-address")
                         .required(true)
                         .help("Hostname or DNS name nodes use to reach this router (written into public_orchestrator.json)"),
+                )
+                .arg(
+                    Arg::new("router-port")
+                        .long("router-port")
+                        .required(true)
+                        .value_parser(value_parser!(u16))
+                        .help("Port nodes use to reach this router (written into public_orchestrator.json)"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Overwrite an existing keypair (use only for intentional key rotation)"),
                 ),
         )
         .arg(
@@ -227,17 +247,23 @@ fn main() {
         let router_address = keygen_matches
             .get_one::<String>("router-address")
             .expect("--router-address is required");
-        generate_key_files(output_dir, router_address);
+        let router_port = *keygen_matches
+            .get_one::<u16>("router-port")
+            .expect("--router-port is required");
+        let force = keygen_matches.get_flag("force");
+        generate_key_files(output_dir, router_address, router_port, force);
         return;
     }
 
     // Configure my identity
-    let key_file = matches
-        .get_one::<String>("key-file")
-        .expect("Please provide key file");
-    let port = matches
-        .get_one::<String>("port")
-        .expect("Please provide port");
+    let key_file = matches.get_one::<String>("key-file").unwrap_or_else(|| {
+        eprintln!("error: --key-file is required");
+        std::process::exit(1);
+    });
+    let port = matches.get_one::<String>("port").unwrap_or_else(|| {
+        eprintln!("error: --port is required");
+        std::process::exit(1);
+    });
     let key = load_key_from_file(key_file);
     let me = format!("{key}@{port}");
     let parts = me.split('@').collect::<Vec<&str>>();
