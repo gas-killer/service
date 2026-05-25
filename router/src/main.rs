@@ -256,18 +256,14 @@ fn main() {
     }
 
     // Configure my identity
-    let key_file = matches
-        .get_one::<String>("key-file")
-        .unwrap_or_else(|| {
-            eprintln!("error: --key-file is required");
-            std::process::exit(1);
-        });
-    let port = matches
-        .get_one::<String>("port")
-        .unwrap_or_else(|| {
-            eprintln!("error: --port is required");
-            std::process::exit(1);
-        });
+    let key_file = matches.get_one::<String>("key-file").unwrap_or_else(|| {
+        eprintln!("error: --key-file is required");
+        std::process::exit(1);
+    });
+    let port = matches.get_one::<String>("port").unwrap_or_else(|| {
+        eprintln!("error: --port is required");
+        std::process::exit(1);
+    });
     let key = load_key_from_file(key_file);
     let me = format!("{key}@{port}");
     let parts = me.split('@').collect::<Vec<&str>>();
