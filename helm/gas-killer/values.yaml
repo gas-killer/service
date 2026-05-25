@@ -70,6 +70,7 @@ rerun:
   # Re-run the generate-router-key job (TESTNET+secretManager only).
   # Only set this if you intentionally want to rotate the router BLS keypair —
   # doing so requires all nodes to restart and pick up the new public key from GCP.
+  # Also triggers key-export so the new public key is uploaded to Secret Manager.
   generateRouterKey: false
 
 # Secrets configuration

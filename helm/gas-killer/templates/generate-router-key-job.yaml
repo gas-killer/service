@@ -11,7 +11,6 @@ metadata:
     "helm.sh/resource-policy": keep
 spec:
   backoffLimit: 3
-  ttlSecondsAfterFinished: 3600
   template:
     metadata:
       labels:
@@ -33,6 +32,11 @@ spec:
             - /root/.nodes
             - --router-address
             - {{ include "gas-killer.router.fullname" . }}
+            - --router-port
+            - {{ .Values.router.port | quote }}
+            {{- if .Values.rerun.generateRouterKey }}
+            - --force
+            {{- end }}
           volumeMounts:
             - name: shared-data
               mountPath: /root/.nodes

@@ -345,7 +345,7 @@ spec:
               mountPath: /app/secrets
               readOnly: true
             {{- end }}
-            {{- if .Values.orchestrator.routerPrivateKey }}
+            {{- if and .Values.orchestrator.routerPrivateKey (not (and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled)) }}
             - name: router-key
               mountPath: /app/router_orchestrator.json
               subPath: router_orchestrator.json
@@ -362,7 +362,7 @@ spec:
         - name: router-secrets
           emptyDir: {}
         {{- end }}
-        {{- if .Values.orchestrator.routerPrivateKey }}
+        {{- if and .Values.orchestrator.routerPrivateKey (not (and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled)) }}
         - name: router-key
           emptyDir: {}
         {{- end }}
