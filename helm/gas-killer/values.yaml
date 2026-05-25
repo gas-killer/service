@@ -207,6 +207,26 @@ node:
     pullPolicy: IfNotPresent
   # Base port for nodes (node-1 uses basePort, node-2 uses basePort+1, etc.)
   basePort: 3001
+  # Per-node socket address overrides for operators that run outside this cluster.
+  #
+  # By default, each node's on-chain socket address is the K8s-internal ClusterIP service
+  # name (e.g. "gas-killer-node-1:3001"). Operators inside the same cluster can reach this
+  # address, but operators on external networks cannot.
+  #
+  # Use this map to supply a publicly-reachable "host:port" for any node that needs to be
+  # reachable from outside the cluster. Keys are 1-based node indices (as strings).
+  # Any node whose index is not listed will continue to use the generated K8s service name.
+  #
+  # Networking requirements for external operators:
+  #   - Each participating operator needs a static public IP or a stable DNS name.
+  #   - The port must be reachable from all other operators and the router.
+  #   - NAT/firewall rules must allow inbound TCP on the declared port.
+  #   - There is currently no relay or NAT-traversal strategy; direct reachability is required.
+  #
+  # Example — node 1 runs externally, nodes 2-3 stay in-cluster:
+  #   socketAddressOverrides:
+  #     "1": "203.0.113.42:3001"
+  socketAddressOverrides: {}
   # Port for the node's /healthz HTTP endpoint (used by Kubernetes probes)
   healthzPort: 8081
   # How long Kubernetes waits for a node to finish in-flight work after SIGTERM.
