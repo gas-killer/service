@@ -215,6 +215,7 @@ fn main() {
                 .arg(
                     Arg::new("force")
                         .long("force")
+                        .alias("rotate")
                         .action(clap::ArgAction::SetTrue)
                         .help("Overwrite an existing keypair (use only for intentional key rotation)"),
                 ),
