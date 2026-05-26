@@ -38,8 +38,9 @@ spec:
               PREFIX="{{ .Values.secretManager.keyPrefix }}"
               MARKER=/root/.nodes/.router_key_complete
 
-              if gcloud secrets describe "${PREFIX}-router-private-key" \
-                  --project="$PROJECT" &>/dev/null; then
+              # Capture stderr; discard stdout. Exit code 0 = secret exists.
+              if DESCRIBE_ERR=$(gcloud secrets describe "${PREFIX}-router-private-key" \
+                  --project="$PROJECT" 2>&1 1>/dev/null); then
                 echo "Found existing router keypair in GCP Secret Manager — restoring to PVC"
 
                 gcloud secrets versions access latest \
@@ -54,8 +55,11 @@ spec:
                 chmod 644 /root/.nodes/public_orchestrator.json
                 touch "$MARKER"
                 echo "Restored router keypair from GCP Secret Manager"
-              else
+              elif echo "$DESCRIBE_ERR" | grep -q "NOT_FOUND"; then
                 echo "No existing router keypair in GCP — generate_key will create a fresh one"
+              else
+                echo "ERROR: Unexpected error checking GCP Secret Manager: $DESCRIBE_ERR" >&2
+                exit 1
               fi
           volumeMounts:
             - name: shared-data
