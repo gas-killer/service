@@ -9,6 +9,9 @@ metadata:
   annotations:
     # Preserve the job after completion so its logs remain inspectable.
     "helm.sh/resource-policy": keep
+    # TODO: If the PVC is lost (e.g. cluster recreation), this job will silently generate a new
+    # keypair even though the old one is registered on-chain and stored in GCP Secret Manager.
+    # A follow-up PR should add an init container that restores from Secret Manager first.
 spec:
   backoffLimit: 3
   template:

@@ -25,7 +25,7 @@ data:
             {{- $defaultAddr := printf "%s-%d:%d" (include "gas-killer.node.fullname" $) $nodeIndex (add (int $.Values.node.basePort) $i) }}
             {{- $override := index $.Values.node.socketAddressOverrides (toString $nodeIndex) }}
             "testacc{{ $nodeIndex }}": {
-                "socketAddress": "{{ default $defaultAddr $override }}"
+                "socketAddress": {{ default $defaultAddr $override | toJson }}
             }{{ if lt $nodeIndex $nodeCount }},{{ end }}
             {{- end }}
         }
