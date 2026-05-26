@@ -109,8 +109,8 @@ fn main() {
     let runner = tokio::Runner::new(runtime_cfg.clone());
 
     // Parse arguments
-    let matches = Command::new("gas-killer-router")
-        .about("Gas Killer BLS aggregation router")
+    let matches = Command::new("orchestrator")
+        .about("generate and verify BN254 Multi-Signatures")
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
