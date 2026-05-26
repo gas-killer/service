@@ -303,6 +303,100 @@ data:
             "colorMode": "background",
             "graphMode": "area"
           }
+        },
+        {
+          "id": 50,
+          "type": "text",
+          "title": "Executor Phase Breakdown",
+          "gridPos": { "x": 0, "y": 42, "w": 24, "h": 1 },
+          "options": { "mode": "markdown", "content": "## Executor Phase Breakdown\n\nPer-phase latency inside `handle_verification`. Chain detection → getMessageHash preflight → supportsInterface check → tx send (includes gas estimation) → receipt confirmation (block inclusion wait)." }
+        },
+        {
+          "id": 51,
+          "type": "timeseries",
+          "title": "Chain Detection (p50 / p95)",
+          "gridPos": { "x": 0, "y": 43, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_executor_chain_detection_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_chain_detection_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 52,
+          "type": "timeseries",
+          "title": "Hash Preflight (p50 / p95)",
+          "gridPos": { "x": 8, "y": 43, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_executor_hash_preflight_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_hash_preflight_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 53,
+          "type": "timeseries",
+          "title": "supportsInterface Check (p50 / p95)",
+          "gridPos": { "x": 16, "y": 43, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_executor_supports_interface_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_supports_interface_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 54,
+          "type": "timeseries",
+          "title": "TX Send (p50 / p95)",
+          "description": "Time from calling verifyAndUpdate to receiving the pending tx handle. Includes eth_estimateGas simulation.",
+          "gridPos": { "x": 0, "y": 51, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_executor_tx_send_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_tx_send_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 55,
+          "type": "timeseries",
+          "title": "Receipt Confirmation (p50 / p95)",
+          "description": "Time waiting for the verifyAndUpdate transaction to be included in a block.",
+          "gridPos": { "x": 12, "y": 51, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_executor_receipt_confirmation_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_receipt_confirmation_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
         }
       ]
     }

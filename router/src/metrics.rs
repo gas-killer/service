@@ -26,6 +26,16 @@ pub struct MetricsCollector {
     pub p2p_round_trip_seconds: Histogram,
     /// Current number of tasks sitting in the ingress queue waiting to be processed.
     pub task_queue_depth: Gauge<i64, AtomicI64>,
+    /// Time to detect which chain a target contract is deployed on (seconds).
+    pub executor_chain_detection_seconds: Histogram,
+    /// Time for getMessageHash RPC preflight call (seconds).
+    pub executor_hash_preflight_seconds: Histogram,
+    /// Time for supportsInterface ERC-165 check (seconds).
+    pub executor_supports_interface_seconds: Histogram,
+    /// Time from calling verifyAndUpdate to receiving the pending tx handle (seconds).
+    pub executor_tx_send_seconds: Histogram,
+    /// Time waiting for the verifyAndUpdate receipt to be mined (seconds).
+    pub executor_receipt_confirmation_seconds: Histogram,
 }
 
 impl MetricsCollector {
@@ -98,6 +108,43 @@ impl MetricsCollector {
             task_queue_depth.clone(),
         );
 
+        let rpc_buckets = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0];
+        let executor_chain_detection_seconds = Histogram::new(rpc_buckets);
+        registry.register(
+            "gas_killer_executor_chain_detection_seconds",
+            "Time to detect which chain a target contract is deployed on",
+            executor_chain_detection_seconds.clone(),
+        );
+
+        let executor_hash_preflight_seconds = Histogram::new(rpc_buckets);
+        registry.register(
+            "gas_killer_executor_hash_preflight_seconds",
+            "Time for the getMessageHash RPC preflight call",
+            executor_hash_preflight_seconds.clone(),
+        );
+
+        let executor_supports_interface_seconds = Histogram::new(rpc_buckets);
+        registry.register(
+            "gas_killer_executor_supports_interface_seconds",
+            "Time for the supportsInterface ERC-165 check",
+            executor_supports_interface_seconds.clone(),
+        );
+
+        let executor_tx_send_seconds = Histogram::new([0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0]);
+        registry.register(
+            "gas_killer_executor_tx_send_seconds",
+            "Time from calling verifyAndUpdate to receiving the pending tx handle",
+            executor_tx_send_seconds.clone(),
+        );
+
+        let executor_receipt_confirmation_seconds =
+            Histogram::new([0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]);
+        registry.register(
+            "gas_killer_executor_receipt_confirmation_seconds",
+            "Time waiting for the verifyAndUpdate receipt to be mined",
+            executor_receipt_confirmation_seconds.clone(),
+        );
+
         Self {
             registry,
             ingress_accepted,
@@ -109,6 +156,11 @@ impl MetricsCollector {
             execution_duration_seconds,
             p2p_round_trip_seconds,
             task_queue_depth,
+            executor_chain_detection_seconds,
+            executor_hash_preflight_seconds,
+            executor_supports_interface_seconds,
+            executor_tx_send_seconds,
+            executor_receipt_confirmation_seconds,
         }
     }
 
