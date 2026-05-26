@@ -4,7 +4,7 @@ use ark_serialize::CanonicalDeserialize;
 use axum::{
     Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
 };
-use clap::{Arg, Command, value_parser};
+use clap::{Arg, Command};
 use commonware_avs_core::bn254::{PublicKey, get_signer};
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
 use commonware_avs_router::orchestrator::traits::OrchestratorTrait;
@@ -116,13 +116,13 @@ fn main() {
                 .long("bootstrappers")
                 .required(false)
                 .value_delimiter(',')
-                .value_parser(value_parser!(String)),
+                .value_parser(clap::value_parser!(String)),
         )
         .arg(
             Arg::new("key-file")
                 .long("key-file")
                 .required(true)
-                .help("Path to the YAML file containing the private key"),
+                .help("Path to the JSON file containing the router BLS private key"),
         )
         .arg(
             Arg::new("port")
@@ -135,10 +135,10 @@ fn main() {
     // Configure my identity
     let key_file = matches
         .get_one::<String>("key-file")
-        .expect("Please provide key file");
+        .expect("--key-file is required");
     let port = matches
         .get_one::<String>("port")
-        .expect("Please provide port");
+        .expect("--port is required");
     let key = load_key_from_file(key_file);
     let me = format!("{key}@{port}");
     let parts = me.split('@').collect::<Vec<&str>>();
@@ -171,9 +171,11 @@ fn main() {
         MAX_MESSAGE_SIZE,
     );
 
-    // Required in Kubernetes (or similar) environments because Kubernetes DNAT/SNAT makes IP-based admission filtering inherently non-functional
-    // Source IPs observed at the listener will always be pod IPs, never the Service IPs registered in the oracle.
-    // The setting should be kept enabled if the router is deployed in a Kubernetes (or similar) environment.
+    // Must stay true for K8s deployments (DNAT/SNAT means source IPs at the listener are
+    // always pod IPs, never the registered ClusterIP addresses) and for mixed-network topologies
+    // where external operators are behind NAT. IP-based pre-filtering cannot work in either
+    // case; authentication relies entirely on the cryptographic handshake (peer public keys
+    // checked against the registered operator set), which is secure for both topologies.
     p2p_cfg.attempt_unregistered_handshakes = true;
 
     // Start runtime

@@ -62,7 +62,7 @@ services:
     volumes:
       - ./config/.nodes/operator_keys/testacc1.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
-      - ./config/public_orchestrator.json:/app/public_orchestrator.json:ro
+      - ./config/public_orchestrator.dev.json:/app/public_orchestrator.json:ro
     command:
       [
         "--key-file",
@@ -96,7 +96,7 @@ services:
     volumes:
       - ./config/.nodes/operator_keys/testacc2.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
-      - ./config/public_orchestrator.json:/app/public_orchestrator.json:ro
+      - ./config/public_orchestrator.dev.json:/app/public_orchestrator.json:ro
     command:
       [
         "--key-file",
@@ -130,7 +130,7 @@ services:
     volumes:
       - ./config/.nodes/operator_keys/testacc3.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
-      - ./config/public_orchestrator.json:/app/public_orchestrator.json:ro
+      - ./config/public_orchestrator.dev.json:/app/public_orchestrator.json:ro
     command:
       [
         "--key-file",
@@ -169,7 +169,7 @@ services:
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
     volumes:
       - ./config/.nodes:/app/.nodes:ro
-      - ./config/router_orchestrator.json:/app/router_orchestrator.json:ro
+      - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro
     command: ["--key-file", "/app/router_orchestrator.json", "--port", "3000"]
     ports:
       - "4000:3000"

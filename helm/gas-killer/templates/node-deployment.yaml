@@ -36,8 +36,9 @@ spec:
       {{- end }}
       initContainers:
         {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
-        # Fetch BLS key and avs_deploy.json from GCP Secret Manager.
+        # Fetch BLS key, avs_deploy.json, and the router public key from GCP Secret Manager.
         # Workload Identity provides authentication — no static credentials needed.
+        # Retries until the key-export job has populated all secrets.
         - name: fetch-secrets
           image: {{ $root.Values.secretManager.cloudSdkImage | quote }}
           command:
@@ -48,40 +49,28 @@ spec:
               PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" $root.Values.secretManager.projectId }}"
               PREFIX="{{ $root.Values.secretManager.keyPrefix }}"
               TIMEOUT={{ $root.Values.global.initTimeout }}
-              ELAPSED=0
 
-              # Retry until secrets exist — on a fresh install the key-export hook
-              # job may still be running when this init container starts.
-              echo "Fetching BLS key for node {{ $nodeIndex }} (timeout: ${TIMEOUT}s)..."
-              until gcloud secrets versions access latest \
-                --secret="${PREFIX}-node-{{ $nodeIndex }}-bls-key" \
-                --project="$PROJECT" \
-                > /app/secrets/bls-key.json 2>/dev/null; do
-                if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-                  echo "ERROR: Timeout waiting for secret ${PREFIX}-node-{{ $nodeIndex }}-bls-key after ${TIMEOUT}s"
-                  exit 1
-                fi
-                echo "Secret ${PREFIX}-node-{{ $nodeIndex }}-bls-key not available yet, retrying... (${ELAPSED}s elapsed)"
-                sleep 10
-                ELAPSED=$((ELAPSED + 10))
-              done
-              echo "BLS key fetched successfully"
+              fetch_secret() {
+                local name="$1" dest="$2"
+                local elapsed=0
+                echo "Fetching ${name} (timeout: ${TIMEOUT}s)..."
+                until gcloud secrets versions access latest \
+                  --secret="$name" --project="$PROJECT" > "$dest" 2>/dev/null; do
+                  if [ "$elapsed" -ge "$TIMEOUT" ]; then
+                    echo "ERROR: Timeout waiting for ${name} after ${TIMEOUT}s"
+                    exit 1
+                  fi
+                  echo "Secret ${name} not available yet, retrying... (${elapsed}s elapsed)"
+                  sleep 10
+                  elapsed=$((elapsed + 10))
+                done
+                echo "Fetched ${name}"
+              }
 
-              ELAPSED=0
-              echo "Fetching avs_deploy.json (timeout: ${TIMEOUT}s)..."
-              until gcloud secrets versions access latest \
-                --secret="${PREFIX}-avs-deploy" \
-                --project="$PROJECT" \
-                > /app/secrets/avs_deploy.json 2>/dev/null; do
-                if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-                  echo "ERROR: Timeout waiting for secret ${PREFIX}-avs-deploy after ${TIMEOUT}s"
-                  exit 1
-                fi
-                echo "Secret ${PREFIX}-avs-deploy not available yet, retrying... (${ELAPSED}s elapsed)"
-                sleep 10
-                ELAPSED=$((ELAPSED + 10))
-              done
-              echo "Secrets fetched successfully"
+              fetch_secret "${PREFIX}-node-{{ $nodeIndex }}-bls-key" /app/secrets/bls-key.json
+              fetch_secret "${PREFIX}-avs-deploy"                    /app/secrets/avs_deploy.json
+              fetch_secret "${PREFIX}-router-public-key"             /app/secrets/public_orchestrator.json
+              echo "All node secrets fetched successfully"
           volumeMounts:
             - name: node-secrets
               mountPath: /app/secrets
@@ -179,12 +168,15 @@ spec:
             - "--port"
             - {{ $nodePort | quote }}
             - "--orchestrator"
-            {{- if $root.Values.orchestrator.publicConfig }}
-            # Use public orchestrator from configmap if provided
+            {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+            # Fetched from GCP Secret Manager by the fetch-secrets init container
+            - "/app/secrets/public_orchestrator.json"
+            {{- else if $root.Values.orchestrator.publicConfig }}
+            # Mounted from configmap (LOCAL mode or TESTNET without secretManager)
             - "/app/public_orchestrator.json"
             {{- else }}
-            # Use public orchestrator from the image if not provided via configmap
-            - "/app/config/public_orchestrator.json"
+            # Development default bundled in the image — NOT FOR PRODUCTION
+            - "/app/config/public_orchestrator.dev.json"
             {{- end }}
           env:
             {{- if eq $root.Values.global.environment "TESTNET" }}
@@ -258,7 +250,7 @@ spec:
               mountPath: /app/secrets
               readOnly: true
             {{- end }}
-            {{- if $root.Values.orchestrator.publicConfig }}
+            {{- if and $root.Values.orchestrator.publicConfig (not (and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled)) }}
             - name: config
               mountPath: /app/public_orchestrator.json
               subPath: public_orchestrator.json
@@ -275,7 +267,7 @@ spec:
         - name: node-secrets
           emptyDir: {}
         {{- end }}
-        {{- if $root.Values.orchestrator.publicConfig }}
+        {{- if and $root.Values.orchestrator.publicConfig (not (and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled)) }}
         - name: config
           configMap:
             name: {{ include "gas-killer.config.fullname" $root }}

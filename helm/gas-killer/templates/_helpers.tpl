@@ -142,3 +142,10 @@ Yield distribution job name
 {{- define "gas-killer.yield-distribution.fullname" -}}
 {{- printf "%s-yield-distribution" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
+
+{{/*
+Generate router key job name
+*/}}
+{{- define "gas-killer.generate-router-key.fullname" -}}
+{{- printf "%s-generate-router-key" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}

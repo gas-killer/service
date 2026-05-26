@@ -1,0 +1,56 @@
+{{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled (or .Release.IsInstall .Values.rerun.generateRouterKey) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gas-killer.generate-router-key.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: generate-router-key
+  annotations:
+    # Preserve the job after completion so its logs remain inspectable.
+    "helm.sh/resource-policy": keep
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "gas-killer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: generate-router-key
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: generate-key
+          image: "{{ .Values.router.image.repository }}:{{ required "router.image.tag must be set" .Values.router.image.tag }}"
+          imagePullPolicy: {{ .Values.router.image.pullPolicy }}
+          # Run as root so we can write to the shared PVC (files are created by
+          # the setup job as root; the directory is 755 / owned by root).
+          securityContext:
+            runAsUser: 0
+          command:
+            - generate_key
+          args:
+            - --output-dir
+            - /root/.nodes
+            - --router-address
+            - {{ include "gas-killer.router.fullname" . }}
+            - --router-port
+            - {{ .Values.router.port | quote }}
+            {{- if .Values.rerun.generateRouterKey }}
+            - --force
+            {{- end }}
+          volumeMounts:
+            - name: shared-data
+              mountPath: /root/.nodes
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: {{ include "gas-killer.shareddata.fullname" . }}
+{{- end }}

@@ -17,7 +17,7 @@ jobs:
   helm-test:
     name: Test with Helm Charts
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     env:
       CI_INGRESS_PASSWORD: ci-test-password
 
@@ -190,7 +190,7 @@ jobs:
           fi
 
           echo "Found setup job: $SETUP_JOB"
-          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=5400s
+          kubectl wait --for=condition=complete "$SETUP_JOB" --timeout=900s
 
           echo "Setup job completed successfully"
           kubectl logs "$SETUP_JOB" --tail=30
@@ -204,7 +204,7 @@ jobs:
 
           if [ -n "$BRIDGE_JOB" ]; then
             echo "Found bridge job: $BRIDGE_JOB"
-            kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=5400s || {
+            kubectl wait --for=condition=complete "$BRIDGE_JOB" --timeout=900s || {
               echo "Bridge job failed or timed out"
               kubectl logs "$BRIDGE_JOB" --tail=100 || true
               exit 1
@@ -226,7 +226,7 @@ jobs:
             echo "Found yield distribution job: $YIELD_JOB"
 
             # Wait for the job to complete (success or failure)
-            TIMEOUT=1800
+            TIMEOUT=900
             ELAPSED=0
             while [ $ELAPSED -lt $TIMEOUT ]; do
               # Check job status
