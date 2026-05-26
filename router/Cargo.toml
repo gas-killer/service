@@ -7,6 +7,10 @@ edition.workspace = true
 name = "gas-killer-router"
 path = "src/main.rs"
 
+[[bin]]
+name = "generate_key"
+path = "src/bin/generate_key.rs"
+
 [dependencies]
 
 # Ethereum / Alloy

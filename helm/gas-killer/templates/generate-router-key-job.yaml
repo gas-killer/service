@@ -26,8 +26,9 @@ spec:
           # the setup job as root; the directory is 755 / owned by root).
           securityContext:
             runAsUser: 0
+          command:
+            - generate_key
           args:
-            - generate-key
             - --output-dir
             - /root/.nodes
             - --router-address
