@@ -1,11 +1,10 @@
 use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
-use ark_ff::PrimeField;
 use ark_serialize::CanonicalDeserialize;
 use axum::{
     Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
 };
-use clap::{Arg, Command, value_parser};
+use clap::{Arg, Command};
 use commonware_avs_core::bn254::{PublicKey, get_signer};
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
 use commonware_avs_router::orchestrator::traits::OrchestratorTrait;
@@ -67,84 +66,6 @@ async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
     )
 }
 
-/// Generate a fresh BLS keypair and write router_orchestrator.json + public_orchestrator.json
-/// to `output_dir`. Idempotent: skips if `.router_key_complete` already exists, unless `force` is
-/// true (used during intentional key rotation via `rerun.generateRouterKey`).
-fn generate_key_files(output_dir: &str, router_address: &str, router_port: u16, force: bool) {
-    use rand::RngCore;
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = std::path::Path::new(output_dir);
-
-    let marker = dir.join(".router_key_complete");
-    if marker.exists() {
-        if force {
-            println!("--force set: removing existing marker to regenerate keypair.");
-            std::fs::remove_file(&marker)
-                .unwrap_or_else(|e| panic!("failed to remove {}: {e}", marker.display()));
-        } else {
-            println!(
-                "Router keypair already exists ({} found). Skipping.",
-                marker.display()
-            );
-            return;
-        }
-    }
-
-    // Generate 32 bytes of CSPRNG entropy, reduce into the BN254 scalar field.
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    let sk = ark_bn254::Fr::from_be_bytes_mod_order(&bytes);
-    // Display for prime field elements is the canonical decimal integer.
-    let private_key_decimal = sk.to_string();
-
-    // Derive G2 public key via the commonware signer (same path used at runtime).
-    let signer = get_signer(&private_key_decimal);
-    let pub_key_bytes = signer.public_key();
-    let g2 = G2Affine::deserialize_compressed(pub_key_bytes.as_ref())
-        .expect("failed to deserialize G2 point from freshly generated key");
-
-    // Write private key file (mode 0600 — owner-readable only).
-    let priv_path = dir.join("router_orchestrator.json");
-    let priv_json =
-        serde_json::to_string_pretty(&serde_json::json!({ "privateKey": private_key_decimal }))
-            .expect("failed to serialize private key");
-    std::fs::write(&priv_path, &priv_json)
-        .unwrap_or_else(|e| panic!("failed to write {}: {e}", priv_path.display()));
-    std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600))
-        .unwrap_or_else(|e| panic!("failed to chmod {}: {e}", priv_path.display()));
-
-    // Write public key file (mode 0644 — world-readable, not sensitive).
-    let pub_path = dir.join("public_orchestrator.json");
-    let pub_json = serde_json::to_string_pretty(&serde_json::json!({
-        "g2_x1": g2.x.c0.to_string(),
-        "g2_x2": g2.x.c1.to_string(),
-        "g2_y1": g2.y.c0.to_string(),
-        "g2_y2": g2.y.c1.to_string(),
-        "port": router_port.to_string(),
-        "address": router_address
-    }))
-    .expect("failed to serialize public key");
-    std::fs::write(&pub_path, &pub_json)
-        .unwrap_or_else(|e| panic!("failed to write {}: {e}", pub_path.display()));
-    std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o644))
-        .unwrap_or_else(|e| panic!("failed to chmod {}: {e}", pub_path.display()));
-
-    // Write completion marker so re-runs skip key generation.
-    std::fs::write(&marker, b"")
-        .unwrap_or_else(|e| panic!("failed to write {}: {e}", marker.display()));
-    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644))
-        .unwrap_or_else(|e| panic!("failed to chmod {}: {e}", marker.display()));
-
-    println!("Generated router BLS keypair:");
-    println!("  private key → {}", priv_path.display());
-    println!("  public key  → {}", pub_path.display());
-    println!("  g2_x1: {}", g2.x.c0);
-    println!("  g2_x2: {}", g2.x.c1);
-    println!("  g2_y1: {}", g2.y.c0);
-    println!("  g2_y2: {}", g2.y.c1);
-}
-
 /// Resolve a hostname:port with retry logic for Docker DNS readiness
 fn resolve_with_retry(
     address: &str,
@@ -188,82 +109,36 @@ fn main() {
     let runner = tokio::Runner::new(runtime_cfg.clone());
 
     // Parse arguments
-    let matches = Command::new("gas-killer-router")
-        .about("Gas Killer BLS aggregation router")
-        .subcommand(
-            Command::new("generate-key")
-                .about("Generate a BLS keypair for the router orchestrator")
-                .arg(
-                    Arg::new("output-dir")
-                        .long("output-dir")
-                        .required(true)
-                        .help("Directory to write router_orchestrator.json and public_orchestrator.json"),
-                )
-                .arg(
-                    Arg::new("router-address")
-                        .long("router-address")
-                        .required(true)
-                        .help("Hostname or DNS name nodes use to reach this router (written into public_orchestrator.json)"),
-                )
-                .arg(
-                    Arg::new("router-port")
-                        .long("router-port")
-                        .required(true)
-                        .value_parser(value_parser!(u16))
-                        .help("Port nodes use to reach this router (written into public_orchestrator.json)"),
-                )
-                .arg(
-                    Arg::new("force")
-                        .long("force")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Overwrite an existing keypair (use only for intentional key rotation)"),
-                ),
-        )
+    let matches = Command::new("orchestrator")
+        .about("generate and verify BN254 Multi-Signatures")
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
                 .required(false)
                 .value_delimiter(',')
-                .value_parser(value_parser!(String)),
+                .value_parser(clap::value_parser!(String)),
         )
         .arg(
             Arg::new("key-file")
                 .long("key-file")
-                .required(false)
+                .required(true)
                 .help("Path to the JSON file containing the router BLS private key"),
         )
         .arg(
             Arg::new("port")
                 .long("port")
-                .required(false)
+                .required(true)
                 .help("Port to run the service on"),
         )
         .get_matches();
 
-    if let Some(keygen_matches) = matches.subcommand_matches("generate-key") {
-        let output_dir = keygen_matches
-            .get_one::<String>("output-dir")
-            .expect("--output-dir is required");
-        let router_address = keygen_matches
-            .get_one::<String>("router-address")
-            .expect("--router-address is required");
-        let router_port = *keygen_matches
-            .get_one::<u16>("router-port")
-            .expect("--router-port is required");
-        let force = keygen_matches.get_flag("force");
-        generate_key_files(output_dir, router_address, router_port, force);
-        return;
-    }
-
     // Configure my identity
-    let key_file = matches.get_one::<String>("key-file").unwrap_or_else(|| {
-        eprintln!("error: --key-file is required");
-        std::process::exit(1);
-    });
-    let port = matches.get_one::<String>("port").unwrap_or_else(|| {
-        eprintln!("error: --port is required");
-        std::process::exit(1);
-    });
+    let key_file = matches
+        .get_one::<String>("key-file")
+        .expect("--key-file is required");
+    let port = matches
+        .get_one::<String>("port")
+        .expect("--port is required");
     let key = load_key_from_file(key_file);
     let me = format!("{key}@{port}");
     let parts = me.split('@').collect::<Vec<&str>>();
