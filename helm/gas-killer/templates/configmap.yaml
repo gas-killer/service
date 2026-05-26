@@ -21,9 +21,12 @@ data:
         "operators": {
             {{- $nodeCount := int .Values.global.nodeCount }}
             {{- range $i := until $nodeCount }}
-            "testacc{{ add $i 1 }}": {
-                "socketAddress": "{{ include "gas-killer.node.fullname" $ }}-{{ add $i 1 }}:{{ add (int $.Values.node.basePort) $i }}"
-            }{{ if lt (add $i 1) $nodeCount }},{{ end }}
+            {{- $nodeIndex := add $i 1 }}
+            {{- $defaultAddr := printf "%s-%d:%d" (include "gas-killer.node.fullname" $) $nodeIndex (add (int $.Values.node.basePort) $i) }}
+            {{- $override := index $.Values.node.socketAddressOverrides (toString $nodeIndex) }}
+            "testacc{{ $nodeIndex }}": {
+                "socketAddress": {{ default $defaultAddr $override | toJson }}
+            }{{ if lt $nodeIndex $nodeCount }},{{ end }}
             {{- end }}
         }
     }

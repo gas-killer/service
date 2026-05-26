@@ -175,8 +175,7 @@ spec:
             # Mounted from configmap (LOCAL mode or TESTNET without secretManager)
             - "/app/public_orchestrator.json"
             {{- else }}
-            # Development default bundled in the image — NOT FOR PRODUCTION
-            - "/app/config/public_orchestrator.dev.json"
+            {{- fail "orchestrator.publicConfig must be set (or secretManager.enabled=true for TESTNET)" }}
             {{- end }}
           env:
             {{- if eq $root.Values.global.environment "TESTNET" }}

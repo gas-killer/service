@@ -302,8 +302,11 @@ fn main() {
             MAX_MESSAGE_SIZE,
         );
 
-        // Allow handshakes from IPs that aren't yet in the registered peer set
-        // (needed for Docker networking where resolved IPs may differ)
+        // Must stay true for K8s deployments (DNAT/SNAT means source IPs at the listener are
+        // always pod IPs, never the registered ClusterIP addresses) and for mixed-network topologies
+        // where external operators are behind NAT. IP-based pre-filtering cannot work in either
+        // case; authentication relies entirely on the cryptographic handshake (peer public keys
+        // checked against the registered operator set), which is secure for both topologies.
         p2p_cfg.attempt_unregistered_handshakes = true;
 
         let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
