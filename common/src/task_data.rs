@@ -24,10 +24,7 @@ pub struct GasKillerTaskData {
     pub value: U256,
     /// Block height at which storage_updates were computed (for deterministic validation)
     pub block_height: u64,
-    /// Actual EVM chain ID (e.g. 1 = Ethereum mainnet, 100 = Gnosis, 31337 = Anvil local).
-    /// Set by the creator from `eth_chainId` so the executor can look up the right provider
-    /// without re-probing the chain. Using the raw numeric ID — rather than a L1/L2 role enum —
-    /// prevents mismatches when the router and nodes are configured with different chains.
+    /// Actual EVM chain ID (e.g. 1 = Ethereum mainnet, 100 = Gnosis, 31337 = Anvil local)
     pub chain_id: u64,
 }
 
