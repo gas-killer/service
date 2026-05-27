@@ -9,9 +9,6 @@ metadata:
   annotations:
     # Preserve the job after completion so its logs remain inspectable.
     "helm.sh/resource-policy": keep
-    # TODO: If the PVC is lost (e.g. cluster recreation), this job will silently generate a new
-    # keypair even though the old one is registered on-chain and stored in GCP Secret Manager.
-    # A follow-up PR should add an init container that restores from Secret Manager first.
 spec:
   backoffLimit: 3
   template:
@@ -21,6 +18,60 @@ spec:
         app.kubernetes.io/component: generate-router-key
     spec:
       restartPolicy: OnFailure
+      serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" .) .Values.secretManager.serviceAccountName }}
+      {{- if not .Values.rerun.generateRouterKey }}
+      # On a fresh PVC (e.g. after cluster recreation), check if a keypair already exists in
+      # GCP Secret Manager. If so, restore it so generate_key skips generation and the
+      # registered on-chain public key is preserved. Skipped during intentional key rotation
+      # (rerun.generateRouterKey=true) where a fresh keypair is explicitly desired.
+      initContainers:
+        - name: restore-from-gcp
+          image: {{ .Values.secretManager.cloudSdkImage | quote }}
+          securityContext:
+            runAsUser: 0
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" .Values.secretManager.projectId }}"
+              PREFIX="{{ .Values.secretManager.keyPrefix }}"
+              MARKER=/root/.nodes/.router_key_complete
+
+              # Capture stderr; discard stdout. Exit code 0 = secret exists.
+              if DESCRIBE_ERR=$(gcloud secrets describe "${PREFIX}-router-private-key" \
+                  --project="$PROJECT" 2>&1 1>/dev/null); then
+                echo "Found existing router keypair in GCP Secret Manager — restoring to PVC"
+
+                gcloud secrets versions access latest \
+                  --secret="${PREFIX}-router-private-key" \
+                  --project="$PROJECT" > /root/.nodes/router_orchestrator.json
+
+                gcloud secrets versions access latest \
+                  --secret="${PREFIX}-router-public-key" \
+                  --project="$PROJECT" > /root/.nodes/public_orchestrator.json
+
+                chmod 600 /root/.nodes/router_orchestrator.json
+                chmod 644 /root/.nodes/public_orchestrator.json
+                touch "$MARKER"
+                echo "Restored router keypair from GCP Secret Manager"
+              elif echo "$DESCRIBE_ERR" | grep -q "NOT_FOUND"; then
+                echo "No existing router keypair in GCP — generate_key will create a fresh one"
+              else
+                echo "ERROR: Unexpected error checking GCP Secret Manager: $DESCRIBE_ERR" >&2
+                exit 1
+              fi
+          volumeMounts:
+            - name: shared-data
+              mountPath: /root/.nodes
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+        {{- end }}
       containers:
         - name: generate-key
           image: "{{ .Values.router.image.repository }}:{{ required "router.image.tag must be set" .Values.router.image.tag }}"
