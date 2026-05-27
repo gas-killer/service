@@ -26,8 +26,6 @@ pub struct MetricsCollector {
     pub p2p_round_trip_seconds: Histogram,
     /// Current number of tasks sitting in the ingress queue waiting to be processed.
     pub task_queue_depth: Gauge<i64, AtomicI64>,
-    /// Time to detect which chain a target contract is deployed on (seconds).
-    pub executor_chain_detection_seconds: Histogram,
     /// Time for getMessageHash RPC preflight call (seconds).
     pub executor_hash_preflight_seconds: Histogram,
     /// Time for supportsInterface ERC-165 check (seconds).
@@ -109,12 +107,6 @@ impl MetricsCollector {
         );
 
         let rpc_buckets = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0];
-        let executor_chain_detection_seconds = Histogram::new(rpc_buckets);
-        registry.register(
-            "gas_killer_executor_chain_detection_seconds",
-            "Time to detect which chain a target contract is deployed on",
-            executor_chain_detection_seconds.clone(),
-        );
 
         let executor_hash_preflight_seconds = Histogram::new(rpc_buckets);
         registry.register(
@@ -156,7 +148,6 @@ impl MetricsCollector {
             execution_duration_seconds,
             p2p_round_trip_seconds,
             task_queue_depth,
-            executor_chain_detection_seconds,
             executor_hash_preflight_seconds,
             executor_supports_interface_seconds,
             executor_tx_send_seconds,

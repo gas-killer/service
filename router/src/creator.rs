@@ -212,6 +212,8 @@ struct EnrichedTask {
     block_height: u64,
     /// Resolved transition index (sentinel `None` → concrete count from chain).
     transition_index: u64,
+    /// Actual EVM chain ID (e.g. 1 = Ethereum mainnet, 100 = Gnosis, 31337 = Anvil).
+    chain_id: u64,
 }
 
 /// Creator for the gas killer usecase that listens for external requests
@@ -311,12 +313,14 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         let (
             storage_updates,
             block_height,
-            detected_chain,
+            numeric_chain_id,
             resolved_transition_index,
             storage_elapsed,
         ) = if let Some(idx) = task.body.transition_index {
             let start = Instant::now();
-            let (updates, height, chain) = self
+            // compute_storage_updates_for_tx detects the chain, runs EVMSketch, and also
+            // calls eth_chainId on the same RPC — returns the numeric chain ID directly.
+            let (updates, height, chain_id) = self
                 .validator
                 .compute_storage_updates_for_tx(
                     task.body.target_address,
@@ -327,31 +331,32 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
-            (updates, height, chain, idx, start.elapsed())
+            (updates, height, chain_id, idx, start.elapsed())
         } else {
-            // Detect chain once so both concurrent futures skip redundant eth_getCode probes.
-            let chain_id = self
+            // Detect chain once so all concurrent futures skip redundant eth_getCode probes.
+            let chain_role = self
                 .validator
                 .detect_chain_for_address(task.body.target_address)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to detect chain: {}", e))?;
             let rpc_url = self
                 .validator
-                .rpc_url_for_chain(chain_id)
-                .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_id))?
+                .rpc_url_for_chain(chain_role)
+                .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_role))?
                 .to_owned();
 
             info!(
                 target_address = %task.body.target_address,
-                chain = %chain_id,
+                chain = %chain_role,
                 "Resolving auto transition_index concurrently with EVMSketch"
             );
 
             let count_validator = Arc::clone(&self.validator);
+            let chain_id_validator = Arc::clone(&self.validator);
             let target = task.body.target_address;
             let count_fut = async move {
                 count_validator
-                    .get_state_transition_count_on_chain(target, chain_id)
+                    .get_state_transition_count_on_chain(target, chain_role)
                     .await
             };
             let storage_fut = async {
@@ -368,13 +373,14 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                     .await
                     .map(|r| (r.storage_updates, r.block_height, start.elapsed()))
             };
-            // try_join! cancels the other future immediately on the first error.
-            let (count, (updates, height, storage_elapsed)) =
-                tokio::try_join!(count_fut, storage_fut)?;
+            // eth_chainId runs concurrently — completes in ~50ms, well before EVMSketch.
+            let chain_id_fut = async move { chain_id_validator.get_chain_id_for(chain_role).await };
+            let (count, (updates, height, storage_elapsed), chain_id) =
+                tokio::try_join!(count_fut, storage_fut, chain_id_fut)?;
 
             info!(
                 target_address = %task.body.target_address,
-                chain = %chain_id,
+                chain = %chain_role,
                 count,
                 "Resolved auto transition_index from chain"
             );
@@ -398,8 +404,8 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             transition_index = resolved_transition_index,
             target_address = %task.body.target_address,
             target_function = %task.body.call_data.get(..4).map(hex::encode).unwrap_or_default(),
-            chain = %detected_chain,
-            "Creator computed storage updates on detected chain"
+            chain_id = numeric_chain_id,
+            "Creator computed storage updates"
         );
 
         // Store enriched task with computed storage updates and block height for metadata access
@@ -408,6 +414,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
             storage_updates,
             block_height,
             transition_index: resolved_transition_index,
+            chain_id: numeric_chain_id,
         };
 
         if let Ok(mut current_task) = self.current_task.lock() {
@@ -455,6 +462,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
                         from_address: enriched.task.body.from_address,
                         value: enriched.task.body.value,
                         block_height: enriched.block_height,
+                        chain_id: enriched.chain_id,
                     };
                 }
                 warn!(
@@ -541,6 +549,7 @@ mod tests {
             from_address: Address::from([2u8; 20]),
             value: U256::from(1000),
             block_height: 12345,
+            chain_id: 1u64,
         };
 
         // Simulate the wire protocol serialization (what happens in production)
@@ -611,6 +620,7 @@ mod tests {
             from_address: task.body.from_address,
             value: task.body.value,
             block_height: task.body.block_height,
+            chain_id: 1u64,
         };
 
         assert_eq!(task_data.transition_index, 42);

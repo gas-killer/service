@@ -177,6 +177,21 @@ impl GasKillerValidator {
         self.chain_rpc_urls.contains_key(&chain_id)
     }
 
+    /// Returns the actual EVM chain ID (from `eth_chainId`) for the given chain role's RPC.
+    pub async fn get_chain_id_for(&self, chain: ChainId) -> Result<u64> {
+        use alloy_provider::ProviderBuilder;
+        let rpc_url = self
+            .rpc_url_for_chain(chain)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain role: {}", chain))?;
+        let url = Url::parse(rpc_url)
+            .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL for chain {}: {}", chain, e))?;
+        ProviderBuilder::new()
+            .connect_http(url)
+            .get_chain_id()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch chain ID for chain {}: {}", chain, e))
+    }
+
     /// Returns all supported chains
     pub fn supported_chains(&self) -> Vec<ChainId> {
         self.chain_rpc_urls.keys().copied().collect()
@@ -259,7 +274,7 @@ impl GasKillerValidator {
     /// Computes storage updates for a transaction using gas-analyzer.
     ///
     /// Automatically detects which chain the contract is on, then computes storage updates.
-    /// Returns the storage updates, block height, and detected chain ID.
+    /// Returns the storage updates, block height, and the actual EVM chain ID (u64).
     pub async fn compute_storage_updates_for_tx(
         &self,
         contract_address: alloy::primitives::Address,
@@ -267,19 +282,21 @@ impl GasKillerValidator {
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
         block_height: u64,
-    ) -> Result<(Vec<u8>, u64, ChainId)> {
-        // Detect which chain has the contract
-        let chain_id = self.detect_chain_for_address(contract_address).await?;
+    ) -> Result<(Vec<u8>, u64, u64)> {
+        let chain_role = self.detect_chain_for_address(contract_address).await?;
 
         debug!(
-            chain = %chain_id,
+            chain = %chain_role,
             address = %contract_address,
             "Detected chain for contract"
         );
 
         let rpc_url = self
-            .rpc_url_for_chain(chain_id)
-            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
+            .rpc_url_for_chain(chain_role)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_role))?;
+
+        // Fetch the actual EVM chain ID from the RPC we're already using for EVMSketch.
+        let numeric_chain_id = self.get_chain_id_for(chain_role).await?;
 
         let result = self
             .analyze_transaction(
@@ -291,7 +308,7 @@ impl GasKillerValidator {
                 block_height,
             )
             .await?;
-        Ok((result.storage_updates, result.block_height, chain_id))
+        Ok((result.storage_updates, result.block_height, numeric_chain_id))
     }
 
     /// Validates the message format and decodes the aggregation
@@ -572,6 +589,7 @@ mod tests {
             from_address: Address::from([2u8; 20]),
             value: U256::from(1000),
             block_height: 12345,
+            chain_id: 1u64,
         }
     }
 

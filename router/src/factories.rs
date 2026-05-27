@@ -10,7 +10,7 @@ use crate::ingress::{
 use crate::metrics::MetricsCollector;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_provider::{
-    Identity, ProviderBuilder, RootProvider,
+    Identity, Provider, ProviderBuilder, RootProvider,
     fillers::{
         BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller,
         SimpleNonceManager, WalletFiller,
@@ -229,24 +229,39 @@ pub async fn create_gas_killer_executor(
             anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
         })?;
 
-    // Create wallet providers for each supported chain
-    let mut providers: HashMap<ChainId, SimpleWalletProvider> = HashMap::new();
+    // Create wallet providers for each supported chain, keyed by actual EVM chain ID
+    let mut providers: HashMap<u64, SimpleWalletProvider> = HashMap::new();
 
     // L1 provider (required)
     let l1_provider = create_wallet_provider_for_chain(ChainId::L1, &private_key).await?;
-    providers.insert(ChainId::L1, l1_provider);
-    info!(chain = %ChainId::L1, "Created L1 wallet provider");
+    let l1_chain_id = l1_provider
+        .get_chain_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get L1 chain ID: {}", e))?;
+    providers.insert(l1_chain_id, l1_provider);
+    info!(chain_id = l1_chain_id, chain = "l1", "Created L1 wallet provider");
 
     // L2 provider — optional, only used for write-side tx execution on L2
     if l2_http_rpc.is_some() {
         match create_wallet_provider_for_chain(ChainId::L2, &private_key).await {
             Ok(l2_provider) => {
-                providers.insert(ChainId::L2, l2_provider);
-                info!(chain = %ChainId::L2, "Created L2 wallet provider");
+                match l2_provider.get_chain_id().await {
+                    Ok(l2_chain_id) => {
+                        providers.insert(l2_chain_id, l2_provider);
+                        info!(chain_id = l2_chain_id, chain = "l2", "Created L2 wallet provider");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            chain = "l2",
+                            error = %e,
+                            "Failed to get L2 chain ID, L2 chain will be unavailable"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
-                    chain = %ChainId::L2,
+                    chain = "l2",
                     error = %e,
                     "Failed to create L2 wallet provider, L2 chain will be unavailable"
                 );

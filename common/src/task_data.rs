@@ -24,6 +24,11 @@ pub struct GasKillerTaskData {
     pub value: U256,
     /// Block height at which storage_updates were computed (for deterministic validation)
     pub block_height: u64,
+    /// Actual EVM chain ID (e.g. 1 = Ethereum mainnet, 100 = Gnosis, 31337 = Anvil local).
+    /// Set by the creator from `eth_chainId` so the executor can look up the right provider
+    /// without re-probing the chain. Using the raw numeric ID — rather than a L1/L2 role enum —
+    /// prevents mismatches when the router and nodes are configured with different chains.
+    pub chain_id: u64,
 }
 
 /// Maximum calldata size for a single EVM transaction (128 KB)
@@ -76,6 +81,7 @@ impl Default for GasKillerTaskData {
             from_address: Address::ZERO,
             value: U256::ZERO,
             block_height: 0,
+            chain_id: 0,
         }
     }
 }
@@ -113,6 +119,9 @@ impl Write for GasKillerTaskData {
 
         // Write block height as u64
         self.block_height.write(buf);
+
+        // Write chain_id as u64 (actual EVM chain ID, e.g. 1, 100, 31337)
+        self.chain_id.write(buf);
     }
 }
 
@@ -166,6 +175,9 @@ impl Read for GasKillerTaskData {
         // Read block height (u64)
         let block_height = u64::read(buf)?;
 
+        // Read chain_id as u64 (actual EVM chain ID)
+        let chain_id = u64::read(buf)?;
+
         Ok(Self {
             storage_updates,
             transition_index,
@@ -174,6 +186,7 @@ impl Read for GasKillerTaskData {
             from_address,
             value,
             block_height,
+            chain_id,
         })
     }
 }
@@ -181,9 +194,8 @@ impl Read for GasKillerTaskData {
 impl EncodeSize for GasKillerTaskData {
     fn encode_size(&self) -> usize {
         // Calculate serialized size matching the Write implementation exactly
-        // storage_updates: u32 length prefix (4 bytes) + raw bytes
         const U32_SIZE: usize = std::mem::size_of::<u32>(); // Length prefix for storage_updates and call_data
-        const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index and block_height
+        const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index, block_height, chain_id
         const ADDRESS_SIZE: usize = 20; // target_address and from_address (Ethereum addresses)
         const U256_SIZE: usize = 32; // value (U256)
 
@@ -196,12 +208,14 @@ impl EncodeSize for GasKillerTaskData {
             + U32_SIZE
             + self.call_data.len()
             + U64_SIZE // block_height
+            + U64_SIZE // chain_id
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{DecodeExt, Encode};
 
     #[test]
     fn test_validate_success() {
@@ -292,5 +306,44 @@ mod tests {
             ..Default::default()
         };
         assert!(task_data.validate().is_ok());
+    }
+
+    #[test]
+    fn test_chain_id_roundtrip_mainnet() {
+        let original = GasKillerTaskData {
+            chain_id: 1, // Ethereum mainnet
+            ..Default::default()
+        };
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.encode_size());
+        let decoded = GasKillerTaskData::decode(encoded).expect("decode failed");
+        assert_eq!(decoded.chain_id, 1);
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_chain_id_roundtrip_gnosis() {
+        let original = GasKillerTaskData {
+            chain_id: 100, // Gnosis chain
+            ..Default::default()
+        };
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.encode_size());
+        let decoded = GasKillerTaskData::decode(encoded).expect("decode failed");
+        assert_eq!(decoded.chain_id, 100);
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn test_chain_id_roundtrip_anvil() {
+        let original = GasKillerTaskData {
+            chain_id: 31337, // Anvil local fork
+            ..Default::default()
+        };
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.encode_size());
+        let decoded = GasKillerTaskData::decode(encoded).expect("decode failed");
+        assert_eq!(decoded.chain_id, 31337);
+        assert_eq!(decoded, original);
     }
 }

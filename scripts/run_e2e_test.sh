@@ -94,9 +94,9 @@ echo "Environment configuration complete"
 echo -e "${YELLOW}Step 3: Pulling Docker images...${NC}"
 docker compose pull
 
-# Step 4: Build router image
-echo -e "${YELLOW}Step 4: Building router Docker image...${NC}"
-docker compose build router
+# Step 4: Build service images
+echo -e "${YELLOW}Step 4: Building service Docker images...${NC}"
+docker compose build
 
 # Step 5: Start Docker Compose services
 echo -e "${YELLOW}Step 5: Starting Docker Compose services...${NC}"

@@ -1,13 +1,12 @@
 use crate::creator::DispatchTime;
 use crate::metrics::MetricsCollector;
 use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
-use gas_killer_common::ChainId;
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever::getNonSignerStakesAndSignatureReturn;
 use commonware_avs_router::executor::bls::BlsSignatureVerificationHandler;
 use commonware_avs_router::executor::ExecutionResult;
 use crate::task_data::GasKillerTaskData;
 use alloy::network::Ethereum;
-use alloy_primitives::{Address, Bytes, FixedBytes, U256};
+use alloy_primitives::{Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,18 +17,18 @@ use tracing::{debug, info, warn};
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
 pub struct GasKillerHandler<P> {
-    /// Wallet providers keyed by chain ID
-    providers: HashMap<ChainId, P>,
+    /// Wallet providers keyed by EVM chain ID
+    providers: HashMap<u64, P>,
     metrics: Option<Arc<MetricsCollector>>,
     /// Shared with the creator to measure P2P round-trip duration.
     dispatch_time: DispatchTime,
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
-    /// Creates a new handler with a single provider (for backwards compatibility)
+    /// Creates a new handler with a single provider (defaults to Ethereum mainnet key)
     pub fn new(provider: P) -> Self {
         let mut providers = HashMap::new();
-        providers.insert(ChainId::L1, provider);
+        providers.insert(1u64, provider);
         Self {
             providers,
             metrics: None,
@@ -38,7 +37,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     }
 
     /// Creates a new handler with providers for multiple chains
-    pub fn with_providers(providers: HashMap<ChainId, P>) -> Self {
+    pub fn with_providers(providers: HashMap<u64, P>) -> Self {
         Self {
             providers,
             metrics: None,
@@ -57,33 +56,13 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     }
 
     /// Adds a provider for a specific chain
-    pub fn add_provider(&mut self, chain_id: ChainId, provider: P) {
+    pub fn add_provider(&mut self, chain_id: u64, provider: P) {
         self.providers.insert(chain_id, provider);
     }
 
     /// Gets the provider for a specific chain
-    fn get_provider(&self, chain_id: ChainId) -> Option<&P> {
+    fn get_provider(&self, chain_id: u64) -> Option<&P> {
         self.providers.get(&chain_id)
-    }
-
-    /// Detects which chain has code deployed at the given address
-    async fn detect_chain_for_address(&self, address: Address) -> Result<ChainId> {
-        debug!(
-            address = %address,
-            "Detecting chain for address in executor"
-        );
-
-        let supported: Vec<ChainId> = self.providers.keys().copied().collect();
-        gas_killer_common::detect_chain_for_address(address, &supported, |chain_id, addr| {
-            let provider = self.providers.get(&chain_id).cloned();
-            async move {
-                let provider = provider
-                    .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?;
-                let code = provider.get_code_at(addr).await?;
-                Ok(code)
-            }
-        })
-        .await
     }
 
     async fn execute_verification(
@@ -127,15 +106,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let task_data = task_data
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
-        // Detect which chain the contract is on
-        let chain_detect_start = Instant::now();
-        let chain_id = self
-            .detect_chain_for_address(task_data.target_address)
-            .await?;
-        if let Some(m) = &self.metrics {
-            m.executor_chain_detection_seconds
-                .observe(chain_detect_start.elapsed().as_secs_f64());
-        }
+        // Use the chain the creator already detected — no redundant eth_getCode probes.
+        let chain_id = task_data.chain_id;
 
         // Get the chain-specific provider
         let provider = self
