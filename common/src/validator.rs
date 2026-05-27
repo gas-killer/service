@@ -308,7 +308,11 @@ impl GasKillerValidator {
                 block_height,
             )
             .await?;
-        Ok((result.storage_updates, result.block_height, numeric_chain_id))
+        Ok((
+            result.storage_updates,
+            result.block_height,
+            numeric_chain_id,
+        ))
     }
 
     /// Validates the message format and decodes the aggregation

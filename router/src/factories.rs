@@ -239,26 +239,32 @@ pub async fn create_gas_killer_executor(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get L1 chain ID: {}", e))?;
     providers.insert(l1_chain_id, l1_provider);
-    info!(chain_id = l1_chain_id, chain = "l1", "Created L1 wallet provider");
+    info!(
+        chain_id = l1_chain_id,
+        chain = "l1",
+        "Created L1 wallet provider"
+    );
 
     // L2 provider — optional, only used for write-side tx execution on L2
     if l2_http_rpc.is_some() {
         match create_wallet_provider_for_chain(ChainId::L2, &private_key).await {
-            Ok(l2_provider) => {
-                match l2_provider.get_chain_id().await {
-                    Ok(l2_chain_id) => {
-                        providers.insert(l2_chain_id, l2_provider);
-                        info!(chain_id = l2_chain_id, chain = "l2", "Created L2 wallet provider");
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            chain = "l2",
-                            error = %e,
-                            "Failed to get L2 chain ID, L2 chain will be unavailable"
-                        );
-                    }
+            Ok(l2_provider) => match l2_provider.get_chain_id().await {
+                Ok(l2_chain_id) => {
+                    providers.insert(l2_chain_id, l2_provider);
+                    info!(
+                        chain_id = l2_chain_id,
+                        chain = "l2",
+                        "Created L2 wallet provider"
+                    );
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(
+                        chain = "l2",
+                        error = %e,
+                        "Failed to get L2 chain ID, L2 chain will be unavailable"
+                    );
+                }
+            },
             Err(e) => {
                 tracing::warn!(
                     chain = "l2",
