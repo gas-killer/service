@@ -129,13 +129,14 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 
         // Detect which chain the contract is on
         let chain_detect_start = Instant::now();
-        let chain_id = self
+        let chain_detect_result = self
             .detect_chain_for_address(task_data.target_address)
-            .await?;
+            .await;
         if let Some(m) = &self.metrics {
             m.executor_chain_detection_seconds
                 .observe(chain_detect_start.elapsed().as_secs_f64());
         }
+        let chain_id = chain_detect_result?;
 
         // Get the chain-specific provider
         let provider = self
