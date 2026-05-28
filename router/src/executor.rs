@@ -128,9 +128,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
         // Detect which chain the contract is on
-        let chain_id = self
+        let chain_detect_start = Instant::now();
+        let chain_detect_result = self
             .detect_chain_for_address(task_data.target_address)
-            .await?;
+            .await;
+        if let Some(m) = &self.metrics {
+            m.executor_chain_detection_seconds
+                .observe(chain_detect_start.elapsed().as_secs_f64());
+        }
+        let chain_id = chain_detect_result?;
 
         // Get the chain-specific provider
         let provider = self
@@ -161,12 +167,18 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         );
 
         let gas_killer_sdk = GasKillerSDK::new(target_addr, provider.clone());
+
         // Query the contract's getMessageHash and compare with the provided msg_hash
-        match gas_killer_sdk
+        let hash_preflight_start = Instant::now();
+        let hash_result = gas_killer_sdk
             .getMessageHash(transition_index, target_function, storage_updates.clone())
             .call()
-            .await
-        {
+            .await;
+        if let Some(m) = &self.metrics {
+            m.executor_hash_preflight_seconds
+                .observe(hash_preflight_start.elapsed().as_secs_f64());
+        }
+        match hash_result {
             Ok(expected_hash) => {
                 if expected_hash != msg_hash {
                     warn!(
@@ -194,7 +206,13 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 
         // Ensure contract implements the GasKiller interface via ERC-165 check
         let interface_id = FixedBytes::<4>::from([0x93, 0xde, 0x45, 0x31]);
-        match gas_killer_sdk.supportsInterface(interface_id).call().await {
+        let supports_interface_start = Instant::now();
+        let supports_result = gas_killer_sdk.supportsInterface(interface_id).call().await;
+        if let Some(m) = &self.metrics {
+            m.executor_supports_interface_seconds
+                .observe(supports_interface_start.elapsed().as_secs_f64());
+        }
+        match supports_result {
             Ok(supported) => {
                 if !supported {
                     warn!("Target contract does not support GasKiller interface (0x93de4531)");
@@ -216,7 +234,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         // Without the decrement, eth_estimateGas at block N sees referenceBlockNumber == N
         // and reverts with FutureBlockNumber.
         info!("Sending verifyAndUpdate transaction");
-        let call_return = gas_killer_sdk
+        let tx_send_start = Instant::now();
+        let send_result = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
                 quorum_numbers,
@@ -228,12 +247,23 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             )
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to send verifyAndUpdate transaction: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send verifyAndUpdate transaction: {}", e));
+        if let Some(m) = &self.metrics {
+            m.executor_tx_send_seconds
+                .observe(tx_send_start.elapsed().as_secs_f64());
+        }
+        let call_return = send_result?;
 
-        let receipt = call_return
+        let receipt_start = Instant::now();
+        let receipt_result = call_return
             .get_receipt()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get transaction receipt: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to get transaction receipt: {}", e));
+        if let Some(m) = &self.metrics {
+            m.executor_receipt_confirmation_seconds
+                .observe(receipt_start.elapsed().as_secs_f64());
+        }
+        let receipt = receipt_result?;
         info!(
             tx = %receipt.transaction_hash,
             block = receipt.block_number,
