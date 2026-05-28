@@ -1,4 +1,4 @@
-use crate::creator::{SimpleTaskQueue, TaskQueue};
+use crate::creator::{TaskQueueDepth, TaskSender};
 use crate::metrics::MetricsCollector;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tracing::{info, warn};
 
 /// AVS identity metadata served at `GET /avs-metadata`.
@@ -55,7 +56,8 @@ pub struct AvsOperatorSetSoftware {
 
 #[derive(Clone)]
 pub struct IngressState {
-    pub queue: Arc<SimpleTaskQueue>,
+    pub sender: TaskSender,
+    pub queue_depth: TaskQueueDepth,
     pub metrics: Option<Arc<MetricsCollector>>,
     pub providers: Arc<HashMap<ChainId, ReadOnlyProvider>>,
     /// Bearer token password. `None` disables authentication.
@@ -65,14 +67,16 @@ pub struct IngressState {
 
 impl IngressState {
     pub fn new(
-        queue: Arc<SimpleTaskQueue>,
+        sender: TaskSender,
+        queue_depth: TaskQueueDepth,
         metrics: Arc<MetricsCollector>,
         providers: HashMap<ChainId, ReadOnlyProvider>,
         password: Option<String>,
         avs_metadata: AvsMetadata,
     ) -> Self {
         Self {
-            queue,
+            sender,
+            queue_depth,
             metrics: Some(metrics),
             providers: Arc::new(providers),
             password,
@@ -80,9 +84,10 @@ impl IngressState {
         }
     }
 
-    pub fn without_metrics(queue: Arc<SimpleTaskQueue>) -> Self {
+    pub fn without_metrics(sender: TaskSender, queue_depth: TaskQueueDepth) -> Self {
         Self {
-            queue,
+            sender,
+            queue_depth,
             metrics: None,
             providers: Arc::new(HashMap::new()),
             password: None,
@@ -429,10 +434,20 @@ pub async fn trigger_task_handler(
         call_data_len = request.body.call_data.len(),
         "Task accepted"
     );
-    state.queue.push(request);
+    if state.sender.send(request).is_err() {
+        tracing::error!("task channel closed, dropping request");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(GasKillerTaskResponse {
+                success: false,
+                message: "Internal error: task queue unavailable".to_string(),
+            }),
+        );
+    }
+    let depth = state.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
     if let Some(m) = &state.metrics {
         m.ingress_accepted.inc();
-        m.task_queue_depth.set(state.queue.len() as i64);
+        m.task_queue_depth.set(depth as i64);
     }
     (
         StatusCode::OK,
@@ -643,19 +658,21 @@ mod tests {
         use axum::http::{Method, Request, StatusCode};
         use tower::util::ServiceExt; // for `oneshot`
 
-        fn make_app() -> (Router, Arc<SimpleTaskQueue>) {
-            let queue = Arc::new(SimpleTaskQueue::new());
-            let state = IngressState::without_metrics(queue.clone());
+        fn make_app() -> (Router, crate::creator::TaskReceiver) {
+            let (sender, receiver) = crate::creator::task_channel();
+            let queue_depth = crate::creator::task_queue_depth();
+            let state = IngressState::without_metrics(sender, queue_depth);
             let app = build_app().with_state(state);
-            (app, queue)
+            (app, receiver)
         }
 
-        fn make_app_with_password(password: &str) -> (Router, Arc<SimpleTaskQueue>) {
-            let queue = Arc::new(SimpleTaskQueue::new());
-            let mut state = IngressState::without_metrics(queue.clone());
+        fn make_app_with_password(password: &str) -> (Router, crate::creator::TaskReceiver) {
+            let (sender, receiver) = crate::creator::task_channel();
+            let queue_depth = crate::creator::task_queue_depth();
+            let mut state = IngressState::without_metrics(sender, queue_depth);
             state.password = Some(password.to_string());
             let app = build_app().with_state(state);
-            (app, queue)
+            (app, receiver)
         }
 
         fn json_request(body: &str) -> Request<Body> {
@@ -703,7 +720,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_valid_request_returns_200_and_queues_task() {
-            let (app, queue) = make_app();
+            let (app, mut receiver) = make_app();
             let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
 
             assert_eq!(resp.status(), StatusCode::OK);
@@ -711,7 +728,7 @@ mod tests {
             assert!(body.success);
             assert_eq!(body.message, "Task queued");
             assert!(
-                queue.pop().is_some(),
+                receiver.try_recv().is_ok(),
                 "task should have been pushed to queue"
             );
         }
@@ -920,18 +937,25 @@ mod tests {
         #[tokio::test]
         async fn test_valid_request_does_not_leave_extra_tasks() {
             // Two sequential valid requests → queue should hold exactly two tasks
-            let queue = Arc::new(SimpleTaskQueue::new());
-            let app1 = build_app().with_state(IngressState::without_metrics(queue.clone()));
-            let app2 = build_app().with_state(IngressState::without_metrics(queue.clone()));
+            let (sender, mut receiver) = crate::creator::task_channel();
+            let queue_depth = crate::creator::task_queue_depth();
+            let app1 = build_app().with_state(IngressState::without_metrics(
+                sender.clone(),
+                queue_depth.clone(),
+            ));
+            let app2 = build_app().with_state(IngressState::without_metrics(
+                sender.clone(),
+                queue_depth.clone(),
+            ));
 
             app1.oneshot(json_request(&valid_body())).await.unwrap();
             app2.oneshot(json_request(&valid_body())).await.unwrap();
 
-            assert!(queue.pop().is_some());
-            assert!(queue.pop().is_some());
+            assert!(receiver.try_recv().is_ok());
+            assert!(receiver.try_recv().is_ok());
             assert!(
-                queue.pop().is_none(),
-                "queue should be empty after two pops"
+                receiver.try_recv().is_err(),
+                "queue should be empty after two recvs"
             );
         }
 
@@ -993,8 +1017,9 @@ mod tests {
 
         #[tokio::test]
         async fn test_avs_metadata_returns_200_with_valid_json() {
-            let queue = Arc::new(SimpleTaskQueue::new());
-            let mut state = IngressState::without_metrics(queue.clone());
+            let (sender, _receiver) = crate::creator::task_channel();
+            let queue_depth = crate::creator::task_queue_depth();
+            let mut state = IngressState::without_metrics(sender, queue_depth);
             state.avs_metadata = AvsMetadata {
                 name: "Gas Killer".to_string(),
                 website: "https://gaskiller.xyz".to_string(),
@@ -1036,7 +1061,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_rejected_request_does_not_enqueue() {
-            let (app, queue) = make_app();
+            let (app, mut receiver) = make_app();
             let payload = serde_json::json!({
                 "body": {
                     "target_address": "0x0000000000000000000000000000000000000000",
@@ -1051,7 +1076,7 @@ mod tests {
 
             app.oneshot(json_request(&payload)).await.unwrap();
             assert!(
-                queue.pop().is_none(),
+                receiver.try_recv().is_err(),
                 "invalid task must not be pushed to queue"
             );
         }
