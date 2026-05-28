@@ -147,7 +147,13 @@ impl ListeningGasKillerCreator {
                 })?
                 .ok_or_else(|| anyhow::anyhow!("task channel closed"))?
         };
-        let depth = self.queue_depth.fetch_sub(1, Ordering::Relaxed) - 1;
+        let depth = self
+            .queue_depth
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(1))
+            })
+            .unwrap()
+            .saturating_sub(1);
         if let Some(m) = &self.metrics {
             m.task_queue_depth.set(depth as i64);
         }

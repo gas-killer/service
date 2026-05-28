@@ -434,7 +434,9 @@ pub async fn trigger_task_handler(
         call_data_len = request.body.call_data.len(),
         "Task accepted"
     );
+    let depth = state.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
     if state.sender.send(request).is_err() {
+        state.queue_depth.fetch_sub(1, Ordering::Relaxed);
         tracing::error!("task channel closed, dropping request");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -444,7 +446,6 @@ pub async fn trigger_task_handler(
             }),
         );
     }
-    let depth = state.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
     if let Some(m) = &state.metrics {
         m.ingress_accepted.inc();
         m.task_queue_depth.set(depth as i64);
