@@ -278,6 +278,8 @@ spec:
               value: {{ .Values.eigenlayer.sdk.thresholdDenominator | quote }}
             - name: BLOCK_STALE_MEASURE
               value: {{ .Values.eigenlayer.sdk.blockStaleMeasure | quote }}
+            - name: MINIMUM_STAKE
+              value: {{ .Values.eigenlayer.quorum.minimumStake | quote }}
           volumeMounts:
             - name: shared-data
               mountPath: /root/.nodes

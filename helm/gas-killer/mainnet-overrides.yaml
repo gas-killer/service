@@ -38,7 +38,9 @@ eigenlayer:
 
 secretManager:
   enabled: true
-  keyPrefix: "gas-killer-mainnet"
+  projectId: gas-killer-mainnet
+  keyPrefix: gas-killer-mainnet
+  gcpServiceAccount: gas-killer-app@gas-killer-mainnet.iam.gserviceaccount.com
 
 ingress:
   enabled: true

@@ -27,7 +27,7 @@ eigenlayer:
     lstStrategy: "0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574"
     allocationManager: "0x42583067658071247ec8CE0A516A58f682002d07"
   quorum:
-    minimumStake: "100000000000000000"   # 0.1 stETH
+    minimumStake: "1000000000000000"   # 0.001 stETH
     maxOperatorCount: 4
     kickBIPsOfOperatorStake: 10000
     kickBIPsOfTotalStake: 100
@@ -38,7 +38,9 @@ eigenlayer:
 
 secretManager:
   enabled: true
-  keyPrefix: "gas-killer-testnet"
+  projectId: gas-killer-testnet
+  keyPrefix: gas-killer-testnet
+  gcpServiceAccount: gas-killer-app@gas-killer-testnet.iam.gserviceaccount.com
 
 ingress:
   enabled: true

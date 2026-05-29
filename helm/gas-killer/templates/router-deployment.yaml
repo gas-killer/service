@@ -60,7 +60,7 @@ spec:
 
               fetch_secret "${PREFIX}-avs-deploy"       /app/secrets/avs_deploy.json
               fetch_secret "${PREFIX}-router-private-key" /app/secrets/router_orchestrator.json
-              chmod 600 /app/secrets/router_orchestrator.json
+              chmod 644 /app/secrets/router_orchestrator.json
               echo "All router secrets fetched successfully"
           volumeMounts:
             - name: router-secrets
