@@ -1,0 +1,42 @@
+{{- /*
+RBAC for the deploy-target job's "publish" step: a plain Kubernetes ServiceAccount
+allowed to write the address ConfigMap in this namespace. Separate from the
+secretManager Workload-Identity SA — this job needs the k8s API, not GCP.
+*/ -}}
+{{- if and .Values.deployTarget.enabled (or .Release.IsInstall .Values.rerun.deployTarget) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "gas-killer.deployTarget.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: deploy-target
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "gas-killer.deployTarget.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: deploy-target
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "gas-killer.deployTarget.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: deploy-target
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "gas-killer.deployTarget.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "gas-killer.deployTarget.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -111,7 +111,7 @@ An annotated example config lives at `scripts/scenarios/example.toml`.
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `label` | No | `request N` | Human-readable label for output |
-| `target_address` | Yes | — | Contract address to call |
+| `target_address` | Yes | — | Contract address to call, or `"kubectl"` to resolve it at runtime from the `gas-killer-smoke-target` ConfigMap via `kubectl` (also accepts `"kubectl:<configmap>[/<key>]"`; namespace follows the current kube-context unless `SMOKE_TARGET_NAMESPACE` is set) |
 | `call_data` | Yes | — | ABI-encoded calldata as a `0x`-prefixed hex string |
 | `from_address` | Yes | — | Sender address |
 | `transition_index` | No | `"auto"` | State transition sequence number, or `"auto"` to fetch `stateTransitionCount()` from the contract (requires `http_rpc`) |
