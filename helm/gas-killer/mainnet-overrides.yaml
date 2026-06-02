@@ -42,13 +42,6 @@ eigenlayer:
     thresholdDenominator: "3"
     blockStaleMeasure: "300"
 
-<<<<<<< Updated upstream
-secretManager:
-  enabled: true
-  keyPrefix: "gas-killer-mainnet"
-
-=======
->>>>>>> Stashed changes
 ingress:
   enabled: true
   host: mainnet.gaskiller.xyz
