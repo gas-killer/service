@@ -4,7 +4,7 @@
 #   cargo run -p scripts --bin run_scenario -- scripts/scenarios/testnet_smoke.toml
 
 router_url = "https://testnet.gaskiller.xyz"
-http_rpc   = "$FORK_URL"
+http_rpc   = "$HTTP_RPC"
 
 # ── Serial smoke test with on-chain verification ─────────────────
 [[scenarios]]

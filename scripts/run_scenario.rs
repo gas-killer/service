@@ -588,12 +588,14 @@ fn parse_kubectl_sentinel(value: &str) -> Option<(String, String)> {
 /// Namespace follows the current kube-context unless `SMOKE_TARGET_NAMESPACE` is set.
 fn fetch_configmap_value(configmap: &str, key: &str) -> Result<String, String> {
     let mut cmd = std::process::Command::new("kubectl");
+    // Bracket notation so keys containing '.' or '-' (valid ConfigMap key chars) are taken
+    // literally instead of being misparsed as nested fields by kubectl's jsonpath.
     cmd.args([
         "get",
         "configmap",
         configmap,
         "-o",
-        &format!("jsonpath={{.data.{key}}}"),
+        &format!("jsonpath={{.data['{key}']}}"),
     ]);
     if let Ok(ns) = std::env::var("SMOKE_TARGET_NAMESPACE")
         && !ns.is_empty()
