@@ -19,6 +19,12 @@ global:
 imagePullSecrets:
   - name: ghcr-pull-secret
 
+secretManager:
+  enabled: true
+  projectId: gas-killer-testnet
+  keyPrefix: gas-killer-testnet
+  gcpServiceAccount: gas-killer-app@gas-killer-testnet.iam.gserviceaccount.com
+
 eigenlayer:
   contracts:
     delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
@@ -36,10 +42,13 @@ eigenlayer:
     thresholdDenominator: "3"
     blockStaleMeasure: "300"
 
+<<<<<<< Updated upstream
 secretManager:
   enabled: true
   keyPrefix: "gas-killer-testnet"
 
+=======
+>>>>>>> Stashed changes
 ingress:
   enabled: true
   host: testnet.gaskiller.xyz
@@ -54,3 +63,18 @@ monitoring:
 router:
   ingress:
     timeoutMs: "0"
+
+# Deploy the smoke-test target (ArraySummation) wired to a real BLSSignatureChecker after
+# AVS setup, then publish its address to a ConfigMap. Read it for the local smoke test:
+#   kubectl get configmap gas-killer-smoke-target -o jsonpath='{.data.target}'
+deployTarget:
+  enabled: true
+  image:
+    # `latest` is published on pushes to main (solidity-sdk docker-publish workflow).
+    # Pin with --set deployTarget.image.tag=<sha> if you need a specific build.
+    tag: latest
+  configMapName: gas-killer-smoke-target
+  # ArraySummation params (smoke test sums indexes [1,2,3], so arraySize must be >= 4).
+  arraySize: 10
+  maxValue: 10000
+  arraySeed: 1
