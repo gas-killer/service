@@ -130,6 +130,13 @@ Bridge job name
 {{- end }}
 
 {{/*
+Deploy-target job name
+*/}}
+{{- define "gas-killer.deployTarget.fullname" -}}
+{{- printf "%s-deploy-target" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 L2 service name
 */}}
 {{- define "gas-killer.l2.fullname" -}}

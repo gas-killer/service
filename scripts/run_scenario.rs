@@ -4,6 +4,7 @@ use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -561,6 +562,64 @@ fn interpolate_env(s: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Parse a `kubectl` target_address sentinel into `(configmap, key)`.
+///
+/// Returns `None` for any other value (i.e. a literal address). Supported forms:
+///   "kubectl"                    → configmap "gas-killer-smoke-target", key "target"
+///   "kubectl:<configmap>"        → key "target"
+///   "kubectl:<configmap>/<key>"
+fn parse_kubectl_sentinel(value: &str) -> Option<(String, String)> {
+    let rest = if value == "kubectl" {
+        ""
+    } else {
+        value.strip_prefix("kubectl:")?
+    };
+    let (configmap, key) = if rest.is_empty() {
+        ("gas-killer-smoke-target", "target")
+    } else if let Some((cm, k)) = rest.split_once('/') {
+        (cm, k)
+    } else {
+        (rest, "target")
+    };
+    Some((configmap.to_string(), key.to_string()))
+}
+
+/// Read a value from a Kubernetes ConfigMap via the local `kubectl`.
+/// Namespace follows the current kube-context unless `SMOKE_TARGET_NAMESPACE` is set.
+fn fetch_configmap_value(configmap: &str, key: &str) -> Result<String, String> {
+    let mut cmd = std::process::Command::new("kubectl");
+    // Bracket notation so keys containing '.' or '-' (valid ConfigMap key chars) are taken
+    // literally instead of being misparsed as nested fields by kubectl's jsonpath.
+    cmd.args([
+        "get",
+        "configmap",
+        configmap,
+        "-o",
+        &format!("jsonpath={{.data['{key}']}}"),
+    ]);
+    if let Ok(ns) = std::env::var("SMOKE_TARGET_NAMESPACE")
+        && !ns.is_empty()
+    {
+        cmd.args(["-n", &ns]);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run kubectl (is it installed and on PATH?): {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`kubectl get configmap {configmap}` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return Err(format!(
+            "configmap '{configmap}' has no value at key '{key}' — has the deploy-target job run?"
+        ));
+    }
+    Ok(value)
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -606,6 +665,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if config.scenarios.is_empty() {
         eprintln!("No scenarios defined in config.");
         std::process::exit(1);
+    }
+
+    // Resolve any `kubectl` target_address sentinels to live addresses from a ConfigMap.
+    // The deploy-target job publishes the smoke target to `gas-killer-smoke-target`, so the
+    // toml can carry `target_address = "kubectl"` instead of a hardcoded address. Resolved
+    // once per distinct sentinel so repeated requests don't re-shell out.
+    {
+        let mut cache: HashMap<String, String> = HashMap::new();
+        for scenario in &mut config.scenarios {
+            for req in &mut scenario.requests {
+                let Some((configmap, key)) = parse_kubectl_sentinel(&req.target_address) else {
+                    continue;
+                };
+                let sentinel = req.target_address.clone();
+                let resolved = match cache.get(&sentinel) {
+                    Some(v) => v.clone(),
+                    None => {
+                        let v = fetch_configmap_value(&configmap, &key)
+                            .map_err(|e| format!("resolving target_address \"{sentinel}\": {e}"))?;
+                        v.parse::<Address>().map_err(|e| {
+                            format!(
+                                "target_address \"{sentinel}\" resolved to {v:?}, not a valid address: {e}"
+                            )
+                        })?;
+                        println!("Resolved target_address \"{sentinel}\" → {v}");
+                        cache.insert(sentinel.clone(), v.clone());
+                        v
+                    }
+                };
+                req.target_address = resolved;
+            }
+        }
     }
 
     let needs_rpc = config

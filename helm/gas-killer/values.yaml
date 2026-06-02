@@ -67,6 +67,8 @@ rerun:
   setup: false
   bridge: false
   keyExport: false
+  # Re-run the deploy-target job to deploy a fresh demo target + checker against the current AVS.
+  deployTarget: false
   # Re-run the generate-router-key job (TESTNET+secretManager only).
   # Only set this if you intentionally want to rotate the router BLS keypair —
   # doing so requires all nodes to restart and pick up the new public key from GCP.
@@ -356,6 +358,35 @@ bridge:
     limits:
       memory: "1Gi"
       cpu: "500m"
+
+# Deploy-target job: deploys a demo GasKillerSDK target (ArraySummation) wired to a real
+# BLSSignatureChecker against the freshly-deployed AVS, then publishes its address to a
+# ConfigMap for the local smoke test. Opt-in (off by default; enable on testnet).
+deployTarget:
+  enabled: false
+  image:
+    # Built from gas-killer/solidity-sdk (forge + the SDK contracts). Tag must be set at deploy.
+    repository: ghcr.io/gas-killer/solidity-sdk
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Image used by the publish step to write the ConfigMap (needs kubectl + a shell).
+  # Alpine-based (has /bin/sh for the apply pipe); bitnami/kubectl was retired from Docker Hub.
+  kubectlImage: "alpine/kubectl:1.33.4"
+  # ConfigMap that receives the deployed target address under key "target".
+  configMapName: gas-killer-smoke-target
+  # Secret key (in the app secret) holding the funded deployer key: PRIVATE_KEY or FUNDED_KEY.
+  deployerSecretKey: PRIVATE_KEY
+  # ArraySummation constructor params. Smoke test sums indexes [1,2,3], so arraySize must be >= 4.
+  arraySize: 10
+  maxValue: 10000
+  arraySeed: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
 
 # Yield Distribution test configuration - only used in LOCAL mode with l2.enabled
 # Defaults to disabled; enable explicitly via --set yieldDistribution.enabled=true (e.g. in CI)

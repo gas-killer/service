@@ -19,6 +19,12 @@ global:
 imagePullSecrets:
   - name: ghcr-pull-secret
 
+secretManager:
+  enabled: true
+  projectId: gas-killer-mainnet
+  keyPrefix: gas-killer-mainnet
+  gcpServiceAccount: gas-killer-app@gas-killer-mainnet.iam.gserviceaccount.com
+
 eigenlayer:
   contracts:
     delegationManager: "0x39053D51B77DC0d36036Fc1fCc8Cb819df8Ef37A"
@@ -35,10 +41,6 @@ eigenlayer:
     quorumThreshold: "2"
     thresholdDenominator: "3"
     blockStaleMeasure: "300"
-
-secretManager:
-  enabled: true
-  keyPrefix: "gas-killer-mainnet"
 
 ingress:
   enabled: true
