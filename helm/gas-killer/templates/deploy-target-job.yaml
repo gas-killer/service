@@ -1,12 +1,7 @@
 {{- /*
-Deploy-target job: deploys a demo GasKillerSDK target (ArraySummation) wired to a REAL
-BLSSignatureChecker against the freshly-deployed AVS, then publishes its address to a
-ConfigMap for the local smoke test. Runs after setup; opt-in via deployTarget.enabled.
-
-Why this exists: the on-chain checker a target calls checkSignatures on must NOT be the
-BLSSigCheckOperatorStateRetriever (avs_deploy.json -> blsSigCheck, the router's off-chain
-helper). The enhanced ArraySummation.s.sol deploys a fresh checker bound to the registry
-coordinator when SIG_CHECKER_ADDRESS is unset, so the target is correct-by-construction.
+Deploy-target job: deploys a demo GasKillerSDK target (ArraySummation) against the
+freshly-deployed AVS and publishes its address to a ConfigMap for the local smoke test.
+Runs after setup; opt-in via deployTarget.enabled.
 */ -}}
 {{- if and .Values.deployTarget.enabled (or .Release.IsInstall .Values.rerun.deployTarget) }}
 apiVersion: batch/v1
@@ -58,7 +53,7 @@ spec:
               mountPath: /app/.nodes
               readOnly: true
 
-        # 2. Deploy the target (+ a fresh real checker) and write its address to the PVC.
+        # 2. Deploy the target and write its address to the PVC.
         #    Runs as an initContainer so a transient publish failure does NOT redeploy.
         - name: deploy
           image: "{{ .Values.deployTarget.image.repository }}:{{ required "deployTarget.image.tag must be set" .Values.deployTarget.image.tag }}"
@@ -70,7 +65,7 @@ spec:
               set -euo pipefail
               AVS_JSON=/app/.nodes/avs_deploy.json
 
-              # Registry coordinator is what the checker must bind to; service manager is the AVS namespace.
+              # Registry coordinator and service manager (AVS) addresses read from avs_deploy.json.
               export REGISTRY_COORDINATOR_ADDRESS=$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' "$AVS_JSON")
               export AVS_ADDRESS=$(jq -r '.addresses.IncredibleSquaringServiceManager // .addresses.avsServiceManagerWrapper' "$AVS_JSON")
               export ARRAY_SIZE={{ .Values.deployTarget.arraySize | quote }}
@@ -82,8 +77,7 @@ spec:
                 echo "ERROR: registryCoordinator not found in $AVS_JSON"; jq '.addresses' "$AVS_JSON"; exit 1
               fi
 
-              # SIG_CHECKER_ADDRESS intentionally unset -> the script deploys a fresh
-              # BLSSignatureChecker bound to REGISTRY_COORDINATOR_ADDRESS and asserts the wiring.
+              # SIG_CHECKER_ADDRESS intentionally unset -> the script provisions one from REGISTRY_COORDINATOR_ADDRESS.
               set +e
               OUT=$(forge script script/ArraySummation.s.sol:ArraySummationScript \
                 --rpc-url "$HTTP_RPC" --private-key "$PRIVATE_KEY" --broadcast 2>&1)
