@@ -34,4 +34,4 @@ histogram_quantile(0.99, rate(gas_killer_p2p_round_trip_seconds_bucket[5m]))
 
 | Date | Commit | chain_detection p50/p95 | hash_preflight p50/p95 | supports_interface p50/p95 | tx_send p50/p95 | receipt_confirmation p50/p95 | execution_duration p50/p95 | p2p_round_trip p50/p99 | Notes |
 |------|--------|------------------------|------------------------|---------------------------|-----------------|------------------------------|---------------------------|------------------------|-------|
-| — | — | — | — | — | — | — | — | — | First deploy with per-phase metrics — fill in after steady-state traffic |
+| 02/06/2026 | [d4ba093](https://github.com/gas-killer/service/commit/d4ba093511f6e49ae2c98efad247389beb960051) | 40/49ms | 25/29.5ms | 15.0/19.5ms | 75.0/97.5ms | 8.0/14.7s | 8.0/15.6s | 1.50/1.99s | First deploy with per-phase metrics |
