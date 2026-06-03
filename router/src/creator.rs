@@ -12,6 +12,7 @@ use std::env;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn};
 
 /// Shared timestamp set by the creator when it dispatches a task and consumed by the executor
@@ -25,143 +26,22 @@ use tracing::{debug, error, info, warn};
 /// https://github.com/BreadchainCoop/commonware-restaking/issues/154.
 pub type DispatchTime = Arc<Mutex<Option<Instant>>>;
 
-/// A queue that can hold and provide task requests
-pub trait TaskQueue: Send + Sync {
-    /// Add a task to the queue
-    fn push(&self, task: GasKillerTaskRequest);
+pub type TaskSender = UnboundedSender<GasKillerTaskRequest>;
+pub type TaskReceiver = UnboundedReceiver<GasKillerTaskRequest>;
+/// Shared atomic counter tracking tasks in flight between the ingress sender and creator receiver.
+pub type TaskQueueDepth = Arc<AtomicUsize>;
 
-    /// Remove and return the next task from the queue
-    fn pop(&self) -> Option<GasKillerTaskRequest>;
-
-    /// Current number of pending tasks in the queue
-    fn len(&self) -> usize;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
+pub fn task_channel() -> (TaskSender, TaskReceiver) {
+    mpsc::unbounded_channel()
 }
 
-/// Simple in-memory task queue using Arc<Mutex> with proper error handling
-#[derive(Clone)]
-pub struct GasKillerTaskQueue {
-    queue: Arc<Mutex<Vec<GasKillerTaskRequest>>>,
-    timeout_ms: u64,
-    max_retries: u32,
-    /// Maintained atomically so `len()` is always accurate even when the mutex is held.
-    count: Arc<AtomicUsize>,
-}
-
-impl GasKillerTaskQueue {
-    pub fn new() -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(Vec::new())),
-            timeout_ms: 1000, // 1 second default timeout
-            max_retries: 3,   // 3 retries by default
-            count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    pub fn with_timeout(timeout_ms: u64) -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(Vec::new())),
-            timeout_ms,
-            max_retries: 3,
-            count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    pub fn with_config(timeout_ms: u64, max_retries: u32) -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(Vec::new())),
-            timeout_ms,
-            max_retries,
-            count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    /// Try to acquire the lock with timeout and retries
-    fn try_lock_with_timeout(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, Vec<GasKillerTaskRequest>>, String> {
-        let start_time = Instant::now();
-        let timeout_duration = Duration::from_millis(self.timeout_ms);
-
-        for attempt in 0..self.max_retries {
-            // Try to acquire the lock
-            match self.queue.try_lock() {
-                Ok(guard) => return Ok(guard),
-                Err(_) => {
-                    // Check if we've exceeded the timeout
-                    if start_time.elapsed() >= timeout_duration {
-                        return Err(format!(
-                            "Failed to acquire lock after {}ms timeout ({} attempts)",
-                            self.timeout_ms,
-                            attempt + 1
-                        ));
-                    }
-
-                    // Small delay before retry to avoid busy waiting
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
-        }
-
-        Err(format!(
-            "Failed to acquire lock after {} retries",
-            self.max_retries
-        ))
-    }
-}
-
-impl Default for GasKillerTaskQueue {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Align naming with the counter usecase so factories and ingress can share a consistent type.
-pub type SimpleTaskQueue = GasKillerTaskQueue;
-
-impl TaskQueue for GasKillerTaskQueue {
-    fn len(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
-    }
-
-    fn push(&self, task: GasKillerTaskRequest) {
-        match self.try_lock_with_timeout() {
-            Ok(mut queue) => {
-                queue.push(task);
-                let new_len = self.count.fetch_add(1, Ordering::Relaxed) + 1;
-                info!("Task enqueued: queue_len={} (after push)", new_len);
-            }
-            Err(e) => {
-                error!("Failed to push task to queue: {}", e);
-                warn!("Task dropped due to lock timeout: {:?}", task);
-            }
-        }
-    }
-
-    fn pop(&self) -> Option<GasKillerTaskRequest> {
-        match self.try_lock_with_timeout() {
-            Ok(mut queue) => {
-                let item = queue.pop();
-                if item.is_some() {
-                    self.count.fetch_sub(1, Ordering::Relaxed);
-                }
-                item
-            }
-            Err(e) => {
-                error!("Failed to pop task from queue: {}", e);
-                None
-            }
-        }
-    }
+pub fn task_queue_depth() -> TaskQueueDepth {
+    Arc::new(AtomicUsize::new(0))
 }
 
 /// Configuration for listening creators
 #[derive(Debug, Clone)]
 pub struct GasKillerConfig {
-    pub polling_interval_ms: u64,
     pub timeout_ms: u64,
 }
 
@@ -172,10 +52,7 @@ impl Default for GasKillerConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
-        Self {
-            polling_interval_ms: 100,
-            timeout_ms,
-        }
+        Self { timeout_ms }
     }
 }
 
@@ -215,8 +92,9 @@ struct EnrichedTask {
 }
 
 /// Creator for the gas killer usecase that listens for external requests
-pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
-    queue: Arc<Q>,
+pub struct ListeningGasKillerCreator {
+    receiver: tokio::sync::Mutex<TaskReceiver>,
+    queue_depth: TaskQueueDepth,
     config: GasKillerConfig,
     validator: Arc<GasKillerValidator>,
     current_task: Mutex<Option<EnrichedTask>>,
@@ -227,15 +105,17 @@ pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     dispatch_time: DispatchTime,
 }
 
-impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
+impl ListeningGasKillerCreator {
     pub fn new(
-        queue: Q,
+        receiver: TaskReceiver,
+        queue_depth: TaskQueueDepth,
         config: GasKillerConfig,
         validator: Arc<GasKillerValidator>,
         dispatch_time: DispatchTime,
     ) -> Self {
         Self {
-            queue: Arc::new(queue),
+            receiver: tokio::sync::Mutex::new(receiver),
+            queue_depth,
             config,
             validator,
             current_task: Mutex::new(None),
@@ -251,37 +131,38 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
     }
 
     async fn wait_for_task(&self) -> Result<GasKillerTaskRequest> {
-        use tokio::time::{Duration, sleep};
-        // timeout_ms == 0 means wait indefinitely
-        let max_attempts = if self.config.timeout_ms == 0 {
-            None
+        let mut rx = self.receiver.lock().await;
+        let task = if self.config.timeout_ms == 0 {
+            rx.recv()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("task channel closed"))?
         } else {
-            Some(self.config.timeout_ms / self.config.polling_interval_ms)
+            tokio::time::timeout(Duration::from_millis(self.config.timeout_ms), rx.recv())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Timeout waiting for task after {}ms",
+                        self.config.timeout_ms
+                    )
+                })?
+                .ok_or_else(|| anyhow::anyhow!("task channel closed"))?
         };
-        let mut attempts = 0u64;
-        loop {
-            if let Some(task) = self.queue.pop() {
-                if let Some(m) = &self.metrics {
-                    m.task_queue_depth.set(self.queue.len() as i64);
-                }
-                return Ok(task);
-            }
-            attempts += 1;
-            if let Some(max) = max_attempts
-                && attempts >= max
-            {
-                return Err(anyhow::anyhow!(
-                    "Timeout waiting for task after {}ms",
-                    self.config.timeout_ms
-                ));
-            }
-            sleep(Duration::from_millis(self.config.polling_interval_ms)).await;
+        let depth = self
+            .queue_depth
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(1))
+            })
+            .unwrap()
+            .saturating_sub(1);
+        if let Some(m) = &self.metrics {
+            m.task_queue_depth.set(depth as i64);
         }
+        Ok(task)
     }
 }
 
 #[async_trait]
-impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator<Q> {
+impl Creator for ListeningGasKillerCreator {
     type TaskData = GasKillerTaskData;
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
@@ -480,7 +361,7 @@ pub enum GasKillerCreatorType {
     /// Basic gas killer creator without ingress
     Basic(GasKillerCreator),
     /// Listening gas killer creator with HTTP ingress
-    Listening(Box<ListeningGasKillerCreator<GasKillerTaskQueue>>),
+    Listening(Box<ListeningGasKillerCreator>),
 }
 
 #[async_trait]
@@ -570,9 +451,9 @@ mod tests {
         // If they fail (no Anvil/RPC), that's expected in unit tests
     }
 
-    #[test]
-    fn test_task_queue_push_pop() {
-        let queue = GasKillerTaskQueue::new();
+    #[tokio::test]
+    async fn test_channel_send_recv() {
+        let (sender, mut receiver) = task_channel();
         let task = GasKillerTaskRequest {
             body: crate::ingress::GasKillerTaskRequestBody {
                 target_address: Address::from([1u8; 20]),
@@ -584,10 +465,10 @@ mod tests {
             },
         };
 
-        queue.push(task.clone());
-        let popped = queue.pop();
-        assert!(popped.is_some());
-        assert_eq!(popped.unwrap().body.transition_index, Some(1));
+        sender.send(task.clone()).unwrap();
+        let received = receiver.try_recv().unwrap();
+        assert_eq!(received.body.transition_index, Some(1));
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::GasKillerHandler;
 use crate::creator::{
     DispatchTime, GasKillerConfig, GasKillerCreator, GasKillerCreatorType,
-    ListeningGasKillerCreator, SimpleTaskQueue,
+    ListeningGasKillerCreator, task_channel, task_queue_depth,
 };
 use crate::ingress::{
     AvsMetadata, AvsOperatorSetMetadata, AvsOperatorSetSoftware, IngressState,
@@ -59,10 +59,17 @@ pub async fn create_listening_creator_with_server(
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
 ) -> anyhow::Result<GasKillerCreatorType> {
-    let queue = SimpleTaskQueue::new();
+    let (sender, receiver) = task_channel();
+    let queue_depth = task_queue_depth();
     let config = GasKillerConfig::default();
-    let creator = ListeningGasKillerCreator::new(queue.clone(), config, validator, dispatch_time)
-        .with_metrics(Arc::clone(&metrics));
+    let creator = ListeningGasKillerCreator::new(
+        receiver,
+        queue_depth.clone(),
+        config,
+        validator,
+        dispatch_time,
+    )
+    .with_metrics(Arc::clone(&metrics));
     let providers = build_ingress_providers().await?;
     let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
     if ingress_password.is_none() {
@@ -70,7 +77,6 @@ pub async fn create_listening_creator_with_server(
             "INGRESS_PASSWORD is not set — /trigger endpoint is unauthenticated; set INGRESS_PASSWORD in production"
         );
     }
-    let queue_arc = Arc::new(queue);
     let operator_sets = {
         let opset_name = env::var("AVS_OPSET_NAME").unwrap_or_default();
         if opset_name.is_empty() {
@@ -111,7 +117,8 @@ pub async fn create_listening_creator_with_server(
         operator_sets,
     };
     let ingress_state = IngressState::new(
-        Arc::clone(&queue_arc),
+        sender,
+        queue_depth,
         metrics,
         providers,
         ingress_password,
