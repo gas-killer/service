@@ -111,9 +111,9 @@ An annotated example config lives at `scripts/scenarios/example.toml`.
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `label` | No | `request N` | Human-readable label for output |
-| `target_address` | Yes | — | Contract address to call, or `"kubectl"` to resolve it at runtime from the `gas-killer-smoke-target` ConfigMap via `kubectl` (also accepts `"kubectl:<configmap>[/<key>]"`; namespace follows the current kube-context unless `SMOKE_TARGET_NAMESPACE` is set) |
+| `target_address` | Yes | — | Contract address to call. Or `"kubectl"` to resolve it at runtime from the `gas-killer-smoke-target` ConfigMap via `kubectl` (also accepts `"kubectl:<configmap>[/<key>]"`; namespace follows the current kube-context unless `SMOKE_TARGET_NAMESPACE` is set). Or `"local"` to read `addresses.arraySummation` from the local deploy JSON at `AVS_DEPLOYMENT_PATH` (default `config/.nodes/avs_deploy.json`; `"local:<key>"` selects a different deployed contract) |
 | `call_data` | Yes | — | ABI-encoded calldata as a `0x`-prefixed hex string |
-| `from_address` | Yes | — | Sender address |
+| `from_address` | Yes | — | Sender address, or `"local"` to derive it from the `PRIVATE_KEY` the local stack signs with |
 | `transition_index` | No | `"auto"` | State transition sequence number, or `"auto"` to fetch `stateTransitionCount()` from the contract (requires `http_rpc`) |
 | `value` | No | `"0"` | Wei value as decimal or `0x`-prefixed hex string |
 | `block_height` | No | `0` | Block to use; `0` auto-fetches current block via `http_rpc` |
