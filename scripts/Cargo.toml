@@ -19,6 +19,10 @@ path = "send_request.rs"
 name = "run_scenario"
 path = "run_scenario.rs"
 
+[[bin]]
+name = "verify_message_hash_parity"
+path = "verify_message_hash_parity.rs"
+
 [dependencies]
 alloy = { workspace = true }
 ark-bn254 = { workspace = true }

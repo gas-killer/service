@@ -1,11 +1,15 @@
 //! Task data types for the Gas Killer AVS
 
 use alloy::primitives::FixedBytes;
+use alloy::sol_types::SolValue;
 use alloy_primitives::{Address, U256};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use commonware_cryptography::sha256::Digest;
+use commonware_cryptography::{Hasher, Sha256};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 /// Task data specific to the gas killer use case
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -63,6 +67,75 @@ impl GasKillerTaskData {
             ));
         }
         Ok(())
+    }
+
+    /// Builds the payload hash for this task from the given storage updates.
+    ///
+    /// Matches the on-chain `expectedHash` from `GasKillerSDK.verifyAndUpdate` (returned by
+    /// `getMessageHash`):
+    ///
+    /// ```solidity
+    /// sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))
+    /// ```
+    ///
+    /// `storage_updates` is a separate argument because the validator hashes the storage updates
+    /// it recomputes via EVMSketch.
+    pub fn build_payload_hash(&self, storage_updates: &[u8]) -> Digest {
+        let selector = self.function_selector();
+
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            // Debug: hash the full storage_updates so divergent inputs are detectable from logs.
+            let mut storage_hasher = Sha256::new();
+            storage_hasher.update(storage_updates);
+            let storage_hash = storage_hasher.finalize();
+            let storage_hash_hex: String = storage_hash
+                .iter()
+                .take(8)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+
+            debug!(
+                transition_index = self.transition_index,
+                target_address = %self.target_address,
+                target_function = %selector,
+                storage_updates_len = storage_updates.len(),
+                storage_updates_hash = %storage_hash_hex,
+                "build_payload_hash inputs"
+            );
+        }
+
+        // Build flattened ABI encoding matching
+        // abi.encode(transitionIndex, address(this), selector, storageUpdates).
+        // Heads (32 bytes each)
+        let head_transition = U256::from(self.transition_index).abi_encode();
+        let head_address = self.target_address.abi_encode();
+        let head_selector = selector.abi_encode();
+        // Offset to the dynamic bytes tail: 4 words (3 static + 1 offset) = 0x80
+        let head_offset = U256::from(32u64 * 4u64).abi_encode();
+
+        // Tail for dynamic bytes: length (u256) + data + padding
+        let mut tail = Vec::with_capacity(32 + storage_updates.len() + 31);
+        tail.extend_from_slice(&U256::from(storage_updates.len()).abi_encode());
+        tail.extend_from_slice(storage_updates);
+        let pad_len = (32 - (storage_updates.len() % 32)) % 32;
+        if pad_len > 0 {
+            tail.extend(std::iter::repeat_n(0u8, pad_len));
+        }
+
+        // Concatenate head and tail into final payload
+        let mut payload = Vec::with_capacity(32 * 4 + tail.len());
+        payload.extend_from_slice(&head_transition);
+        payload.extend_from_slice(&head_address);
+        payload.extend_from_slice(&head_selector);
+        payload.extend_from_slice(&head_offset);
+        payload.extend_from_slice(&tail);
+
+        let mut hasher = Sha256::new();
+        hasher.update(&payload);
+        let payload_hash = hasher.finalize();
+
+        debug!("Built payload hash: {:?}", payload_hash);
+        payload_hash
     }
 }
 

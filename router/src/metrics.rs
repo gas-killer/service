@@ -28,7 +28,7 @@ pub struct MetricsCollector {
     pub task_queue_depth: Gauge<i64, AtomicI64>,
     /// Time to detect which chain a target contract is deployed on (seconds).
     pub executor_chain_detection_seconds: Histogram,
-    /// Time for getMessageHash RPC preflight call (seconds).
+    /// Time for the payload-hash preflight computation (seconds).
     pub executor_hash_preflight_seconds: Histogram,
     /// Time for supportsInterface ERC-165 check (seconds).
     pub executor_supports_interface_seconds: Histogram,
@@ -124,7 +124,7 @@ impl MetricsCollector {
         let executor_hash_preflight_seconds = Histogram::new(rpc_buckets);
         registry.register(
             "gas_killer_executor_hash_preflight_seconds",
-            "Time for the getMessageHash RPC preflight call",
+            "Time for the payload-hash preflight computation",
             executor_hash_preflight_seconds.clone(),
         );
 
