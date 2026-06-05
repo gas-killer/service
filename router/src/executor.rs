@@ -163,46 +163,36 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             storage_updates_len = storage_updates.len(),
             storage_updates_first_32 = %hex::encode(&task_data.storage_updates[..std::cmp::min(32, task_data.storage_updates.len())]),
             detected_chain = %chain_id,
-            "Executor getMessageHash inputs"
+            "Executor payload hash inputs"
         );
 
         let gas_killer_sdk = GasKillerSDK::new(target_addr, provider.clone());
 
-        // Query the contract's getMessageHash and compare with the provided msg_hash
+        // Confirm the locally computed payload hash matches the quorum's signed hash.
         let hash_preflight_start = Instant::now();
-        let hash_result = gas_killer_sdk
-            .getMessageHash(transition_index, target_function, storage_updates.clone())
-            .call()
-            .await;
+        let expected_hash =
+            FixedBytes::<32>::from(task_data.build_payload_hash(storage_updates.as_ref()).0);
         if let Some(m) = &self.metrics {
             m.executor_hash_preflight_seconds
                 .observe(hash_preflight_start.elapsed().as_secs_f64());
         }
-        match hash_result {
-            Ok(expected_hash) => {
-                if expected_hash != msg_hash {
-                    warn!(
-                        offchain_msg_hash = %msg_hash,
-                        onchain_expected_hash = %expected_hash,
-                        transition_index = %transition_index,
-                        target_address = %target_addr,
-                        target_function = %target_function,
-                        storage_updates_len = storage_updates.len(),
-                        "Message hash mismatch between offchain and onchain"
-                    );
-                    return Err(anyhow::anyhow!(
-                        "Message hash mismatch: offchain {} != onchain {}",
-                        msg_hash,
-                        expected_hash
-                    ));
-                } else {
-                    info!("Message hash match confirmed");
-                }
-            }
-            Err(e) => {
-                warn!("getMessageHash call failed: {}", e);
-            }
+        if expected_hash != msg_hash {
+            warn!(
+                offchain_msg_hash = %msg_hash,
+                local_expected_hash = %expected_hash,
+                transition_index = %transition_index,
+                target_address = %target_addr,
+                target_function = %target_function,
+                storage_updates_len = storage_updates.len(),
+                "Message hash mismatch between aggregation and local computation"
+            );
+            return Err(anyhow::anyhow!(
+                "Message hash mismatch: aggregation {} != local {}",
+                msg_hash,
+                expected_hash
+            ));
         }
+        info!("Message hash match confirmed");
 
         // Ensure contract implements the GasKiller interface via ERC-165 check
         let interface_id = FixedBytes::<4>::from([0x93, 0xde, 0x45, 0x31]);
