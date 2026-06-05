@@ -2,7 +2,7 @@
 
 use alloy::primitives::FixedBytes;
 use alloy::sol_types::SolValue;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
@@ -14,8 +14,11 @@ use tracing::debug;
 /// Task data specific to the gas killer use case
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct GasKillerTaskData {
-    /// Encoded storage updates to be applied
-    pub storage_updates: Vec<u8>,
+    /// Encoded storage updates to be applied.
+    ///
+    /// `Bytes` is `Arc`-backed, so cloning the task data through the router hot path
+    /// (creator → `current_task` → executor) is a reference-count bump.
+    pub storage_updates: Bytes,
     /// Index of the state transition
     pub transition_index: u64,
     /// Target contract address for function call
@@ -142,7 +145,7 @@ impl GasKillerTaskData {
 impl Default for GasKillerTaskData {
     fn default() -> Self {
         Self {
-            storage_updates: vec![],
+            storage_updates: Bytes::new(),
             transition_index: 0,
             target_address: Address::ZERO,
             call_data: vec![],
@@ -240,7 +243,7 @@ impl Read for GasKillerTaskData {
         let block_height = u64::read(buf)?;
 
         Ok(Self {
-            storage_updates,
+            storage_updates: storage_updates.into(),
             transition_index,
             target_address,
             call_data,
@@ -285,7 +288,7 @@ mod tests {
     #[test]
     fn test_validate_with_normal_data() {
         let task_data = GasKillerTaskData {
-            storage_updates: vec![0u8; 1024],
+            storage_updates: vec![0u8; 1024].into(),
             call_data: vec![0u8; 256],
             ..Default::default()
         };
@@ -331,7 +334,7 @@ mod tests {
         // Each field is under the limit individually, but combined they exceed it
         let half_limit = MAX_EVM_TX_CALLDATA_SIZE / 2 + 1;
         let task_data = GasKillerTaskData {
-            storage_updates: vec![0u8; half_limit],
+            storage_updates: vec![0u8; half_limit].into(),
             call_data: vec![0u8; half_limit],
             ..Default::default()
         };
@@ -360,7 +363,7 @@ mod tests {
         // Combined exactly at the limit should pass
         let half_limit = MAX_EVM_TX_CALLDATA_SIZE / 2;
         let task_data = GasKillerTaskData {
-            storage_updates: vec![0u8; half_limit],
+            storage_updates: vec![0u8; half_limit].into(),
             call_data: vec![0u8; half_limit],
             ..Default::default()
         };
