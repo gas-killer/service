@@ -1,5 +1,6 @@
 use crate::creator::DispatchTime;
 use crate::metrics::MetricsCollector;
+use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
 use gas_killer_common::ChainId;
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever::getNonSignerStakesAndSignatureReturn;
@@ -14,6 +15,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
@@ -23,6 +25,9 @@ pub struct GasKillerHandler<P> {
     metrics: Option<Arc<MetricsCollector>>,
     /// Shared with the creator to measure P2P round-trip duration.
     dispatch_time: DispatchTime,
+    /// Memoizes ERC-165 GasKiller interface support per target address. A deployed
+    /// contract's supported interfaces are immutable, so entries never expire.
+    interface_cache: Arc<RwLock<HashMap<Address, bool>>>,
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
@@ -34,6 +39,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             providers,
             metrics: None,
             dispatch_time: Default::default(),
+            interface_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -43,6 +49,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             providers,
             metrics: None,
             dispatch_time: Default::default(),
+            interface_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -84,6 +91,43 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             }
         })
         .await
+    }
+
+    /// Resolves whether `target_addr` implements the GasKiller ERC-165 interface,
+    /// memoizing the result per address. Interface support is immutable for a
+    /// deployed contract, so the first lookup is reused on every later round and
+    /// the per-round `supportsInterface` RPC collapses to a hashmap read.
+    async fn supports_gas_killer_interface(
+        &self,
+        provider: P,
+        target_addr: Address,
+    ) -> Result<bool> {
+        if let Some(supported) = self.interface_cache.read().await.get(&target_addr).copied() {
+            return Ok(supported);
+        }
+
+        let gas_killer_sdk = GasKillerSDK::new(target_addr, provider);
+        let supports_interface_start = Instant::now();
+        let supported = match gas_killer_sdk
+            .supportsInterface(GAS_KILLER_INTERFACE_ID)
+            .call()
+            .await
+        {
+            Ok(supported) => supported,
+            Err(e) => {
+                warn!("supportsInterface call failed: {}", e);
+                return Err(anyhow::anyhow!("supportsInterface call failed: {}", e));
+            }
+        };
+        if let Some(m) = &self.metrics {
+            m.executor_supports_interface_seconds
+                .observe(supports_interface_start.elapsed().as_secs_f64());
+        }
+        self.interface_cache
+            .write()
+            .await
+            .insert(target_addr, supported);
+        Ok(supported)
     }
 
     async fn execute_verification(
@@ -141,7 +185,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         // Get the chain-specific provider
         let provider = self
             .get_provider(chain_id)
-            .ok_or_else(|| anyhow::anyhow!("No provider configured for chain: {}", chain_id))?;
+            .ok_or_else(|| anyhow::anyhow!("No provider configured for chain: {}", chain_id))?
+            .clone();
 
         info!(
             storage_updates_len = task_data.storage_updates.len(),
@@ -166,16 +211,26 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             "Executor payload hash inputs"
         );
 
-        let gas_killer_sdk = GasKillerSDK::new(target_addr, provider.clone());
+        // The payload-hash preflight and the ERC-165 interface check are independent,
+        // so run them concurrently. Once the interface result is cached the second
+        // future collapses to a hashmap read, making the join effectively free.
+        let metrics = self.metrics.clone();
+        let (expected_hash, supports_result) = tokio::join!(
+            async {
+                let hash_preflight_start = Instant::now();
+                let expected_hash = FixedBytes::<32>::from(
+                    task_data.build_payload_hash(storage_updates.as_ref()).0,
+                );
+                if let Some(m) = &metrics {
+                    m.executor_hash_preflight_seconds
+                        .observe(hash_preflight_start.elapsed().as_secs_f64());
+                }
+                expected_hash
+            },
+            self.supports_gas_killer_interface(provider.clone(), target_addr),
+        );
 
         // Confirm the locally computed payload hash matches the quorum's signed hash.
-        let hash_preflight_start = Instant::now();
-        let expected_hash =
-            FixedBytes::<32>::from(task_data.build_payload_hash(storage_updates.as_ref()).0);
-        if let Some(m) = &self.metrics {
-            m.executor_hash_preflight_seconds
-                .observe(hash_preflight_start.elapsed().as_secs_f64());
-        }
         if expected_hash != msg_hash {
             warn!(
                 offchain_msg_hash = %msg_hash,
@@ -194,28 +249,19 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         }
         info!("Message hash match confirmed");
 
-        // Ensure contract implements the GasKiller interface via ERC-165 check
-        let interface_id = FixedBytes::<4>::from([0x93, 0xde, 0x45, 0x31]);
-        let supports_interface_start = Instant::now();
-        let supports_result = gas_killer_sdk.supportsInterface(interface_id).call().await;
-        if let Some(m) = &self.metrics {
-            m.executor_supports_interface_seconds
-                .observe(supports_interface_start.elapsed().as_secs_f64());
+        // Ensure the contract implements the GasKiller interface via the ERC-165 check.
+        if !supports_result? {
+            warn!(
+                interface_id = %GAS_KILLER_INTERFACE_ID,
+                "Target contract does not support GasKiller interface"
+            );
+            return Err(anyhow::anyhow!(
+                "Target contract does not support GasKiller interface ({})",
+                GAS_KILLER_INTERFACE_ID
+            ));
         }
-        match supports_result {
-            Ok(supported) => {
-                if !supported {
-                    warn!("Target contract does not support GasKiller interface (0x93de4531)");
-                    return Err(anyhow::anyhow!(
-                        "Target contract does not support GasKiller interface (0x93de4531)"
-                    ));
-                }
-            }
-            Err(e) => {
-                warn!("supportsInterface call failed: {}", e);
-                return Err(anyhow::anyhow!("supportsInterface call failed: {}", e));
-            }
-        };
+
+        let gas_killer_sdk = GasKillerSDK::new(target_addr, provider);
 
         // Execute the gas killer verifyAndUpdate
         // Use referenceBlockNumber = current_block_number - 1 so that eth_estimateGas (which
@@ -322,5 +368,109 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::sol_types::SolValue;
+    use alloy_provider::{ProviderBuilder, mock::Asserter};
+
+    // supportsInterface(bytes4) returns (bool); the eth_call result is the
+    // ABI-encoded bool wrapped as Bytes. Responses are consumed FIFO, so each
+    // queued entry corresponds to exactly one RPC.
+    fn push_supports_interface(asserter: &Asserter, supported: bool) {
+        asserter.push_success(&Bytes::from(supported.abi_encode()));
+    }
+
+    #[tokio::test]
+    async fn test_supports_interface_cached_after_first_call() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        // Queue a single response: the first lookup must hit the RPC and the
+        // second must be served from the cache. A cache miss on the second call
+        // would drain the empty asserter and error.
+        push_supports_interface(&asserter, true);
+
+        let handler = GasKillerHandler::new(provider.clone());
+        let target = Address::from([0x11u8; 20]);
+
+        let first = handler
+            .supports_gas_killer_interface(provider.clone(), target)
+            .await
+            .expect("first lookup should resolve over RPC");
+        assert!(first);
+
+        let second = handler
+            .supports_gas_killer_interface(provider.clone(), target)
+            .await
+            .expect("second lookup should be served from cache");
+        assert!(second);
+    }
+
+    #[tokio::test]
+    async fn test_supports_interface_caches_unsupported_result() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        push_supports_interface(&asserter, false);
+
+        let handler = GasKillerHandler::new(provider.clone());
+        let target = Address::from([0x22u8; 20]);
+
+        // A `false` result is immutable too, so it is cached and reused without a
+        // second RPC.
+        assert!(
+            !handler
+                .supports_gas_killer_interface(provider.clone(), target)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !handler
+                .supports_gas_killer_interface(provider.clone(), target)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_supports_interface_caches_per_address() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        // Two distinct addresses each require their own RPC; queue one response
+        // per address, ordered to match the call sequence below.
+        push_supports_interface(&asserter, true);
+        push_supports_interface(&asserter, false);
+
+        let handler = GasKillerHandler::new(provider.clone());
+        let supported_addr = Address::from([0x33u8; 20]);
+        let unsupported_addr = Address::from([0x44u8; 20]);
+
+        assert!(
+            handler
+                .supports_gas_killer_interface(provider.clone(), supported_addr)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !handler
+                .supports_gas_killer_interface(provider.clone(), unsupported_addr)
+                .await
+                .unwrap()
+        );
+        // Both addresses are now cached, so neither repeat lookup issues an RPC.
+        assert!(
+            handler
+                .supports_gas_killer_interface(provider.clone(), supported_addr)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !handler
+                .supports_gas_killer_interface(provider.clone(), unsupported_addr)
+                .await
+                .unwrap()
+        );
     }
 }
