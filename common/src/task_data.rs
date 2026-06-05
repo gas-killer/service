@@ -83,24 +83,26 @@ impl GasKillerTaskData {
     pub fn build_payload_hash(&self, storage_updates: &[u8]) -> Digest {
         let selector = self.function_selector();
 
-        // Debug: hash the full storage_updates so divergent inputs are detectable from logs.
-        let mut storage_hasher = Sha256::new();
-        storage_hasher.update(storage_updates);
-        let storage_hash = storage_hasher.finalize();
-        let storage_hash_hex: String = storage_hash
-            .iter()
-            .take(8)
-            .map(|b| format!("{:02x}", b))
-            .collect();
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            // Debug: hash the full storage_updates so divergent inputs are detectable from logs.
+            let mut storage_hasher = Sha256::new();
+            storage_hasher.update(storage_updates);
+            let storage_hash = storage_hasher.finalize();
+            let storage_hash_hex: String = storage_hash
+                .iter()
+                .take(8)
+                .map(|b| format!("{b:02x}"))
+                .collect();
 
-        debug!(
-            transition_index = self.transition_index,
-            target_address = %self.target_address,
-            target_function = %selector,
-            storage_updates_len = storage_updates.len(),
-            storage_updates_hash = %storage_hash_hex,
-            "build_payload_hash inputs"
-        );
+            debug!(
+                transition_index = self.transition_index,
+                target_address = %self.target_address,
+                target_function = %selector,
+                storage_updates_len = storage_updates.len(),
+                storage_updates_hash = %storage_hash_hex,
+                "build_payload_hash inputs"
+            );
+        }
 
         // Build flattened ABI encoding matching
         // abi.encode(transitionIndex, address(this), selector, storageUpdates).
