@@ -31,8 +31,10 @@ global:
 # rather than the shared PVC. This makes keys durable across cluster recreations.
 #
 # Setup:
-#   1. Run terraform apply in terraform/ to provision the GKE cluster and GCP SA
-#   2. Copy the gcp_service_account_email output into secretManager.gcpServiceAccount below
+#   1. Provision the GKE cluster and GCP service account(s) via Terraform in the
+#      gas-killer/infra repo (terraform/dev or terraform/prod)
+#   2. Copy the service account email output into secretManager.gcpServiceAccount below
+#      (dev: gcp_service_account_email; prod: app_service_account_email)
 #   3. Set secretManager.projectId to your GCP project ID
 #
 # Secret naming in GCP Secret Manager:
@@ -44,11 +46,12 @@ secretManager:
   enabled: false
   projectId: ""
   keyPrefix: "gas-killer"
-  # GCP Service Account email for Workload Identity. Copy from terraform output:
-  #   terraform output gcp_service_account_email
+  # GCP Service Account email for Workload Identity. Copy from the gas-killer/infra
+  # terraform output (dev: gcp_service_account_email; prod: app_service_account_email):
+  #   terraform output -raw app_service_account_email
   gcpServiceAccount: ""
   # Kubernetes ServiceAccount name. Defaults to <release>-sa (e.g. "gas-killer-sa").
-  # Must match terraform var kubernetes_service_account_name.
+  # Must match the gas-killer/infra terraform var kubernetes_service_account_name.
   # Override if your release name differs from what Terraform expects:
   #   --set secretManager.serviceAccountName=my-release-sa
   serviceAccountName: ""
