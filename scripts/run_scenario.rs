@@ -642,8 +642,10 @@ fn parse_local_sentinel(value: &str) -> Option<String> {
 /// Read an address from the local deployment JSON under `addresses.<key>`.
 /// Path follows `AVS_DEPLOYMENT_PATH`, defaulting to the file the local stack writes.
 fn fetch_local_deploy_address(key: &str) -> Result<String, String> {
-    let path = std::env::var("AVS_DEPLOYMENT_PATH")
-        .unwrap_or_else(|_| "config/.nodes/avs_deploy.json".to_string());
+    let path = match std::env::var("AVS_DEPLOYMENT_PATH") {
+        Ok(p) if !p.trim().is_empty() => p,
+        _ => "config/.nodes/avs_deploy.json".to_string(),
+    };
     let content = std::fs::read_to_string(&path).map_err(|e| {
         format!("failed to read deployment JSON at '{path}' (set AVS_DEPLOYMENT_PATH?): {e}")
     })?;
