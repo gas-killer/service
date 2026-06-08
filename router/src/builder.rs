@@ -4,6 +4,7 @@ use crate::factories::{
 };
 use crate::metrics::MetricsCollector;
 use crate::{GasKillerCreatorType, GasKillerOrchestrator, GasKillerValidator};
+use commonware_avs_router::executor::bls::BlsVerificationData;
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
 
 use commonware_runtime::Clock;
@@ -63,6 +64,10 @@ impl GasKillerOrchestratorBuilder {
         // This is safe because we control all references
         let validator_for_orchestrator = Arc::unwrap_or_clone(validator);
 
-        builder.build(task_creator, executor, validator_for_orchestrator)
+        builder.build_with::<_, _, _, BlsVerificationData>(
+            task_creator,
+            executor,
+            validator_for_orchestrator,
+        )
     }
 }
