@@ -9,6 +9,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
+use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,16 +17,33 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn};
 
-/// Shared timestamp set by the creator when it dispatches a task and consumed by the executor
-/// to compute the P2P round-trip duration.
+/// Per-round dispatch timestamps: the creator inserts `round -> Instant::now()` when it dispatches
+/// a task, and the executor removes the matching entry in `handle_verification` to compute the P2P
+/// round-trip duration.
 ///
-/// This is a single slot, not a per-round map. It is accurate as long as rounds are sequential
-/// (one task in flight at a time), which the commonware orchestrator currently guarantees.
-/// If a consensus round fails without calling `handle_verification`, the stale timestamp bleeds
-/// into the next round's measurement. A per-round `HashMap<u64, Instant>` would fix this, but
-/// requires `handle_verification` to receive the round number — tracked upstream in
-/// https://github.com/BreadchainCoop/commonware-restaking/issues/154.
-pub type DispatchTime = Arc<Mutex<Option<Instant>>>;
+/// Keying by round (rather than a single shared slot) means a consensus round that fails without
+/// calling `handle_verification` cannot bleed its stale timestamp into the next round's
+/// measurement. Rounds advance monotonically and the orchestrator runs one at a time, so the
+/// creator evicts any entry older than the round it is dispatching, keeping the map bounded even
+/// when rounds fail.
+pub type DispatchTime = Arc<Mutex<HashMap<u64, Instant>>>;
+
+/// Records `round`'s dispatch instant for later round-trip measurement, first evicting any entry
+/// from an earlier round. Rounds advance monotonically and the orchestrator runs one at a time, so
+/// an older entry belongs to a round that failed without completing; dropping it here keeps the map
+/// bounded even when rounds repeatedly fail.
+pub(crate) fn stamp_dispatch_time(times: &DispatchTime, round: u64) {
+    if let Ok(mut times) = times.lock() {
+        times.retain(|&r, _| r >= round);
+        times.insert(round, Instant::now());
+    }
+}
+
+/// Removes and returns `round`'s dispatch instant, if one was recorded. Consuming the entry both
+/// yields the round-trip start and prevents the completed round from lingering in the map.
+pub(crate) fn take_dispatch_time(times: &DispatchTime, round: u64) -> Option<Instant> {
+    times.lock().ok().and_then(|mut times| times.remove(&round))
+}
 
 pub type TaskSender = UnboundedSender<GasKillerTaskRequest>;
 pub type TaskReceiver = UnboundedReceiver<GasKillerTaskRequest>;
@@ -313,10 +331,8 @@ impl Creator for ListeningGasKillerCreator {
         let round = self.round_counter.fetch_add(1, Ordering::SeqCst);
         info!(round = round, "Creator returning payload with round");
 
-        // Stamp the dispatch time so the executor can compute P2P round-trip duration.
-        if let Ok(mut t) = self.dispatch_time.lock() {
-            *t = Some(Instant::now());
-        }
+        // Stamp this round's dispatch time so the executor can compute P2P round-trip duration.
+        stamp_dispatch_time(&self.dispatch_time, round);
 
         Ok((payload, round))
     }
@@ -398,6 +414,31 @@ mod tests {
         let (payload, round) = result.unwrap();
         assert!(!payload.is_empty());
         assert_eq!(round, 0); // Default round is 0
+    }
+
+    #[test]
+    fn test_dispatch_time_evicts_failed_rounds_and_isolates_measurements() {
+        let times: DispatchTime = Arc::new(Mutex::new(HashMap::new()));
+
+        // Round 0 is dispatched but its consensus round fails, so it is never consumed.
+        stamp_dispatch_time(&times, 0);
+        assert_eq!(times.lock().unwrap().len(), 1);
+
+        // Dispatching round 1 evicts the stale round-0 entry rather than letting it accumulate
+        // or bleed into round 1's measurement.
+        stamp_dispatch_time(&times, 1);
+        {
+            let map = times.lock().unwrap();
+            assert_eq!(map.len(), 1, "stale failed-round entry should be evicted");
+            assert!(map.contains_key(&1));
+            assert!(!map.contains_key(&0));
+        }
+
+        // The executor consumes round 1's own timestamp exactly once; the failed round 0 is gone.
+        assert!(take_dispatch_time(&times, 0).is_none());
+        assert!(take_dispatch_time(&times, 1).is_some());
+        assert!(take_dispatch_time(&times, 1).is_none());
+        assert!(times.lock().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

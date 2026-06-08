@@ -1,4 +1,4 @@
-use crate::creator::DispatchTime;
+use crate::creator::{DispatchTime, take_dispatch_time};
 use crate::metrics::MetricsCollector;
 use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
@@ -372,17 +372,18 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
 
     async fn handle_verification(
         &mut self,
+        round: u64,
         msg_hash: FixedBytes<32>,
         quorum_numbers: Bytes,
         current_block_number: u32,
         non_signer_data: getNonSignerStakesAndSignatureReturn,
         task_data: Option<&Self::TaskData>,
     ) -> Result<ExecutionResult> {
-        // Record P2P round-trip: time from creator dispatch to threshold signatures received.
-        // Check metrics first so we never consume the timestamp when there's nowhere to record it.
-        if let Some(m) = &self.metrics
-            && let Ok(mut t) = self.dispatch_time.lock()
-            && let Some(start) = t.take()
+        // Record P2P round-trip: time from this round's creator dispatch to threshold signatures
+        // received. Consume the entry keyed by `round` so a failed earlier round (which never
+        // reaches here) cannot contribute a stale, inflated sample.
+        if let Some(start) = take_dispatch_time(&self.dispatch_time, round)
+            && let Some(m) = &self.metrics
         {
             m.p2p_round_trip_seconds
                 .observe(start.elapsed().as_secs_f64());
