@@ -271,6 +271,11 @@ router:
   # Aggregation window duration in seconds. Must exceed the time nodes need to compute
   # EVMSketch storage updates. L2 computation takes ~60s, so 90s gives a safe margin.
   aggregationFrequency: "90"
+  # Max seconds the executor waits for a verifyAndUpdate transaction receipt before
+  # timing out the round and proceeding to the next one. Prevents an indefinite stall
+  # under L1 mempool congestion or RPC degradation. Leave empty to use the per-chain
+  # defaults baked into the router (L1: 120s, L2: 30s).
+  receiptTimeoutSecs: ""
   ingress:
     enabled: true
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation.

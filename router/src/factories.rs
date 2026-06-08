@@ -270,10 +270,17 @@ pub async fn create_gas_killer_executor(
         view_only_provider.clone(),
     );
 
+    // Optional override (seconds) for the verifyAndUpdate receipt-wait timeout.
+    // Unset falls back to the executor's per-chain defaults.
+    let receipt_timeout_override = env::var("EXECUTOR_RECEIPT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
+
     // Create handler with multi-chain providers
     let gas_killer_handler = GasKillerHandler::with_providers(providers)
         .with_metrics(metrics)
-        .with_dispatch_time(dispatch_time);
+        .with_dispatch_time(dispatch_time)
+        .with_receipt_timeout(receipt_timeout_override);
 
     Ok(BlsEigenlayerExecutor::new(
         view_only_provider,

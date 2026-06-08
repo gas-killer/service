@@ -14,9 +14,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+/// Default receipt-wait timeout on L1. At ~12s/block this covers several blocks
+/// plus mempool-replacement headroom before the round is abandoned.
+const DEFAULT_RECEIPT_TIMEOUT_L1_SECS: u64 = 120;
+/// Default receipt-wait timeout on L2, where blocks land in seconds or less.
+const DEFAULT_RECEIPT_TIMEOUT_L2_SECS: u64 = 30;
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
 pub struct GasKillerHandler<P> {
@@ -28,6 +34,10 @@ pub struct GasKillerHandler<P> {
     /// Memoizes ERC-165 GasKiller interface support per target address. A deployed
     /// contract's supported interfaces are immutable, so entries never expire.
     interface_cache: Arc<RwLock<HashMap<Address, bool>>>,
+    /// Optional override (seconds) for the verifyAndUpdate receipt-wait timeout,
+    /// applied to every chain. When unset, per-chain defaults apply. Sourced from
+    /// `EXECUTOR_RECEIPT_TIMEOUT_SECS`.
+    receipt_timeout_override: Option<u64>,
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
@@ -40,6 +50,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             metrics: None,
             dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
+            receipt_timeout_override: None,
         }
     }
 
@@ -50,6 +61,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             metrics: None,
             dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
+            receipt_timeout_override: None,
         }
     }
 
@@ -63,6 +75,13 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         self
     }
 
+    /// Overrides the receipt-wait timeout (seconds) for all chains. `None` keeps
+    /// the per-chain defaults.
+    pub fn with_receipt_timeout(mut self, timeout_secs: Option<u64>) -> Self {
+        self.receipt_timeout_override = timeout_secs;
+        self
+    }
+
     /// Adds a provider for a specific chain
     pub fn add_provider(&mut self, chain_id: ChainId, provider: P) {
         self.providers.insert(chain_id, provider);
@@ -71,6 +90,16 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// Gets the provider for a specific chain
     fn get_provider(&self, chain_id: ChainId) -> Option<&P> {
         self.providers.get(&chain_id)
+    }
+
+    /// Resolves the receipt-wait timeout for `chain_id`: the configured override
+    /// if set, otherwise the per-chain default.
+    fn receipt_timeout(&self, chain_id: ChainId) -> Duration {
+        let secs = self.receipt_timeout_override.unwrap_or(match chain_id {
+            ChainId::L1 => DEFAULT_RECEIPT_TIMEOUT_L1_SECS,
+            ChainId::L2 => DEFAULT_RECEIPT_TIMEOUT_L2_SECS,
+        });
+        Duration::from_secs(secs)
     }
 
     /// Detects which chain has code deployed at the given address
@@ -290,16 +319,33 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         }
         let call_return = send_result?;
 
+        // Bound the receipt wait so L1 mempool congestion, RPC degradation, or a
+        // dropped transaction can't stall the executor indefinitely. On timeout we
+        // return an error so the orchestrator counts the round as failed and moves on.
+        let receipt_timeout = self.receipt_timeout(chain_id);
         let receipt_start = Instant::now();
-        let receipt_result = call_return
-            .get_receipt()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get transaction receipt: {}", e));
-        if let Some(m) = &self.metrics {
-            m.executor_receipt_confirmation_seconds
-                .observe(receipt_start.elapsed().as_secs_f64());
-        }
-        let receipt = receipt_result?;
+        let receipt = match tokio::time::timeout(receipt_timeout, call_return.get_receipt()).await {
+            Ok(receipt_result) => {
+                if let Some(m) = &self.metrics {
+                    m.executor_receipt_confirmation_seconds
+                        .observe(receipt_start.elapsed().as_secs_f64());
+                }
+                receipt_result
+                    .map_err(|e| anyhow::anyhow!("Failed to get transaction receipt: {}", e))?
+            }
+            Err(_) => {
+                warn!(
+                    chain = %chain_id,
+                    timeout_secs = receipt_timeout.as_secs(),
+                    "get_receipt timed out waiting for transaction inclusion"
+                );
+                return Err(anyhow::anyhow!(
+                    "get_receipt timed out after {}s on chain {}",
+                    receipt_timeout.as_secs(),
+                    chain_id
+                ));
+            }
+        };
         info!(
             tx = %receipt.transaction_hash,
             block = receipt.block_number,
@@ -471,6 +517,38 @@ mod tests {
                 .supports_gas_killer_interface(provider.clone(), unsupported_addr)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receipt_timeout_defaults_per_chain() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let handler = GasKillerHandler::new(provider);
+
+        assert_eq!(
+            handler.receipt_timeout(ChainId::L1),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            handler.receipt_timeout(ChainId::L2),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receipt_timeout_override_applies_to_all_chains() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let handler = GasKillerHandler::new(provider).with_receipt_timeout(Some(45));
+
+        assert_eq!(
+            handler.receipt_timeout(ChainId::L1),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            handler.receipt_timeout(ChainId::L2),
+            Duration::from_secs(45)
         );
     }
 }
