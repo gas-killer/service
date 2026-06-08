@@ -4,6 +4,7 @@ use commonware_avs_router::creator::Creator;
 use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
 
+use alloy_primitives::Bytes;
 use anyhow::Result;
 use async_trait::async_trait;
 use commonware_codec::Encode;
@@ -85,7 +86,7 @@ impl Creator for GasKillerCreator {
 /// Enriched task data that includes computed storage updates and block height
 struct EnrichedTask {
     task: GasKillerTaskRequest,
-    storage_updates: Vec<u8>,
+    storage_updates: Bytes,
     block_height: u64,
     /// Resolved transition index (sentinel `None` → concrete count from chain).
     transition_index: u64,
@@ -286,7 +287,7 @@ impl Creator for ListeningGasKillerCreator {
         // Store enriched task with computed storage updates and block height for metadata access
         let enriched = EnrichedTask {
             task,
-            storage_updates,
+            storage_updates: storage_updates.into(),
             block_height,
             transition_index: resolved_transition_index,
         };
@@ -415,7 +416,7 @@ mod tests {
         let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
 
         let task_data = GasKillerTaskData {
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04],
+            storage_updates: vec![0x01, 0x02, 0x03, 0x04].into(),
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
@@ -485,7 +486,7 @@ mod tests {
         };
 
         let task_data = GasKillerTaskData {
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04], // would be computed by GasAnalyzer
+            storage_updates: vec![0x01, 0x02, 0x03, 0x04].into(), // would be computed by GasAnalyzer
             transition_index: task.body.transition_index.unwrap_or(0),
             target_address: task.body.target_address,
             call_data: task.body.call_data.clone(),

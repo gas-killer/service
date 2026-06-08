@@ -195,7 +195,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         );
 
         // Extract task data parameters - use pre-computed storage_updates from task data
-        let storage_updates = Bytes::from(task_data.storage_updates.clone());
+        let storage_updates = task_data.storage_updates.clone();
         let transition_index = U256::from(task_data.transition_index);
         let target_function = task_data.function_selector();
         let target_addr = task_data.target_address;

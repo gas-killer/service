@@ -53,7 +53,7 @@ async fn main() -> Result<(), BoxError> {
             .map_err(|e| format!("getMessageHash call failed: {e}"))?;
 
         let task_data = GasKillerTaskData {
-            storage_updates: storage_updates.clone(),
+            storage_updates: Bytes::from(storage_updates.clone()),
             transition_index,
             target_address,
             call_data: selector.to_vec(),
