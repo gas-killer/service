@@ -8,6 +8,7 @@ use commonware_avs_router::executor::bls::BlsVerificationData;
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
 
 use commonware_runtime::Clock;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
@@ -36,9 +37,9 @@ impl GasKillerOrchestratorBuilder {
         // Create shared validator first - used by both creator and orchestrator
         let validator = Arc::new(GasKillerValidator::new()?);
 
-        // Shared timestamp for P2P round-trip measurement: set by the creator when it
-        // dispatches a payload, read+cleared by the executor when threshold sigs arrive.
-        let dispatch_time: DispatchTime = Arc::new(Mutex::new(None));
+        // Per-round dispatch timestamps for P2P round-trip measurement: the creator inserts a
+        // timestamp keyed by round, the executor removes it when threshold sigs arrive.
+        let dispatch_time: DispatchTime = Arc::new(Mutex::new(HashMap::new()));
 
         // Create gas-killer-specific dependencies
         let use_ingress = std::env::var("INGRESS").unwrap_or_default().to_lowercase() == "true";
