@@ -6,13 +6,12 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::debug;
-use url::Url;
 
+use crate::ReadOnlyProvider;
 use crate::config::ChainId;
 use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
@@ -80,6 +79,8 @@ const DEFAULT_EXECUTOR_CACHE_CAPACITY: usize = 4;
 pub struct GasKillerValidator {
     /// RPC URLs per chain for the gas analyzer
     chain_rpc_urls: HashMap<ChainId, String>,
+    /// Read-only providers per chain for chain detection and `stateTransitionCount` reads.
+    providers: Arc<HashMap<ChainId, ReadOnlyProvider>>,
     /// Default chain for backwards compatibility
     default_chain: ChainId,
     /// Cache: (transition_index, block_height) -> computed digest
@@ -103,20 +104,12 @@ impl GasKillerValidator {
     ///
     /// Returns an error if L1 RPC is not set.
     pub fn new() -> Result<Self> {
-        let mut chain_rpc_urls = HashMap::new();
-
-        // Load L1 RPC URL (required)
-        let l1_rpc = env::var("HTTP_RPC")
-            .map_err(|_| anyhow::anyhow!("HTTP_RPC environment variable is not set"))?;
-        chain_rpc_urls.insert(ChainId::L1, l1_rpc);
-
-        // Load L2 RPC URL (optional)
-        if let Ok(l2_rpc) = env::var("L2_HTTP_RPC") {
-            chain_rpc_urls.insert(ChainId::L2, l2_rpc);
-        }
+        let chain_rpc_urls = crate::chain_rpc_urls_from_env()?;
+        let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
 
         Ok(Self {
             chain_rpc_urls,
+            providers,
             default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
@@ -130,8 +123,10 @@ impl GasKillerValidator {
     pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         let mut chain_rpc_urls = HashMap::new();
         chain_rpc_urls.insert(ChainId::L1, rpc_url.into());
+        let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
         Self {
             chain_rpc_urls,
+            providers,
             default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
@@ -141,8 +136,10 @@ impl GasKillerValidator {
 
     /// Creates a new GasKillerValidator with RPC URLs for multiple chains.
     pub fn with_chain_rpc_urls(chain_rpc_urls: HashMap<ChainId, String>) -> Self {
+        let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
         Self {
             chain_rpc_urls,
+            providers,
             default_chain: ChainId::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
@@ -187,25 +184,21 @@ impl GasKillerValidator {
         &self,
         address: alloy::primitives::Address,
     ) -> Result<ChainId> {
-        use alloy_provider::ProviderBuilder;
-
         debug!(
             address = %address,
             "Detecting chain for address"
         );
 
         let supported = self.supported_chains();
-        // Clone the RPC URLs so the closure doesn't borrow self
-        let chain_rpc_urls = self.chain_rpc_urls.clone();
+        // Clone the Arc so the closure doesn't borrow self
+        let providers = Arc::clone(&self.providers);
 
         crate::config::detect_chain_for_address(address, &supported, |chain_id, addr| {
-            let chain_rpc_urls = chain_rpc_urls.clone();
+            let providers = Arc::clone(&providers);
             async move {
-                let rpc_url = chain_rpc_urls
+                let provider = providers
                     .get(&chain_id)
-                    .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_id))?;
-                let url = Url::parse(rpc_url)?;
-                let provider = ProviderBuilder::new().connect_http(url);
+                    .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?;
                 let code = provider.get_code_at(addr).await?;
                 Ok(code)
             }
@@ -223,14 +216,12 @@ impl GasKillerValidator {
         chain_id: ChainId,
     ) -> Result<u64> {
         use crate::bindings::gaskillersdk::GasKillerSDK;
-        use alloy_provider::ProviderBuilder;
 
-        let rpc_url = self
-            .rpc_url_for_chain(chain_id)
-            .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_id))?;
-        let url = Url::parse(rpc_url)?;
-        let provider = ProviderBuilder::new().connect_http(url);
-        let count = GasKillerSDK::new(address, provider)
+        let provider = self
+            .providers
+            .get(&chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?;
+        let count = GasKillerSDK::new(address, provider.clone())
             .stateTransitionCount()
             .call()
             .await
@@ -514,6 +505,17 @@ mod tests {
     async fn test_validator_creation() {
         let _validator =
             GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
+    }
+
+    #[test]
+    fn test_providers_prebuilt_for_each_chain() {
+        let mut urls = HashMap::new();
+        urls.insert(ChainId::L1, "https://example.com".to_string());
+        urls.insert(ChainId::L2, "https://l2.example.com".to_string());
+        let validator = GasKillerValidator::with_chain_rpc_urls(urls);
+
+        assert!(validator.providers.contains_key(&ChainId::L1));
+        assert!(validator.providers.contains_key(&ChainId::L2));
     }
 
     #[tokio::test]
