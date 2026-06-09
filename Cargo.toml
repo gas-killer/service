@@ -24,12 +24,11 @@ async-trait = "0.1"
 axum = "0.7"
 bytes = "1.10.1"
 clap = "4.5.37"
-# TEMP: tracking PR #161 (round number in handle_verification) until it merges; revert branch back to default afterwards.
-commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/handle_verification-round-number" }
-commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/handle_verification-round-number" }
-commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/handle_verification-round-number" }
-commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/handle_verification-round-number" }
-commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/handle_verification-round-number" }
+commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-codec = "0.0.63"
 commonware-cryptography = "0.0.63"
 commonware-macros = "0.0.63"
