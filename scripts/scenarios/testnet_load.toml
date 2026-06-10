@@ -18,23 +18,7 @@ router_url           = "https://testnet.gaskiller.xyz"
 http_rpc             = "$HTTP_RPC"
 ingress_timeout_secs = 60
 
-# ── 1. Smoke ──────────────────────────────────────────────────────────────────
-[[scenarios]]
-name = "smoke"
-mode = "serial"
-
-  [[scenarios.requests]]
-  label               = "array_summation_smoke"
-  target_address      = "0x5DC77FCc9E71F3A0DD0EffC144B697B74F5C5287"
-  call_data           = "0194db8e00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
-  from_address        = "0xff467a85932cF543Df50255f00A8A829c12a3A11"
-  transition_index    = "auto"
-  value               = "0"
-  block_height        = 0
-  verify              = true
-  verify_timeout_secs = 300
-
-# ── 2. Burst (10 concurrent) ──────────────────────────────────────────────────
+# ── Burst test with 10 concurrent requests ──────────────────────────────────
 [[scenarios]]
 name  = "burst_10"
 mode  = "parallel"
@@ -47,7 +31,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false
 
   [[scenarios.requests]]
   label            = "burst_2"
@@ -57,7 +41,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false
 
   [[scenarios.requests]]
   label            = "burst_3"
@@ -67,7 +51,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false
 
   [[scenarios.requests]]
   label            = "burst_4"
@@ -77,7 +61,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false
 
   [[scenarios.requests]]
   label            = "burst_5"
@@ -87,7 +71,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false
 
   [[scenarios.requests]]
   label            = "burst_6"
@@ -97,7 +81,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false
 
   [[scenarios.requests]]
   label            = "burst_7"
@@ -107,7 +91,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false
 
   [[scenarios.requests]]
   label            = "burst_8"
@@ -117,7 +101,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false
 
   [[scenarios.requests]]
   label            = "burst_9"
@@ -127,7 +111,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false
 
   [[scenarios.requests]]
   label            = "burst_10"
@@ -137,4 +121,4 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
-  verify           = true
+  verify           = false

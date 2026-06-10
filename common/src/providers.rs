@@ -22,9 +22,11 @@ pub fn chain_rpc_urls_from_env() -> anyhow::Result<HashMap<ChainId, String>> {
 
     let l1_rpc = env::var("HTTP_RPC")
         .map_err(|_| anyhow::anyhow!("HTTP_RPC environment variable is not set"))?;
+    Url::parse(&l1_rpc).map_err(|e| anyhow::anyhow!("HTTP_RPC is not a valid URL: {e}"))?;
     urls.insert(ChainId::L1, l1_rpc);
 
     if let Ok(l2_rpc) = env::var("L2_HTTP_RPC") {
+        Url::parse(&l2_rpc).map_err(|e| anyhow::anyhow!("L2_HTTP_RPC is not a valid URL: {e}"))?;
         urls.insert(ChainId::L2, l2_rpc);
     }
 
