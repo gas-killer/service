@@ -18,7 +18,9 @@ use commonware_runtime::{
 use commonware_utils::NZU32;
 use commonware_utils::set::OrderedAssociated;
 use eigen_logging::log_level::LogLevel;
-use gas_killer_common::{get_operator_states, load_key_from_file};
+use gas_killer_common::{
+    GasKillerValidator, SpeculativePrebuildConfig, get_operator_states, load_key_from_file,
+};
 use gas_killer_router::GasKillerOrchestratorBuilder;
 use gas_killer_router::metrics::MetricsCollector;
 use governor::Quota;
@@ -286,9 +288,25 @@ fn main() {
             .with_threshold(threshold)
             .load_from_env(); // Read configuration from environment variables
 
-        let orchestrator = GasKillerOrchestratorBuilder::build(builder, Arc::clone(&metrics))
-            .await
-            .expect("Failed to build orchestrator");
+        // Shared validator, used by the creator and orchestrator. Owned here so we can also run
+        // its speculative executor pre-build loop, which warms the shared executor cache off the
+        // hot path so the first analysis at each block skips the live build().
+        let validator = Arc::new(
+            GasKillerValidator::new()
+                .expect("HTTP_RPC environment variable must be set for gas analyzer"),
+        );
+        {
+            let spec_validator = Arc::clone(&validator);
+            let prebuild_cfg = SpeculativePrebuildConfig::from_env();
+            context.clone().spawn(move |_| async move {
+                spec_validator.run_speculative_prebuild(prebuild_cfg).await;
+            });
+        }
+
+        let orchestrator =
+            GasKillerOrchestratorBuilder::build(builder, validator, Arc::clone(&metrics))
+                .await
+                .expect("Failed to build orchestrator");
 
         context
             .clone()
