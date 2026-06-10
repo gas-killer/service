@@ -3778,6 +3778,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "dotenv",
+ "futures",
  "gas-analyzer-evmsketch",
  "prometheus-client 0.23.1",
  "serde",

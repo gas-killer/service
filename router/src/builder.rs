@@ -26,15 +26,19 @@ impl GasKillerOrchestratorBuilder {
     ///
     /// # Arguments
     /// * `builder` - The configured orchestrator builder
+    /// * `validator` - The shared validator, owned by the caller (which also runs its
+    ///   speculative pre-build loop), used by both the creator and the orchestrator
+    /// * `metrics` - The shared metrics collector
     ///
     /// # Returns
     /// * `Result<GasKillerOrchestrator<C>>` - The constructed gas killer orchestrator
     pub async fn build<C: Clock>(
         builder: OrchestratorBuilder<C>,
+        validator: Arc<GasKillerValidator>,
         metrics: Arc<MetricsCollector>,
     ) -> Result<GasKillerOrchestrator<C>, Box<dyn std::error::Error>> {
-        // Create shared validator first - used by both creator and orchestrator
-        let validator = Arc::new(GasKillerValidator::new()?);
+        // The validator is created and owned by the caller (which also spawns the speculative
+        // pre-build loop on it); it is shared here by both the creator and the orchestrator.
 
         // Shared timestamp for P2P round-trip measurement: set by the creator when it
         // dispatches a payload, read+cleared by the executor when threshold sigs arrive.

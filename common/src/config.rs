@@ -154,3 +154,65 @@ pub async fn get_operator_states() -> Result<Vec<QuorumInfo>, Box<dyn std::error
     let client = EigenStakingClient::new(http_rpc, ws_rpc, avs_deployment_path).await?;
     client.get_operator_states().await
 }
+
+/// Maximum age (in blocks) of a reference block, falling back to the contract default
+/// when `BLOCK_STALE_MEASURE` is unset or unparseable.
+///
+/// Mirrors `DEFAULT_BLOCK_STALE_MEASURE` in `GasKillerSDK.sol`. The service reuses this
+/// value as an off-chain policy bound: it rejects gas-analysis requests whose
+/// `block_height` is older than this window (see ingress validation), and sizes the
+/// speculative executor cache to cover it.
+pub const DEFAULT_BLOCK_STALE_MEASURE: u64 = 300;
+
+/// Reads the staleness window from `BLOCK_STALE_MEASURE`, defaulting to
+/// [`DEFAULT_BLOCK_STALE_MEASURE`].
+pub fn block_stale_measure() -> u64 {
+    env::var("BLOCK_STALE_MEASURE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_BLOCK_STALE_MEASURE)
+}
+
+/// Runtime configuration for the speculative executor pre-build loop.
+///
+/// The loop watches each chain's head and pre-builds the EVMSketch executor for the
+/// latest block so a task's first validation hits the executor cache instead of paying
+/// the live `build()` cost (~80–120 ms) on the critical path.
+#[derive(Clone, Copy, Debug)]
+pub struct SpeculativePrebuildConfig {
+    /// Whether the loop runs at all (`SPECULATIVE_PREBUILD`, default `true`).
+    pub enabled: bool,
+    /// How often to poll each chain's head (`SPECULATIVE_PREBUILD_POLL_MS`, default 2000).
+    pub poll_interval: std::time::Duration,
+    /// Blocks behind head to target (`SPECULATIVE_PREBUILD_CONFIRMATIONS`, default 0).
+    ///
+    /// The cached executor only feeds the (discarded) gas estimate — never the signed
+    /// `storage_updates` — so building at the unconfirmed tip is consensus-safe. A
+    /// non-zero depth trades a small hit-rate loss for fewer wasted builds on reorgs.
+    pub confirmation_depth: u64,
+}
+
+impl SpeculativePrebuildConfig {
+    /// Builds the config from environment variables, applying defaults for any unset or
+    /// unparseable values.
+    pub fn from_env() -> Self {
+        let enabled = env::var("SPECULATIVE_PREBUILD")
+            .map(|v| !matches!(v.trim().to_lowercase().as_str(), "false" | "0" | "no"))
+            .unwrap_or(true);
+        let poll_ms = env::var("SPECULATIVE_PREBUILD_POLL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&ms| ms > 0)
+            .unwrap_or(2000);
+        let confirmation_depth = env::var("SPECULATIVE_PREBUILD_CONFIRMATIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        Self {
+            enabled,
+            poll_interval: std::time::Duration::from_millis(poll_ms),
+            confirmation_depth,
+        }
+    }
+}

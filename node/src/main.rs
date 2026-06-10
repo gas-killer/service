@@ -16,8 +16,8 @@ use commonware_runtime::{Metrics, Runner, Spawner, tokio};
 use commonware_utils::{NZU32, set::OrderedAssociated};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
-    GasKillerTaskData, GasKillerValidator, OrchestratorConfig, ValidatorMetrics,
-    get_operator_states, load_key_from_file, load_orchestrator_config,
+    GasKillerTaskData, GasKillerValidator, OrchestratorConfig, SpeculativePrebuildConfig,
+    ValidatorMetrics, get_operator_states, load_key_from_file, load_orchestrator_config,
 };
 use governor::Quota;
 use std::collections::HashMap;
@@ -361,6 +361,16 @@ fn main() {
                 .expect("HTTP_RPC environment variable must be set for gas analyzer")
                 .with_validator_metrics(Arc::clone(&validator_metrics)),
         );
+
+        // Warm the executor cache off the hot path: a background loop pre-builds the EVMSketch
+        // executor for each chain's latest block so the first task validation is a cache hit.
+        {
+            let spec_validator = Arc::clone(&validator);
+            let prebuild_cfg = SpeculativePrebuildConfig::from_env();
+            context.clone().spawn(move |_| async move {
+                spec_validator.run_speculative_prebuild(prebuild_cfg).await;
+            });
+        }
 
         // Create contributor with GasKillerTaskData as the metadata type
         let contributor = Contributor::<GasKillerTaskData>::new(
