@@ -163,6 +163,7 @@ impl MetricsCollector {
             execution_duration_seconds,
             p2p_round_trip_seconds,
             task_queue_depth,
+            executor_chain_detection_seconds,
             executor_hash_preflight_seconds,
             executor_supports_interface_seconds,
             executor_tx_send_seconds,

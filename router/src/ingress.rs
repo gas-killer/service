@@ -8,7 +8,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
-use gas_killer_common::ChainId;
+use gas_killer_common::ChainRole;
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
@@ -59,7 +59,7 @@ pub struct IngressState {
     pub sender: TaskSender,
     pub queue_depth: TaskQueueDepth,
     pub metrics: Option<Arc<MetricsCollector>>,
-    pub providers: Arc<HashMap<ChainId, ReadOnlyProvider>>,
+    pub providers: Arc<HashMap<ChainRole, ReadOnlyProvider>>,
     /// Bearer token password. `None` disables authentication.
     pub password: Option<String>,
     pub avs_metadata: AvsMetadata,
@@ -70,7 +70,7 @@ impl IngressState {
         sender: TaskSender,
         queue_depth: TaskQueueDepth,
         metrics: Arc<MetricsCollector>,
-        providers: HashMap<ChainId, ReadOnlyProvider>,
+        providers: HashMap<ChainRole, ReadOnlyProvider>,
         password: Option<String>,
         avs_metadata: AvsMetadata,
     ) -> Self {
@@ -143,9 +143,9 @@ impl fmt::Display for OnchainValidationError {
 impl std::error::Error for OnchainValidationError {}
 
 async fn detect_contract_chain<P: Provider + Clone>(
-    providers: &HashMap<ChainId, P>,
+    providers: &HashMap<ChainRole, P>,
     address: Address,
-) -> Result<ChainId, OnchainValidationError> {
+) -> Result<ChainRole, OnchainValidationError> {
     let mut rpc_error: Option<String> = None;
     for &chain_id in &CHAIN_DETECTION_ORDER {
         if let Some(provider) = providers.get(&chain_id) {
@@ -166,7 +166,7 @@ async fn detect_contract_chain<P: Provider + Clone>(
 }
 
 async fn validate_onchain<P: Provider + Clone>(
-    providers: &HashMap<ChainId, P>,
+    providers: &HashMap<ChainRole, P>,
     body: &GasKillerTaskRequestBody,
 ) -> Result<(), OnchainValidationError> {
     let chain_id = detect_contract_chain(providers, body.target_address).await?;
@@ -1206,7 +1206,7 @@ mod tests {
             push_code_empty(&asserter);
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, provider);
+            providers.insert(ChainRole::L1, provider);
 
             let err = validate_onchain(&providers, &valid_body())
                 .await
@@ -1224,7 +1224,7 @@ mod tests {
             push_block_number(&asserter, 40); // chain is at 40, request wants 50
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, provider);
+            providers.insert(ChainRole::L1, provider);
 
             let err = validate_onchain(&providers, &valid_body())
                 .await
@@ -1249,7 +1249,7 @@ mod tests {
             push_state_transition_count(&asserter, 10); // contract at 10, request provides 5 ✗
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, provider);
+            providers.insert(ChainRole::L1, provider);
 
             let err = validate_onchain(&providers, &valid_body())
                 .await
@@ -1274,7 +1274,7 @@ mod tests {
             push_state_transition_count(&asserter, 5); // contract at 5, request at 5 ✓
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, provider);
+            providers.insert(ChainRole::L1, provider);
 
             validate_onchain(&providers, &valid_body())
                 .await
@@ -1289,7 +1289,7 @@ mod tests {
             push_state_transition_count(&asserter, 3); // contract at 3, request at 5 → ahead ✗
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, provider);
+            providers.insert(ChainRole::L1, provider);
 
             let err = validate_onchain(&providers, &valid_body())
                 .await
@@ -1312,7 +1312,7 @@ mod tests {
             asserter.push_failure_msg("connection refused");
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, provider);
+            providers.insert(ChainRole::L1, provider);
 
             let err = validate_onchain(&providers, &valid_body())
                 .await
@@ -1330,7 +1330,7 @@ mod tests {
             asserter.push_failure_msg("node overloaded");
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, provider);
+            providers.insert(ChainRole::L1, provider);
 
             let err = validate_onchain(&providers, &valid_body())
                 .await
@@ -1349,7 +1349,7 @@ mod tests {
             asserter.push_failure_msg("call reverted");
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, provider);
+            providers.insert(ChainRole::L1, provider);
 
             let err = validate_onchain(&providers, &valid_body())
                 .await
@@ -1368,7 +1368,7 @@ mod tests {
             // No push_state_transition_count — the mock asserter would fail if it were called.
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, provider);
+            providers.insert(ChainRole::L1, provider);
 
             let mut body = valid_body();
             body.transition_index = None;
@@ -1389,8 +1389,8 @@ mod tests {
             push_state_transition_count(&l2_asserter, 5);
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, l1_provider);
-            providers.insert(ChainId::L2, l2_provider);
+            providers.insert(ChainRole::L1, l1_provider);
+            providers.insert(ChainRole::L2, l2_provider);
 
             validate_onchain(&providers, &valid_body())
                 .await
@@ -1406,8 +1406,8 @@ mod tests {
             push_code_empty(&l2_asserter);
 
             let mut providers = HashMap::new();
-            providers.insert(ChainId::L1, l1_provider);
-            providers.insert(ChainId::L2, l2_provider);
+            providers.insert(ChainRole::L1, l1_provider);
+            providers.insert(ChainRole::L2, l2_provider);
 
             let err = validate_onchain(&providers, &valid_body())
                 .await

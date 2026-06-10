@@ -10,7 +10,7 @@ use std::fs;
 /// These are role labels, not chain-specific names. The actual numeric chain ID
 /// is discovered at runtime by querying `eth_chainId` on the configured RPC endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum ChainId {
+pub enum ChainRole {
     /// The primary (L1) chain
     #[default]
     L1,
@@ -18,17 +18,29 @@ pub enum ChainId {
     L2,
 }
 
-impl ChainId {
+impl ChainRole {
     /// Returns the role name as a string
     pub fn name(&self) -> &'static str {
         match self {
-            ChainId::L1 => "l1",
-            ChainId::L2 => "l2",
+            ChainRole::L1 => "l1",
+            ChainRole::L2 => "l2",
+        }
+    }
+
+    /// Returns the configured HTTP RPC URL for this chain role.
+    ///
+    /// Reads `HTTP_RPC` for L1 and `L2_HTTP_RPC` for L2.
+    pub fn rpc_url(&self) -> anyhow::Result<String> {
+        match self {
+            ChainRole::L1 => env::var("HTTP_RPC")
+                .map_err(|_| anyhow::anyhow!("HTTP_RPC environment variable is not set")),
+            ChainRole::L2 => env::var("L2_HTTP_RPC")
+                .map_err(|_| anyhow::anyhow!("L2_HTTP_RPC environment variable is not set")),
         }
     }
 }
 
-impl std::fmt::Display for ChainId {
+impl std::fmt::Display for ChainRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
     }
@@ -36,7 +48,7 @@ impl std::fmt::Display for ChainId {
 
 /// The ordered list of roles to check when detecting where a contract is deployed.
 /// L1 is checked first as the primary chain.
-pub const CHAIN_DETECTION_ORDER: [ChainId; 2] = [ChainId::L1, ChainId::L2];
+pub const CHAIN_DETECTION_ORDER: [ChainRole; 2] = [ChainRole::L1, ChainRole::L2];
 
 /// Detects which chain role has code deployed at the given address.
 ///
@@ -46,36 +58,36 @@ pub const CHAIN_DETECTION_ORDER: [ChainId; 2] = [ChainId::L1, ChainId::L2];
 /// # Arguments
 /// * `address` - The contract address to look up
 /// * `supported_chains` - Slice of chains the caller supports (filtered against detection order)
-/// * `get_code` - Async closure `(ChainId, Address) -> Result<Bytes>` that fetches bytecode
+/// * `get_code` - Async closure `(ChainRole, Address) -> Result<Bytes>` that fetches bytecode
 pub async fn detect_chain_for_address<F, Fut>(
     address: alloy_primitives::Address,
-    supported_chains: &[ChainId],
+    supported_chains: &[ChainRole],
     get_code: F,
-) -> anyhow::Result<ChainId>
+) -> anyhow::Result<ChainRole>
 where
-    F: Fn(ChainId, alloy_primitives::Address) -> Fut,
+    F: Fn(ChainRole, alloy_primitives::Address) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<alloy_primitives::Bytes>>,
 {
-    for &chain_id in &CHAIN_DETECTION_ORDER {
-        if !supported_chains.contains(&chain_id) {
+    for &chain_role in &CHAIN_DETECTION_ORDER {
+        if !supported_chains.contains(&chain_role) {
             continue;
         }
 
-        match get_code(chain_id, address).await {
+        match get_code(chain_role, address).await {
             Ok(code) => {
                 if !code.is_empty() {
                     tracing::debug!(
-                        chain = %chain_id,
+                        chain = %chain_role,
                         address = %address,
                         code_len = code.len(),
                         "Found contract code on chain"
                     );
-                    return Ok(chain_id);
+                    return Ok(chain_role);
                 }
             }
             Err(e) => {
                 tracing::debug!(
-                    chain = %chain_id,
+                    chain = %chain_role,
                     error = %e,
                     "Failed to check code on chain"
                 );

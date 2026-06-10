@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use tracing::debug;
 use url::Url;
 
-use crate::config::ChainId;
+use crate::config::ChainRole;
 use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
 use commonware_avs_router::wire;
@@ -79,9 +79,9 @@ const DEFAULT_EXECUTOR_CACHE_CAPACITY: usize = 4;
 #[derive(Clone)]
 pub struct GasKillerValidator {
     /// RPC URLs per chain for the gas analyzer
-    chain_rpc_urls: HashMap<ChainId, String>,
+    chain_rpc_urls: HashMap<ChainRole, String>,
     /// Default chain for backwards compatibility
-    default_chain: ChainId,
+    default_chain: ChainRole,
     /// Cache: (transition_index, block_height) -> computed digest
     /// Prevents re-running expensive EVMSketch for the same round when the
     /// orchestrator validates multiple signatures for identical task data.
@@ -108,16 +108,16 @@ impl GasKillerValidator {
         // Load L1 RPC URL (required)
         let l1_rpc = env::var("HTTP_RPC")
             .map_err(|_| anyhow::anyhow!("HTTP_RPC environment variable is not set"))?;
-        chain_rpc_urls.insert(ChainId::L1, l1_rpc);
+        chain_rpc_urls.insert(ChainRole::L1, l1_rpc);
 
         // Load L2 RPC URL (optional)
         if let Ok(l2_rpc) = env::var("L2_HTTP_RPC") {
-            chain_rpc_urls.insert(ChainId::L2, l2_rpc);
+            chain_rpc_urls.insert(ChainRole::L2, l2_rpc);
         }
 
         Ok(Self {
             chain_rpc_urls,
-            default_chain: ChainId::L1,
+            default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
             validator_metrics: None,
@@ -129,10 +129,10 @@ impl GasKillerValidator {
     /// Useful for testing without modifying environment variables.
     pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         let mut chain_rpc_urls = HashMap::new();
-        chain_rpc_urls.insert(ChainId::L1, rpc_url.into());
+        chain_rpc_urls.insert(ChainRole::L1, rpc_url.into());
         Self {
             chain_rpc_urls,
-            default_chain: ChainId::L1,
+            default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
             validator_metrics: None,
@@ -140,10 +140,10 @@ impl GasKillerValidator {
     }
 
     /// Creates a new GasKillerValidator with RPC URLs for multiple chains.
-    pub fn with_chain_rpc_urls(chain_rpc_urls: HashMap<ChainId, String>) -> Self {
+    pub fn with_chain_rpc_urls(chain_rpc_urls: HashMap<ChainRole, String>) -> Self {
         Self {
             chain_rpc_urls,
-            default_chain: ChainId::L1,
+            default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
             validator_metrics: None,
@@ -165,17 +165,17 @@ impl GasKillerValidator {
     }
 
     /// Returns the RPC URL for a specific chain
-    pub fn rpc_url_for_chain(&self, chain_id: ChainId) -> Option<&str> {
+    pub fn rpc_url_for_chain(&self, chain_id: ChainRole) -> Option<&str> {
         self.chain_rpc_urls.get(&chain_id).map(|s| s.as_str())
     }
 
     /// Returns whether a chain is supported
-    pub fn supports_chain(&self, chain_id: ChainId) -> bool {
+    pub fn supports_chain(&self, chain_id: ChainRole) -> bool {
         self.chain_rpc_urls.contains_key(&chain_id)
     }
 
     /// Returns the actual EVM chain ID (from `eth_chainId`) for the given chain role's RPC.
-    pub async fn get_chain_id_for(&self, chain: ChainId) -> Result<u64> {
+    pub async fn get_chain_id_for(&self, chain: ChainRole) -> Result<u64> {
         use alloy_provider::ProviderBuilder;
         let rpc_url = self
             .rpc_url_for_chain(chain)
@@ -190,7 +190,7 @@ impl GasKillerValidator {
     }
 
     /// Returns all supported chains
-    pub fn supported_chains(&self) -> Vec<ChainId> {
+    pub fn supported_chains(&self) -> Vec<ChainRole> {
         self.chain_rpc_urls.keys().copied().collect()
     }
 
@@ -201,7 +201,7 @@ impl GasKillerValidator {
     pub async fn detect_chain_for_address(
         &self,
         address: alloy::primitives::Address,
-    ) -> Result<ChainId> {
+    ) -> Result<ChainRole> {
         use alloy_provider::ProviderBuilder;
 
         debug!(
@@ -235,7 +235,7 @@ impl GasKillerValidator {
     pub async fn get_state_transition_count_on_chain(
         &self,
         address: alloy::primitives::Address,
-        chain_id: ChainId,
+        chain_id: ChainRole,
     ) -> Result<u64> {
         use crate::bindings::gaskillersdk::GasKillerSDK;
         use alloy_provider::ProviderBuilder;

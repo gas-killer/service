@@ -22,7 +22,7 @@ use commonware_avs_eigenlayer::AvsDeployment;
 use commonware_avs_router::bindings::bls_apk_registry::BLSApkRegistry;
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
-use gas_killer_common::{ChainId, GasKillerValidator};
+use gas_killer_common::{ChainRole, GasKillerValidator};
 use std::collections::HashMap;
 use std::{env, str::FromStr, sync::Arc};
 use tracing::info;
@@ -131,7 +131,7 @@ pub async fn create_listening_creator_with_server(
 }
 
 async fn build_ingress_providers()
--> anyhow::Result<HashMap<ChainId, gas_killer_common::ReadOnlyProvider>> {
+-> anyhow::Result<HashMap<ChainRole, gas_killer_common::ReadOnlyProvider>> {
     let mut providers = HashMap::new();
 
     if let Ok(rpc) = env::var("HTTP_RPC") {
@@ -139,7 +139,7 @@ async fn build_ingress_providers()
             .connect(&rpc)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create L1 ingress provider: {e}"))?;
-        providers.insert(ChainId::L1, p);
+        providers.insert(ChainRole::L1, p);
         info!(chain = "l1", "Created L1 ingress read provider");
     }
 
@@ -148,7 +148,7 @@ async fn build_ingress_providers()
             .connect(&rpc)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create L2 ingress provider: {e}"))?;
-        providers.insert(ChainId::L2, p);
+        providers.insert(ChainRole::L2, p);
         info!(chain = "l2", "Created L2 ingress read provider");
     }
 
@@ -166,15 +166,10 @@ async fn build_ingress_providers()
 /// estimation (e.g., double-execution with a stale transition_index), the local nonce counter
 /// is never corrupted, keeping subsequent rounds healthy.
 async fn create_wallet_provider_for_chain(
-    chain_id: ChainId,
+    chain_role: ChainRole,
     private_key: &str,
 ) -> Result<SimpleWalletProvider> {
-    let http_rpc = match chain_id {
-        ChainId::L1 => env::var("HTTP_RPC")
-            .map_err(|_| anyhow::anyhow!("HTTP_RPC must be set for L1 chain"))?,
-        ChainId::L2 => env::var("L2_HTTP_RPC")
-            .map_err(|_| anyhow::anyhow!("L2_HTTP_RPC must be set for L2 chain"))?,
-    };
+    let http_rpc = chain_role.rpc_url()?;
 
     let ecdsa_signer = PrivateKeySigner::from_str(private_key)
         .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
@@ -193,7 +188,9 @@ async fn create_wallet_provider_for_chain(
         .wallet(ecdsa_signer)
         .connect(&http_rpc)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect write provider for {}: {}", chain_id, e))?;
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to connect write provider for {}: {}", chain_role, e)
+        })?;
 
     Ok(provider)
 }
@@ -236,16 +233,20 @@ pub async fn create_gas_killer_executor(
             anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
         })?;
 
-    // Create wallet providers for each supported chain, keyed by actual EVM chain ID
+    // Create wallet providers for each supported chain, keyed by actual EVM chain ID.
+    // `chain_roles` records the role behind each numeric ID so the executor can pick
+    // the per-role receipt timeout from the chain ID carried in task data.
     let mut providers: HashMap<u64, SimpleWalletProvider> = HashMap::new();
+    let mut chain_roles: HashMap<u64, ChainRole> = HashMap::new();
 
     // L1 provider (required)
-    let l1_provider = create_wallet_provider_for_chain(ChainId::L1, &private_key).await?;
+    let l1_provider = create_wallet_provider_for_chain(ChainRole::L1, &private_key).await?;
     let l1_chain_id = l1_provider
         .get_chain_id()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get L1 chain ID: {}", e))?;
     providers.insert(l1_chain_id, l1_provider);
+    chain_roles.insert(l1_chain_id, ChainRole::L1);
     info!(
         chain_id = l1_chain_id,
         chain = "l1",
@@ -254,10 +255,11 @@ pub async fn create_gas_killer_executor(
 
     // L2 provider — optional, only used for write-side tx execution on L2
     if l2_http_rpc.is_some() {
-        match create_wallet_provider_for_chain(ChainId::L2, &private_key).await {
+        match create_wallet_provider_for_chain(ChainRole::L2, &private_key).await {
             Ok(l2_provider) => match l2_provider.get_chain_id().await {
                 Ok(l2_chain_id) => {
                     providers.insert(l2_chain_id, l2_provider);
+                    chain_roles.insert(l2_chain_id, ChainRole::L2);
                     info!(
                         chain_id = l2_chain_id,
                         chain = "l2",
@@ -299,6 +301,7 @@ pub async fn create_gas_killer_executor(
 
     // Create handler with multi-chain providers
     let gas_killer_handler = GasKillerHandler::with_providers(providers)
+        .with_chain_roles(chain_roles)
         .with_metrics(metrics)
         .with_dispatch_time(dispatch_time)
         .with_receipt_timeout(receipt_timeout_override);
