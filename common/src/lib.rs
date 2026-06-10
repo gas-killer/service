@@ -1,5 +1,6 @@
 pub mod bindings;
 pub mod config;
+pub mod providers;
 pub mod task_data;
 pub mod validator;
 
@@ -8,6 +9,7 @@ pub use config::{
     ChainId, KeyConfig, OrchestratorConfig, detect_chain_for_address, get_operator_states,
     load_key_from_file, load_orchestrator_config,
 };
+pub use providers::{build_read_providers, chain_rpc_urls_from_env};
 pub use task_data::GasKillerTaskData;
 pub use validator::{GasKillerValidator, ValidatorMetrics};
 
