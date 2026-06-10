@@ -60,7 +60,7 @@ spec:
 
               fetch_secret "${PREFIX}-avs-deploy"       /app/secrets/avs_deploy.json
               fetch_secret "${PREFIX}-router-private-key" /app/secrets/router_orchestrator.json
-              chmod 600 /app/secrets/router_orchestrator.json
+              chmod 644 /app/secrets/router_orchestrator.json
               echo "All router secrets fetched successfully"
           volumeMounts:
             - name: router-secrets
@@ -305,6 +305,10 @@ spec:
             {{- end }}
             - name: AGGREGATION_FREQUENCY
               value: {{ .Values.router.aggregationFrequency | quote }}
+            {{- if .Values.router.receiptTimeoutSecs }}
+            - name: EXECUTOR_RECEIPT_TIMEOUT_SECS
+              value: {{ .Values.router.receiptTimeoutSecs | quote }}
+            {{- end }}
             - name: HEALTHZ_PORT
               value: {{ .Values.router.healthzPort | quote }}
             - name: PRIVATE_KEY

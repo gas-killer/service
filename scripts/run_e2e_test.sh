@@ -77,6 +77,7 @@ echo -e "${YELLOW}Step 1: Building scripts...${NC}"
 cd "$PROJECT_ROOT/scripts"
 cargo build --release -p scripts --bin deploy_array_summation
 cargo build --release -p scripts --bin send_request
+cargo build --release -p scripts --bin verify_message_hash_parity
 cd "$PROJECT_ROOT"
 
 # Step 2: Assume .env already exists and contains required values
@@ -180,6 +181,18 @@ else
     export GAS_KILLER_TARGET_ADDRESS="$ARRAY_SUMMATION_ADDRESS"
 fi
 
+cd "$PROJECT_ROOT"
+
+# Step 7b: Verify the router's local payload hash matches the contract's getMessageHash
+echo -e "${YELLOW}Step 7b: Verifying message-hash parity (build_payload_hash vs on-chain getMessageHash)...${NC}"
+cd "$PROJECT_ROOT/scripts"
+if ! cargo run --release -p scripts --bin verify_message_hash_parity; then
+    echo -e "${RED}❌ Message-hash parity check FAILED — local build_payload_hash diverges from on-chain getMessageHash${NC}"
+    cd "$PROJECT_ROOT"
+    docker compose logs --tail=100 ethereum || true
+    exit 1
+fi
+echo -e "${GREEN}✅ Message-hash parity verified${NC}"
 cd "$PROJECT_ROOT"
 
 # Step 8: Check service health

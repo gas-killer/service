@@ -26,7 +26,9 @@ pub struct MetricsCollector {
     pub p2p_round_trip_seconds: Histogram,
     /// Current number of tasks sitting in the ingress queue waiting to be processed.
     pub task_queue_depth: Gauge<i64, AtomicI64>,
-    /// Time for getMessageHash RPC preflight call (seconds).
+    /// Time to detect which chain a target contract is deployed on (seconds).
+    pub executor_chain_detection_seconds: Histogram,
+    /// Time for the payload-hash preflight computation (seconds).
     pub executor_hash_preflight_seconds: Histogram,
     /// Time for supportsInterface ERC-165 check (seconds).
     pub executor_supports_interface_seconds: Histogram,
@@ -83,8 +85,10 @@ impl MetricsCollector {
             aggregation_rounds_failed.clone(),
         );
 
-        let execution_duration_seconds =
-            Histogram::new([1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]);
+        // Fast reverts (~sub-second, fail at tx send) and confirmed runs (~block-time dominated); Buckets resolve both ends.
+        let execution_duration_seconds = Histogram::new([
+            0.5, 1.0, 2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0, 45.0, 60.0, 120.0, 300.0,
+        ]);
         registry.register(
             "gas_killer_execution_duration_seconds",
             "Duration of handle_verification including all contract calls and tx submission",
@@ -106,12 +110,21 @@ impl MetricsCollector {
             task_queue_depth.clone(),
         );
 
-        let rpc_buckets = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0];
+        // Single same-RPC round-trips (~5-150ms); fine low-end buckets so p50/p95 resolve.
+        let rpc_buckets = [
+            0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5,
+        ];
+        let executor_chain_detection_seconds = Histogram::new(rpc_buckets);
+        registry.register(
+            "gas_killer_executor_chain_detection_seconds",
+            "Time to detect which chain a target contract is deployed on",
+            executor_chain_detection_seconds.clone(),
+        );
 
         let executor_hash_preflight_seconds = Histogram::new(rpc_buckets);
         registry.register(
             "gas_killer_executor_hash_preflight_seconds",
-            "Time for the getMessageHash RPC preflight call",
+            "Time for the payload-hash preflight computation",
             executor_hash_preflight_seconds.clone(),
         );
 
@@ -129,8 +142,10 @@ impl MetricsCollector {
             executor_tx_send_seconds.clone(),
         );
 
-        let executor_receipt_confirmation_seconds =
-            Histogram::new([0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]);
+        // Block-time driven (~1-2 confirmations); dense through the 8-30s window.
+        let executor_receipt_confirmation_seconds = Histogram::new([
+            1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 15.0, 18.0, 24.0, 30.0, 45.0, 60.0, 120.0,
+        ]);
         registry.register(
             "gas_killer_executor_receipt_confirmation_seconds",
             "Time waiting for the verifyAndUpdate receipt to be mined",

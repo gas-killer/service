@@ -4,164 +4,63 @@ use commonware_avs_router::creator::Creator;
 use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
 
+use alloy_primitives::Bytes;
 use anyhow::Result;
 use async_trait::async_trait;
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher, Sha256};
+use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn};
 
-/// Shared timestamp set by the creator when it dispatches a task and consumed by the executor
-/// to compute the P2P round-trip duration.
+/// Per-round dispatch timestamps: the creator inserts `round -> Instant::now()` when it dispatches
+/// a task, and the executor removes the matching entry in `handle_verification` to compute the P2P
+/// round-trip duration.
 ///
-/// This is a single slot, not a per-round map. It is accurate as long as rounds are sequential
-/// (one task in flight at a time), which the commonware orchestrator currently guarantees.
-/// If a consensus round fails without calling `handle_verification`, the stale timestamp bleeds
-/// into the next round's measurement. A per-round `HashMap<u64, Instant>` would fix this, but
-/// requires `handle_verification` to receive the round number — tracked upstream in
-/// https://github.com/BreadchainCoop/commonware-restaking/issues/154.
-pub type DispatchTime = Arc<Mutex<Option<Instant>>>;
+/// Keying by round (rather than a single shared slot) means a consensus round that fails without
+/// calling `handle_verification` cannot bleed its stale timestamp into the next round's
+/// measurement. Rounds advance monotonically and the orchestrator runs one at a time, so the
+/// creator evicts any entry older than the round it is dispatching, keeping the map bounded even
+/// when rounds fail.
+pub type DispatchTime = Arc<Mutex<HashMap<u64, Instant>>>;
 
-/// A queue that can hold and provide task requests
-pub trait TaskQueue: Send + Sync {
-    /// Add a task to the queue
-    fn push(&self, task: GasKillerTaskRequest);
-
-    /// Remove and return the next task from the queue
-    fn pop(&self) -> Option<GasKillerTaskRequest>;
-
-    /// Current number of pending tasks in the queue
-    fn len(&self) -> usize;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
+/// Records `round`'s dispatch instant for later round-trip measurement, first evicting any entry
+/// from an earlier round. Rounds advance monotonically and the orchestrator runs one at a time, so
+/// an older entry belongs to a round that failed without completing; dropping it here keeps the map
+/// bounded even when rounds repeatedly fail.
+pub(crate) fn stamp_dispatch_time(times: &DispatchTime, round: u64) {
+    if let Ok(mut times) = times.lock() {
+        times.retain(|&r, _| r >= round);
+        times.insert(round, Instant::now());
     }
 }
 
-/// Simple in-memory task queue using Arc<Mutex> with proper error handling
-#[derive(Clone)]
-pub struct GasKillerTaskQueue {
-    queue: Arc<Mutex<Vec<GasKillerTaskRequest>>>,
-    timeout_ms: u64,
-    max_retries: u32,
-    /// Maintained atomically so `len()` is always accurate even when the mutex is held.
-    count: Arc<AtomicUsize>,
+/// Removes and returns `round`'s dispatch instant, if one was recorded. Consuming the entry both
+/// yields the round-trip start and prevents the completed round from lingering in the map.
+pub(crate) fn take_dispatch_time(times: &DispatchTime, round: u64) -> Option<Instant> {
+    times.lock().ok().and_then(|mut times| times.remove(&round))
 }
 
-impl GasKillerTaskQueue {
-    pub fn new() -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(Vec::new())),
-            timeout_ms: 1000, // 1 second default timeout
-            max_retries: 3,   // 3 retries by default
-            count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
+pub type TaskSender = UnboundedSender<GasKillerTaskRequest>;
+pub type TaskReceiver = UnboundedReceiver<GasKillerTaskRequest>;
+/// Shared atomic counter tracking tasks in flight between the ingress sender and creator receiver.
+pub type TaskQueueDepth = Arc<AtomicUsize>;
 
-    pub fn with_timeout(timeout_ms: u64) -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(Vec::new())),
-            timeout_ms,
-            max_retries: 3,
-            count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    pub fn with_config(timeout_ms: u64, max_retries: u32) -> Self {
-        Self {
-            queue: Arc::new(Mutex::new(Vec::new())),
-            timeout_ms,
-            max_retries,
-            count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    /// Try to acquire the lock with timeout and retries
-    fn try_lock_with_timeout(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, Vec<GasKillerTaskRequest>>, String> {
-        let start_time = Instant::now();
-        let timeout_duration = Duration::from_millis(self.timeout_ms);
-
-        for attempt in 0..self.max_retries {
-            // Try to acquire the lock
-            match self.queue.try_lock() {
-                Ok(guard) => return Ok(guard),
-                Err(_) => {
-                    // Check if we've exceeded the timeout
-                    if start_time.elapsed() >= timeout_duration {
-                        return Err(format!(
-                            "Failed to acquire lock after {}ms timeout ({} attempts)",
-                            self.timeout_ms,
-                            attempt + 1
-                        ));
-                    }
-
-                    // Small delay before retry to avoid busy waiting
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
-        }
-
-        Err(format!(
-            "Failed to acquire lock after {} retries",
-            self.max_retries
-        ))
-    }
+pub fn task_channel() -> (TaskSender, TaskReceiver) {
+    mpsc::unbounded_channel()
 }
 
-impl Default for GasKillerTaskQueue {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Align naming with the counter usecase so factories and ingress can share a consistent type.
-pub type SimpleTaskQueue = GasKillerTaskQueue;
-
-impl TaskQueue for GasKillerTaskQueue {
-    fn len(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
-    }
-
-    fn push(&self, task: GasKillerTaskRequest) {
-        match self.try_lock_with_timeout() {
-            Ok(mut queue) => {
-                queue.push(task);
-                let new_len = self.count.fetch_add(1, Ordering::Relaxed) + 1;
-                info!("Task enqueued: queue_len={} (after push)", new_len);
-            }
-            Err(e) => {
-                error!("Failed to push task to queue: {}", e);
-                warn!("Task dropped due to lock timeout: {:?}", task);
-            }
-        }
-    }
-
-    fn pop(&self) -> Option<GasKillerTaskRequest> {
-        match self.try_lock_with_timeout() {
-            Ok(mut queue) => {
-                let item = queue.pop();
-                if item.is_some() {
-                    self.count.fetch_sub(1, Ordering::Relaxed);
-                }
-                item
-            }
-            Err(e) => {
-                error!("Failed to pop task from queue: {}", e);
-                None
-            }
-        }
-    }
+pub fn task_queue_depth() -> TaskQueueDepth {
+    Arc::new(AtomicUsize::new(0))
 }
 
 /// Configuration for listening creators
 #[derive(Debug, Clone)]
 pub struct GasKillerConfig {
-    pub polling_interval_ms: u64,
     pub timeout_ms: u64,
 }
 
@@ -172,10 +71,7 @@ impl Default for GasKillerConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
-        Self {
-            polling_interval_ms: 100,
-            timeout_ms,
-        }
+        Self { timeout_ms }
     }
 }
 
@@ -208,7 +104,7 @@ impl Creator for GasKillerCreator {
 /// Enriched task data that includes computed storage updates and block height
 struct EnrichedTask {
     task: GasKillerTaskRequest,
-    storage_updates: Vec<u8>,
+    storage_updates: Bytes,
     block_height: u64,
     /// Resolved transition index (sentinel `None` → concrete count from chain).
     transition_index: u64,
@@ -217,8 +113,9 @@ struct EnrichedTask {
 }
 
 /// Creator for the gas killer usecase that listens for external requests
-pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
-    queue: Arc<Q>,
+pub struct ListeningGasKillerCreator {
+    receiver: tokio::sync::Mutex<TaskReceiver>,
+    queue_depth: TaskQueueDepth,
     config: GasKillerConfig,
     validator: Arc<GasKillerValidator>,
     current_task: Mutex<Option<EnrichedTask>>,
@@ -229,15 +126,17 @@ pub struct ListeningGasKillerCreator<Q: TaskQueue + Send + Sync + 'static> {
     dispatch_time: DispatchTime,
 }
 
-impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
+impl ListeningGasKillerCreator {
     pub fn new(
-        queue: Q,
+        receiver: TaskReceiver,
+        queue_depth: TaskQueueDepth,
         config: GasKillerConfig,
         validator: Arc<GasKillerValidator>,
         dispatch_time: DispatchTime,
     ) -> Self {
         Self {
-            queue: Arc::new(queue),
+            receiver: tokio::sync::Mutex::new(receiver),
+            queue_depth,
             config,
             validator,
             current_task: Mutex::new(None),
@@ -253,37 +152,38 @@ impl<Q: TaskQueue + Send + Sync + 'static> ListeningGasKillerCreator<Q> {
     }
 
     async fn wait_for_task(&self) -> Result<GasKillerTaskRequest> {
-        use tokio::time::{Duration, sleep};
-        // timeout_ms == 0 means wait indefinitely
-        let max_attempts = if self.config.timeout_ms == 0 {
-            None
+        let mut rx = self.receiver.lock().await;
+        let task = if self.config.timeout_ms == 0 {
+            rx.recv()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("task channel closed"))?
         } else {
-            Some(self.config.timeout_ms / self.config.polling_interval_ms)
+            tokio::time::timeout(Duration::from_millis(self.config.timeout_ms), rx.recv())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Timeout waiting for task after {}ms",
+                        self.config.timeout_ms
+                    )
+                })?
+                .ok_or_else(|| anyhow::anyhow!("task channel closed"))?
         };
-        let mut attempts = 0u64;
-        loop {
-            if let Some(task) = self.queue.pop() {
-                if let Some(m) = &self.metrics {
-                    m.task_queue_depth.set(self.queue.len() as i64);
-                }
-                return Ok(task);
-            }
-            attempts += 1;
-            if let Some(max) = max_attempts
-                && attempts >= max
-            {
-                return Err(anyhow::anyhow!(
-                    "Timeout waiting for task after {}ms",
-                    self.config.timeout_ms
-                ));
-            }
-            sleep(Duration::from_millis(self.config.polling_interval_ms)).await;
+        let depth = self
+            .queue_depth
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(1))
+            })
+            .unwrap()
+            .saturating_sub(1);
+        if let Some(m) = &self.metrics {
+            m.task_queue_depth.set(depth as i64);
         }
+        Ok(task)
     }
 }
 
 #[async_trait]
-impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator<Q> {
+impl Creator for ListeningGasKillerCreator {
     type TaskData = GasKillerTaskData;
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
@@ -411,7 +311,7 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         // Store enriched task with computed storage updates and block height for metadata access
         let enriched = EnrichedTask {
             task,
-            storage_updates,
+            storage_updates: storage_updates.into(),
             block_height,
             transition_index: resolved_transition_index,
             chain_id: numeric_chain_id,
@@ -438,10 +338,8 @@ impl<Q: TaskQueue + Send + Sync + 'static> Creator for ListeningGasKillerCreator
         let round = self.round_counter.fetch_add(1, Ordering::SeqCst);
         info!(round = round, "Creator returning payload with round");
 
-        // Stamp the dispatch time so the executor can compute P2P round-trip duration.
-        if let Ok(mut t) = self.dispatch_time.lock() {
-            *t = Some(Instant::now());
-        }
+        // Stamp this round's dispatch time so the executor can compute P2P round-trip duration.
+        stamp_dispatch_time(&self.dispatch_time, round);
 
         Ok((payload, round))
     }
@@ -488,7 +386,7 @@ pub enum GasKillerCreatorType {
     /// Basic gas killer creator without ingress
     Basic(GasKillerCreator),
     /// Listening gas killer creator with HTTP ingress
-    Listening(Box<ListeningGasKillerCreator<GasKillerTaskQueue>>),
+    Listening(Box<ListeningGasKillerCreator>),
 }
 
 #[async_trait]
@@ -526,6 +424,31 @@ mod tests {
         assert_eq!(round, 0); // Default round is 0
     }
 
+    #[test]
+    fn test_dispatch_time_evicts_failed_rounds_and_isolates_measurements() {
+        let times: DispatchTime = Arc::new(Mutex::new(HashMap::new()));
+
+        // Round 0 is dispatched but its consensus round fails, so it is never consumed.
+        stamp_dispatch_time(&times, 0);
+        assert_eq!(times.lock().unwrap().len(), 1);
+
+        // Dispatching round 1 evicts the stale round-0 entry rather than letting it accumulate
+        // or bleed into round 1's measurement.
+        stamp_dispatch_time(&times, 1);
+        {
+            let map = times.lock().unwrap();
+            assert_eq!(map.len(), 1, "stale failed-round entry should be evicted");
+            assert!(map.contains_key(&1));
+            assert!(!map.contains_key(&0));
+        }
+
+        // The executor consumes round 1's own timestamp exactly once; the failed round 0 is gone.
+        assert!(take_dispatch_time(&times, 0).is_none());
+        assert!(take_dispatch_time(&times, 1).is_some());
+        assert!(take_dispatch_time(&times, 1).is_none());
+        assert!(times.lock().unwrap().is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_validator_produces_consistent_hash() {
         // This test verifies the production flow:
@@ -542,7 +465,7 @@ mod tests {
         let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
 
         let task_data = GasKillerTaskData {
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04],
+            storage_updates: vec![0x01, 0x02, 0x03, 0x04].into(),
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
@@ -579,9 +502,9 @@ mod tests {
         // If they fail (no Anvil/RPC), that's expected in unit tests
     }
 
-    #[test]
-    fn test_task_queue_push_pop() {
-        let queue = GasKillerTaskQueue::new();
+    #[tokio::test]
+    async fn test_channel_send_recv() {
+        let (sender, mut receiver) = task_channel();
         let task = GasKillerTaskRequest {
             body: crate::ingress::GasKillerTaskRequestBody {
                 target_address: Address::from([1u8; 20]),
@@ -593,10 +516,10 @@ mod tests {
             },
         };
 
-        queue.push(task.clone());
-        let popped = queue.pop();
-        assert!(popped.is_some());
-        assert_eq!(popped.unwrap().body.transition_index, Some(1));
+        sender.send(task.clone()).unwrap();
+        let received = receiver.try_recv().unwrap();
+        assert_eq!(received.body.transition_index, Some(1));
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]
@@ -613,7 +536,7 @@ mod tests {
         };
 
         let task_data = GasKillerTaskData {
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04], // would be computed by GasAnalyzer
+            storage_updates: vec![0x01, 0x02, 0x03, 0x04].into(), // would be computed by GasAnalyzer
             transition_index: task.body.transition_index.unwrap_or(0),
             target_address: task.body.target_address,
             call_data: task.body.call_data.clone(),

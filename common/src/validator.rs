@@ -1,10 +1,7 @@
-use alloy::primitives::U256;
-use alloy::sol_types::SolValue;
 use alloy_provider::Provider;
 use anyhow::Result;
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
-use commonware_cryptography::{Hasher, Sha256};
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
@@ -344,7 +341,7 @@ impl GasKillerValidator {
     /// the orchestrator's validator can skip running EVMSketch again when verifying each incoming
     /// node signature for the same round.
     pub async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
-        let digest = self.build_payload_hash(task_data, storage_updates);
+        let digest = task_data.build_payload_hash(storage_updates);
         let cache_key = (task_data.transition_index, task_data.block_height);
         let mut cache = self.digest_cache.lock().await;
         cache.insert(cache_key, digest);
@@ -353,68 +350,6 @@ impl GasKillerValidator {
             block_height = task_data.block_height,
             "Primed validator digest cache from creator (verification will skip EVMSketch)"
         );
-    }
-
-    /// Builds the payload hash from task data and storage updates
-    ///
-    /// This method must produce the same hash as the on-chain expectedHash
-    /// in GasKillerSDK.verifyAndUpdate to ensure consensus consistency.
-    fn build_payload_hash(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) -> Digest {
-        // IMPORTANT: This hash must match the on-chain expectedHash in GasKillerSDK.verifyAndUpdate:
-        // sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))
-
-        let selector = task_data.function_selector();
-
-        // Debug: Log hash of full storage_updates to detect any differences
-        let mut storage_hasher = Sha256::new();
-        storage_hasher.update(storage_updates);
-        let storage_hash = storage_hasher.finalize();
-        let storage_hash_hex: String = storage_hash
-            .iter()
-            .take(8)
-            .map(|b| format!("{:02x}", b))
-            .collect();
-
-        debug!(
-            transition_index = task_data.transition_index,
-            target_address = %task_data.target_address,
-            target_function = %selector,
-            storage_updates_len = storage_updates.len(),
-            storage_updates_hash = %storage_hash_hex,
-            "Validator build_payload_hash inputs"
-        );
-
-        // Build flattened ABI encoding matching abi.encode(transitionIndex, address(this), selector, storageUpdates)
-        // Heads (32 bytes each)
-        let head_transition = U256::from(task_data.transition_index).abi_encode();
-        let head_address = task_data.target_address.abi_encode();
-        let head_selector = selector.abi_encode();
-        // Offset to the dynamic bytes tail: 4 words (3 static + 1 offset) = 0x80
-        let head_offset = U256::from(32u64 * 4u64).abi_encode();
-
-        // Tail for dynamic bytes: length (u256) + data + padding
-        let mut tail = Vec::with_capacity(32 + storage_updates.len() + 31);
-        tail.extend_from_slice(&U256::from(storage_updates.len()).abi_encode());
-        tail.extend_from_slice(storage_updates);
-        let pad_len = (32 - (storage_updates.len() % 32)) % 32;
-        if pad_len > 0 {
-            tail.extend(std::iter::repeat_n(0u8, pad_len));
-        }
-
-        // Concatenate head and tail into final payload
-        let mut payload = Vec::with_capacity(32 * 4 + tail.len());
-        payload.extend_from_slice(&head_transition);
-        payload.extend_from_slice(&head_address);
-        payload.extend_from_slice(&head_selector);
-        payload.extend_from_slice(&head_offset);
-        payload.extend_from_slice(&tail);
-
-        let mut hasher = Sha256::new();
-        hasher.update(&payload);
-        let payload_hash = hasher.finalize();
-
-        debug!("Built payload hash: {:?}", payload_hash);
-        payload_hash
     }
 
     /// Performs the core gas analysis using gas-analyzer.
@@ -552,7 +487,7 @@ impl GasKillerValidator {
         let storage_updates = self.compute_storage_updates(task_data).await?;
 
         // Build expected payload hash using computed storage updates
-        let payload_hash = self.build_payload_hash(task_data, &storage_updates);
+        let payload_hash = task_data.build_payload_hash(&storage_updates);
 
         // Store in cache for subsequent calls with the same round
         {
@@ -586,7 +521,7 @@ mod tests {
 
     fn create_test_task_data() -> GasKillerTaskData {
         GasKillerTaskData {
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04],
+            storage_updates: vec![0x01, 0x02, 0x03, 0x04].into(),
             transition_index: 1,
             target_address: Address::from([1u8; 20]),
             call_data: vec![0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01],
@@ -666,12 +601,11 @@ mod tests {
 
     #[test]
     fn test_build_payload_hash_deterministic() {
-        let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
         let task_data = create_test_task_data();
         let storage_updates = vec![0x01, 0x02, 0x03, 0x04];
 
-        let hash1 = validator.build_payload_hash(&task_data, &storage_updates);
-        let hash2 = validator.build_payload_hash(&task_data, &storage_updates);
+        let hash1 = task_data.build_payload_hash(&storage_updates);
+        let hash2 = task_data.build_payload_hash(&storage_updates);
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, Digest::from([0u8; 32]));
@@ -679,11 +613,10 @@ mod tests {
 
     #[test]
     fn test_build_payload_hash_different_inputs() {
-        let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
         let task_data = create_test_task_data();
 
-        let hash1 = validator.build_payload_hash(&task_data, &[0x01, 0x02]);
-        let hash2 = validator.build_payload_hash(&task_data, &[0x03, 0x04]);
+        let hash1 = task_data.build_payload_hash(&[0x01, 0x02]);
+        let hash2 = task_data.build_payload_hash(&[0x03, 0x04]);
 
         assert_ne!(hash1, hash2);
     }

@@ -1,9 +1,11 @@
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
+use alloy::signers::local::PrivateKeySigner;
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -561,6 +563,170 @@ fn interpolate_env(s: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Parse a `kubectl` target_address sentinel into `(configmap, key)`.
+///
+/// Returns `None` for any other value (i.e. a literal address). Supported forms:
+///   "kubectl"                    → configmap "gas-killer-smoke-target", key "target"
+///   "kubectl:<configmap>"        → key "target"
+///   "kubectl:<configmap>/<key>"
+fn parse_kubectl_sentinel(value: &str) -> Option<(String, String)> {
+    let rest = if value == "kubectl" {
+        ""
+    } else {
+        value.strip_prefix("kubectl:")?
+    };
+    let (configmap, key) = if rest.is_empty() {
+        ("gas-killer-smoke-target", "target")
+    } else if let Some((cm, k)) = rest.split_once('/') {
+        (cm, k)
+    } else {
+        (rest, "target")
+    };
+    Some((configmap.to_string(), key.to_string()))
+}
+
+/// Read a value from a Kubernetes ConfigMap via the local `kubectl`.
+/// Namespace follows the current kube-context unless `SMOKE_TARGET_NAMESPACE` is set.
+fn fetch_configmap_value(configmap: &str, key: &str) -> Result<String, String> {
+    let mut cmd = std::process::Command::new("kubectl");
+    // Bracket notation so keys containing '.' or '-' (valid ConfigMap key chars) are taken
+    // literally instead of being misparsed as nested fields by kubectl's jsonpath.
+    cmd.args([
+        "get",
+        "configmap",
+        configmap,
+        "-o",
+        &format!("jsonpath={{.data['{key}']}}"),
+    ]);
+    if let Ok(ns) = std::env::var("SMOKE_TARGET_NAMESPACE")
+        && !ns.is_empty()
+    {
+        cmd.args(["-n", &ns]);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run kubectl (is it installed and on PATH?): {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`kubectl get configmap {configmap}` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return Err(format!(
+            "configmap '{configmap}' has no value at key '{key}' — has the deploy-target job run?"
+        ));
+    }
+    Ok(value)
+}
+
+/// Parse a `local` target_address sentinel into the deployment-JSON key it maps to.
+///
+/// Returns `None` for any other value (i.e. a literal address). Supported forms:
+///   "local"        → key "arraySummation"
+///   "local:<key>"  → that key under `addresses`
+fn parse_local_sentinel(value: &str) -> Option<String> {
+    let rest = if value == "local" {
+        ""
+    } else {
+        value.strip_prefix("local:")?
+    };
+    Some(if rest.is_empty() {
+        "arraySummation".to_string()
+    } else {
+        rest.to_string()
+    })
+}
+
+/// Read an address from the local deployment JSON under `addresses.<key>`.
+/// Path follows `AVS_DEPLOYMENT_PATH`, defaulting to the file the local stack writes.
+fn fetch_local_deploy_address(key: &str) -> Result<String, String> {
+    let path = match std::env::var("AVS_DEPLOYMENT_PATH") {
+        Ok(p) if !p.trim().is_empty() => p,
+        _ => "config/.nodes/avs_deploy.json".to_string(),
+    };
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        format!("failed to read deployment JSON at '{path}' (set AVS_DEPLOYMENT_PATH?): {e}")
+    })?;
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("failed to parse '{path}': {e}"))?;
+    json.get("addresses")
+        .and_then(|a| a.get(key))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!("deployment JSON '{path}' has no addresses.{key} — has the deploy run?")
+        })
+}
+
+/// Derive the address of the `PRIVATE_KEY` the local stack signs with.
+/// Resolves a `from_address = "local"` sentinel to whatever key the local config uses.
+fn local_from_address() -> Result<String, String> {
+    let key = std::env::var("PRIVATE_KEY")
+        .map_err(|_| "PRIVATE_KEY must be set to resolve from_address \"local\"".to_string())?;
+    let signer: PrivateKeySigner = key
+        .parse()
+        .map_err(|e| format!("PRIVATE_KEY is not a valid private key: {e}"))?;
+    Ok(signer.address().to_string())
+}
+
+/// Resolve a `target_address` value, expanding `kubectl`/`local` sentinels to a live
+/// address. Returns `Ok(None)` for a literal address (left unchanged). `cache` memoizes
+/// each distinct sentinel so repeated requests don't redo the lookup.
+fn resolve_target_address(
+    value: &str,
+    cache: &mut HashMap<String, String>,
+) -> Result<Option<String>, String> {
+    enum Source {
+        Kubectl(String, String),
+        Local(String),
+    }
+    let source = if let Some((configmap, key)) = parse_kubectl_sentinel(value) {
+        Source::Kubectl(configmap, key)
+    } else if let Some(key) = parse_local_sentinel(value) {
+        Source::Local(key)
+    } else {
+        return Ok(None);
+    };
+
+    if let Some(v) = cache.get(value) {
+        return Ok(Some(v.clone()));
+    }
+
+    let resolved = match source {
+        Source::Kubectl(configmap, key) => fetch_configmap_value(&configmap, &key),
+        Source::Local(key) => fetch_local_deploy_address(&key),
+    }
+    .map_err(|e| format!("resolving target_address \"{value}\": {e}"))?;
+
+    resolved.parse::<Address>().map_err(|e| {
+        format!("target_address \"{value}\" resolved to {resolved:?}, not a valid address: {e}")
+    })?;
+    println!("Resolved target_address \"{value}\" → {resolved}");
+    cache.insert(value.to_string(), resolved.clone());
+    Ok(Some(resolved))
+}
+
+/// Resolve a `from_address` value, expanding the `local` sentinel (derive from
+/// `PRIVATE_KEY`). Returns `Ok(None)` for a literal address (left unchanged).
+fn resolve_from_address(
+    value: &str,
+    cache: &mut HashMap<String, String>,
+) -> Result<Option<String>, String> {
+    if value != "local" {
+        return Ok(None);
+    }
+    if let Some(v) = cache.get(value) {
+        return Ok(Some(v.clone()));
+    }
+    let resolved =
+        local_from_address().map_err(|e| format!("resolving from_address \"{value}\": {e}"))?;
+    println!("Resolved from_address \"{value}\" → {resolved}");
+    cache.insert(value.to_string(), resolved.clone());
+    Ok(Some(resolved))
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -606,6 +772,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if config.scenarios.is_empty() {
         eprintln!("No scenarios defined in config.");
         std::process::exit(1);
+    }
+
+    // Resolve `kubectl`/`local` sentinels in target_address and from_address to live values.
+    // `kubectl` reads the smoke target published to `gas-killer-smoke-target` by the
+    // deploy-target job; `local` reads the local deploy JSON (target) or derives from
+    // `PRIVATE_KEY` (from). This lets the toml carry `"local"` / `"kubectl"` instead of a
+    // hardcoded address. Each distinct sentinel is resolved once and cached.
+    {
+        let mut target_cache: HashMap<String, String> = HashMap::new();
+        let mut from_cache: HashMap<String, String> = HashMap::new();
+        for scenario in &mut config.scenarios {
+            for req in &mut scenario.requests {
+                if let Some(resolved) =
+                    resolve_target_address(&req.target_address, &mut target_cache)?
+                {
+                    req.target_address = resolved;
+                }
+                if let Some(resolved) = resolve_from_address(&req.from_address, &mut from_cache)? {
+                    req.from_address = resolved;
+                }
+            }
+        }
     }
 
     let needs_rpc = config
@@ -677,4 +865,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_sentinel_defaults_to_array_summation() {
+        assert_eq!(
+            parse_local_sentinel("local").as_deref(),
+            Some("arraySummation")
+        );
+    }
+
+    #[test]
+    fn local_sentinel_accepts_explicit_key() {
+        assert_eq!(
+            parse_local_sentinel("local:avsServiceManagerWrapper").as_deref(),
+            Some("avsServiceManagerWrapper")
+        );
+    }
+
+    #[test]
+    fn literal_address_is_not_a_local_sentinel() {
+        assert_eq!(
+            parse_local_sentinel("0x912AEF8290516Ab2941B531990c89D0e7FABD98D"),
+            None
+        );
+        // `kubectl` sentinels must not be swallowed by the `local` parser.
+        assert_eq!(parse_local_sentinel("kubectl"), None);
+    }
 }
