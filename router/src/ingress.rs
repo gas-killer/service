@@ -118,8 +118,19 @@ fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
 #[derive(Debug)]
 pub enum OnchainValidationError {
     ContractNotFound,
-    TransitionIndexMismatch { provided: u64, current: u64 },
-    BlockHeightInFuture { provided: u64, current: u64 },
+    TransitionIndexMismatch {
+        provided: u64,
+        current: u64,
+    },
+    BlockHeightInFuture {
+        provided: u64,
+        current: u64,
+    },
+    BlockHeightTooStale {
+        provided: u64,
+        current: u64,
+        max_age: u64,
+    },
     RpcError(String),
 }
 
@@ -134,6 +145,14 @@ impl fmt::Display for OnchainValidationError {
             Self::BlockHeightInFuture { provided, current } => write!(
                 f,
                 "block_height {provided} is ahead of current chain height {current}"
+            ),
+            Self::BlockHeightTooStale {
+                provided,
+                current,
+                max_age,
+            } => write!(
+                f,
+                "block_height {provided} is older than the staleness window ({max_age} blocks) relative to current chain height {current}"
             ),
             Self::RpcError(msg) => write!(f, "RPC error during onchain validation: {msg}"),
         }
@@ -182,6 +201,20 @@ async fn validate_onchain<P: Provider + Clone>(
         return Err(OnchainValidationError::BlockHeightInFuture {
             provided: body.block_height,
             current: current_block,
+        });
+    }
+
+    // Reject analyses anchored too far behind head. This is an off-chain policy bound (the
+    // contract bounds the operator-set reference block, not this gas-analysis block_height):
+    // it keeps requests within the speculative executor cache's window and rejects analyses
+    // old enough to likely hit a transition_index mismatch. age == max_age stays valid, matching
+    // the contract's `referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number` convention.
+    let max_age = gas_killer_common::block_stale_measure();
+    if current_block.saturating_sub(body.block_height) > max_age {
+        return Err(OnchainValidationError::BlockHeightTooStale {
+            provided: body.block_height,
+            current: current_block,
+            max_age,
         });
     }
 
@@ -1238,6 +1271,51 @@ mod tests {
                     }
                 ),
                 "expected BlockHeightInFuture, got {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_block_height_too_stale() {
+            let body = valid_body(); // block_height = 50
+            let measure = gas_killer_common::block_stale_measure();
+            // head one block past the staleness window → age = measure + 1, rejected
+            let head = body.block_height + measure + 1;
+
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, head);
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+
+            let err = validate_onchain(&providers, &body).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    OnchainValidationError::BlockHeightTooStale { provided: 50, .. }
+                ),
+                "expected BlockHeightTooStale, got {err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_block_height_at_staleness_boundary_passes() {
+            let body = valid_body(); // block_height = 50, transition_index = Some(5)
+            let measure = gas_killer_common::block_stale_measure();
+            // head exactly at the window edge → age == measure, still valid
+            let head = body.block_height + measure;
+
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, head);
+            push_state_transition_count(&asserter, 5); // matches transition_index → passes
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+
+            assert!(
+                validate_onchain(&providers, &body).await.is_ok(),
+                "age == staleness window should be accepted"
             );
         }
 

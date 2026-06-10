@@ -70,7 +70,7 @@ pub async fn create_listening_creator_with_server(
         dispatch_time,
     )
     .with_metrics(Arc::clone(&metrics));
-    let providers = build_ingress_providers().await?;
+    let providers = build_ingress_providers()?;
     let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
     if ingress_password.is_none() {
         tracing::warn!(
@@ -130,27 +130,10 @@ pub async fn create_listening_creator_with_server(
     Ok(GasKillerCreatorType::Listening(Box::new(creator)))
 }
 
-async fn build_ingress_providers()
+fn build_ingress_providers()
 -> anyhow::Result<HashMap<ChainRole, gas_killer_common::ReadOnlyProvider>> {
-    let mut providers = HashMap::new();
-
-    if let Ok(rpc) = env::var("HTTP_RPC") {
-        let p = ProviderBuilder::new()
-            .connect(&rpc)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create L1 ingress provider: {e}"))?;
-        providers.insert(ChainRole::L1, p);
-        info!(chain = "l1", "Created L1 ingress read provider");
-    }
-
-    if let Ok(rpc) = env::var("L2_HTTP_RPC") {
-        let p = ProviderBuilder::new()
-            .connect(&rpc)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create L2 ingress provider: {e}"))?;
-        providers.insert(ChainRole::L2, p);
-        info!(chain = "l2", "Created L2 ingress read provider");
-    }
+    let chain_rpc_urls = gas_killer_common::chain_rpc_urls_from_env()?;
+    let providers = gas_killer_common::build_read_providers(&chain_rpc_urls);
 
     if providers.is_empty() {
         anyhow::bail!("no ingress providers could be created: set HTTP_RPC and/or L2_HTTP_RPC");

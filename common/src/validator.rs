@@ -6,20 +6,20 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use tracing::debug;
-use url::Url;
+use tracing::{debug, info, warn};
 
-use crate::config::ChainRole;
+use crate::ReadOnlyProvider;
+use crate::config::{ChainRole, SpeculativePrebuildConfig};
 use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
 use commonware_avs_router::wire;
 
 use alloy::rpc::types::TransactionRequest;
 use gas_analyzer::{EvmSketchExecutorCache, call_to_encoded_state_updates_with_evmsketch};
+use url::Url;
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
 pub struct ValidatorMetrics {
@@ -69,17 +69,30 @@ pub struct AnalysisResult {
     pub block_height: u64,
 }
 
-/// Default LRU capacity for the executor cache.
+/// Extra executor-cache slots per chain beyond the staleness window.
 ///
-/// 4 entries covers all realistic burst scenarios on mainnet (~12 s blocks):
-/// one entry per chain (mainnet + L2) at the current and previous block height.
-const DEFAULT_EXECUTOR_CACHE_CAPACITY: usize = 4;
+/// Covers on-demand entries (a freshly requested block not yet pre-built) without
+/// evicting the speculative window.
+const EXECUTOR_CACHE_SLACK_PER_CHAIN: usize = 4;
+
+/// LRU capacity for the executor cache.
+///
+/// Sized to retain a full `BLOCK_STALE_MEASURE` window per chain so any in-window
+/// `block_height` — whether pre-built by the speculative loop or requested on demand —
+/// hits the cache. Entries are small (anchor header + provider handle, a few KB), so a
+/// few-hundred-entry window costs single-digit MB.
+fn executor_cache_capacity(num_chains: usize) -> usize {
+    let per_chain = crate::config::block_stale_measure() as usize + EXECUTOR_CACHE_SLACK_PER_CHAIN;
+    per_chain * num_chains.max(1)
+}
 
 /// Validator implementation for the gas killer use case with multi-chain support
 #[derive(Clone)]
 pub struct GasKillerValidator {
     /// RPC URLs per chain for the gas analyzer
     chain_rpc_urls: HashMap<ChainRole, String>,
+    /// Read-only providers per chain for chain detection and `stateTransitionCount` reads.
+    providers: Arc<HashMap<ChainRole, ReadOnlyProvider>>,
     /// Default chain for backwards compatibility
     default_chain: ChainRole,
     /// Cache: (transition_index, block_height) -> computed digest
@@ -103,23 +116,19 @@ impl GasKillerValidator {
     ///
     /// Returns an error if L1 RPC is not set.
     pub fn new() -> Result<Self> {
-        let mut chain_rpc_urls = HashMap::new();
-
-        // Load L1 RPC URL (required)
-        let l1_rpc = env::var("HTTP_RPC")
-            .map_err(|_| anyhow::anyhow!("HTTP_RPC environment variable is not set"))?;
-        chain_rpc_urls.insert(ChainRole::L1, l1_rpc);
-
-        // Load L2 RPC URL (optional)
-        if let Ok(l2_rpc) = env::var("L2_HTTP_RPC") {
-            chain_rpc_urls.insert(ChainRole::L2, l2_rpc);
+        let chain_rpc_urls = crate::chain_rpc_urls_from_env()?;
+        let capacity = executor_cache_capacity(chain_rpc_urls.len());
+        let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
+        if !providers.contains_key(&ChainRole::L1) {
+            anyhow::bail!("HTTP_RPC is set but is not a valid URL");
         }
 
         Ok(Self {
             chain_rpc_urls,
+            providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
-            executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
+            executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
         })
     }
@@ -130,22 +139,28 @@ impl GasKillerValidator {
     pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         let mut chain_rpc_urls = HashMap::new();
         chain_rpc_urls.insert(ChainRole::L1, rpc_url.into());
+        let capacity = executor_cache_capacity(chain_rpc_urls.len());
+        let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
         Self {
             chain_rpc_urls,
+            providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
-            executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
+            executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
         }
     }
 
     /// Creates a new GasKillerValidator with RPC URLs for multiple chains.
     pub fn with_chain_rpc_urls(chain_rpc_urls: HashMap<ChainRole, String>) -> Self {
+        let capacity = executor_cache_capacity(chain_rpc_urls.len());
+        let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
         Self {
             chain_rpc_urls,
+            providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
-            executor_cache: Arc::new(EvmSketchExecutorCache::new(DEFAULT_EXECUTOR_CACHE_CAPACITY)),
+            executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
         }
     }
@@ -202,25 +217,21 @@ impl GasKillerValidator {
         &self,
         address: alloy::primitives::Address,
     ) -> Result<ChainRole> {
-        use alloy_provider::ProviderBuilder;
-
         debug!(
             address = %address,
             "Detecting chain for address"
         );
 
         let supported = self.supported_chains();
-        // Clone the RPC URLs so the closure doesn't borrow self
-        let chain_rpc_urls = self.chain_rpc_urls.clone();
+        // Clone the Arc so the closure doesn't borrow self
+        let providers = Arc::clone(&self.providers);
 
         crate::config::detect_chain_for_address(address, &supported, |chain_id, addr| {
-            let chain_rpc_urls = chain_rpc_urls.clone();
+            let providers = Arc::clone(&providers);
             async move {
-                let rpc_url = chain_rpc_urls
+                let provider = providers
                     .get(&chain_id)
-                    .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_id))?;
-                let url = Url::parse(rpc_url)?;
-                let provider = ProviderBuilder::new().connect_http(url);
+                    .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?;
                 let code = provider.get_code_at(addr).await?;
                 Ok(code)
             }
@@ -238,13 +249,20 @@ impl GasKillerValidator {
         chain_id: ChainRole,
     ) -> Result<u64> {
         use crate::bindings::gaskillersdk::GasKillerSDK;
-        use alloy_provider::ProviderBuilder;
 
-        let rpc_url = self
-            .rpc_url_for_chain(chain_id)
-            .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_id))?;
-        let url = Url::parse(rpc_url)?;
-        let provider = ProviderBuilder::new().connect_http(url);
+        let provider = match self.providers.get(&chain_id) {
+            Some(p) => p.clone(),
+            None => {
+                if let Some(rpc_url) = self.chain_rpc_urls.get(&chain_id) {
+                    anyhow::bail!(
+                        "RPC URL for chain {} is not a valid URL (provider was not built): {}",
+                        chain_id,
+                        rpc_url
+                    );
+                }
+                anyhow::bail!("No RPC URL configured for chain {}", chain_id);
+            }
+        };
         let count = GasKillerSDK::new(address, provider)
             .stateTransitionCount()
             .call()
@@ -413,6 +431,86 @@ impl GasKillerValidator {
         })
     }
 
+    /// Watches each chain's head and speculatively pre-builds the EVMSketch executor for the
+    /// latest block, populating the shared executor cache so a task's first validation skips the
+    /// live `build()` cost (~80–120 ms) on the critical path.
+    ///
+    /// Runs forever; intended to be spawned as a background task. Per-chain loops run
+    /// concurrently, each with at most one build in flight. Build failures are logged at `WARN`
+    /// and never propagate — a miss simply falls back to the on-demand build path.
+    ///
+    /// The cached executor only feeds the (discarded) gas estimate, never the signed
+    /// `storage_updates`, so pre-building at the unconfirmed tip cannot affect consensus.
+    pub async fn run_speculative_prebuild(&self, config: SpeculativePrebuildConfig) {
+        if !config.enabled {
+            debug!("Speculative executor pre-build disabled");
+            return;
+        }
+
+        let loops = self
+            .chain_rpc_urls
+            .iter()
+            .filter_map(|(chain, rpc_url)| {
+                let provider = self.providers.get(chain)?;
+                Some(self.prebuild_chain_loop(*chain, rpc_url, provider, config))
+            })
+            .collect::<Vec<_>>();
+
+        if loops.is_empty() {
+            warn!("Speculative pre-build: no chains with providers; loop not started");
+            return;
+        }
+
+        info!(
+            chains = loops.len(),
+            poll_ms = config.poll_interval.as_millis() as u64,
+            confirmations = config.confirmation_depth,
+            "Starting speculative executor pre-build"
+        );
+        futures::future::join_all(loops).await;
+    }
+
+    /// Per-chain pre-build loop: poll the head, build the target block's executor if it changed.
+    async fn prebuild_chain_loop(
+        &self,
+        chain: ChainRole,
+        rpc_url: &str,
+        provider: &ReadOnlyProvider,
+        config: SpeculativePrebuildConfig,
+    ) {
+        let mut last_built: Option<u64> = None;
+        loop {
+            match provider.get_block_number().await {
+                Ok(head) => {
+                    if let Some(target) = Self::speculative_target(head, config.confirmation_depth)
+                        && last_built != Some(target)
+                    {
+                        match self.executor_cache.get_or_build(rpc_url, target).await {
+                            Ok(_) => {
+                                last_built = Some(target);
+                                debug!(chain = %chain, block = target, "Speculative pre-build cached executor");
+                            }
+                            Err(e) => {
+                                warn!(chain = %chain, block = target, error = %e, "Speculative pre-build failed");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(chain = %chain, error = %e, "Speculative pre-build: failed to read chain head");
+                }
+            }
+            tokio::time::sleep(config.poll_interval).await;
+        }
+    }
+
+    /// The block to pre-build for a given chain `head` and confirmation depth.
+    ///
+    /// Returns `None` when the depth would reach at or below genesis (nothing useful to build).
+    fn speculative_target(head: u64, confirmation_depth: u64) -> Option<u64> {
+        head.checked_sub(confirmation_depth).filter(|&b| b > 0)
+    }
+
     /// Computes storage updates by running local analysis.
     /// Automatically detects which chain the target address is on.
     /// Uses the block_height from task_data to ensure deterministic results matching the router.
@@ -536,6 +634,39 @@ mod tests {
     async fn test_validator_creation() {
         let _validator =
             GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
+    }
+
+    #[test]
+    fn test_providers_prebuilt_for_each_chain() {
+        let mut urls = HashMap::new();
+        urls.insert(ChainRole::L1, "https://example.com".to_string());
+        urls.insert(ChainRole::L2, "https://l2.example.com".to_string());
+        let validator = GasKillerValidator::with_chain_rpc_urls(urls);
+
+        assert!(validator.providers.contains_key(&ChainRole::L1));
+        assert!(validator.providers.contains_key(&ChainRole::L2));
+    }
+
+    #[test]
+    fn test_speculative_target() {
+        // depth 0 → build the tip
+        assert_eq!(GasKillerValidator::speculative_target(100, 0), Some(100));
+        // depth N → N blocks behind head
+        assert_eq!(GasKillerValidator::speculative_target(100, 3), Some(97));
+        // head - depth == 0 (genesis) → nothing to build
+        assert_eq!(GasKillerValidator::speculative_target(2, 2), None);
+        // depth deeper than head → no underflow
+        assert_eq!(GasKillerValidator::speculative_target(1, 5), None);
+    }
+
+    #[test]
+    fn test_executor_cache_capacity_covers_window_per_chain() {
+        let window = crate::config::block_stale_measure() as usize;
+        let one = executor_cache_capacity(1);
+        let two = executor_cache_capacity(2);
+        // Each chain gets at least a full staleness window of slots.
+        assert!(one >= window);
+        assert_eq!(two, one * 2);
     }
 
     #[tokio::test]
