@@ -118,6 +118,9 @@ impl GasKillerValidator {
         let chain_rpc_urls = crate::chain_rpc_urls_from_env()?;
         let capacity = executor_cache_capacity(chain_rpc_urls.len());
         let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
+        if !providers.contains_key(&ChainId::L1) {
+            anyhow::bail!("HTTP_RPC is set but is not a valid URL");
+        }
 
         Ok(Self {
             chain_rpc_urls,
@@ -231,11 +234,20 @@ impl GasKillerValidator {
     ) -> Result<u64> {
         use crate::bindings::gaskillersdk::GasKillerSDK;
 
-        let provider = self
-            .providers
-            .get(&chain_id)
-            .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?;
-        let count = GasKillerSDK::new(address, provider.clone())
+        let provider = match self.providers.get(&chain_id) {
+            Some(p) => p.clone(),
+            None => {
+                if let Some(rpc_url) = self.chain_rpc_urls.get(&chain_id) {
+                    anyhow::bail!(
+                        "RPC URL for chain {} is not a valid URL (provider was not built): {}",
+                        chain_id,
+                        rpc_url
+                    );
+                }
+                anyhow::bail!("No RPC URL configured for chain {}", chain_id);
+            }
+        };
+        let count = GasKillerSDK::new(address, provider)
             .stateTransitionCount()
             .call()
             .await
