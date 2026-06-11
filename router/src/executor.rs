@@ -367,8 +367,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
     ) -> Result<ExecutionResult> {
         // Record P2P round-trip: time from this round's creator dispatch to threshold signatures
         // received. Consume the entry keyed by `round` so a failed earlier round (which never
-        // reaches here) cannot contribute a stale, inflated sample.
-        if let Some(start) = take_dispatch_time(&self.dispatch_time, round)
+        // reaches here) cannot contribute a stale, inflated sample. The dispatch instant is kept
+        // so the end-to-end round latency can be observed once execution completes.
+        let dispatch_start = take_dispatch_time(&self.dispatch_time, round);
+        if let Some(start) = dispatch_start
             && let Some(m) = &self.metrics
         {
             m.p2p_round_trip_seconds
@@ -393,6 +395,13 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
             match &result {
                 Ok(_) => {
                     m.aggregation_rounds_completed.inc();
+                    // End-to-end round latency: creator dispatch through receipt confirmation.
+                    // Failed rounds are skipped — they have no on-chain confirmation, and a
+                    // receipt-timeout sample would distort the percentiles.
+                    if let Some(start) = dispatch_start {
+                        m.round_latency_seconds
+                            .observe(start.elapsed().as_secs_f64());
+                    }
                 }
                 Err(_) => {
                     m.aggregation_rounds_failed.inc();

@@ -202,13 +202,35 @@ data:
           "type": "text",
           "title": "Latency Breakdown",
           "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Latency Breakdown\n\nP2P round-trip = time from creator dispatching a task (after router-side storage computation) to the executor receiving threshold signatures. Includes P2P transit ×2, node EVMSketch, BLS signing, and aggregation.\n\nEstimated transport+signing overhead ≈ round-trip − node EVMSketch. Router-side storage computation is **not** part of the round-trip measurement (it completes before the dispatch timestamp is stamped)." }
+          "options": { "mode": "markdown", "content": "## Latency Breakdown\n\nRound latency = end-to-end time from creator dispatch to verifyAndUpdate receipt confirmation, successful rounds only. P2P round-trip = time from creator dispatching a task (after router-side storage computation) to the executor receiving threshold signatures. Includes P2P transit ×2, node EVMSketch, BLS signing, and aggregation.\n\nEstimated transport+signing overhead ≈ round-trip − node EVMSketch. Router-side storage computation and ingress-queue wait are **not** part of either measurement (they complete before the dispatch timestamp is stamped)." }
+        },
+        {
+          "id": 44,
+          "type": "timeseries",
+          "title": "Round Latency (p50 / p95 / p99)",
+          "description": "End-to-end: creator dispatch → verifyAndUpdate receipt confirmation. Successful rounds only.",
+          "gridPos": { "x": 0, "y": 24, "w": 6, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            },
+            {
+              "expr": "histogram_quantile(0.99, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
         },
         {
           "id": 41,
           "type": "timeseries",
           "title": "P2P Round-Trip (p50 / p99)",
-          "gridPos": { "x": 0, "y": 24, "w": 8, "h": 8 },
+          "gridPos": { "x": 6, "y": 24, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_p2p_round_trip_seconds_bucket[5m]))",
@@ -226,7 +248,7 @@ data:
           "type": "timeseries",
           "title": "Node EVMSketch Duration (p50 / p99)",
           "description": "Time for call_to_encoded_state_updates_with_evmsketch on the node (cache-miss path). Scraped from the node's /metrics endpoint.",
-          "gridPos": { "x": 8, "y": 24, "w": 8, "h": 8 },
+          "gridPos": { "x": 12, "y": 24, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_node_evmsketch_duration_seconds_bucket[5m]))",
@@ -244,7 +266,7 @@ data:
           "type": "timeseries",
           "title": "Task Queue Depth",
           "description": "Number of tasks sitting in the ingress queue waiting to be processed. Sustained depth > 0 under burst load indicates the 1 msg/sec P2P rate limit is the bottleneck.",
-          "gridPos": { "x": 16, "y": 24, "w": 8, "h": 8 },
+          "gridPos": { "x": 18, "y": 24, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "gas_killer_task_queue_depth",
