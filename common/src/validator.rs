@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::ReadOnlyProvider;
-use crate::config::{ChainId, SpeculativePrebuildConfig};
+use crate::config::{ChainRole, SpeculativePrebuildConfig};
 use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
 use commonware_avs_router::wire;
@@ -89,11 +89,11 @@ fn executor_cache_capacity(num_chains: usize) -> usize {
 #[derive(Clone)]
 pub struct GasKillerValidator {
     /// RPC URLs per chain for the gas analyzer
-    chain_rpc_urls: HashMap<ChainId, String>,
+    chain_rpc_urls: HashMap<ChainRole, String>,
     /// Read-only providers per chain for chain detection and `stateTransitionCount` reads.
-    providers: Arc<HashMap<ChainId, ReadOnlyProvider>>,
+    providers: Arc<HashMap<ChainRole, ReadOnlyProvider>>,
     /// Default chain for backwards compatibility
-    default_chain: ChainId,
+    default_chain: ChainRole,
     /// Cache: (transition_index, block_height) -> computed digest
     /// Prevents re-running expensive EVMSketch for the same round when the
     /// orchestrator validates multiple signatures for identical task data.
@@ -118,14 +118,14 @@ impl GasKillerValidator {
         let chain_rpc_urls = crate::chain_rpc_urls_from_env()?;
         let capacity = executor_cache_capacity(chain_rpc_urls.len());
         let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
-        if !providers.contains_key(&ChainId::L1) {
+        if !providers.contains_key(&ChainRole::L1) {
             anyhow::bail!("HTTP_RPC is set but is not a valid URL");
         }
 
         Ok(Self {
             chain_rpc_urls,
             providers,
-            default_chain: ChainId::L1,
+            default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
@@ -137,13 +137,13 @@ impl GasKillerValidator {
     /// Useful for testing without modifying environment variables.
     pub fn with_rpc_url(rpc_url: impl Into<String>) -> Self {
         let mut chain_rpc_urls = HashMap::new();
-        chain_rpc_urls.insert(ChainId::L1, rpc_url.into());
+        chain_rpc_urls.insert(ChainRole::L1, rpc_url.into());
         let capacity = executor_cache_capacity(chain_rpc_urls.len());
         let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
         Self {
             chain_rpc_urls,
             providers,
-            default_chain: ChainId::L1,
+            default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
@@ -151,13 +151,13 @@ impl GasKillerValidator {
     }
 
     /// Creates a new GasKillerValidator with RPC URLs for multiple chains.
-    pub fn with_chain_rpc_urls(chain_rpc_urls: HashMap<ChainId, String>) -> Self {
+    pub fn with_chain_rpc_urls(chain_rpc_urls: HashMap<ChainRole, String>) -> Self {
         let capacity = executor_cache_capacity(chain_rpc_urls.len());
         let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
         Self {
             chain_rpc_urls,
             providers,
-            default_chain: ChainId::L1,
+            default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
@@ -179,17 +179,27 @@ impl GasKillerValidator {
     }
 
     /// Returns the RPC URL for a specific chain
-    pub fn rpc_url_for_chain(&self, chain_id: ChainId) -> Option<&str> {
+    pub fn rpc_url_for_chain(&self, chain_id: ChainRole) -> Option<&str> {
         self.chain_rpc_urls.get(&chain_id).map(|s| s.as_str())
     }
 
     /// Returns whether a chain is supported
-    pub fn supports_chain(&self, chain_id: ChainId) -> bool {
+    pub fn supports_chain(&self, chain_id: ChainRole) -> bool {
         self.chain_rpc_urls.contains_key(&chain_id)
     }
 
+    /// Returns the actual EVM chain ID (from `eth_chainId`) for the given chain role's RPC.
+    pub async fn get_chain_id_for(&self, chain: ChainRole) -> Result<u64> {
+        self.providers
+            .get(&chain)
+            .ok_or_else(|| anyhow::anyhow!("No provider configured for chain role: {}", chain))?
+            .get_chain_id()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch chain ID for chain {}: {}", chain, e))
+    }
+
     /// Returns all supported chains
-    pub fn supported_chains(&self) -> Vec<ChainId> {
+    pub fn supported_chains(&self) -> Vec<ChainRole> {
         self.chain_rpc_urls.keys().copied().collect()
     }
 
@@ -200,7 +210,7 @@ impl GasKillerValidator {
     pub async fn detect_chain_for_address(
         &self,
         address: alloy::primitives::Address,
-    ) -> Result<ChainId> {
+    ) -> Result<ChainRole> {
         debug!(
             address = %address,
             "Detecting chain for address"
@@ -230,7 +240,7 @@ impl GasKillerValidator {
     pub async fn get_state_transition_count_on_chain(
         &self,
         address: alloy::primitives::Address,
-        chain_id: ChainId,
+        chain_id: ChainRole,
     ) -> Result<u64> {
         use crate::bindings::gaskillersdk::GasKillerSDK;
 
@@ -273,7 +283,7 @@ impl GasKillerValidator {
     /// Computes storage updates for a transaction using gas-analyzer.
     ///
     /// Automatically detects which chain the contract is on, then computes storage updates.
-    /// Returns the storage updates, block height, and detected chain ID.
+    /// Returns the storage updates, block height, and the actual EVM chain ID (u64).
     pub async fn compute_storage_updates_for_tx(
         &self,
         contract_address: alloy::primitives::Address,
@@ -281,19 +291,21 @@ impl GasKillerValidator {
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
         block_height: u64,
-    ) -> Result<(Vec<u8>, u64, ChainId)> {
-        // Detect which chain has the contract
-        let chain_id = self.detect_chain_for_address(contract_address).await?;
+    ) -> Result<(Vec<u8>, u64, u64)> {
+        let chain_role = self.detect_chain_for_address(contract_address).await?;
 
         debug!(
-            chain = %chain_id,
+            chain = %chain_role,
             address = %contract_address,
             "Detected chain for contract"
         );
 
         let rpc_url = self
-            .rpc_url_for_chain(chain_id)
-            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_id))?;
+            .rpc_url_for_chain(chain_role)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_role))?;
+
+        // Fetch the actual EVM chain ID from the RPC we're already using for EVMSketch.
+        let numeric_chain_id = self.get_chain_id_for(chain_role).await?;
 
         let result = self
             .analyze_transaction(
@@ -305,7 +317,11 @@ impl GasKillerValidator {
                 block_height,
             )
             .await?;
-        Ok((result.storage_updates, result.block_height, chain_id))
+        Ok((
+            result.storage_updates,
+            result.block_height,
+            numeric_chain_id,
+        ))
     }
 
     /// Validates the message format and decodes the aggregation
@@ -451,7 +467,7 @@ impl GasKillerValidator {
     /// Per-chain pre-build loop: poll the head, build the target block's executor if it changed.
     async fn prebuild_chain_loop(
         &self,
-        chain: ChainId,
+        chain: ChainRole,
         rpc_url: &str,
         provider: &ReadOnlyProvider,
         config: SpeculativePrebuildConfig,
@@ -604,6 +620,7 @@ mod tests {
             from_address: Address::from([2u8; 20]),
             value: U256::from(1000),
             block_height: 12345,
+            chain_id: 1u64,
         }
     }
 
@@ -616,12 +633,12 @@ mod tests {
     #[test]
     fn test_providers_prebuilt_for_each_chain() {
         let mut urls = HashMap::new();
-        urls.insert(ChainId::L1, "https://example.com".to_string());
-        urls.insert(ChainId::L2, "https://l2.example.com".to_string());
+        urls.insert(ChainRole::L1, "https://example.com".to_string());
+        urls.insert(ChainRole::L2, "https://l2.example.com".to_string());
         let validator = GasKillerValidator::with_chain_rpc_urls(urls);
 
-        assert!(validator.providers.contains_key(&ChainId::L1));
-        assert!(validator.providers.contains_key(&ChainId::L2));
+        assert!(validator.providers.contains_key(&ChainRole::L1));
+        assert!(validator.providers.contains_key(&ChainRole::L2));
     }
 
     #[test]

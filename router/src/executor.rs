@@ -1,8 +1,8 @@
 use crate::creator::{DispatchTime, take_dispatch_time};
 use crate::metrics::MetricsCollector;
+use gas_killer_common::ChainRole;
 use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
-use gas_killer_common::ChainId;
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever::getNonSignerStakesAndSignatureReturn;
 use commonware_avs_router::executor::bls::BlsSignatureVerificationHandler;
 use commonware_avs_router::executor::ExecutionResult;
@@ -26,8 +26,12 @@ const DEFAULT_RECEIPT_TIMEOUT_L2_SECS: u64 = 30;
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
 pub struct GasKillerHandler<P> {
-    /// Wallet providers keyed by chain ID
-    providers: HashMap<ChainId, P>,
+    /// Wallet providers keyed by EVM chain ID
+    providers: HashMap<u64, P>,
+    /// Maps each actual EVM chain ID to its gas-killer role, resolved once at startup.
+    /// Lets the executor pick the per-role receipt timeout from the numeric chain ID
+    /// carried in task data, without re-querying `eth_chainId`.
+    chain_roles: HashMap<u64, ChainRole>,
     metrics: Option<Arc<MetricsCollector>>,
     /// Shared with the creator to measure P2P round-trip duration.
     dispatch_time: DispatchTime,
@@ -41,12 +45,13 @@ pub struct GasKillerHandler<P> {
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
-    /// Creates a new handler with a single provider (for backwards compatibility)
-    pub fn new(provider: P) -> Self {
+    /// Creates a new handler with a single provider for the given EVM chain ID.
+    pub fn new(chain_id: u64, provider: P) -> Self {
         let mut providers = HashMap::new();
-        providers.insert(ChainId::L1, provider);
+        providers.insert(chain_id, provider);
         Self {
             providers,
+            chain_roles: HashMap::new(),
             metrics: None,
             dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -54,15 +59,23 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         }
     }
 
-    /// Creates a new handler with providers for multiple chains
-    pub fn with_providers(providers: HashMap<ChainId, P>) -> Self {
+    /// Creates a new handler with providers for multiple chains, keyed by actual EVM chain ID.
+    pub fn with_providers(providers: HashMap<u64, P>) -> Self {
         Self {
             providers,
+            chain_roles: HashMap::new(),
             metrics: None,
             dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
             receipt_timeout_override: None,
         }
+    }
+
+    /// Records the role (L1/L2) of each actual EVM chain ID, used to select the
+    /// per-role receipt timeout for the chain referenced in task data.
+    pub fn with_chain_roles(mut self, chain_roles: HashMap<u64, ChainRole>) -> Self {
+        self.chain_roles = chain_roles;
+        self
     }
 
     pub fn with_metrics(mut self, metrics: Arc<MetricsCollector>) -> Self {
@@ -83,43 +96,23 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     }
 
     /// Adds a provider for a specific chain
-    pub fn add_provider(&mut self, chain_id: ChainId, provider: P) {
+    pub fn add_provider(&mut self, chain_id: u64, provider: P) {
         self.providers.insert(chain_id, provider);
     }
 
     /// Gets the provider for a specific chain
-    fn get_provider(&self, chain_id: ChainId) -> Option<&P> {
+    fn get_provider(&self, chain_id: u64) -> Option<&P> {
         self.providers.get(&chain_id)
     }
 
-    /// Resolves the receipt-wait timeout for `chain_id`: the configured override
-    /// if set, otherwise the per-chain default.
-    fn receipt_timeout(&self, chain_id: ChainId) -> Duration {
-        let secs = self.receipt_timeout_override.unwrap_or(match chain_id {
-            ChainId::L1 => DEFAULT_RECEIPT_TIMEOUT_L1_SECS,
-            ChainId::L2 => DEFAULT_RECEIPT_TIMEOUT_L2_SECS,
+    /// Resolves the receipt-wait timeout for `chain_role`: the configured override
+    /// if set, otherwise the per-role default.
+    fn receipt_timeout(&self, chain_role: ChainRole) -> Duration {
+        let secs = self.receipt_timeout_override.unwrap_or(match chain_role {
+            ChainRole::L1 => DEFAULT_RECEIPT_TIMEOUT_L1_SECS,
+            ChainRole::L2 => DEFAULT_RECEIPT_TIMEOUT_L2_SECS,
         });
         Duration::from_secs(secs)
-    }
-
-    /// Detects which chain has code deployed at the given address
-    async fn detect_chain_for_address(&self, address: Address) -> Result<ChainId> {
-        debug!(
-            address = %address,
-            "Detecting chain for address in executor"
-        );
-
-        let supported: Vec<ChainId> = self.providers.keys().copied().collect();
-        gas_killer_common::detect_chain_for_address(address, &supported, |chain_id, addr| {
-            let provider = self.providers.get(&chain_id).cloned();
-            async move {
-                let provider = provider
-                    .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?;
-                let code = provider.get_code_at(addr).await?;
-                Ok(code)
-            }
-        })
-        .await
     }
 
     /// Resolves whether `target_addr` implements the GasKiller ERC-165 interface,
@@ -200,16 +193,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let task_data = task_data
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
 
-        // Detect which chain the contract is on
-        let chain_detect_start = Instant::now();
-        let chain_detect_result = self
-            .detect_chain_for_address(task_data.target_address)
-            .await;
-        if let Some(m) = &self.metrics {
-            m.executor_chain_detection_seconds
-                .observe(chain_detect_start.elapsed().as_secs_f64());
-        }
-        let chain_id = chain_detect_result?;
+        let chain_id: u64 = task_data.chain_id;
 
         // Get the chain-specific provider
         let provider = self
@@ -322,7 +306,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         // Bound the receipt wait so L1 mempool congestion, RPC degradation, or a
         // dropped transaction can't stall the executor indefinitely. On timeout we
         // return an error so the orchestrator counts the round as failed and moves on.
-        let receipt_timeout = self.receipt_timeout(chain_id);
+        // Unknown chain IDs fall back to the L1 (longer) timeout.
+        let chain_role = self.chain_roles.get(&chain_id).copied().unwrap_or_default();
+        let receipt_timeout = self.receipt_timeout(chain_role);
         let receipt_start = Instant::now();
         let receipt = match tokio::time::timeout(receipt_timeout, call_return.get_receipt()).await {
             Ok(receipt_result) => {
@@ -440,7 +426,7 @@ mod tests {
         // would drain the empty asserter and error.
         push_supports_interface(&asserter, true);
 
-        let handler = GasKillerHandler::new(provider.clone());
+        let handler = GasKillerHandler::new(1, provider.clone());
         let target = Address::from([0x11u8; 20]);
 
         let first = handler
@@ -462,7 +448,7 @@ mod tests {
         let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
         push_supports_interface(&asserter, false);
 
-        let handler = GasKillerHandler::new(provider.clone());
+        let handler = GasKillerHandler::new(1, provider.clone());
         let target = Address::from([0x22u8; 20]);
 
         // A `false` result is immutable too, so it is cached and reused without a
@@ -490,7 +476,7 @@ mod tests {
         push_supports_interface(&asserter, true);
         push_supports_interface(&asserter, false);
 
-        let handler = GasKillerHandler::new(provider.clone());
+        let handler = GasKillerHandler::new(1, provider.clone());
         let supported_addr = Address::from([0x33u8; 20]);
         let unsupported_addr = Address::from([0x44u8; 20]);
 
@@ -525,14 +511,14 @@ mod tests {
     async fn test_receipt_timeout_defaults_per_chain() {
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new().connect_mocked_client(asserter);
-        let handler = GasKillerHandler::new(provider);
+        let handler = GasKillerHandler::new(1, provider);
 
         assert_eq!(
-            handler.receipt_timeout(ChainId::L1),
+            handler.receipt_timeout(ChainRole::L1),
             Duration::from_secs(120)
         );
         assert_eq!(
-            handler.receipt_timeout(ChainId::L2),
+            handler.receipt_timeout(ChainRole::L2),
             Duration::from_secs(30)
         );
     }
@@ -541,14 +527,14 @@ mod tests {
     async fn test_receipt_timeout_override_applies_to_all_chains() {
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new().connect_mocked_client(asserter);
-        let handler = GasKillerHandler::new(provider).with_receipt_timeout(Some(45));
+        let handler = GasKillerHandler::new(1, provider).with_receipt_timeout(Some(45));
 
         assert_eq!(
-            handler.receipt_timeout(ChainId::L1),
+            handler.receipt_timeout(ChainRole::L1),
             Duration::from_secs(45)
         );
         assert_eq!(
-            handler.receipt_timeout(ChainId::L2),
+            handler.receipt_timeout(ChainRole::L2),
             Duration::from_secs(45)
         );
     }

@@ -60,6 +60,7 @@ async fn main() -> Result<(), BoxError> {
             from_address: Address::ZERO,
             value: U256::ZERO,
             block_height: 0,
+            chain_id: 0,
         };
         let local = FixedBytes::<32>::from(task_data.build_payload_hash(&storage_updates).0);
 

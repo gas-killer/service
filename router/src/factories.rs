@@ -10,7 +10,7 @@ use crate::ingress::{
 use crate::metrics::MetricsCollector;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_provider::{
-    Identity, ProviderBuilder, RootProvider,
+    Identity, Provider, ProviderBuilder, RootProvider,
     fillers::{
         BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller,
         SimpleNonceManager, WalletFiller,
@@ -22,7 +22,7 @@ use commonware_avs_eigenlayer::AvsDeployment;
 use commonware_avs_router::bindings::bls_apk_registry::BLSApkRegistry;
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
-use gas_killer_common::{ChainId, GasKillerValidator};
+use gas_killer_common::{ChainRole, GasKillerValidator};
 use std::collections::HashMap;
 use std::{env, str::FromStr, sync::Arc};
 use tracing::info;
@@ -130,8 +130,8 @@ pub async fn create_listening_creator_with_server(
     Ok(GasKillerCreatorType::Listening(Box::new(creator)))
 }
 
-fn build_ingress_providers() -> anyhow::Result<HashMap<ChainId, gas_killer_common::ReadOnlyProvider>>
-{
+fn build_ingress_providers()
+-> anyhow::Result<HashMap<ChainRole, gas_killer_common::ReadOnlyProvider>> {
     let chain_rpc_urls = gas_killer_common::chain_rpc_urls_from_env()?;
     let providers = gas_killer_common::build_read_providers(&chain_rpc_urls);
 
@@ -149,15 +149,10 @@ fn build_ingress_providers() -> anyhow::Result<HashMap<ChainId, gas_killer_commo
 /// estimation (e.g., double-execution with a stale transition_index), the local nonce counter
 /// is never corrupted, keeping subsequent rounds healthy.
 async fn create_wallet_provider_for_chain(
-    chain_id: ChainId,
+    chain_role: ChainRole,
     private_key: &str,
 ) -> Result<SimpleWalletProvider> {
-    let http_rpc = match chain_id {
-        ChainId::L1 => env::var("HTTP_RPC")
-            .map_err(|_| anyhow::anyhow!("HTTP_RPC must be set for L1 chain"))?,
-        ChainId::L2 => env::var("L2_HTTP_RPC")
-            .map_err(|_| anyhow::anyhow!("L2_HTTP_RPC must be set for L2 chain"))?,
-    };
+    let http_rpc = chain_role.rpc_url()?;
 
     let ecdsa_signer = PrivateKeySigner::from_str(private_key)
         .map_err(|e| anyhow::anyhow!("Failed to parse private key: {}", e))?;
@@ -176,7 +171,9 @@ async fn create_wallet_provider_for_chain(
         .wallet(ecdsa_signer)
         .connect(&http_rpc)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect write provider for {}: {}", chain_id, e))?;
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to connect write provider for {}: {}", chain_role, e)
+        })?;
 
     Ok(provider)
 }
@@ -219,24 +216,58 @@ pub async fn create_gas_killer_executor(
             anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
         })?;
 
-    // Create wallet providers for each supported chain
-    let mut providers: HashMap<ChainId, SimpleWalletProvider> = HashMap::new();
+    // Create wallet providers for each supported chain, keyed by actual EVM chain ID.
+    // `chain_roles` records the role behind each numeric ID so the executor can pick
+    // the per-role receipt timeout from the chain ID carried in task data.
+    let mut providers: HashMap<u64, SimpleWalletProvider> = HashMap::new();
+    let mut chain_roles: HashMap<u64, ChainRole> = HashMap::new();
 
     // L1 provider (required)
-    let l1_provider = create_wallet_provider_for_chain(ChainId::L1, &private_key).await?;
-    providers.insert(ChainId::L1, l1_provider);
-    info!(chain = %ChainId::L1, "Created L1 wallet provider");
+    let l1_provider = create_wallet_provider_for_chain(ChainRole::L1, &private_key).await?;
+    let l1_chain_id = l1_provider
+        .get_chain_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to get L1 chain ID: {}", e))?;
+    providers.insert(l1_chain_id, l1_provider);
+    chain_roles.insert(l1_chain_id, ChainRole::L1);
+    info!(
+        chain_id = l1_chain_id,
+        chain = "l1",
+        "Created L1 wallet provider"
+    );
 
     // L2 provider — optional, only used for write-side tx execution on L2
     if l2_http_rpc.is_some() {
-        match create_wallet_provider_for_chain(ChainId::L2, &private_key).await {
-            Ok(l2_provider) => {
-                providers.insert(ChainId::L2, l2_provider);
-                info!(chain = %ChainId::L2, "Created L2 wallet provider");
-            }
+        match create_wallet_provider_for_chain(ChainRole::L2, &private_key).await {
+            Ok(l2_provider) => match l2_provider.get_chain_id().await {
+                Ok(l2_chain_id) if l2_chain_id == l1_chain_id => {
+                    tracing::warn!(
+                        chain_id = l2_chain_id,
+                        "L2_HTTP_RPC resolves to the same EVM chain ID as HTTP_RPC (L1); \
+                         skipping L2 provider to avoid overwriting L1. Check that HTTP_RPC \
+                         and L2_HTTP_RPC point at different chains"
+                    );
+                }
+                Ok(l2_chain_id) => {
+                    providers.insert(l2_chain_id, l2_provider);
+                    chain_roles.insert(l2_chain_id, ChainRole::L2);
+                    info!(
+                        chain_id = l2_chain_id,
+                        chain = "l2",
+                        "Created L2 wallet provider"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        chain = "l2",
+                        error = %e,
+                        "Failed to get L2 chain ID, L2 chain will be unavailable"
+                    );
+                }
+            },
             Err(e) => {
                 tracing::warn!(
-                    chain = %ChainId::L2,
+                    chain = "l2",
                     error = %e,
                     "Failed to create L2 wallet provider, L2 chain will be unavailable"
                 );
@@ -261,6 +292,7 @@ pub async fn create_gas_killer_executor(
 
     // Create handler with multi-chain providers
     let gas_killer_handler = GasKillerHandler::with_providers(providers)
+        .with_chain_roles(chain_roles)
         .with_metrics(metrics)
         .with_dispatch_time(dispatch_time)
         .with_receipt_timeout(receipt_timeout_override);
