@@ -240,6 +240,14 @@ pub async fn create_gas_killer_executor(
     if l2_http_rpc.is_some() {
         match create_wallet_provider_for_chain(ChainRole::L2, &private_key).await {
             Ok(l2_provider) => match l2_provider.get_chain_id().await {
+                Ok(l2_chain_id) if l2_chain_id == l1_chain_id => {
+                    tracing::warn!(
+                        chain_id = l2_chain_id,
+                        "L2_HTTP_RPC resolves to the same EVM chain ID as HTTP_RPC (L1); \
+                         skipping L2 provider to avoid overwriting L1. Check that HTTP_RPC \
+                         and L2_HTTP_RPC point at different chains"
+                    );
+                }
                 Ok(l2_chain_id) => {
                     providers.insert(l2_chain_id, l2_provider);
                     chain_roles.insert(l2_chain_id, ChainRole::L2);

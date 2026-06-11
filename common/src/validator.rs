@@ -19,7 +19,6 @@ use commonware_avs_router::wire;
 
 use alloy::rpc::types::TransactionRequest;
 use gas_analyzer::{EvmSketchExecutorCache, call_to_encoded_state_updates_with_evmsketch};
-use url::Url;
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
 pub struct ValidatorMetrics {
@@ -191,14 +190,9 @@ impl GasKillerValidator {
 
     /// Returns the actual EVM chain ID (from `eth_chainId`) for the given chain role's RPC.
     pub async fn get_chain_id_for(&self, chain: ChainRole) -> Result<u64> {
-        use alloy_provider::ProviderBuilder;
-        let rpc_url = self
-            .rpc_url_for_chain(chain)
-            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain role: {}", chain))?;
-        let url = Url::parse(rpc_url)
-            .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL for chain {}: {}", chain, e))?;
-        ProviderBuilder::new()
-            .connect_http(url)
+        self.providers
+            .get(&chain)
+            .ok_or_else(|| anyhow::anyhow!("No provider configured for chain role: {}", chain))?
             .get_chain_id()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch chain ID for chain {}: {}", chain, e))

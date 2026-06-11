@@ -45,10 +45,10 @@ pub struct GasKillerHandler<P> {
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
-    /// Creates a new handler with a single provider (defaults to Ethereum mainnet key)
-    pub fn new(provider: P) -> Self {
+    /// Creates a new handler with a single provider for the given EVM chain ID.
+    pub fn new(chain_id: u64, provider: P) -> Self {
         let mut providers = HashMap::new();
-        providers.insert(1u64, provider);
+        providers.insert(chain_id, provider);
         Self {
             providers,
             chain_roles: HashMap::new(),
@@ -426,7 +426,7 @@ mod tests {
         // would drain the empty asserter and error.
         push_supports_interface(&asserter, true);
 
-        let handler = GasKillerHandler::new(provider.clone());
+        let handler = GasKillerHandler::new(1, provider.clone());
         let target = Address::from([0x11u8; 20]);
 
         let first = handler
@@ -448,7 +448,7 @@ mod tests {
         let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
         push_supports_interface(&asserter, false);
 
-        let handler = GasKillerHandler::new(provider.clone());
+        let handler = GasKillerHandler::new(1, provider.clone());
         let target = Address::from([0x22u8; 20]);
 
         // A `false` result is immutable too, so it is cached and reused without a
@@ -476,7 +476,7 @@ mod tests {
         push_supports_interface(&asserter, true);
         push_supports_interface(&asserter, false);
 
-        let handler = GasKillerHandler::new(provider.clone());
+        let handler = GasKillerHandler::new(1, provider.clone());
         let supported_addr = Address::from([0x33u8; 20]);
         let unsupported_addr = Address::from([0x44u8; 20]);
 
@@ -511,7 +511,7 @@ mod tests {
     async fn test_receipt_timeout_defaults_per_chain() {
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new().connect_mocked_client(asserter);
-        let handler = GasKillerHandler::new(provider);
+        let handler = GasKillerHandler::new(1, provider);
 
         assert_eq!(
             handler.receipt_timeout(ChainRole::L1),
@@ -527,7 +527,7 @@ mod tests {
     async fn test_receipt_timeout_override_applies_to_all_chains() {
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new().connect_mocked_client(asserter);
-        let handler = GasKillerHandler::new(provider).with_receipt_timeout(Some(45));
+        let handler = GasKillerHandler::new(1, provider).with_receipt_timeout(Some(45));
 
         assert_eq!(
             handler.receipt_timeout(ChainRole::L1),
