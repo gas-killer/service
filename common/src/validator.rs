@@ -31,7 +31,7 @@ impl ValidatorMetrics {
     pub fn new() -> Self {
         let mut registry = Registry::default();
         let evmsketch_duration_seconds =
-            Histogram::new([0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0]);
+            Histogram::new([0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0].into_iter());
         registry.register(
             "gas_killer_node_evmsketch_duration_seconds",
             "Duration of gas analysis (EVMSketch + RPC calls) on the node, cache-miss path only. Excludes chain detection.",

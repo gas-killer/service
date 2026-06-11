@@ -70,7 +70,7 @@ impl MetricsCollector {
         );
 
         let storage_computation_seconds =
-            Histogram::new([0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0, 300.0]);
+            Histogram::new([0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0, 300.0].into_iter());
         registry.register(
             "gas_killer_storage_computation_seconds",
             "EVM storage-update computation duration in seconds",
@@ -92,9 +92,12 @@ impl MetricsCollector {
         );
 
         // Fast reverts (~sub-second, fail at tx send) and confirmed runs (~block-time dominated); Buckets resolve both ends.
-        let execution_duration_seconds = Histogram::new([
-            0.5, 1.0, 2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0, 45.0, 60.0, 120.0, 300.0,
-        ]);
+        let execution_duration_seconds = Histogram::new(
+            [
+                0.5, 1.0, 2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0, 45.0, 60.0, 120.0, 300.0,
+            ]
+            .into_iter(),
+        );
         registry.register(
             "gas_killer_execution_duration_seconds",
             "Duration of handle_verification including all contract calls and tx submission",
@@ -102,7 +105,7 @@ impl MetricsCollector {
         );
 
         let p2p_round_trip_seconds =
-            Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]);
+            Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0].into_iter());
         registry.register(
             "gas_killer_p2p_round_trip_seconds",
             "Time from creator dispatching a task to executor receiving threshold signatures (P2P transit + node EVMSketch + BLS signing + aggregation)",
@@ -111,9 +114,12 @@ impl MetricsCollector {
 
         // Roughly p2p_round_trip + execution_duration; block-time dominated, so the
         // execution-duration buckets resolve it well.
-        let round_latency_seconds = Histogram::new([
-            0.5, 1.0, 2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0, 45.0, 60.0, 120.0, 300.0,
-        ]);
+        let round_latency_seconds = Histogram::new(
+            [
+                0.5, 1.0, 2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0, 45.0, 60.0, 120.0, 300.0,
+            ]
+            .into_iter(),
+        );
         registry.register(
             "gas_killer_round_latency_seconds",
             "End-to-end round latency from creator dispatch to verifyAndUpdate receipt confirmation (successful rounds only)",
@@ -131,28 +137,29 @@ impl MetricsCollector {
         let rpc_buckets = [
             0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5,
         ];
-        let executor_chain_detection_seconds = Histogram::new(rpc_buckets);
+        let executor_chain_detection_seconds = Histogram::new(rpc_buckets.into_iter());
         registry.register(
             "gas_killer_executor_chain_detection_seconds",
             "Time to detect which chain a target contract is deployed on",
             executor_chain_detection_seconds.clone(),
         );
 
-        let executor_hash_preflight_seconds = Histogram::new(rpc_buckets);
+        let executor_hash_preflight_seconds = Histogram::new(rpc_buckets.into_iter());
         registry.register(
             "gas_killer_executor_hash_preflight_seconds",
             "Time for the payload-hash preflight computation",
             executor_hash_preflight_seconds.clone(),
         );
 
-        let executor_supports_interface_seconds = Histogram::new(rpc_buckets);
+        let executor_supports_interface_seconds = Histogram::new(rpc_buckets.into_iter());
         registry.register(
             "gas_killer_executor_supports_interface_seconds",
             "Time for the supportsInterface ERC-165 check",
             executor_supports_interface_seconds.clone(),
         );
 
-        let executor_tx_send_seconds = Histogram::new([0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0]);
+        let executor_tx_send_seconds =
+            Histogram::new([0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0].into_iter());
         registry.register(
             "gas_killer_executor_tx_send_seconds",
             "Time from calling verifyAndUpdate to receiving the pending tx handle",
@@ -160,9 +167,12 @@ impl MetricsCollector {
         );
 
         // Block-time driven (~1-2 confirmations); dense through the 8-30s window.
-        let executor_receipt_confirmation_seconds = Histogram::new([
-            1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 15.0, 18.0, 24.0, 30.0, 45.0, 60.0, 120.0,
-        ]);
+        let executor_receipt_confirmation_seconds = Histogram::new(
+            [
+                1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 15.0, 18.0, 24.0, 30.0, 45.0, 60.0, 120.0,
+            ]
+            .into_iter(),
+        );
         registry.register(
             "gas_killer_executor_receipt_confirmation_seconds",
             "Time waiting for the verifyAndUpdate receipt to be mined",
