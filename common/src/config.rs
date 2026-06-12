@@ -186,6 +186,29 @@ pub fn block_stale_measure() -> u64 {
         .unwrap_or(DEFAULT_BLOCK_STALE_MEASURE)
 }
 
+/// Reads the orchestrator's per-round signature-collection window from
+/// `AGGREGATION_TIMEOUT` (seconds, fractional values accepted).
+///
+/// This bounds how long the router waits for operator signatures on a round before
+/// abandoning it and moving to the next queued task. It must comfortably exceed the
+/// worst-case node compute + sign time, or rounds will time out before operators finish.
+/// The upstream orchestrator builder reads the same setting under its legacy name
+/// `AGGREGATION_FREQUENCY`; when both are set, `AGGREGATION_TIMEOUT` wins.
+///
+/// Returns `None` when unset or unparseable, leaving the builder's value in effect.
+pub fn aggregation_timeout() -> Option<std::time::Duration> {
+    parse_aggregation_timeout(env::var("AGGREGATION_TIMEOUT").ok().as_deref())
+}
+
+/// Parses an `AGGREGATION_TIMEOUT` value into a duration, rejecting non-positive,
+/// non-finite, or malformed input.
+fn parse_aggregation_timeout(value: Option<&str>) -> Option<std::time::Duration> {
+    value
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|&secs| secs > 0.0 && secs.is_finite())
+        .map(std::time::Duration::from_secs_f64)
+}
+
 /// Runtime configuration for the speculative executor pre-build loop.
 ///
 /// The loop watches each chain's head and pre-builds the EVMSketch executor for the
@@ -226,5 +249,46 @@ impl SpeculativePrebuildConfig {
             poll_interval: std::time::Duration::from_millis(poll_ms),
             confirmation_depth,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn aggregation_timeout_parses_whole_seconds() {
+        assert_eq!(
+            parse_aggregation_timeout(Some("300")),
+            Some(Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn aggregation_timeout_parses_fractional_seconds() {
+        assert_eq!(
+            parse_aggregation_timeout(Some("0.5")),
+            Some(Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn aggregation_timeout_rejects_invalid_values() {
+        assert_eq!(parse_aggregation_timeout(None), None);
+        assert_eq!(parse_aggregation_timeout(Some("")), None);
+        assert_eq!(parse_aggregation_timeout(Some("abc")), None);
+        assert_eq!(parse_aggregation_timeout(Some("0")), None);
+        assert_eq!(parse_aggregation_timeout(Some("-5")), None);
+        assert_eq!(parse_aggregation_timeout(Some("inf")), None);
+        assert_eq!(parse_aggregation_timeout(Some("NaN")), None);
+    }
+
+    #[test]
+    fn aggregation_timeout_trims_whitespace() {
+        assert_eq!(
+            parse_aggregation_timeout(Some(" 90 ")),
+            Some(Duration::from_secs(90))
+        );
     }
 }
