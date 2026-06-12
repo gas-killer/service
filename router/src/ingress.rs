@@ -1117,6 +1117,37 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
         }
 
+        // -- queue capacity tests --
+
+        #[tokio::test]
+        async fn test_full_queue_returns_503() {
+            let (sender, _receiver) = crate::creator::task_channel();
+            let queue_depth = crate::creator::task_queue_depth();
+            let mut state = IngressState::without_metrics(sender, queue_depth.clone());
+            state.max_queue_depth = 1;
+            queue_depth.store(1, std::sync::atomic::Ordering::Relaxed);
+            let app = build_app().with_state(state);
+
+            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = response_body(resp).await;
+            assert!(!body.success);
+            assert!(body.message.to_lowercase().contains("capacity"));
+        }
+
+        #[tokio::test]
+        async fn test_queue_one_below_limit_still_accepts() {
+            let (sender, _receiver) = crate::creator::task_channel();
+            let queue_depth = crate::creator::task_queue_depth();
+            let mut state = IngressState::without_metrics(sender, queue_depth.clone());
+            state.max_queue_depth = 2;
+            queue_depth.store(1, std::sync::atomic::Ordering::Relaxed);
+            let app = build_app().with_state(state);
+
+            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
         #[tokio::test]
         async fn test_rejected_request_does_not_enqueue() {
             let (app, mut receiver) = make_app();
