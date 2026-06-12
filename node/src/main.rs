@@ -13,11 +13,12 @@ use commonware_avs_node::contributor::{AggregationInput, Contribute, Contributor
 use commonware_p2p::Manager;
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_runtime::{Metrics, Runner, Spawner, tokio};
-use commonware_utils::{NZU32, set::OrderedAssociated};
+use commonware_utils::set::OrderedAssociated;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
     GasKillerTaskData, GasKillerValidator, OrchestratorConfig, SpeculativePrebuildConfig,
     ValidatorMetrics, get_operator_states, load_key_from_file, load_orchestrator_config,
+    p2p_message_backlog, p2p_messages_per_second,
 };
 use governor::Quota;
 use std::collections::HashMap;
@@ -350,9 +351,11 @@ fn main() {
         let aggregation_input = AggregationInput::new(threshold, g1_map);
 
         // Create network channel
-        const DEFAULT_MESSAGE_BACKLOG: usize = 256;
-        let (sender, receiver) =
-            network.register(0, Quota::per_second(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+        let p2p_backlog = p2p_message_backlog();
+        let p2p_quota =
+            Quota::with_period(Duration::from_secs_f64(1.0 / p2p_messages_per_second()))
+                .expect("P2P_MESSAGES_PER_SECOND must be positive and finite");
+        let (sender, receiver) = network.register(0, p2p_quota, p2p_backlog);
 
         // Create validator metrics and validator for the gas killer use case
         let validator_metrics = Arc::new(ValidatorMetrics::new());

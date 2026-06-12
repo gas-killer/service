@@ -120,6 +120,7 @@ pub async fn create_listening_creator_with_server(
     let ingress_state = IngressState::new(
         sender,
         queue_depth,
+        gas_killer_common::p2p_message_backlog(),
         metrics,
         providers,
         ingress_password,

@@ -167,6 +167,38 @@ pub async fn get_operator_states() -> Result<Vec<QuorumInfo>, Box<dyn std::error
     client.get_operator_states().await
 }
 
+/// Default P2P channel message backlog depth.
+///
+/// The backlog bounds how many queued messages the channel will hold before the sender
+/// blocks or drops new messages. Configurable at runtime via `P2P_MESSAGE_BACKLOG`.
+pub const DEFAULT_P2P_MESSAGE_BACKLOG: usize = 256;
+
+/// Default P2P channel rate limit in messages per second.
+///
+/// Configurable at runtime via `P2P_MESSAGES_PER_SECOND`. Accepts fractional values
+/// (e.g. `0.5` for one message every two seconds).
+pub const DEFAULT_P2P_MESSAGES_PER_SECOND: f64 = 1.0;
+
+/// Reads the P2P channel backlog depth from `P2P_MESSAGE_BACKLOG`, defaulting to
+/// [`DEFAULT_P2P_MESSAGE_BACKLOG`].
+pub fn p2p_message_backlog() -> usize {
+    env::var("P2P_MESSAGE_BACKLOG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v: &usize| v > 0)
+        .unwrap_or(DEFAULT_P2P_MESSAGE_BACKLOG)
+}
+
+/// Reads the P2P channel rate limit from `P2P_MESSAGES_PER_SECOND`, defaulting to
+/// [`DEFAULT_P2P_MESSAGES_PER_SECOND`].
+pub fn p2p_messages_per_second() -> f64 {
+    env::var("P2P_MESSAGES_PER_SECOND")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v: &f64| v > 0.0 && v.is_finite())
+        .unwrap_or(DEFAULT_P2P_MESSAGES_PER_SECOND)
+}
+
 /// Maximum age (in blocks) of a reference block, falling back to the contract default
 /// when `BLOCK_STALE_MEASURE` is unset or unparseable.
 ///

@@ -15,11 +15,11 @@ use commonware_runtime::{
     Metrics, Runner, Spawner,
     tokio::{self},
 };
-use commonware_utils::NZU32;
 use commonware_utils::set::OrderedAssociated;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
     GasKillerValidator, SpeculativePrebuildConfig, get_operator_states, load_key_from_file,
+    p2p_message_backlog, p2p_messages_per_second,
 };
 use gas_killer_router::GasKillerOrchestratorBuilder;
 use gas_killer_router::metrics::MetricsCollector;
@@ -273,10 +273,11 @@ fn main() {
         let threshold = quorum_infos[quorum_number].threshold;
 
         // Run as the orchestrator using the builder pattern
-        const DEFAULT_MESSAGE_BACKLOG: usize = 256;
-
-        let (sender, receiver) =
-            network.register(0, Quota::per_second(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+        let p2p_backlog = p2p_message_backlog();
+        let p2p_quota =
+            Quota::with_period(Duration::from_secs_f64(1.0 / p2p_messages_per_second()))
+                .expect("P2P_MESSAGES_PER_SECOND must be positive and finite");
+        let (sender, receiver) = network.register(0, p2p_quota, p2p_backlog);
 
         // Custom Prometheus metrics — shared with executor, creator, and ingress via builder
         let metrics = Arc::new(MetricsCollector::new());
