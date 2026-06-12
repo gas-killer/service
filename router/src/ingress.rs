@@ -412,6 +412,29 @@ pub async fn trigger_task_handler(
         );
     }
 
+    // Load-shed before any validation work. Onchain validation costs multiple RPC
+    // round-trips, so rejecting at-capacity requests up front keeps an overloaded
+    // service from amplifying its own load; a request that would have failed
+    // validation gets a 503 instead of a 400 while the queue is full.
+    let current_depth = state.queue_depth.load(Ordering::Relaxed);
+    if current_depth >= state.max_queue_depth {
+        warn!(
+            queue_depth = current_depth,
+            max_queue_depth = state.max_queue_depth,
+            "Task rejected: queue at capacity"
+        );
+        if let Some(m) = &state.metrics {
+            m.ingress_at_capacity.inc();
+        }
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(GasKillerTaskResponse {
+                success: false,
+                message: "Service at capacity, please try again in a few minutes".to_string(),
+            }),
+        );
+    }
+
     if let Err(e) = request.validate() {
         warn!(
             target_address = %request.body.target_address,
@@ -461,25 +484,6 @@ pub async fn trigger_task_handler(
             Json(GasKillerTaskResponse {
                 success: false,
                 message: client_message,
-            }),
-        );
-    }
-
-    let current_depth = state.queue_depth.load(Ordering::Relaxed);
-    if current_depth >= state.max_queue_depth {
-        warn!(
-            queue_depth = current_depth,
-            max_queue_depth = state.max_queue_depth,
-            "Task rejected: queue at capacity"
-        );
-        if let Some(m) = &state.metrics {
-            m.ingress_at_capacity.inc();
-        }
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(GasKillerTaskResponse {
-                success: false,
-                message: "Service at capacity, please try again in a few minutes".to_string(),
             }),
         );
     }
@@ -1133,6 +1137,23 @@ mod tests {
             let body = response_body(resp).await;
             assert!(!body.success);
             assert!(body.message.to_lowercase().contains("capacity"));
+        }
+
+        #[tokio::test]
+        async fn test_full_queue_increments_at_capacity_metric() {
+            let (sender, _receiver) = crate::creator::task_channel();
+            let queue_depth = crate::creator::task_queue_depth();
+            let metrics = Arc::new(MetricsCollector::new());
+            let mut state = IngressState::without_metrics(sender, queue_depth.clone());
+            state.metrics = Some(Arc::clone(&metrics));
+            state.max_queue_depth = 1;
+            queue_depth.store(1, std::sync::atomic::Ordering::Relaxed);
+            let app = build_app().with_state(state);
+
+            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(metrics.ingress_at_capacity.get(), 1);
+            assert_eq!(metrics.ingress_rejected.get(), 0);
         }
 
         #[tokio::test]

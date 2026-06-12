@@ -189,14 +189,27 @@ pub fn p2p_message_backlog() -> usize {
         .unwrap_or(DEFAULT_P2P_MESSAGE_BACKLOG)
 }
 
-/// Reads the P2P channel rate limit from `P2P_MESSAGES_PER_SECOND`, defaulting to
-/// [`DEFAULT_P2P_MESSAGES_PER_SECOND`].
-pub fn p2p_messages_per_second() -> f64 {
-    env::var("P2P_MESSAGES_PER_SECOND")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&v: &f64| v > 0.0 && v.is_finite())
-        .unwrap_or(DEFAULT_P2P_MESSAGES_PER_SECOND)
+/// Reads the P2P channel rate limit from `P2P_MESSAGES_PER_SECOND` and returns the
+/// per-message quota period (`1 / rate`), defaulting to
+/// [`DEFAULT_P2P_MESSAGES_PER_SECOND`] when unset or invalid.
+///
+/// The quota is a smooth rate with no burst allowance: a rate of `5.0` permits one
+/// message every 200 ms, not bursts of five. Values whose reciprocal would overflow
+/// a `Duration` (e.g. `1e-20`) are treated as invalid and fall back to the default.
+pub fn p2p_quota_period() -> std::time::Duration {
+    parse_p2p_quota_period(env::var("P2P_MESSAGES_PER_SECOND").ok().as_deref())
+}
+
+/// Parses a `P2P_MESSAGES_PER_SECOND` value into a quota period, falling back to the
+/// default rate on malformed, non-positive, non-finite, or `Duration`-overflowing input.
+fn parse_p2p_quota_period(value: Option<&str>) -> std::time::Duration {
+    value
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|&v| v > 0.0 && v.is_finite())
+        .and_then(|v| std::time::Duration::try_from_secs_f64(1.0 / v).ok())
+        .unwrap_or_else(|| {
+            std::time::Duration::from_secs_f64(1.0 / DEFAULT_P2P_MESSAGES_PER_SECOND)
+        })
 }
 
 /// Maximum age (in blocks) of a reference block, falling back to the contract default
@@ -258,5 +271,45 @@ impl SpeculativePrebuildConfig {
             poll_interval: std::time::Duration::from_millis(poll_ms),
             confirmation_depth,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn p2p_quota_period_default_is_one_per_second() {
+        assert_eq!(parse_p2p_quota_period(None), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn p2p_quota_period_converts_rate_to_period() {
+        assert_eq!(
+            parse_p2p_quota_period(Some("5.0")),
+            Duration::from_millis(200)
+        );
+        assert_eq!(parse_p2p_quota_period(Some("0.5")), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn p2p_quota_period_rejects_invalid_values() {
+        let default = Duration::from_secs(1);
+        assert_eq!(parse_p2p_quota_period(Some("")), default);
+        assert_eq!(parse_p2p_quota_period(Some("abc")), default);
+        assert_eq!(parse_p2p_quota_period(Some("0")), default);
+        assert_eq!(parse_p2p_quota_period(Some("-1.5")), default);
+        assert_eq!(parse_p2p_quota_period(Some("inf")), default);
+        assert_eq!(parse_p2p_quota_period(Some("NaN")), default);
+    }
+
+    #[test]
+    fn p2p_quota_period_rejects_duration_overflow() {
+        // 1.0 / 1e-20 overflows Duration; must fall back to the default, not panic.
+        assert_eq!(
+            parse_p2p_quota_period(Some("1e-20")),
+            Duration::from_secs(1)
+        );
     }
 }

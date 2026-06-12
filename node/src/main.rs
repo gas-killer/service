@@ -18,7 +18,7 @@ use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
     GasKillerTaskData, GasKillerValidator, OrchestratorConfig, SpeculativePrebuildConfig,
     ValidatorMetrics, get_operator_states, load_key_from_file, load_orchestrator_config,
-    p2p_message_backlog, p2p_messages_per_second,
+    p2p_message_backlog, p2p_quota_period,
 };
 use governor::Quota;
 use std::collections::HashMap;
@@ -352,9 +352,8 @@ fn main() {
 
         // Create network channel
         let p2p_backlog = p2p_message_backlog();
-        let p2p_quota =
-            Quota::with_period(Duration::from_secs_f64(1.0 / p2p_messages_per_second()))
-                .expect("P2P_MESSAGES_PER_SECOND must be positive and finite");
+        let p2p_quota = Quota::with_period(p2p_quota_period())
+            .expect("p2p_quota_period always returns a non-zero duration");
         let (sender, receiver) = network.register(0, p2p_quota, p2p_backlog);
 
         // Create validator metrics and validator for the gas killer use case
