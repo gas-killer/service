@@ -202,13 +202,35 @@ data:
           "type": "text",
           "title": "Latency Breakdown",
           "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Latency Breakdown\n\nP2P round-trip = time from creator dispatching a task (after router-side storage computation) to the executor receiving threshold signatures. Includes P2P transit ×2, node EVMSketch, BLS signing, and aggregation.\n\nEstimated transport+signing overhead ≈ round-trip − node EVMSketch. Router-side storage computation is **not** part of the round-trip measurement (it completes before the dispatch timestamp is stamped)." }
+          "options": { "mode": "markdown", "content": "## Latency Breakdown\n\nRound latency = end-to-end time from creator dispatch to verifyAndUpdate receipt confirmation, successful rounds only. P2P round-trip = time from creator dispatching a task (after router-side storage computation) to the executor receiving threshold signatures. Includes P2P transit ×2, node EVMSketch, BLS signing, and aggregation.\n\nEstimated transport+signing overhead ≈ round-trip − node EVMSketch. Router-side storage computation and ingress-queue wait are **not** part of either measurement (they complete before the dispatch timestamp is stamped)." }
+        },
+        {
+          "id": 44,
+          "type": "timeseries",
+          "title": "Round Latency (p50 / p95 / p99)",
+          "description": "End-to-end: creator dispatch → verifyAndUpdate receipt confirmation. Successful rounds only.",
+          "gridPos": { "x": 0, "y": 24, "w": 6, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            },
+            {
+              "expr": "histogram_quantile(0.99, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
         },
         {
           "id": 41,
           "type": "timeseries",
           "title": "P2P Round-Trip (p50 / p99)",
-          "gridPos": { "x": 0, "y": 24, "w": 8, "h": 8 },
+          "gridPos": { "x": 6, "y": 24, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_p2p_round_trip_seconds_bucket[5m]))",
@@ -226,7 +248,7 @@ data:
           "type": "timeseries",
           "title": "Node EVMSketch Duration (p50 / p99)",
           "description": "Time for call_to_encoded_state_updates_with_evmsketch on the node (cache-miss path). Scraped from the node's /metrics endpoint.",
-          "gridPos": { "x": 8, "y": 24, "w": 8, "h": 8 },
+          "gridPos": { "x": 12, "y": 24, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_node_evmsketch_duration_seconds_bucket[5m]))",
@@ -244,7 +266,7 @@ data:
           "type": "timeseries",
           "title": "Task Queue Depth",
           "description": "Number of tasks sitting in the ingress queue waiting to be processed. Sustained depth > 0 under burst load indicates the 1 msg/sec P2P rate limit is the bottleneck.",
-          "gridPos": { "x": 16, "y": 24, "w": 8, "h": 8 },
+          "gridPos": { "x": 18, "y": 24, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "gas_killer_task_queue_depth",
@@ -266,17 +288,137 @@ data:
           }
         },
         {
+          "id": 60,
+          "type": "text",
+          "title": "Orchestrator Internals",
+          "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 },
+          "options": { "mode": "markdown", "content": "## Orchestrator Internals\n\nRound-internal metrics from the commonware orchestrator and BLS executor registries, surfaced via the runtime context on the same `/metrics` endpoint.\n\nTime to quorum = round broadcast → signature threshold reached (isolates aggregation from EigenLayer reads). Round timeouts = aggregation windows that expired before the round completed — the primary signal for tuning `AGGREGATION_FREQUENCY`. EigenLayer state retrieval = operator resolution + non-signer stakes/signature reads between quorum and `handle_verification`; subtract it and time-to-quorum from P2P round-trip to estimate pure transport+signing overhead." }
+        },
+        {
+          "id": 61,
+          "type": "timeseries",
+          "title": "Time to Quorum (p50 / p95)",
+          "gridPos": { "x": 0, "y": 33, "w": 6, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(orchestrator_time_to_quorum_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(orchestrator_time_to_quorum_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 62,
+          "type": "timeseries",
+          "title": "Signature Arrival Spread (p50 / p99)",
+          "description": "Round broadcast → each accepted signature. A wide p50→p99 gap means straggler operators are holding rounds open.",
+          "gridPos": { "x": 6, "y": 33, "w": 6, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(orchestrator_signature_arrival_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.99, rate(orchestrator_signature_arrival_seconds_bucket[5m]))",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 63,
+          "type": "timeseries",
+          "title": "Round Outcomes / min",
+          "description": "Window timeouts re-broadcast the round on the next pass; sustained timeouts mean AGGREGATION_FREQUENCY is shorter than time-to-quorum.",
+          "gridPos": { "x": 12, "y": 33, "w": 6, "h": 8 },
+          "targets": [
+            {
+              "expr": "rate(orchestrator_round_executions_total{status=\"Success\"}[2m]) * 60",
+              "legendFormat": "executed"
+            },
+            {
+              "expr": "rate(orchestrator_round_executions_total{status=\"Failure\"}[2m]) * 60",
+              "legendFormat": "execution failed"
+            },
+            {
+              "expr": "rate(orchestrator_round_timeouts_total[2m]) * 60",
+              "legendFormat": "window timeout"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 64,
+          "type": "timeseries",
+          "title": "Signatures / min by Outcome",
+          "description": "Success = accepted and stored. Invalid = failed decode, validation, or BLS verification. Dropped = duplicates, unknown senders/rounds, already-executed rounds.",
+          "gridPos": { "x": 18, "y": 33, "w": 6, "h": 8 },
+          "targets": [
+            {
+              "expr": "rate(orchestrator_signatures_total{status=\"Success\"}[2m]) * 60",
+              "legendFormat": "accepted"
+            },
+            {
+              "expr": "rate(orchestrator_signatures_total{status=\"Invalid\"}[2m]) * 60",
+              "legendFormat": "invalid"
+            },
+            {
+              "expr": "rate(orchestrator_signatures_total{status=\"Dropped\"}[2m]) * 60",
+              "legendFormat": "dropped"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 65,
+          "type": "timeseries",
+          "title": "EigenLayer State Retrieval (p50 / p95)",
+          "description": "Operator-address resolution + current-block query + getNonSignerStakesAndSignature, per execution. Runs between quorum and handle_verification, so it is included in the P2P Round-Trip measurement above.",
+          "gridPos": { "x": 0, "y": 41, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(executor_state_retrieval_seconds_bucket[5m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(executor_state_retrieval_seconds_bucket[5m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 66,
+          "type": "stat",
+          "title": "Operator Cache Misses (total)",
+          "description": "pubkeyHashToOperator RPC lookups. Expected at startup and when new operators register; steady growth otherwise indicates the cache is not retaining entries.",
+          "gridPos": { "x": 12, "y": 41, "w": 12, "h": 8 },
+          "targets": [{
+            "expr": "executor_operator_cache_misses_total",
+            "legendFormat": "cache misses"
+          }],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "background",
+            "graphMode": "area"
+          }
+        },
+        {
           "id": 30,
           "type": "text",
           "title": "Ingress",
-          "gridPos": { "x": 0, "y": 33, "w": 24, "h": 1 },
+          "gridPos": { "x": 0, "y": 49, "w": 24, "h": 1 },
           "options": { "mode": "markdown", "content": "## Ingress" }
         },
         {
           "id": 31,
           "type": "timeseries",
           "title": "Ingress Request Rate / min",
-          "gridPos": { "x": 0, "y": 34, "w": 12, "h": 8 },
+          "gridPos": { "x": 0, "y": 50, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "rate(gas_killer_ingress_requests_accepted_total[2m]) * 60",
@@ -293,7 +435,7 @@ data:
           "id": 32,
           "type": "stat",
           "title": "Tasks Created (total)",
-          "gridPos": { "x": 12, "y": 34, "w": 6, "h": 8 },
+          "gridPos": { "x": 12, "y": 50, "w": 6, "h": 8 },
           "targets": [{
             "expr": "gas_killer_tasks_created_total",
             "legendFormat": "tasks"
@@ -308,14 +450,14 @@ data:
           "id": 50,
           "type": "text",
           "title": "Executor Phase Breakdown",
-          "gridPos": { "x": 0, "y": 42, "w": 24, "h": 1 },
+          "gridPos": { "x": 0, "y": 58, "w": 24, "h": 1 },
           "options": { "mode": "markdown", "content": "## Executor Phase Breakdown\n\nPer-phase latency inside `handle_verification`. getMessageHash preflight → supportsInterface check → tx send (includes gas estimation) → receipt confirmation (block inclusion wait)." }
         },
         {
           "id": 52,
           "type": "timeseries",
           "title": "Hash Preflight (p50 / p95)",
-          "gridPos": { "x": 0, "y": 43, "w": 12, "h": 8 },
+          "gridPos": { "x": 0, "y": 59, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_executor_hash_preflight_seconds_bucket[5m]))",
@@ -332,7 +474,7 @@ data:
           "id": 53,
           "type": "timeseries",
           "title": "supportsInterface Check (p50 / p95)",
-          "gridPos": { "x": 12, "y": 43, "w": 12, "h": 8 },
+          "gridPos": { "x": 12, "y": 59, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_executor_supports_interface_seconds_bucket[5m]))",
@@ -350,7 +492,7 @@ data:
           "type": "timeseries",
           "title": "TX Send (p50 / p95)",
           "description": "Time from calling verifyAndUpdate to receiving the pending tx handle. Includes eth_estimateGas simulation.",
-          "gridPos": { "x": 0, "y": 51, "w": 12, "h": 8 },
+          "gridPos": { "x": 0, "y": 67, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_executor_tx_send_seconds_bucket[5m]))",
@@ -368,7 +510,7 @@ data:
           "type": "timeseries",
           "title": "Receipt Confirmation (p50 / p95)",
           "description": "Time waiting for the verifyAndUpdate transaction to be included in a block.",
-          "gridPos": { "x": 12, "y": 51, "w": 12, "h": 8 },
+          "gridPos": { "x": 12, "y": 67, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_executor_receipt_confirmation_seconds_bucket[5m]))",

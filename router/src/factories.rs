@@ -22,6 +22,7 @@ use commonware_avs_eigenlayer::AvsDeployment;
 use commonware_avs_router::bindings::bls_apk_registry::BLSApkRegistry;
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
 use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
+use commonware_runtime::Metrics;
 use gas_killer_common::{ChainRole, GasKillerValidator};
 use std::collections::HashMap;
 use std::{env, str::FromStr, sync::Arc};
@@ -189,6 +190,7 @@ async fn create_wallet_provider_for_chain(
 pub async fn create_gas_killer_executor(
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
+    context: &impl Metrics,
 ) -> Result<BlsEigenlayerExecutor<GasKillerHandler<SimpleWalletProvider>>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
@@ -303,5 +305,6 @@ pub async fn create_gas_killer_executor(
         bls_operator_state_retriever,
         registry_coordinator_address,
         gas_killer_handler,
-    ))
+    )
+    .with_metrics(context))
 }

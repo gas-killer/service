@@ -304,7 +304,7 @@ fn main() {
         }
 
         let orchestrator =
-            GasKillerOrchestratorBuilder::build(builder, validator, Arc::clone(&metrics))
+            GasKillerOrchestratorBuilder::build(builder, validator, Arc::clone(&metrics), &context)
                 .await
                 .expect("Failed to build orchestrator");
 
