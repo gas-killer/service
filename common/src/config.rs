@@ -195,18 +195,21 @@ pub fn p2p_message_backlog() -> usize {
 ///
 /// The quota is a smooth rate with no burst allowance: a rate of `5.0` permits one
 /// message every 200 ms, not bursts of five. Values whose reciprocal would overflow
-/// a `Duration` (e.g. `1e-20`) are treated as invalid and fall back to the default.
+/// a `Duration` (e.g. `1e-20`) or round below its 1 ns resolution (e.g. `3e9`) are
+/// treated as invalid and fall back to the default.
 pub fn p2p_quota_period() -> std::time::Duration {
     parse_p2p_quota_period(env::var("P2P_MESSAGES_PER_SECOND").ok().as_deref())
 }
 
 /// Parses a `P2P_MESSAGES_PER_SECOND` value into a quota period, falling back to the
-/// default rate on malformed, non-positive, non-finite, or `Duration`-overflowing input.
+/// default rate on malformed, non-positive, non-finite, or non-representable input
+/// (including `Duration` overflow and sub-nanosecond reciprocals that round to zero).
 fn parse_p2p_quota_period(value: Option<&str>) -> std::time::Duration {
     value
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|&v| v > 0.0 && v.is_finite())
         .and_then(|v| std::time::Duration::try_from_secs_f64(1.0 / v).ok())
+        .filter(|d| !d.is_zero())
         .unwrap_or_else(|| {
             std::time::Duration::from_secs_f64(1.0 / DEFAULT_P2P_MESSAGES_PER_SECOND)
         })
@@ -309,6 +312,15 @@ mod tests {
         // 1.0 / 1e-20 overflows Duration; must fall back to the default, not panic.
         assert_eq!(
             parse_p2p_quota_period(Some("1e-20")),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn p2p_quota_period_rejects_excessive_rate() {
+        // 1.0 / 3e9 rounds below 1 ns and becomes Duration::ZERO; must fall back to default.
+        assert_eq!(
+            parse_p2p_quota_period(Some("3e9")),
             Duration::from_secs(1)
         );
     }
