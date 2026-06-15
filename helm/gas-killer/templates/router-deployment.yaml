@@ -311,6 +311,10 @@ spec:
             {{- end }}
             - name: HEALTHZ_PORT
               value: {{ .Values.router.healthzPort | quote }}
+            - name: P2P_MESSAGE_BACKLOG
+              value: {{ .Values.router.p2pMessageBacklog | quote }}
+            - name: P2P_MESSAGES_PER_SECOND
+              value: {{ .Values.router.p2pMessagesPerSecond | quote }}
             - name: PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
