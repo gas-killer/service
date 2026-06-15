@@ -319,9 +319,6 @@ mod tests {
     #[test]
     fn p2p_quota_period_rejects_excessive_rate() {
         // 1.0 / 3e9 rounds below 1 ns and becomes Duration::ZERO; must fall back to default.
-        assert_eq!(
-            parse_p2p_quota_period(Some("3e9")),
-            Duration::from_secs(1)
-        );
+        assert_eq!(parse_p2p_quota_period(Some("3e9")), Duration::from_secs(1));
     }
 }
