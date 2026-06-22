@@ -292,7 +292,7 @@ data:
           "type": "text",
           "title": "Orchestrator Internals",
           "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Orchestrator Internals\n\nRound-internal metrics from the commonware orchestrator and BLS executor registries, surfaced via the runtime context on the same `/metrics` endpoint.\n\nTime to quorum = round broadcast → signature threshold reached (isolates aggregation from EigenLayer reads). Round timeouts = aggregation windows that expired before the round completed — the primary signal for tuning `AGGREGATION_FREQUENCY`. EigenLayer state retrieval = operator resolution + non-signer stakes/signature reads between quorum and `handle_verification`; subtract it and time-to-quorum from P2P round-trip to estimate pure transport+signing overhead." }
+          "options": { "mode": "markdown", "content": "## Orchestrator Internals\n\nRound-internal metrics from the commonware orchestrator and BLS executor registries, surfaced via the runtime context on the same `/metrics` endpoint.\n\nTime to quorum = round broadcast → signature threshold reached (isolates aggregation from EigenLayer reads). Round timeouts = aggregation windows that expired before the round completed — the primary signal for tuning `AGGREGATION_TIMEOUT`. EigenLayer state retrieval = operator resolution + non-signer stakes/signature reads between quorum and `handle_verification`; subtract it and time-to-quorum from P2P round-trip to estimate pure transport+signing overhead." }
         },
         {
           "id": 61,
@@ -333,7 +333,7 @@ data:
           "id": 63,
           "type": "timeseries",
           "title": "Round Outcomes / min",
-          "description": "Window timeouts re-broadcast the round on the next pass; sustained timeouts mean AGGREGATION_FREQUENCY is shorter than time-to-quorum.",
+          "description": "A timed-out round is abandoned and the orchestrator moves to the next queued task; sustained timeouts mean AGGREGATION_TIMEOUT is shorter than time-to-quorum.",
           "gridPos": { "x": 12, "y": 33, "w": 6, "h": 8 },
           "targets": [
             {
