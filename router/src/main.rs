@@ -19,8 +19,7 @@ use commonware_utils::NZU32;
 use commonware_utils::set::OrderedAssociated;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
-    GasKillerValidator, SpeculativePrebuildConfig, aggregation_timeout, get_operator_states,
-    load_key_from_file,
+    GasKillerValidator, SpeculativePrebuildConfig, get_operator_states, load_key_from_file,
 };
 use gas_killer_router::GasKillerOrchestratorBuilder;
 use gas_killer_router::metrics::MetricsCollector;
@@ -283,22 +282,11 @@ fn main() {
         let metrics = Arc::new(MetricsCollector::new());
 
         // Use the builder pattern to create the orchestrator
-        let mut builder = OrchestratorBuilder::new(context.clone(), signer)
+        let builder = OrchestratorBuilder::new(context.clone(), signer)
             .with_contributors(contributors)
             .with_g1_map(contributors_map)
             .with_threshold(threshold)
             .load_from_env(); // Read configuration from environment variables
-
-        // AGGREGATION_TIMEOUT bounds how long a round waits for operator signatures before
-        // being abandoned. The library builder reads the same knob as AGGREGATION_FREQUENCY
-        // in load_from_env above; the newer name takes precedence when both are set.
-        if let Some(timeout) = aggregation_timeout() {
-            tracing::info!(
-                timeout_secs = timeout.as_secs_f64(),
-                "aggregation timeout set from AGGREGATION_TIMEOUT"
-            );
-            builder = builder.with_aggregation_frequency(timeout);
-        }
 
         // Shared validator, used by the creator and orchestrator. Owned here so we can also run
         // its speculative executor pre-build loop, which warms the shared executor cache off the
