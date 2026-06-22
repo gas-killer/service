@@ -167,6 +167,54 @@ pub async fn get_operator_states() -> Result<Vec<QuorumInfo>, Box<dyn std::error
     client.get_operator_states().await
 }
 
+/// Default P2P channel message backlog depth.
+///
+/// The backlog bounds how many queued messages the channel will hold before the sender
+/// blocks or drops new messages. Configurable at runtime via `P2P_MESSAGE_BACKLOG`.
+pub const DEFAULT_P2P_MESSAGE_BACKLOG: usize = 256;
+
+/// Default P2P channel rate limit in messages per second.
+///
+/// Configurable at runtime via `P2P_MESSAGES_PER_SECOND`. Accepts fractional values
+/// (e.g. `0.5` for one message every two seconds).
+pub const DEFAULT_P2P_MESSAGES_PER_SECOND: f64 = 1.0;
+
+/// Reads the P2P channel backlog depth from `P2P_MESSAGE_BACKLOG`, defaulting to
+/// [`DEFAULT_P2P_MESSAGE_BACKLOG`].
+pub fn p2p_message_backlog() -> usize {
+    env::var("P2P_MESSAGE_BACKLOG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v: &usize| v > 0)
+        .unwrap_or(DEFAULT_P2P_MESSAGE_BACKLOG)
+}
+
+/// Reads the P2P channel rate limit from `P2P_MESSAGES_PER_SECOND` and returns the
+/// per-message quota period (`1 / rate`), defaulting to
+/// [`DEFAULT_P2P_MESSAGES_PER_SECOND`] when unset or invalid.
+///
+/// The quota is a smooth rate with no burst allowance: a rate of `5.0` permits one
+/// message every 200 ms, not bursts of five. Values whose reciprocal would overflow
+/// a `Duration` (e.g. `1e-20`) or round below its 1 ns resolution (e.g. `3e9`) are
+/// treated as invalid and fall back to the default.
+pub fn p2p_quota_period() -> std::time::Duration {
+    parse_p2p_quota_period(env::var("P2P_MESSAGES_PER_SECOND").ok().as_deref())
+}
+
+/// Parses a `P2P_MESSAGES_PER_SECOND` value into a quota period, falling back to the
+/// default rate on malformed, non-positive, non-finite, or non-representable input
+/// (including `Duration` overflow and sub-nanosecond reciprocals that round to zero).
+fn parse_p2p_quota_period(value: Option<&str>) -> std::time::Duration {
+    value
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|&v| v > 0.0 && v.is_finite())
+        .and_then(|v| std::time::Duration::try_from_secs_f64(1.0 / v).ok())
+        .filter(|d| !d.is_zero())
+        .unwrap_or_else(|| {
+            std::time::Duration::from_secs_f64(1.0 / DEFAULT_P2P_MESSAGES_PER_SECOND)
+        })
+}
+
 /// Maximum age (in blocks) of a reference block, falling back to the contract default
 /// when `BLOCK_STALE_MEASURE` is unset or unparseable.
 ///
@@ -226,5 +274,51 @@ impl SpeculativePrebuildConfig {
             poll_interval: std::time::Duration::from_millis(poll_ms),
             confirmation_depth,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn p2p_quota_period_default_is_one_per_second() {
+        assert_eq!(parse_p2p_quota_period(None), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn p2p_quota_period_converts_rate_to_period() {
+        assert_eq!(
+            parse_p2p_quota_period(Some("5.0")),
+            Duration::from_millis(200)
+        );
+        assert_eq!(parse_p2p_quota_period(Some("0.5")), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn p2p_quota_period_rejects_invalid_values() {
+        let default = Duration::from_secs(1);
+        assert_eq!(parse_p2p_quota_period(Some("")), default);
+        assert_eq!(parse_p2p_quota_period(Some("abc")), default);
+        assert_eq!(parse_p2p_quota_period(Some("0")), default);
+        assert_eq!(parse_p2p_quota_period(Some("-1.5")), default);
+        assert_eq!(parse_p2p_quota_period(Some("inf")), default);
+        assert_eq!(parse_p2p_quota_period(Some("NaN")), default);
+    }
+
+    #[test]
+    fn p2p_quota_period_rejects_duration_overflow() {
+        // 1.0 / 1e-20 overflows Duration; must fall back to the default, not panic.
+        assert_eq!(
+            parse_p2p_quota_period(Some("1e-20")),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn p2p_quota_period_rejects_excessive_rate() {
+        // 1.0 / 3e9 rounds below 1 ns and becomes Duration::ZERO; must fall back to default.
+        assert_eq!(parse_p2p_quota_period(Some("3e9")), Duration::from_secs(1));
     }
 }

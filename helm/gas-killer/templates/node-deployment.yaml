@@ -219,6 +219,10 @@ spec:
               {{- end }}
             - name: HEALTHZ_PORT
               value: {{ $root.Values.node.healthzPort | quote }}
+            - name: P2P_MESSAGE_BACKLOG
+              value: {{ $root.Values.node.p2pMessageBacklog | quote }}
+            - name: P2P_MESSAGES_PER_SECOND
+              value: {{ $root.Values.node.p2pMessagesPerSecond | quote }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}

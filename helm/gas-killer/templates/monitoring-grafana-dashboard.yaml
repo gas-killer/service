@@ -427,6 +427,10 @@ data:
             {
               "expr": "rate(gas_killer_ingress_requests_rejected_total[2m]) * 60",
               "legendFormat": "rejected"
+            },
+            {
+              "expr": "rate(gas_killer_ingress_requests_at_capacity_total[2m]) * 60",
+              "legendFormat": "at capacity (503)"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "short" } }
