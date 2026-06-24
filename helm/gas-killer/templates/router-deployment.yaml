@@ -315,8 +315,10 @@ spec:
             - name: AVS_OPSET_SLASHING_CONDITIONS
               value: {{ .Values.router.avsMetadata.operatorSet.slashingConditions | quote }}
             {{- end }}
-            - name: AGGREGATION_TIMEOUT
-              value: {{ .Values.router.aggregationTimeout | quote }}
+            - name: ROUND_TIMEOUT
+              value: {{ .Values.router.roundTimeout | quote }}
+            - name: REBROADCAST_INTERVAL
+              value: {{ .Values.router.rebroadcastInterval | quote }}
             {{- if .Values.router.receiptTimeoutSecs }}
             - name: EXECUTOR_RECEIPT_TIMEOUT_SECS
               value: {{ .Values.router.receiptTimeoutSecs | quote }}
