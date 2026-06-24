@@ -250,7 +250,7 @@ node:
   # node-1 starts immediately; node-N waits (N-1) * startupDelaySecsPerNode before launching.
   # The router waits nodeCount * startupDelaySecsPerNode. Set to 0 to disable.
   # Remove once the operator-state disk cache (service#275) is implemented.
-  startupDelaySecsPerNode: 15
+  startupDelaySecsPerNode: 5
   resources:
     requests:
       memory: "256Mi"
