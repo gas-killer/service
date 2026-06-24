@@ -97,15 +97,9 @@ services:
       - ./config/.nodes/operator_keys/testacc2.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
       - ./config/public_orchestrator.dev.json:/app/public_orchestrator.json:ro
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      [
-        "--key-file",
-        "/app/key.json",
-        "--port",
-        "3002",
-        "--orchestrator",
-        "/app/public_orchestrator.json",
-      ]
+      - "sleep 15 && exec gas-killer-node --key-file /app/key.json --port 3002 --orchestrator /app/public_orchestrator.json"
     ports:
       - "4002:3002"
       - "9002:8081"  # metrics / healthz
@@ -131,15 +125,9 @@ services:
       - ./config/.nodes/operator_keys/testacc3.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
       - ./config/public_orchestrator.dev.json:/app/public_orchestrator.json:ro
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      [
-        "--key-file",
-        "/app/key.json",
-        "--port",
-        "3003",
-        "--orchestrator",
-        "/app/public_orchestrator.json",
-      ]
+      - "sleep 30 && exec gas-killer-node --key-file /app/key.json --port 3003 --orchestrator /app/public_orchestrator.json"
     ports:
       - "4003:3003"
       - "9003:8081"  # metrics / healthz
@@ -170,7 +158,9 @@ services:
     volumes:
       - ./config/.nodes:/app/.nodes:ro
       - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro
-    command: ["--key-file", "/app/router_orchestrator.json", "--port", "3000"]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "sleep 45 && exec gas-killer-router --key-file /app/router_orchestrator.json --port 3000"
     ports:
       - "4000:3000"
       - "8080:8080"
