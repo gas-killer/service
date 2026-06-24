@@ -245,6 +245,11 @@ node:
   # Must be >= the time needed to complete a validation + sign cycle. L2 computation
   # takes up to ~60s (see aggregationFrequency comment), so 120s gives a safe buffer.
   terminationGracePeriodSeconds: 120
+  # Stagger EigenSDK eth_getLogs backfill sweeps across nodes so at most one runs at a time.
+  # node-1 starts immediately; node-N waits (N-1) * startupDelaySecsPerNode before launching.
+  # The router waits nodeCount * startupDelaySecsPerNode. Set to 0 to disable.
+  # Remove once the operator-state disk cache (service#275) is implemented.
+  startupDelaySecsPerNode: 15
   resources:
     requests:
       memory: "256Mi"
