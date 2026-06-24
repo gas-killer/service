@@ -295,6 +295,16 @@ router:
   # for the full window. Tune against gas_killer_p2p_round_trip_seconds and the
   # round-timeout panel in the Grafana dashboard.
   aggregationTimeout: "300"
+  # Adaptive aggregation-window controller. When enabled, the router replaces the
+  # static aggregationTimeout with a window derived from live P2P round-trip latency.
+  # target = scaleFactor × rolling-p95(round-trip), clamped to [minSecs, maxSecs].
+  # Disabled by default; set enabled to "true" to activate. maxSecs should match
+  # aggregationTimeout so disabling the controller produces no sudden window jump.
+  adaptiveAggregation:
+    enabled: "false"
+    scaleFactor: "2.0"
+    minSecs: "5"
+    maxSecs: "300"
   # Max seconds the executor waits for a verifyAndUpdate transaction receipt before
   # timing out the round and proceeding to the next one. Prevents an indefinite stall
   # under L1 mempool congestion or RPC degradation. Leave empty to use the per-chain

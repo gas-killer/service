@@ -96,6 +96,10 @@ impl Creator for GasKillerCreator {
         Ok((raw_payload, 0)) // set default "round" to 0
     }
 
+    async fn wait_for_new_round(&self, _current: u64) -> Result<(Vec<u8>, u64)> {
+        self.get_payload_and_round().await
+    }
+
     fn get_task_metadata(&self) -> Self::TaskData {
         GasKillerTaskData::default()
     }
@@ -344,6 +348,12 @@ impl Creator for ListeningGasKillerCreator {
         Ok((payload, round))
     }
 
+    async fn wait_for_new_round(&self, _current: u64) -> Result<(Vec<u8>, u64)> {
+        // Each call to get_payload_and_round blocks on the ingress queue and assigns the
+        // next monotonically-incrementing round number, so any returned round is > current.
+        self.get_payload_and_round().await
+    }
+
     fn get_task_metadata(&self) -> Self::TaskData {
         // Try to get metadata from the current task, fall back to defaults if not available
         match self.current_task.lock() {
@@ -397,6 +407,13 @@ impl Creator for GasKillerCreatorType {
         match self {
             GasKillerCreatorType::Basic(creator) => creator.get_payload_and_round().await,
             GasKillerCreatorType::Listening(creator) => creator.get_payload_and_round().await,
+        }
+    }
+
+    async fn wait_for_new_round(&self, current: u64) -> Result<(Vec<u8>, u64)> {
+        match self {
+            GasKillerCreatorType::Basic(creator) => creator.wait_for_new_round(current).await,
+            GasKillerCreatorType::Listening(creator) => creator.wait_for_new_round(current).await,
         }
     }
 

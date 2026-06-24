@@ -1,9 +1,12 @@
+use crate::rolling_window::RollingWindow;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 use std::sync::atomic::{AtomicI64, AtomicU64};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub struct MetricsCollector {
     registry: Registry,
@@ -34,6 +37,13 @@ pub struct MetricsCollector {
     pub round_latency_seconds: Histogram,
     /// Current number of tasks sitting in the ingress queue waiting to be processed.
     pub task_queue_depth: Gauge<i64, AtomicI64>,
+    /// Current aggregation window chosen by the adaptive controller (seconds).
+    /// Zero when the adaptive controller is disabled or has not yet been called.
+    pub aggregation_window_seconds: Gauge<f64, AtomicU64>,
+    /// Sliding window of recent P2P round-trip durations; shared with the adaptive
+    /// controller so it can compute a rolling p95 without reading back from the
+    /// export-only histogram.
+    pub round_trip_window: Arc<Mutex<RollingWindow>>,
     /// Time to detect which chain a target contract is deployed on (seconds).
     pub executor_chain_detection_seconds: Histogram,
     /// Time for the payload-hash preflight computation (seconds).
@@ -142,6 +152,15 @@ impl MetricsCollector {
             task_queue_depth.clone(),
         );
 
+        let aggregation_window_seconds: Gauge<f64, AtomicU64> = Gauge::default();
+        registry.register(
+            "gas_killer_aggregation_window_seconds",
+            "Current aggregation window chosen by the adaptive controller; 0 when disabled or before the first round",
+            aggregation_window_seconds.clone(),
+        );
+
+        let round_trip_window = Arc::new(Mutex::new(RollingWindow::new(64)));
+
         // Single same-RPC round-trips (~5-150ms); fine low-end buckets so p50/p95 resolve.
         let rpc_buckets = [
             0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5,
@@ -201,12 +220,21 @@ impl MetricsCollector {
             p2p_round_trip_seconds,
             round_latency_seconds,
             task_queue_depth,
+            aggregation_window_seconds,
+            round_trip_window,
             executor_chain_detection_seconds,
             executor_hash_preflight_seconds,
             executor_supports_interface_seconds,
             executor_tx_send_seconds,
             executor_receipt_confirmation_seconds,
         }
+    }
+
+    /// Records a completed-round P2P trip duration into both the export histogram and the
+    /// in-process rolling window that the adaptive controller reads.
+    pub fn record_round_trip(&self, duration: Duration) {
+        self.p2p_round_trip_seconds.observe(duration.as_secs_f64());
+        self.round_trip_window.lock().unwrap().push(duration);
     }
 
     pub fn encode(&self) -> String {

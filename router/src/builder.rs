@@ -1,3 +1,4 @@
+use crate::adaptive_controller::{AdaptiveConfig, AdaptiveController, adaptive_enabled};
 use crate::creator::DispatchTime;
 use crate::factories::{
     create_creator, create_gas_killer_executor, create_listening_creator_with_server,
@@ -66,11 +67,29 @@ impl GasKillerOrchestratorBuilder {
             create_creator().await?
         };
 
-        let executor = create_gas_killer_executor(metrics, dispatch_time, context).await?;
+        let executor =
+            create_gas_killer_executor(Arc::clone(&metrics), dispatch_time, context).await?;
 
-        // Unwrap the Arc to get the validator for the orchestrator
-        // This is safe because we control all references
         let validator_for_orchestrator = Arc::unwrap_or_clone(validator);
+
+        // Override the static round_timeout with the adaptive controller when enabled.
+        let builder = if adaptive_enabled() {
+            let config = AdaptiveConfig::from_env();
+            info!(
+                min_secs = config.min.as_secs_f64(),
+                max_secs = config.max.as_secs_f64(),
+                scale_factor = config.scale_factor,
+                "adaptive aggregation window controller enabled"
+            );
+            let controller = AdaptiveController::new(
+                Arc::clone(&metrics.round_trip_window),
+                metrics.aggregation_window_seconds.clone(),
+                config,
+            );
+            builder.with_round_timeout_provider(controller.as_provider())
+        } else {
+            builder
+        };
 
         builder.build_with::<_, _, _, BlsVerificationData>(
             task_creator,

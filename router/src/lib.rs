@@ -1,4 +1,5 @@
 // Gas killer usecase implementations
+pub mod adaptive_controller;
 pub mod builder;
 pub mod creator;
 pub mod executor;
@@ -6,6 +7,7 @@ pub mod factories;
 pub mod ingress;
 pub mod metrics;
 pub mod orchestrator;
+pub mod rolling_window;
 
 // Re-export task_data from common crate
 pub mod task_data {
