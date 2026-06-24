@@ -154,6 +154,19 @@ spec:
               echo "L1 is ready!"
         {{- end }}
 
+        {{- $delayPerNode := int $root.Values.node.startupDelaySecsPerNode }}
+        {{- $nodeDelay := mul $i $delayPerNode }}
+        {{- if gt $nodeDelay 0 }}
+        # Stagger EigenSDK eth_getLogs backfill: node-{{ $nodeIndex }} waits {{ $nodeDelay }}s so at most
+        # one process runs its operator-state sweep at a time. Remove once service#275 is merged.
+        - name: startup-delay
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "echo 'Delaying startup by {{ $nodeDelay }}s (node {{ $nodeIndex }})...'; sleep {{ $nodeDelay }}; echo 'Done.'"
+        {{- end }}
+
       containers:
         - name: node
           image: "{{ $root.Values.node.image.repository }}:{{ required "node.image.tag must be set" $root.Values.node.image.tag }}"

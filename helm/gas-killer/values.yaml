@@ -246,6 +246,11 @@ node:
   # transactions can take several minutes of EVMSketch compute (see the
   # aggregationTimeout comment), so 360s covers a full round plus buffer.
   terminationGracePeriodSeconds: 360
+  # Stagger EigenSDK eth_getLogs backfill sweeps across nodes so at most one runs at a time.
+  # node-1 starts immediately; node-N waits (N-1) * startupDelaySecsPerNode before launching.
+  # The router waits nodeCount * startupDelaySecsPerNode. Set to 0 to disable.
+  # Remove once the operator-state disk cache (service#275) is implemented.
+  startupDelaySecsPerNode: 5
   resources:
     requests:
       memory: "256Mi"

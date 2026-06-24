@@ -192,6 +192,18 @@ spec:
               mountPath: /app
         {{- end }}
 
+        {{- $routerDelay := mul (int .Values.global.nodeCount) (int .Values.node.startupDelaySecsPerNode) }}
+        {{- if gt $routerDelay 0 }}
+        # Stagger EigenSDK eth_getLogs backfill: router waits {{ $routerDelay }}s so it runs its
+        # operator-state sweep after all nodes have finished theirs. Remove once service#275 is merged.
+        - name: startup-delay
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "echo 'Delaying router startup by {{ $routerDelay }}s...'; sleep {{ $routerDelay }}; echo 'Done.'"
+        {{- end }}
+
       containers:
         - name: router
           image: "{{ .Values.router.image.repository }}:{{ required "router.image.tag must be set" .Values.router.image.tag }}"

@@ -167,9 +167,10 @@ fn main() {
 
         // Scoped to avoid configuring two loggers
         let orchestrator_pub_key;
+        let quorum_infos;
         {
             eigen_logging::init_logger(LogLevel::Debug);
-            let quorum_infos = get_operator_states()
+            quorum_infos = get_operator_states()
                 .await
                 .expect("Failed to get operator states");
 
@@ -329,9 +330,6 @@ fn main() {
         // Build contributor list and G1 map from operator states
         let mut contributors = Vec::new();
         let mut g1_map = HashMap::new();
-        let quorum_infos = get_operator_states()
-            .await
-            .expect("Failed to get operator states");
         let operators = &quorum_infos[quorum_number].operators;
 
         if operators.is_empty() {
