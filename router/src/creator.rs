@@ -96,6 +96,13 @@ impl Creator for GasKillerCreator {
         Ok((raw_payload, 0)) // set default "round" to 0
     }
 
+    async fn wait_for_new_round(&self, current: u64) -> Result<(Vec<u8>, u64)> {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let payload = self.get_task_metadata();
+        let raw_payload = payload.encode().to_vec();
+        Ok((raw_payload, current + 1))
+    }
+
     fn get_task_metadata(&self) -> Self::TaskData {
         GasKillerTaskData::default()
     }
@@ -185,6 +192,15 @@ impl ListeningGasKillerCreator {
 #[async_trait]
 impl Creator for ListeningGasKillerCreator {
     type TaskData = GasKillerTaskData;
+
+    async fn wait_for_new_round(&self, current: u64) -> Result<(Vec<u8>, u64)> {
+        loop {
+            let result = self.get_payload_and_round().await?;
+            if result.1 > current {
+                return Ok(result);
+            }
+        }
+    }
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
         let task = self.wait_for_task().await?;
@@ -397,6 +413,13 @@ impl Creator for GasKillerCreatorType {
         match self {
             GasKillerCreatorType::Basic(creator) => creator.get_payload_and_round().await,
             GasKillerCreatorType::Listening(creator) => creator.get_payload_and_round().await,
+        }
+    }
+
+    async fn wait_for_new_round(&self, current: u64) -> Result<(Vec<u8>, u64)> {
+        match self {
+            GasKillerCreatorType::Basic(creator) => creator.wait_for_new_round(current).await,
+            GasKillerCreatorType::Listening(creator) => creator.wait_for_new_round(current).await,
         }
     }
 

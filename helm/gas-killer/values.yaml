@@ -244,7 +244,7 @@ node:
   # How long Kubernetes waits for a node to finish in-flight work after SIGTERM.
   # Must be >= the time needed to complete a validation + sign cycle. Production
   # transactions can take several minutes of EVMSketch compute (see the
-  # aggregationTimeout comment), so 360s covers a full round plus buffer.
+  # roundTimeout comment), so 360s covers a full round plus buffer.
   terminationGracePeriodSeconds: 360
   # Stagger EigenSDK eth_getLogs backfill sweeps across nodes so at most one runs at a time.
   # node-1 starts immediately; node-N waits (N-1) * startupDelaySecsPerNode before launching.
@@ -284,7 +284,7 @@ router:
   healthzPort: 8081
   # How long Kubernetes waits for a router to finish in-flight work after SIGTERM.
   # Must be >= the time needed to complete an aggregation round, which is bounded by
-  # aggregationTimeout (300s), so 360s lets an in-flight round finish plus buffer.
+  # roundTimeout (300s), so 360s lets an in-flight round finish plus buffer.
   terminationGracePeriodSeconds: 360
   # Max seconds the router waits for operator signatures on a round before abandoning
   # it and moving to the next queued task. The orchestrator submits immediately once
@@ -294,7 +294,11 @@ router:
   # of a larger value is that a round that never reaches quorum blocks the task queue
   # for the full window. Tune against gas_killer_p2p_round_trip_seconds and the
   # round-timeout panel in the Grafana dashboard.
-  aggregationTimeout: "300"
+  roundTimeout: "300"
+  # How often (in seconds) the router re-sends the Start broadcast for an in-flight round
+  # while waiting for signatures. Set longer than roundTimeout to disable intra-round
+  # rebroadcasting entirely.
+  rebroadcastInterval: "300"
   # Max seconds the executor waits for a verifyAndUpdate transaction receipt before
   # timing out the round and proceeding to the next one. Prevents an indefinite stall
   # under L1 mempool congestion or RPC degradation. Leave empty to use the per-chain
