@@ -195,15 +195,23 @@ fi
 echo -e "${GREEN}✅ Message-hash parity verified${NC}"
 cd "$PROJECT_ROOT"
 
-# Step 8: Check service health
-echo -e "${YELLOW}Step 8: Checking service health...${NC}"
-for service in node-1 node-2 node-3 router; do
-    if docker compose ps | grep -q "$service.*Up"; then
-        echo "Service $service is running"
-    else
-        echo -e "${YELLOW}Warning: Service $service might not be ready${NC}"
+# Step 8: Wait for router ingress to be reachable
+echo -e "${YELLOW}Step 8: Waiting for router ingress to be ready...${NC}"
+ROUTER_HEALTH_URL="http://localhost:8080/healthz"
+ROUTER_TIMEOUT=120
+ROUTER_INTERVAL=3
+elapsed=0
+until curl -sf "$ROUTER_HEALTH_URL" > /dev/null 2>&1; do
+    if [ "$elapsed" -ge "$ROUTER_TIMEOUT" ]; then
+        echo -e "${RED}Timeout: router ingress not ready after ${ROUTER_TIMEOUT}s${NC}"
+        docker compose logs --tail=50 router || true
+        exit 1
     fi
+    echo "Waiting for router ingress... (${elapsed}s)"
+    sleep "$ROUTER_INTERVAL"
+    elapsed=$((elapsed + ROUTER_INTERVAL))
 done
+echo -e "${GREEN}Router ingress is ready (${elapsed}s)${NC}"
 
 # Step 9: Brief wait for services to stabilize
 echo -e "${YELLOW}Step 9: Waiting briefly for services to stabilize...${NC}"
