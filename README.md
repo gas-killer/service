@@ -106,7 +106,8 @@ LOCAL-mode-only:
 - `FORK_URL`: Sepolia RPC URL to fork from (Anvil uses this)
 
 Optional environment variables:
-- `AGGREGATION_TIMEOUT`: Max seconds the router waits for operator signatures on a round before abandoning it and moving to the next task (accepts fractional seconds). The orchestrator submits immediately once the signature threshold is reached, so this only affects rounds that fail to reach quorum. Library default: 30; Helm deployments set 300. Must exceed worst-case node compute + sign time.
+- `ROUND_TIMEOUT`: Max seconds the router waits for operator signatures on a round before abandoning it and moving to the next task (accepts fractional seconds). The orchestrator submits immediately once the signature threshold is reached, so this only affects rounds that fail to reach quorum. Library default: 30; Helm deployments set 300. Must exceed worst-case node compute + sign time.
+- `REBROADCAST_INTERVAL`: How often (in seconds) the router re-sends the `Start` broadcast for an in-flight round while waiting for signatures (accepts fractional seconds). Set longer than `ROUND_TIMEOUT` to disable intra-round rebroadcasting. Library default: 30; Helm deployments set 300.
 - `THRESHOLD`: Minimum signatures required for aggregation
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
