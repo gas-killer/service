@@ -296,8 +296,8 @@ router:
   # round-timeout panel in the Grafana dashboard.
   roundTimeout: "300"
   # How often (in seconds) the router re-sends the Start broadcast for an in-flight round
-  # while waiting for signatures. Set longer than roundTimeout to disable intra-round
-  # rebroadcasting entirely.
+  # while waiting for signatures. When equal to or longer than roundTimeout the biased
+  # select ensures no intra-round rebroadcast fires.
   rebroadcastInterval: "300"
   # Max seconds the executor waits for a verifyAndUpdate transaction receipt before
   # timing out the round and proceeding to the next one. Prevents an indefinite stall

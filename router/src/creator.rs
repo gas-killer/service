@@ -447,6 +447,16 @@ mod tests {
         assert_eq!(round, 0); // Default round is 0
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_wait_for_new_round_strictly_advances() {
+        let creator = GasKillerCreator::new();
+        let (_, round0) = creator.get_payload_and_round().await.unwrap();
+        let (_, round1) = creator.wait_for_new_round(round0).await.unwrap();
+        assert!(round1 > round0);
+        let (_, round2) = creator.wait_for_new_round(round1).await.unwrap();
+        assert!(round2 > round1);
+    }
+
     #[test]
     fn test_dispatch_time_evicts_failed_rounds_and_isolates_measurements() {
         let times: DispatchTime = Arc::new(Mutex::new(HashMap::new()));
