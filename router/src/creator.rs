@@ -80,6 +80,12 @@ pub struct GasKillerCreator {
     polling_interval: Duration,
 }
 
+impl Default for GasKillerCreator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GasKillerCreator {
     pub fn new() -> Self {
         let polling_interval_ms: u64 = env::var("POLLING_INTERVAL_MS")

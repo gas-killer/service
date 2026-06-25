@@ -315,6 +315,8 @@ spec:
             - name: AVS_OPSET_SLASHING_CONDITIONS
               value: {{ .Values.router.avsMetadata.operatorSet.slashingConditions | quote }}
             {{- end }}
+            - name: POLLING_INTERVAL_MS
+              value: {{ .Values.router.pollingIntervalMs | quote }}
             - name: ROUND_TIMEOUT
               value: {{ .Values.router.roundTimeout | quote }}
             - name: REBROADCAST_INTERVAL
