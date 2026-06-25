@@ -286,6 +286,10 @@ router:
   # Must be >= the time needed to complete an aggregation round, which is bounded by
   # roundTimeout (300s), so 360s lets an in-flight round finish plus buffer.
   terminationGracePeriodSeconds: 360
+  # How often (in milliseconds) to poll for a new round between task cycles.
+  # Only applies when INGRESS=false (Basic creator). When INGRESS=true the creator
+  # blocks on an event-driven channel and this value has no effect.
+  pollingIntervalMs: "2000"
   # Max seconds the router waits for operator signatures on a round before abandoning
   # it and moving to the next queued task. The orchestrator submits immediately once
   # the signature threshold is reached, so this is a stalled-round recovery window,
