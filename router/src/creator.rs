@@ -91,6 +91,7 @@ impl GasKillerCreator {
         let polling_interval_ms: u64 = env::var("POLLING_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
+            .filter(|&ms| ms > 0)
             .unwrap_or(2_000);
         Self {
             polling_interval: Duration::from_millis(polling_interval_ms),
