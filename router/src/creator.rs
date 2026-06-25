@@ -76,12 +76,19 @@ impl Default for GasKillerConfig {
 }
 
 /// Creator for the gas killer usecase without ingress
-#[derive(Default)]
-pub struct GasKillerCreator {}
+pub struct GasKillerCreator {
+    polling_interval: Duration,
+}
 
 impl GasKillerCreator {
     pub fn new() -> Self {
-        Self {}
+        let polling_interval_ms: u64 = env::var("POLLING_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_000);
+        Self {
+            polling_interval: Duration::from_millis(polling_interval_ms),
+        }
     }
 }
 
@@ -97,7 +104,7 @@ impl Creator for GasKillerCreator {
     }
 
     async fn wait_for_new_round(&self, current: u64) -> Result<(Vec<u8>, u64)> {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(self.polling_interval).await;
         let payload = self.get_task_metadata();
         let raw_payload = payload.encode().to_vec();
         Ok((raw_payload, current + 1))
