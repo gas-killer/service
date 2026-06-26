@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info, warn};
 
@@ -133,6 +133,15 @@ struct EnrichedTask {
     chain_id: u64,
 }
 
+/// Seeds the round counter so it does not restart from a fixed value. Nodes refuse to re-sign a
+/// round, so reusing rounds across restarts would stall aggregation.
+fn initial_round_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Creator for the gas killer usecase that listens for external requests
 pub struct ListeningGasKillerCreator {
     receiver: tokio::sync::Mutex<TaskReceiver>,
@@ -140,7 +149,7 @@ pub struct ListeningGasKillerCreator {
     config: GasKillerConfig,
     validator: Arc<GasKillerValidator>,
     current_task: Mutex<Option<EnrichedTask>>,
-    /// Round counter - incremented for each new task to ensure unique rounds
+    /// Consensus round number, incremented per dispatched task and unique across restarts.
     round_counter: AtomicU64,
     metrics: Option<Arc<MetricsCollector>>,
     /// Shared with the executor to measure P2P round-trip duration.
@@ -161,7 +170,7 @@ impl ListeningGasKillerCreator {
             config,
             validator,
             current_task: Mutex::new(None),
-            round_counter: AtomicU64::new(0),
+            round_counter: AtomicU64::new(initial_round_seed()),
             metrics: None,
             dispatch_time,
         }
@@ -469,6 +478,17 @@ mod tests {
         assert!(round1 > round0);
         let (_, round2) = creator.wait_for_new_round(round1).await.unwrap();
         assert!(round2 > round1);
+    }
+
+    #[test]
+    fn test_initial_round_seed_advances_and_is_nonzero() {
+        let first = initial_round_seed();
+        let second = initial_round_seed();
+        assert!(first > 0, "seed must not start from a fixed zero");
+        assert!(
+            second >= first,
+            "seed must not move backwards between starts"
+        );
     }
 
     #[test]
