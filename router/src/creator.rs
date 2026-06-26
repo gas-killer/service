@@ -76,12 +76,26 @@ impl Default for GasKillerConfig {
 }
 
 /// Creator for the gas killer usecase without ingress
-#[derive(Default)]
-pub struct GasKillerCreator {}
+pub struct GasKillerCreator {
+    polling_interval: Duration,
+}
+
+impl Default for GasKillerCreator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl GasKillerCreator {
     pub fn new() -> Self {
-        Self {}
+        let polling_interval_ms: u64 = env::var("POLLING_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&ms| ms > 0)
+            .unwrap_or(2_000);
+        Self {
+            polling_interval: Duration::from_millis(polling_interval_ms),
+        }
     }
 }
 
@@ -96,8 +110,11 @@ impl Creator for GasKillerCreator {
         Ok((raw_payload, 0)) // set default "round" to 0
     }
 
-    async fn wait_for_new_round(&self, _current: u64) -> Result<(Vec<u8>, u64)> {
-        self.get_payload_and_round().await
+    async fn wait_for_new_round(&self, current: u64) -> Result<(Vec<u8>, u64)> {
+        tokio::time::sleep(self.polling_interval).await;
+        let payload = self.get_task_metadata();
+        let raw_payload = payload.encode().to_vec();
+        Ok((raw_payload, current + 1))
     }
 
     fn get_task_metadata(&self) -> Self::TaskData {
@@ -189,6 +206,15 @@ impl ListeningGasKillerCreator {
 #[async_trait]
 impl Creator for ListeningGasKillerCreator {
     type TaskData = GasKillerTaskData;
+
+    async fn wait_for_new_round(&self, current: u64) -> Result<(Vec<u8>, u64)> {
+        loop {
+            let result = self.get_payload_and_round().await?;
+            if result.1 > current {
+                return Ok(result);
+            }
+        }
+    }
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
         let task = self.wait_for_task().await?;
@@ -348,12 +374,6 @@ impl Creator for ListeningGasKillerCreator {
         Ok((payload, round))
     }
 
-    async fn wait_for_new_round(&self, _current: u64) -> Result<(Vec<u8>, u64)> {
-        // Each call to get_payload_and_round blocks on the ingress queue and assigns the
-        // next monotonically-incrementing round number, so any returned round is > current.
-        self.get_payload_and_round().await
-    }
-
     fn get_task_metadata(&self) -> Self::TaskData {
         // Try to get metadata from the current task, fall back to defaults if not available
         match self.current_task.lock() {
@@ -439,6 +459,16 @@ mod tests {
         let (payload, round) = result.unwrap();
         assert!(!payload.is_empty());
         assert_eq!(round, 0); // Default round is 0
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_wait_for_new_round_strictly_advances() {
+        let creator = GasKillerCreator::new();
+        let (_, round0) = creator.get_payload_and_round().await.unwrap();
+        let (_, round1) = creator.wait_for_new_round(round0).await.unwrap();
+        assert!(round1 > round0);
+        let (_, round2) = creator.wait_for_new_round(round1).await.unwrap();
+        assert!(round2 > round1);
     }
 
     #[test]
