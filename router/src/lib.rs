@@ -1,6 +1,7 @@
 // Gas killer usecase implementations
 pub mod builder;
 pub mod creator;
+pub mod error;
 pub mod executor;
 pub mod factories;
 pub mod ingress;
@@ -20,6 +21,7 @@ pub mod validator {
 // Re-export main types for easy access
 pub use builder::GasKillerOrchestratorBuilder;
 pub use creator::GasKillerCreatorType;
+pub use error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ErrorCode};
 pub use executor::GasKillerHandler;
 pub use gas_killer_common::GasKillerTaskData;
 pub use gas_killer_common::GasKillerValidator;

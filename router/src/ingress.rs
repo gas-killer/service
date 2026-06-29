@@ -1,4 +1,5 @@
 use crate::creator::{TaskQueueDepth, TaskSender};
+use crate::error::{ApiError, ApiJson, ErrorCode};
 use crate::metrics::MetricsCollector;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
@@ -166,6 +167,35 @@ impl fmt::Display for OnchainValidationError {
 
 impl std::error::Error for OnchainValidationError {}
 
+impl From<OnchainValidationError> for ApiError {
+    fn from(e: OnchainValidationError) -> Self {
+        let (status, code) = match e {
+            OnchainValidationError::ContractNotFound => {
+                (StatusCode::BAD_REQUEST, ErrorCode::ContractNotFound)
+            }
+            OnchainValidationError::TransitionIndexMismatch { .. } => {
+                (StatusCode::BAD_REQUEST, ErrorCode::TransitionMismatch)
+            }
+            OnchainValidationError::BlockHeightInFuture { .. } => {
+                (StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest)
+            }
+            OnchainValidationError::BlockHeightTooStale { .. } => {
+                (StatusCode::BAD_REQUEST, ErrorCode::StaleBlock)
+            }
+            OnchainValidationError::RpcError(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, ErrorCode::RpcUnavailable)
+            }
+        };
+        // RPC failures are transient and their detail is internal; surface a generic message
+        // to clients rather than leaking the upstream error string.
+        let message = match code {
+            ErrorCode::RpcUnavailable => "Service temporarily unavailable".to_string(),
+            _ => e.to_string(),
+        };
+        ApiError::new(status, code, message)
+    }
+}
+
 async fn detect_contract_chain<P: Provider + Clone>(
     providers: &HashMap<ChainRole, P>,
     address: Address,
@@ -276,6 +306,21 @@ impl fmt::Display for ValidationError {
 }
 
 impl std::error::Error for ValidationError {}
+
+impl From<ValidationError> for ApiError {
+    fn from(e: ValidationError) -> Self {
+        let code = match e {
+            ValidationError::ZeroTargetAddress | ValidationError::ZeroFromAddress => {
+                ErrorCode::InvalidAddress
+            }
+            ValidationError::CallDataTooLarge { .. } => ErrorCode::CalldataTooLarge,
+            ValidationError::EmptyCallData
+            | ValidationError::CallDataTooShort { .. }
+            | ValidationError::ZeroBlockHeight => ErrorCode::InvalidRequest,
+        };
+        ApiError::new(StatusCode::BAD_REQUEST, code, e.to_string())
+    }
+}
 
 /// Deserializes `transition_index` from JSON.
 ///
@@ -398,18 +443,12 @@ pub struct GasKillerTaskResponse {
 pub async fn trigger_task_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
-    Json(request): Json<GasKillerTaskRequest>,
-) -> (StatusCode, Json<GasKillerTaskResponse>) {
+    ApiJson(request): ApiJson<GasKillerTaskRequest>,
+) -> Result<(StatusCode, Json<GasKillerTaskResponse>), ApiError> {
     if let Some(password) = &state.password
         && !check_bearer_auth(&headers, password)
     {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(GasKillerTaskResponse {
-                success: false,
-                message: "Unauthorized".to_string(),
-            }),
-        );
+        return Err(ApiError::unauthorized());
     }
 
     // Load-shed before any validation work. Onchain validation costs multiple RPC
@@ -426,13 +465,9 @@ pub async fn trigger_task_handler(
         if let Some(m) = &state.metrics {
             m.ingress_at_capacity.inc();
         }
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(GasKillerTaskResponse {
-                success: false,
-                message: "Service at capacity, please try again in a few minutes".to_string(),
-            }),
-        );
+        return Err(ApiError::queue_full(
+            "Service at capacity, please try again in a few minutes",
+        ));
     }
 
     if let Err(e) = request.validate() {
@@ -446,23 +481,12 @@ pub async fn trigger_task_handler(
         if let Some(m) = &state.metrics {
             m.ingress_rejected.inc();
         }
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(GasKillerTaskResponse {
-                success: false,
-                message: format!("Task rejected: {e}"),
-            }),
-        );
+        return Err(e.into());
     }
 
     if !state.providers.is_empty()
         && let Err(e) = validate_onchain(&*state.providers, &request.body).await
     {
-        let status = if matches!(e, OnchainValidationError::RpcError(_)) {
-            StatusCode::SERVICE_UNAVAILABLE
-        } else {
-            StatusCode::BAD_REQUEST
-        };
         warn!(
             target_address = %request.body.target_address,
             from_address = %request.body.from_address,
@@ -474,18 +498,7 @@ pub async fn trigger_task_handler(
         if let Some(m) = &state.metrics {
             m.ingress_rejected.inc();
         }
-        let client_message = if matches!(e, OnchainValidationError::RpcError(_)) {
-            "Service temporarily unavailable".to_string()
-        } else {
-            format!("Task rejected: {e}")
-        };
-        return (
-            status,
-            Json(GasKillerTaskResponse {
-                success: false,
-                message: client_message,
-            }),
-        );
+        return Err(e.into());
     }
 
     info!(
@@ -499,25 +512,19 @@ pub async fn trigger_task_handler(
     if state.sender.send(request).is_err() {
         state.queue_depth.fetch_sub(1, Ordering::Relaxed);
         tracing::error!("task channel closed, dropping request");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(GasKillerTaskResponse {
-                success: false,
-                message: "Internal error: task queue unavailable".to_string(),
-            }),
-        );
+        return Err(ApiError::internal("Internal error: task queue unavailable"));
     }
     if let Some(m) = &state.metrics {
         m.ingress_accepted.inc();
         m.task_queue_depth.set(depth as i64);
     }
-    (
+    Ok((
         StatusCode::OK,
         Json(GasKillerTaskResponse {
             success: true,
             message: "Task queued".to_string(),
         }),
-    )
+    ))
 }
 
 async fn healthz_handler() -> StatusCode {
@@ -767,6 +774,14 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap()
         }
 
+        async fn error_envelope(resp: axum::response::Response) -> crate::error::ApiErrorEnvelope {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes)
+                .expect("error response should deserialize as the ApiError envelope")
+        }
+
         #[tokio::test]
         async fn test_healthz_returns_200() {
             let (app, _queue) = make_app();
@@ -812,9 +827,9 @@ mod tests {
 
             let resp = app.oneshot(json_request(&payload)).await.unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-            let body = response_body(resp).await;
-            assert!(!body.success);
-            assert!(body.message.contains("target_address is zero"));
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidAddress);
+            assert!(body.error.message.contains("target_address is zero"));
         }
 
         #[tokio::test]
@@ -834,9 +849,9 @@ mod tests {
 
             let resp = app.oneshot(json_request(&payload)).await.unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-            let body = response_body(resp).await;
-            assert!(!body.success);
-            assert!(body.message.contains("from_address is zero"));
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidAddress);
+            assert!(body.error.message.contains("from_address is zero"));
         }
 
         #[tokio::test]
@@ -856,9 +871,9 @@ mod tests {
 
             let resp = app.oneshot(json_request(&payload)).await.unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-            let body = response_body(resp).await;
-            assert!(!body.success);
-            assert!(body.message.contains("call_data is empty"));
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
+            assert!(body.error.message.contains("call_data is empty"));
         }
 
         #[tokio::test]
@@ -878,9 +893,9 @@ mod tests {
 
             let resp = app.oneshot(json_request(&payload)).await.unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-            let body = response_body(resp).await;
-            assert!(!body.success);
-            assert!(body.message.contains("call_data too short"));
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
+            assert!(body.error.message.contains("call_data too short"));
         }
 
         #[tokio::test]
@@ -901,9 +916,9 @@ mod tests {
 
             let resp = app.oneshot(json_request(&payload)).await.unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-            let body = response_body(resp).await;
-            assert!(!body.success);
-            assert!(body.message.contains("call_data too large"));
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::CalldataTooLarge);
+            assert!(body.error.message.contains("call_data too large"));
         }
 
         #[tokio::test]
@@ -923,9 +938,9 @@ mod tests {
 
             let resp = app.oneshot(json_request(&payload)).await.unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-            let body = response_body(resp).await;
-            assert!(!body.success);
-            assert!(body.message.contains("block_height is zero"));
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
+            assert!(body.error.message.contains("block_height is zero"));
         }
 
         #[tokio::test]
@@ -944,6 +959,8 @@ mod tests {
                 "malformed JSON should return 4xx, got {}",
                 resp.status()
             );
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
         }
 
         #[tokio::test]
@@ -963,6 +980,8 @@ mod tests {
 
             let resp = app.oneshot(json_request(&payload)).await.unwrap();
             assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
         }
 
         #[tokio::test]
@@ -981,6 +1000,8 @@ mod tests {
                 "empty body should return 4xx, got {}",
                 resp.status()
             );
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
         }
 
         #[tokio::test]
@@ -1028,6 +1049,8 @@ mod tests {
             let (app, _queue) = make_app_with_password("secret");
             let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::Unauthorized);
         }
 
         #[tokio::test]
@@ -1042,6 +1065,8 @@ mod tests {
                 .unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::Unauthorized);
         }
 
         #[tokio::test]
@@ -1134,9 +1159,9 @@ mod tests {
 
             let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
             assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-            let body = response_body(resp).await;
-            assert!(!body.success);
-            assert!(body.message.to_lowercase().contains("capacity"));
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::QueueFull);
+            assert!(body.error.message.to_lowercase().contains("capacity"));
         }
 
         #[tokio::test]
@@ -1569,6 +1594,98 @@ mod tests {
             assert!(
                 matches!(err, OnchainValidationError::ContractNotFound),
                 "expected ContractNotFound, got {err}"
+            );
+        }
+    }
+
+    // -- error envelope mapping --
+    //
+    // Locks the status code and machine-readable ErrorCode each validation error maps to,
+    // including that transient RPC failures are sanitized so internal detail never reaches
+    // the client.
+
+    mod error_mapping {
+        use super::*;
+        use crate::error::ErrorCode;
+
+        #[test]
+        fn validation_errors_map_to_code_and_400() {
+            let cases = [
+                (
+                    ValidationError::ZeroTargetAddress,
+                    ErrorCode::InvalidAddress,
+                ),
+                (ValidationError::ZeroFromAddress, ErrorCode::InvalidAddress),
+                (ValidationError::EmptyCallData, ErrorCode::InvalidRequest),
+                (
+                    ValidationError::CallDataTooShort { len: 2 },
+                    ErrorCode::InvalidRequest,
+                ),
+                (
+                    ValidationError::CallDataTooLarge { len: 1, max: 0 },
+                    ErrorCode::CalldataTooLarge,
+                ),
+                (ValidationError::ZeroBlockHeight, ErrorCode::InvalidRequest),
+            ];
+            for (err, code) in cases {
+                let api = ApiError::from(err);
+                assert_eq!(api.status, StatusCode::BAD_REQUEST);
+                assert_eq!(api.code, code);
+            }
+        }
+
+        #[test]
+        fn onchain_errors_map_to_code_and_status() {
+            let cases = [
+                (
+                    OnchainValidationError::ContractNotFound,
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::ContractNotFound,
+                ),
+                (
+                    OnchainValidationError::TransitionIndexMismatch {
+                        provided: 5,
+                        current: 6,
+                    },
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::TransitionMismatch,
+                ),
+                (
+                    OnchainValidationError::BlockHeightInFuture {
+                        provided: 10,
+                        current: 9,
+                    },
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidRequest,
+                ),
+                (
+                    OnchainValidationError::BlockHeightTooStale {
+                        provided: 1,
+                        current: 500,
+                        max_age: 300,
+                    },
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::StaleBlock,
+                ),
+            ];
+            for (err, status, code) in cases {
+                let api = ApiError::from(err);
+                assert_eq!(api.status, status);
+                assert_eq!(api.code, code);
+            }
+        }
+
+        #[test]
+        fn rpc_error_is_503_and_message_is_sanitized() {
+            let api = ApiError::from(OnchainValidationError::RpcError(
+                "connection refused at 10.0.0.5".to_string(),
+            ));
+            assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(api.code, ErrorCode::RpcUnavailable);
+            assert_eq!(api.message, "Service temporarily unavailable");
+            assert!(
+                !api.message.contains("10.0.0.5"),
+                "internal RPC detail must not leak to clients"
             );
         }
     }
