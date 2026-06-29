@@ -534,7 +534,10 @@ fn print_scenario_summary(results: &[RequestResult]) {
 /// A trailing comma in the byte array is tolerated.
 fn parse_call_data(s: &str) -> Result<Vec<u8>, String> {
     let trimmed = s.trim();
-    if let Some(inner) = trimmed.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let inner = rest
+            .strip_suffix(']')
+            .ok_or_else(|| "malformed byte array: missing closing ']'".to_string())?;
         inner
             .split(',')
             .map(str::trim)
@@ -944,5 +947,9 @@ mod tests {
         assert!(parse_call_data("[1,foo,3]").is_err());
         // Malformed hex.
         assert!(parse_call_data("0xzz").is_err());
+        // A leading '[' commits to the byte-array form, so a missing ']'
+        // reports a malformed-array error rather than falling through to hex.
+        let err = parse_call_data("[1,2,3").unwrap_err();
+        assert!(err.contains("malformed byte array"), "got: {err}");
     }
 }
