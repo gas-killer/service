@@ -296,13 +296,18 @@ fn main() {
         const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         let my_local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        let mut p2p_cfg = lookup::Config::local(
+        let mut p2p_cfg = lookup::Config::recommended(
             signer.clone(),
             APPLICATION_NAMESPACE,
             my_addr,
             my_local_addr,
             MAX_MESSAGE_SIZE,
         );
+
+        // recommended() sets this false, but in-cluster router<->node p2p on GKE resolves to private
+        // pod IPs; leaving it false would drop every intra-cluster connection. Keep it true until the
+        // topology uses public addresses.
+        p2p_cfg.allow_private_ips = true;
 
         // Must stay true for K8s deployments (DNAT/SNAT means source IPs at the listener are
         // always pod IPs, never the registered ClusterIP addresses) and for mixed-network topologies
