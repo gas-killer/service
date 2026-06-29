@@ -101,7 +101,8 @@ struct RequestConfig {
     /// Human-readable label for output. Defaults to "request N".
     label: Option<String>,
     target_address: String,
-    /// ABI-encoded call data as a 0x-prefixed hex string.
+    /// ABI-encoded call data, as either a 0x-prefixed hex string ("0xdeadbeef")
+    /// or a bracketed decimal byte array ("[222,173,190,239]").
     call_data: String,
     from_address: String,
     /// State transition sequence number. Set to "auto" or omit to let the server assign the next available slot.
@@ -247,14 +248,14 @@ async fn send_request(
         cfg.block_height
     };
 
-    let call_data = match parse_hex_bytes(&cfg.call_data) {
+    let call_data = match parse_call_data(&cfg.call_data) {
         Ok(b) => b,
         Err(e) => {
             return RequestResult {
                 label,
                 status: 0,
                 api_success: false,
-                message: format!("invalid call_data hex: {e}"),
+                message: format!("invalid call_data: {e}"),
                 elapsed: Duration::ZERO,
                 on_chain: None,
             };
@@ -528,9 +529,25 @@ fn print_scenario_summary(results: &[RequestResult]) {
     }
 }
 
-fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, alloy::hex::FromHexError> {
-    let stripped = s.trim_start_matches("0x").trim_start_matches("0X");
-    alloy::hex::decode(stripped)
+/// Parse the `call_data` field into raw bytes. Accepts either a 0x-prefixed hex
+/// string ("0xdeadbeef") or a bracketed decimal byte array ("[222,173,190,239]").
+/// A trailing comma in the byte array is tolerated.
+fn parse_call_data(s: &str) -> Result<Vec<u8>, String> {
+    let trimmed = s.trim();
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let inner = rest
+            .strip_suffix(']')
+            .ok_or_else(|| "malformed byte array: missing closing ']'".to_string())?;
+        inner
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| t.parse::<u8>().map_err(|e| format!("byte \"{t}\": {e}")))
+            .collect()
+    } else {
+        let stripped = trimmed.trim_start_matches("0x").trim_start_matches("0X");
+        alloy::hex::decode(stripped).map_err(|e| e.to_string())
+    }
 }
 
 /// Replace `$VAR_NAME` tokens in `s` with values from the environment.
@@ -895,5 +912,44 @@ mod tests {
         );
         // `kubectl` sentinels must not be swallowed by the `local` parser.
         assert_eq!(parse_local_sentinel("kubectl"), None);
+    }
+
+    #[test]
+    fn parse_call_data_accepts_hex() {
+        assert_eq!(
+            parse_call_data("0xdeadbeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+        // The 0x prefix is optional.
+        assert_eq!(
+            parse_call_data("deadbeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+        assert_eq!(parse_call_data("0x").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn parse_call_data_accepts_byte_array() {
+        assert_eq!(
+            parse_call_data("[131,68,247,113]").unwrap(),
+            vec![131, 68, 247, 113]
+        );
+        // Whitespace and a trailing comma are tolerated.
+        assert_eq!(parse_call_data("[ 1, 2, 3, ]").unwrap(), vec![1, 2, 3]);
+        assert_eq!(parse_call_data("[]").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn parse_call_data_rejects_invalid_input() {
+        // Byte out of u8 range.
+        assert!(parse_call_data("[256]").is_err());
+        // Non-numeric byte.
+        assert!(parse_call_data("[1,foo,3]").is_err());
+        // Malformed hex.
+        assert!(parse_call_data("0xzz").is_err());
+        // A leading '[' commits to the byte-array form, so a missing ']'
+        // reports a malformed-array error rather than falling through to hex.
+        let err = parse_call_data("[1,2,3").unwrap_err();
+        assert!(err.contains("malformed byte array"), "got: {err}");
     }
 }
