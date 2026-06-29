@@ -47,6 +47,10 @@ pub enum ErrorCode {
     ContractNotFound,
     /// The request body is malformed or fails field-level validation.
     InvalidRequest,
+    /// The requested path does not exist.
+    NotFound,
+    /// The HTTP method is not supported for the requested path.
+    MethodNotAllowed,
     /// An unexpected server-side error occurred.
     Internal,
 }
@@ -169,6 +173,8 @@ mod tests {
             (ErrorCode::RpcUnavailable, "RPC_UNAVAILABLE"),
             (ErrorCode::ContractNotFound, "CONTRACT_NOT_FOUND"),
             (ErrorCode::InvalidRequest, "INVALID_REQUEST"),
+            (ErrorCode::NotFound, "NOT_FOUND"),
+            (ErrorCode::MethodNotAllowed, "METHOD_NOT_ALLOWED"),
             (ErrorCode::Internal, "INTERNAL"),
         ];
         for (code, wire) in cases {

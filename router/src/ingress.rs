@@ -535,11 +535,29 @@ async fn avs_metadata_handler(State(state): State<IngressState>) -> Json<AvsMeta
     Json(state.avs_metadata.clone())
 }
 
+/// Fallback for requests whose path matches no route. Returns the error envelope with a 404
+/// rather than axum's default empty-body response, so unknown paths share the API error contract.
+async fn not_found_handler() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "Not found")
+}
+
+/// Fallback for requests to a known path with an unsupported HTTP method. Returns the error
+/// envelope with a 405 rather than axum's default empty-body response.
+async fn method_not_allowed_handler() -> ApiError {
+    ApiError::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        ErrorCode::MethodNotAllowed,
+        "Method not allowed",
+    )
+}
+
 pub fn build_app() -> Router<IngressState> {
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/avs-metadata", get(avs_metadata_handler))
         .route("/trigger", post(trigger_task_handler))
+        .fallback(not_found_handler)
+        .method_not_allowed_fallback(method_not_allowed_handler)
 }
 
 // Start the HTTP server in a background task
@@ -1015,6 +1033,23 @@ mod tests {
 
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::MethodNotAllowed);
+        }
+
+        #[tokio::test]
+        async fn test_unknown_path_returns_404() {
+            let (app, _queue) = make_app();
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("/does-not-exist")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::NotFound);
         }
 
         #[tokio::test]
