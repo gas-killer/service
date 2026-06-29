@@ -1,12 +1,13 @@
 use crate::creator::{TaskQueueDepth, TaskSender};
-use crate::error::{ApiError, ApiJson, ErrorCode};
+use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ErrorCode};
 use crate::metrics::MetricsCollector;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use axum::{
     Json, Router,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::Response,
     routing::{get, post},
 };
 use gas_killer_common::ChainRole;
@@ -535,20 +536,51 @@ async fn avs_metadata_handler(State(state): State<IngressState>) -> Json<AvsMeta
     Json(state.avs_metadata.clone())
 }
 
-/// Fallback for requests whose path matches no route. Returns the error envelope with a 404
-/// rather than axum's default empty-body response, so unknown paths share the API error contract.
-async fn not_found_handler() -> ApiError {
-    ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "Not found")
-}
+/// Gives axum's built-in 404 (no matching route) and 405 (method not allowed) responses the same
+/// `{ "error": { "code", "message" } }` body as handler errors, so every error the ingress emits
+/// shares one contract.
+///
+/// Only framework-generated errors are rewritten: a 404/405 with no `Content-Type`. Handler errors
+/// and the API's own envelopes always set `application/json`, so they pass through untouched. The
+/// body is replaced in place rather than rebuilt, preserving the headers axum computed — in
+/// particular the `Allow` header that a spec-compliant 405 must carry.
+async fn wrap_framework_error(mut resp: Response) -> Response {
+    let status = resp.status();
+    let is_framework_error = matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ) && resp.headers().get(header::CONTENT_TYPE).is_none();
+    if !is_framework_error {
+        return resp;
+    }
 
-/// Fallback for requests to a known path with an unsupported HTTP method. Returns the error
-/// envelope with a 405 rather than axum's default empty-body response.
-async fn method_not_allowed_handler() -> ApiError {
-    ApiError::new(
-        StatusCode::METHOD_NOT_ALLOWED,
-        ErrorCode::MethodNotAllowed,
-        "Method not allowed",
-    )
+    let (code, message) = if status == StatusCode::METHOD_NOT_ALLOWED {
+        (ErrorCode::MethodNotAllowed, "Method not allowed")
+    } else {
+        (ErrorCode::NotFound, "Not found")
+    };
+    let envelope = ApiErrorEnvelope {
+        error: ApiErrorBody {
+            code,
+            message: message.to_string(),
+        },
+    };
+    let body = match serde_json::to_vec(&envelope) {
+        Ok(bytes) => bytes,
+        // A fixed-shape struct cannot realistically fail to serialize; if it somehow does, leave
+        // axum's original response untouched rather than panicking.
+        Err(_) => return resp,
+    };
+
+    let len = body.len();
+    *resp.body_mut() = axum::body::Body::from(body);
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    resp
 }
 
 pub fn build_app() -> Router<IngressState> {
@@ -556,8 +588,7 @@ pub fn build_app() -> Router<IngressState> {
         .route("/healthz", get(healthz_handler))
         .route("/avs-metadata", get(avs_metadata_handler))
         .route("/trigger", post(trigger_task_handler))
-        .fallback(not_found_handler)
-        .method_not_allowed_fallback(method_not_allowed_handler)
+        .layer(axum::middleware::map_response(wrap_framework_error))
 }
 
 // Start the HTTP server in a background task
@@ -1033,6 +1064,18 @@ mod tests {
 
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+            // A spec-compliant 405 must advertise the supported methods; rewriting the body into
+            // the error envelope must not drop the Allow header axum computes for the route.
+            let allow = resp
+                .headers()
+                .get(axum::http::header::ALLOW)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                allow.contains("POST"),
+                "Allow should list POST, got {allow:?}"
+            );
             let body = error_envelope(resp).await;
             assert_eq!(body.error.code, crate::error::ErrorCode::MethodNotAllowed);
         }
