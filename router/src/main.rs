@@ -15,6 +15,7 @@ use commonware_runtime::{
     Metrics, Runner, Spawner,
     tokio::{self},
 };
+use commonware_utils::NZU32;
 use commonware_utils::set::OrderedAssociated;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
@@ -184,6 +185,18 @@ fn main() {
     // case; authentication relies entirely on the cryptographic handshake (peer public keys
     // checked against the registered operator set), which is secure for both topologies.
     p2p_cfg.attempt_unregistered_handshakes = true;
+
+    // recommended() throttles peer discovery for large open gossip networks where aggressive
+    // dialing is abusive. gas-killer instead runs a small, static, allowlisted operator set in a
+    // full mesh: every participant dials every other, so both ends frequently dial at once and one
+    // connection loses the reservation race. The loser must re-dial quickly, and an operator that
+    // restarts must rejoin the signing quorum in seconds rather than ~a minute. Restore fast
+    // (re)discovery while keeping recommended's abuse-resistance (concurrent-handshake cap, subnet
+    // rate limit, ping cadence).
+    p2p_cfg.dial_frequency = Duration::from_millis(500);
+    p2p_cfg.query_frequency = Duration::from_secs(30);
+    p2p_cfg.allowed_connection_rate_per_peer = Quota::per_second(NZU32!(1));
+    p2p_cfg.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(16));
 
     // Start runtime
     runner.start(|context| async move {
