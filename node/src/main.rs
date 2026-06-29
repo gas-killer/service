@@ -13,6 +13,7 @@ use commonware_avs_node::contributor::{AggregationInput, Contribute, Contributor
 use commonware_p2p::Manager;
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_runtime::{Metrics, Runner, Spawner, tokio};
+use commonware_utils::NZU32;
 use commonware_utils::set::OrderedAssociated;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
@@ -296,7 +297,7 @@ fn main() {
         const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         let my_local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        let mut p2p_cfg = lookup::Config::local(
+        let mut p2p_cfg = lookup::Config::recommended(
             signer.clone(),
             APPLICATION_NAMESPACE,
             my_addr,
@@ -304,12 +305,29 @@ fn main() {
             MAX_MESSAGE_SIZE,
         );
 
+        // recommended() sets this false, but in-cluster router<->node p2p on GKE resolves to private
+        // pod IPs; leaving it false would drop every intra-cluster connection. Keep it true until the
+        // topology uses public addresses.
+        p2p_cfg.allow_private_ips = true;
+
         // Must stay true for K8s deployments (DNAT/SNAT means source IPs at the listener are
         // always pod IPs, never the registered ClusterIP addresses) and for mixed-network topologies
         // where external operators are behind NAT. IP-based pre-filtering cannot work in either
         // case; authentication relies entirely on the cryptographic handshake (peer public keys
         // checked against the registered operator set), which is secure for both topologies.
         p2p_cfg.attempt_unregistered_handshakes = true;
+
+        // recommended() throttles peer discovery for large open gossip networks where aggressive
+        // dialing is abusive. gas-killer instead runs a small, static, allowlisted operator set in a
+        // full mesh: every participant dials every other, so both ends frequently dial at once and
+        // one connection loses the reservation race. The loser must re-dial quickly, and an operator
+        // that restarts must rejoin the signing quorum in seconds rather than ~a minute. Restore fast
+        // (re)discovery while keeping recommended's abuse-resistance (concurrent-handshake cap, subnet
+        // rate limit, ping cadence).
+        p2p_cfg.dial_frequency = Duration::from_millis(500);
+        p2p_cfg.query_frequency = Duration::from_secs(30);
+        p2p_cfg.allowed_connection_rate_per_peer = Quota::per_second(NZU32!(1));
+        p2p_cfg.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(16));
 
         let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
 
