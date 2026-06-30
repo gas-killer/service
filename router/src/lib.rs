@@ -7,6 +7,7 @@ pub mod factories;
 pub mod ingress;
 pub mod metrics;
 pub mod orchestrator;
+pub mod store;
 
 // Re-export task_data from common crate
 pub mod task_data {
@@ -27,3 +28,4 @@ pub use gas_killer_common::GasKillerTaskData;
 pub use gas_killer_common::GasKillerValidator;
 pub use ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody, ValidationError};
 pub use orchestrator::GasKillerOrchestrator;
+pub use store::SqliteStore;

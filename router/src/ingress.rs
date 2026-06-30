@@ -1,6 +1,7 @@
 use crate::creator::{TaskQueueDepth, TaskSender};
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ErrorCode};
 use crate::metrics::MetricsCollector;
+use crate::store::SqliteStore;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use axum::{
@@ -67,6 +68,9 @@ pub struct IngressState {
     /// Bearer token password. `None` disables authentication.
     pub password: Option<String>,
     pub avs_metadata: AvsMetadata,
+    /// Durable SQLite store shared with the orchestrator. `None` when persistence is not
+    /// configured (e.g. in tests); persistent features fall back to in-memory behaviour.
+    pub store: Option<SqliteStore>,
 }
 
 impl IngressState {
@@ -87,6 +91,7 @@ impl IngressState {
             providers: Arc::new(providers),
             password,
             avs_metadata,
+            store: None,
         }
     }
 
@@ -99,7 +104,14 @@ impl IngressState {
             providers: Arc::new(HashMap::new()),
             password: None,
             avs_metadata: AvsMetadata::default(),
+            store: None,
         }
+    }
+
+    /// Attaches the durable SQLite store, returning the updated state for chained construction.
+    pub fn with_store(mut self, store: SqliteStore) -> Self {
+        self.store = Some(store);
+        self
     }
 }
 
