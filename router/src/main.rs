@@ -9,13 +9,13 @@ use commonware_avs_core::bn254::{PublicKey, get_signer};
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
 use commonware_avs_router::orchestrator::traits::OrchestratorTrait;
 use commonware_cryptography::Signer;
-use commonware_p2p::Manager;
 use commonware_p2p::authenticated::lookup::{self, Network};
+use commonware_p2p::{Address, AddressableManager};
 use commonware_runtime::{
-    Metrics, Runner, Spawner,
+    Metrics, Runner, Spawner, Supervisor,
     tokio::{self},
 };
-use commonware_utils::set::OrderedAssociated;
+use commonware_utils::ordered::Map;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
     GasKillerValidator, SpeculativePrebuildConfig, get_operator_states, load_key_from_file,
@@ -37,7 +37,10 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 #[derive(Clone)]
 struct HealthState {
     ready: Arc<AtomicBool>,
-    context: tokio::Context,
+    // `tokio::Context` is no longer `Clone`, but axum requires the handler state to
+    // be `Clone`. An `Arc` makes the state cloneable; `encode()` (which takes `&self`)
+    // still resolves through `Deref`, and the registry is shared across all contexts.
+    context: Arc<tokio::Context>,
     metrics: Arc<MetricsCollector>,
 }
 
@@ -162,14 +165,12 @@ fn main() {
     println!("  g2_y2: {}", g2_point.y.c1);
 
     // Configure network
-    const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
+    const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
     let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
-    let my_local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let mut p2p_cfg = lookup::Config::local(
         signer.clone(),
         APPLICATION_NAMESPACE,
         my_addr,
-        my_local_addr,
         MAX_MESSAGE_SIZE,
     );
 
@@ -178,12 +179,14 @@ fn main() {
     // where external operators are behind NAT. IP-based pre-filtering cannot work in either
     // case; authentication relies entirely on the cryptographic handshake (peer public keys
     // checked against the registered operator set), which is secure for both topologies.
-    p2p_cfg.attempt_unregistered_handshakes = true;
+    // (Renamed from `attempt_unregistered_handshakes` in commonware 2026.5.0; same
+    // semantics: skip the source-IP match so known peers can connect from unexpected IPs.)
+    p2p_cfg.bypass_ip_check = true;
 
     // Start runtime
     runner.start(|context| async move {
-        let (mut network, mut oracle) = Network::new(context.with_label("network"), p2p_cfg);
-        let mut recipients: Vec<(PublicKey, SocketAddr)>;
+        let (mut network, mut oracle) = Network::new(context.child("network"), p2p_cfg);
+        let mut recipients: Vec<(PublicKey, Address)>;
         let quorum_infos;
         // Configure quorum number from environment (default: 0)
         let quorum_number: usize = std::env::var("QUORUM_NUMBER")
@@ -223,12 +226,12 @@ fn main() {
                     if let Some(socket_addr) =
                         resolve_with_retry(&socket, 30, Duration::from_secs(2))
                     {
-                        recipients.push((verifier, socket_addr));
+                        recipients.push((verifier, Address::from(socket_addr)));
                     } else {
                         // Last resort: try parsing as direct IP:PORT
                         match SocketAddr::from_str(&socket) {
                             Ok(socket_addr) => {
-                                recipients.push((verifier, socket_addr));
+                                recipients.push((verifier, Address::from(socket_addr)));
                             }
                             Err(parse_err) => {
                                 tracing::error!(
@@ -243,7 +246,7 @@ fn main() {
                 }
             }
             let orchestrator_verifier = signer.public_key();
-            recipients.push((orchestrator_verifier, my_addr));
+            recipients.push((orchestrator_verifier, Address::from(my_addr)));
         }
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
@@ -251,9 +254,10 @@ fn main() {
             .finish();
         _ = tracing::subscriber::set_default(subscriber);
 
-        // Provide authorized peers
-        let authorized = OrderedAssociated::from_iter(recipients.clone());
-        oracle.update(0, authorized).await;
+        // Provide authorized peers. `track` registers a peer set (id 0) and is no
+        // longer async; `recipients` already holds `Address` values.
+        let authorized = Map::from_iter_dedup(recipients);
+        oracle.track(0, authorized);
 
         // Parse contributors from operator states
         let mut contributors = Vec::new();
@@ -281,8 +285,19 @@ fn main() {
         // Custom Prometheus metrics — shared with executor, creator, and ingress via builder
         let metrics = Arc::new(MetricsCollector::new());
 
+        // `tokio::Context` is no longer `Clone`, and the orchestrator builder consumes
+        // the root context by value (it self-prefixes its metrics with "orchestrator").
+        // Derive every child context we still need *before* moving the root context in.
+        // All children share the same metrics registry, so `/metrics` encoding from any
+        // of them reports the full set.
+        let executor_ctx = context.child("executor");
+        let speculative_ctx = context.child("speculative_prebuild");
+        let orchestrator_task_ctx = context.child("orchestrator_task");
+        let healthz_ctx = context.child("healthz_server");
+        let health_ctx = Arc::new(context.child("metrics"));
+
         // Use the builder pattern to create the orchestrator
-        let builder = OrchestratorBuilder::new(context.clone(), signer)
+        let builder = OrchestratorBuilder::new(context, signer)
             .with_contributors(contributors)
             .with_g1_map(contributors_map)
             .with_threshold(threshold)
@@ -298,19 +313,21 @@ fn main() {
         {
             let spec_validator = Arc::clone(&validator);
             let prebuild_cfg = SpeculativePrebuildConfig::from_env();
-            context.clone().spawn(move |_| async move {
+            speculative_ctx.spawn(move |_| async move {
                 spec_validator.run_speculative_prebuild(prebuild_cfg).await;
             });
         }
 
-        let orchestrator =
-            GasKillerOrchestratorBuilder::build(builder, validator, Arc::clone(&metrics), &context)
-                .await
-                .expect("Failed to build orchestrator");
+        let orchestrator = GasKillerOrchestratorBuilder::build(
+            builder,
+            validator,
+            Arc::clone(&metrics),
+            &executor_ctx,
+        )
+        .await
+        .expect("Failed to build orchestrator");
 
-        context
-            .clone()
-            .spawn(|_| async move { orchestrator.run(sender, receiver).await });
+        orchestrator_task_ctx.spawn(|_| async move { orchestrator.run(sender, receiver).await });
 
         // Readiness flag: set to true after orchestrator is spawned and network is starting
         let ready = Arc::new(AtomicBool::new(false));
@@ -323,10 +340,10 @@ fn main() {
         let healthz_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), healthz_port);
         let health_state = HealthState {
             ready: Arc::clone(&ready),
-            context: context.clone(),
+            context: health_ctx,
             metrics: Arc::clone(&metrics),
         };
-        context.clone().spawn(move |_| async move {
+        healthz_ctx.spawn(move |_| async move {
             let app = Router::new()
                 .route("/healthz", get(healthz_handler))
                 .route("/readyz", get(readyz_handler))

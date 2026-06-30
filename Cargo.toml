@@ -24,17 +24,17 @@ async-trait = "0.1"
 axum = "0.7"
 bytes = "1.10.1"
 clap = "4.5.37"
-commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-codec = "0.0.63"
-commonware-cryptography = "0.0.63"
-commonware-macros = "0.0.63"
-commonware-p2p = "0.0.63"
-commonware-runtime = "0.0.63"
-commonware-utils = "0.0.63"
+commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update" }
+commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update" }
+commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update"}
+commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update"}
+commonware-codec = "2026.5.0"
+commonware-cryptography = "2026.5.0"
+commonware-macros = "2026.5.0"
+commonware-p2p = "2026.5.0"
+commonware-runtime = "2026.5.0"
+commonware-utils = "2026.5.0"
 dotenv = "0.15.0"
 eigen-client-avsregistry = "2.0.0"
 eigen-common = "2.0.0"
@@ -47,10 +47,9 @@ futures = "0.3.31"
 futures-util = "0.3.31"
 gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch" }
 gas-killer-common = { path = "common" }
-governor = "0.6.3"
+governor = "0.10.4"
 hex = "0.4"
 num-bigint = "0.4"
-prometheus-client = "0.22.3"
 prost = "0.13.5"
 rand = "0.9.1"
 serde = { version = "1.0.219", features = ["derive"] }

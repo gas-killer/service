@@ -1,8 +1,6 @@
-use prometheus_client::encoding::text::encode;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::metrics::histogram::Histogram;
-use prometheus_client::registry::Registry;
+use commonware_runtime::telemetry::metrics::encoding::text::encode;
+use commonware_runtime::telemetry::metrics::raw::{Counter, Gauge, Histogram};
+use commonware_runtime::telemetry::metrics::registry::Registry;
 use std::sync::atomic::{AtomicI64, AtomicU64};
 
 pub struct MetricsCollector {
