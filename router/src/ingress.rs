@@ -1095,6 +1095,63 @@ mod tests {
             assert_eq!(body.error.code, crate::error::ErrorCode::NotFound);
         }
 
+        // Pins the documented contract of `wrap_framework_error`: a handler that emits a bare,
+        // bodyless `StatusCode::NOT_FOUND`/`METHOD_NOT_ALLOWED` (no Content-Type) is rewritten into
+        // the error envelope, while a handler that already returns an envelope (Content-Type
+        // application/json) keeps its specific status, code, and message untouched. Guards against a
+        // future handler's error shape silently diverging from — or being clobbered by — the layer.
+        #[tokio::test]
+        async fn test_bare_status_handler_is_wrapped_but_envelope_handler_is_preserved() {
+            use crate::error::ErrorCode;
+
+            let app: Router = Router::new()
+                .route("/bare", get(|| async { StatusCode::NOT_FOUND }))
+                .route(
+                    "/typed",
+                    get(|| async {
+                        ApiError::new(
+                            StatusCode::NOT_FOUND,
+                            ErrorCode::NotFound,
+                            "widget 7 not found",
+                        )
+                    }),
+                )
+                .layer(axum::middleware::map_response(wrap_framework_error));
+
+            // Bare StatusCode from a handler → wrapped into the generic envelope.
+            let bare = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/bare")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(bare.status(), StatusCode::NOT_FOUND);
+            let bare_body = error_envelope(bare).await;
+            assert_eq!(bare_body.error.code, ErrorCode::NotFound);
+            assert_eq!(bare_body.error.message, "Not found");
+
+            // Handler-built envelope (application/json) → passed through with its specific message.
+            let typed = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/typed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(typed.status(), StatusCode::NOT_FOUND);
+            let typed_body = error_envelope(typed).await;
+            assert_eq!(typed_body.error.code, ErrorCode::NotFound);
+            assert_eq!(typed_body.error.message, "widget 7 not found");
+        }
+
         #[tokio::test]
         async fn test_valid_request_does_not_leave_extra_tasks() {
             // Two sequential valid requests → queue should hold exactly two tasks
