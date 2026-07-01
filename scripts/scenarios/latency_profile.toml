@@ -9,7 +9,7 @@
 #
 # Requires:
 #   GNOSIS_RPC_URL    — Gnosis chain HTTP RPC endpoint
-#   INGRESS_PASSWORD  — Bearer token for /trigger (if enabled)
+#   GAS_KILLER_API_KEY  — API key sent as `Authorization: Bearer <key>` on /trigger (if the server requires auth)
 #
 # After running, pull metrics from Grafana:
 #   - gas_killer_p2p_round_trip_seconds        (router)

@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CI_INGRESS_PASSWORD: ci-test-password
       CI_ADMIN_KEY: ci-admin-key
 
     steps:
@@ -153,7 +152,6 @@ jobs:
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
             --set secrets.l2ForkUrl="$L2_FORK_URL" \
-            --set secrets.ingressPassword="$CI_INGRESS_PASSWORD" \
             --set secrets.adminKey="$CI_ADMIN_KEY" \
             --set node.image.repository=service \
             --set node.image.tag=node-local \
@@ -412,6 +410,15 @@ jobs:
 
           echo "API key admin flow verified"
 
+          # Mint a working key for the remaining e2e steps, which authenticate /trigger with it.
+          # The value is written to GITHUB_ENV (not echoed) so later steps pick it up.
+          WORKING=$(curl -s -X POST -H "Authorization: Bearer $CI_ADMIN_KEY" \
+            -H "Content-Type: application/json" -d '{"label":"ci-e2e-runner"}' "$ROUTER_URL/admin/keys")
+          WORKING_KEY=$(echo "$WORKING" | jq -r '.key')
+          case "$WORKING_KEY" in gk_*) ;; *) echo "failed to mint working key"; exit 1;; esac
+          echo "GAS_KILLER_API_KEY=$WORKING_KEY" >> "$GITHUB_ENV"
+          echo "provisioned working API key for downstream steps"
+
       - name: Verify shared data was created
         run: |
           echo "Checking if setup job created the required files..."
@@ -471,7 +478,8 @@ jobs:
           export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
           export GAS_KILLER_TRIGGER_URL=http://localhost:8080/trigger
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-          export INGRESS_PASSWORD="$CI_INGRESS_PASSWORD"
+          # send_request authenticates /trigger with GAS_KILLER_API_KEY, minted in the admin-flow
+          # step and exported via GITHUB_ENV.
 
           # Get ArraySummation address from deployment file
           ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.arraySummation' "$AVS_DEPLOYMENT_PATH")
@@ -578,7 +586,7 @@ jobs:
           PAYLOAD="{\"body\":{\"target_address\":\"$YIELD_DISTRIBUTOR\",\"call_data\":$BYTES_ARRAY,\"transition_index\":$INITIAL_COUNT,\"from_address\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\",\"value\":\"0\",\"block_height\":$BLOCK}}"
           echo "Payload: $PAYLOAD"
 
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $CI_INGRESS_PASSWORD" -d "$PAYLOAD" "$ROUTER_URL/trigger")
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $GAS_KILLER_API_KEY" -d "$PAYLOAD" "$ROUTER_URL/trigger")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | head -1)
           echo "Router response ($HTTP_CODE): $BODY"

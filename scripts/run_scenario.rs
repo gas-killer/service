@@ -331,10 +331,10 @@ async fn send_request(
     let url = format!("{}/trigger", router_url.trim_end_matches('/'));
     let start = Instant::now();
     let mut req = client.post(&url).json(&payload);
-    if let Ok(password) = std::env::var("INGRESS_PASSWORD")
-        && !password.is_empty()
+    if let Ok(api_key) = std::env::var("GAS_KILLER_API_KEY")
+        && !api_key.is_empty()
     {
-        req = req.header("Authorization", format!("Bearer {password}"));
+        req = req.header("Authorization", format!("Bearer {api_key}"));
     }
     let resp = req.send().await;
     let elapsed = start.elapsed();

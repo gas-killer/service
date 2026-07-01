@@ -99,8 +99,7 @@ See `values.yaml` for all available configuration options.
 | `secrets.forkUrl` | Anvil fork URL (required for LOCAL mode) | `""` |
 | `secrets.privateKey` | Deployer private key | `""` |
 | `secrets.fundedKey` | Funded account private key | `""` |
-| `secrets.ingressPassword` | Legacy shared Bearer token for `/trigger` auth, retained during the API-key migration. **Required** when `global.environment=TESTNET` and `router.ingress.enabled=true`. Requests may authenticate with `Authorization: Bearer <value>`. | `""` |
-| `secrets.adminKey` | Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke per-client API keys via `Authorization: Bearer <value>`. Leave empty to disable the admin API. | `""` |
+| `secrets.adminKey` | Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke per-client API keys via `Authorization: Bearer <value>`. Clients then authenticate `/trigger` with their minted key. **Required** when `global.environment=TESTNET` and `router.ingress.enabled=true`. | `""` |
 
 ## Architecture
 

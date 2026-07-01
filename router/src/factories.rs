@@ -78,7 +78,6 @@ pub async fn create_listening_creator_with_server(
     )
     .with_metrics(Arc::clone(&metrics));
     let providers = build_ingress_providers()?;
-    let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
     let admin_key = env::var("ADMIN_KEY").ok().filter(|k| !k.is_empty());
     if admin_key.is_none() {
         tracing::warn!(
@@ -150,7 +149,6 @@ pub async fn create_listening_creator_with_server(
         gas_killer_common::p2p_message_backlog(),
         metrics,
         providers,
-        ingress_password,
         avs_metadata,
     )
     .with_store(store)
