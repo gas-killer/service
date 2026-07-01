@@ -284,7 +284,10 @@ fn main() {
                 })
             });
 
-            recipients.push((orchestrator_pub_key.clone(), Address::from(orchestrator_addr)));
+            recipients.push((
+                orchestrator_pub_key.clone(),
+                Address::from(orchestrator_addr),
+            ));
         }
 
         // Configure tracing
