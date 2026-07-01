@@ -13,6 +13,7 @@ use commonware_avs_node::contributor::{AggregationInput, Contribute, Contributor
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_p2p::{Address, AddressableManager};
 use commonware_runtime::{Metrics, Runner, Spawner, Supervisor, tokio};
+use commonware_utils::NZU32;
 use commonware_utils::ordered::Map;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
@@ -300,12 +301,17 @@ fn main() {
         // Configure P2P network
         const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
-        let mut p2p_cfg = lookup::Config::local(
+        let mut p2p_cfg = lookup::Config::recommended(
             signer.clone(),
             APPLICATION_NAMESPACE,
             my_addr,
             MAX_MESSAGE_SIZE,
         );
+
+        // recommended() sets this false, but in-cluster router<->node p2p on GKE resolves to private
+        // pod IPs; leaving it false would drop every intra-cluster connection. Keep it true until the
+        // topology uses public addresses.
+        p2p_cfg.allow_private_ips = true;
 
         // Must stay true for K8s deployments (DNAT/SNAT means source IPs at the listener are
         // always pod IPs, never the registered ClusterIP addresses) and for mixed-network topologies
@@ -315,6 +321,20 @@ fn main() {
         // (Renamed from `attempt_unregistered_handshakes` in commonware 2026.5.0; same
         // semantics: skip the source-IP match so known peers can connect from unexpected IPs.)
         p2p_cfg.bypass_ip_check = true;
+
+        // recommended() throttles peer discovery for large open gossip networks where aggressive
+        // dialing is abusive. gas-killer instead runs a small, static, allowlisted operator set in a
+        // full mesh: every participant dials every other, so both ends frequently dial at once and
+        // one connection loses the reservation race. The loser must re-dial quickly, and an operator
+        // that restarts must rejoin the signing quorum in seconds rather than ~a minute. Restore fast
+        // (re)discovery (these match Config::local's values) while keeping recommended's
+        // abuse-resistance (concurrent-handshake cap, subnet rate limit, ping cadence).
+        // Note (2026.5.0): the old `query_frequency` knob was removed, and the old
+        // `allowed_connection_rate_per_peer = 1/s` is now expressed as its inverse,
+        // `peer_connection_cooldown = 1s` (minimum time between per-peer connection reservations).
+        p2p_cfg.dial_frequency = Duration::from_millis(500);
+        p2p_cfg.peer_connection_cooldown = Duration::from_secs(1);
+        p2p_cfg.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(16));
 
         let (mut network, mut oracle) = Network::new(context.child("network"), p2p_cfg);
 
