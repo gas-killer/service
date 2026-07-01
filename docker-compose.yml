@@ -158,6 +158,9 @@ services:
       # /app is owned by the non-root container user; /data is reserved for the Kubernetes
       # PVC mount and is not writable here.
       - DATA_DIR=/app/data
+      # Guards the /admin/keys endpoints used to mint the API keys that authenticate /trigger.
+      # Defaults to a fixed value for the local/e2e harness; override by exporting ADMIN_KEY.
+      - ADMIN_KEY=${ADMIN_KEY:-ci-admin-key}
     volumes:
       - ./config/.nodes:/app/.nodes:ro
       - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro
