@@ -1,15 +1,15 @@
 use crate::creator::{TaskQueueDepth, TaskSender};
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ErrorCode};
 use crate::metrics::MetricsCollector;
-use crate::store::SqliteStore;
+use crate::store::{ApiKeyMetadata, CreatedApiKey, SqliteStore};
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use gas_killer_common::ChainRole;
 use gas_killer_common::ReadOnlyProvider;
@@ -65,11 +65,15 @@ pub struct IngressState {
     pub max_queue_depth: usize,
     pub metrics: Option<Arc<MetricsCollector>>,
     pub providers: Arc<HashMap<ChainRole, ReadOnlyProvider>>,
-    /// Bearer token password. `None` disables authentication.
+    /// Legacy shared-secret Bearer token for task submission, retained during the API-key
+    /// migration. `None` disables this fallback.
     pub password: Option<String>,
+    /// Shared secret guarding the `/admin/keys` endpoints (`ADMIN_KEY`). `None` disables the
+    /// admin API, so keys cannot be managed until it is set.
+    pub admin_key: Option<String>,
     pub avs_metadata: AvsMetadata,
     /// Durable SQLite store shared with the orchestrator. `None` when persistence is not
-    /// configured (e.g. in tests); persistent features fall back to in-memory behaviour.
+    /// configured (e.g. in tests); the admin API and API-key auth require it.
     pub store: Option<SqliteStore>,
 }
 
@@ -90,6 +94,7 @@ impl IngressState {
             metrics: Some(metrics),
             providers: Arc::new(providers),
             password,
+            admin_key: None,
             avs_metadata,
             store: None,
         }
@@ -103,6 +108,7 @@ impl IngressState {
             metrics: None,
             providers: Arc::new(HashMap::new()),
             password: None,
+            admin_key: None,
             avs_metadata: AvsMetadata::default(),
             store: None,
         }
@@ -111,6 +117,13 @@ impl IngressState {
     /// Attaches the durable SQLite store, returning the updated state for chained construction.
     pub fn with_store(mut self, store: SqliteStore) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Sets the shared secret guarding the admin API, returning the updated state for chained
+    /// construction.
+    pub fn with_admin_key(mut self, admin_key: Option<String>) -> Self {
+        self.admin_key = admin_key;
         self
     }
 }
@@ -125,12 +138,87 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         == 0
 }
 
-fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
+/// Extracts the token from an `Authorization: Bearer <token>` header, if present and valid.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
-        .get(axum::http::header::AUTHORIZATION)
+        .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
+}
+
+/// Whether the request carries a Bearer token matching `expected`, compared in constant time
+/// so a mismatch's position cannot be inferred from timing. Used for the shared secrets
+/// (`ADMIN_KEY` and the legacy ingress password).
+fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
+    bearer_token(headers)
         .is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
+}
+
+/// Authorizes a task-submission request against whichever mechanisms are configured:
+///
+/// - A valid, unrevoked API key from the durable store (the primary mechanism) authorizes.
+/// - `INGRESS_PASSWORD`, a legacy shared secret retained for the beta migration, also
+///   authorizes when set and matched in constant time.
+/// - When neither a store nor a password is configured the endpoint is open (development and
+///   tests); the startup path logs a warning in that case.
+async fn authorize_task_request(state: &IngressState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let token = bearer_token(headers);
+
+    if let Some(store) = &state.store
+        && let Some(token) = token
+    {
+        match store.verify_api_key(token).await {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "api key verification failed");
+                return Err(ApiError::internal("Internal error during authentication"));
+            }
+        }
+    }
+
+    if let Some(password) = &state.password
+        && token.is_some_and(|t| constant_time_eq(t.as_bytes(), password.as_bytes()))
+    {
+        return Ok(());
+    }
+
+    // A request is unauthenticated-but-allowed only when no mechanism is configured at all.
+    if state.store.is_some() || state.password.is_some() {
+        Err(ApiError::unauthorized())
+    } else {
+        Ok(())
+    }
+}
+
+/// Guards the `/admin/keys` endpoints with the `ADMIN_KEY` shared secret. Returns a 503 when
+/// the admin API is not configured, so an operator who has not set `ADMIN_KEY` gets a clear
+/// signal rather than a locked door with no key, and a 401 when the credential is wrong.
+fn authorize_admin(state: &IngressState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(admin_key) = &state.admin_key else {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::NotConfigured,
+            "Admin API is not configured (set ADMIN_KEY)",
+        ));
+    };
+    if check_bearer_auth(headers, admin_key) {
+        Ok(())
+    } else {
+        Err(ApiError::unauthorized())
+    }
+}
+
+/// Borrows the durable store, or returns a 503 when persistence is not configured. The admin
+/// API and API-key auth cannot function without it.
+fn require_store(state: &IngressState) -> Result<&SqliteStore, ApiError> {
+    state.store.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::NotConfigured,
+            "Persistence is not configured",
+        )
+    })
 }
 
 /// Onchain validation errors for incoming task requests.
@@ -458,11 +546,7 @@ pub async fn trigger_task_handler(
     headers: HeaderMap,
     ApiJson(request): ApiJson<GasKillerTaskRequest>,
 ) -> Result<(StatusCode, Json<GasKillerTaskResponse>), ApiError> {
-    if let Some(password) = &state.password
-        && !check_bearer_auth(&headers, password)
-    {
-        return Err(ApiError::unauthorized());
-    }
+    authorize_task_request(&state, &headers).await?;
 
     // Load-shed before any validation work. Onchain validation costs multiple RPC
     // round-trips, so rejecting at-capacity requests up front keeps an overloaded
@@ -540,6 +624,91 @@ pub async fn trigger_task_handler(
     ))
 }
 
+/// Request body for `POST /admin/keys`. The whole body is optional; an empty body creates an
+/// unlabeled key.
+#[derive(Debug, Deserialize)]
+pub struct CreateApiKeyRequest {
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// `POST /admin/keys` — issues a new API key. Admin-only. The response carries the raw key
+/// value exactly once; it is not persisted in the clear and cannot be retrieved later.
+async fn create_api_key_handler(
+    State(state): State<IngressState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Result<(StatusCode, Json<CreatedApiKey>), ApiError> {
+    authorize_admin(&state, &headers)?;
+    let store = require_store(&state)?;
+
+    // The body is an optional JSON object carrying a human-readable label; an empty body means
+    // "no label". Blank labels are normalized away so listings never show empty strings.
+    let label = if body.is_empty() {
+        None
+    } else {
+        serde_json::from_slice::<CreateApiKeyRequest>(&body)
+            .map_err(|e| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidRequest,
+                    format!("invalid request body: {e}"),
+                )
+            })?
+            .label
+    }
+    .filter(|l| !l.trim().is_empty());
+
+    let created = store.create_api_key(label).await.map_err(|e| {
+        tracing::error!(error = %e, "failed to create api key");
+        ApiError::internal("Failed to create API key")
+    })?;
+    info!(id = %created.id, "api key created");
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// `GET /admin/keys` — lists metadata for active keys. Admin-only. Never returns key values.
+async fn list_api_keys_handler(
+    State(state): State<IngressState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ApiKeyMetadata>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    let store = require_store(&state)?;
+
+    let keys = store.list_api_keys().await.map_err(|e| {
+        tracing::error!(error = %e, "failed to list api keys");
+        ApiError::internal("Failed to list API keys")
+    })?;
+    Ok(Json(keys))
+}
+
+/// `DELETE /admin/keys/:id` — revokes a key, taking effect immediately. Admin-only. Returns
+/// 204 on success and 404 when no active key with that id exists.
+async fn revoke_api_key_handler(
+    State(state): State<IngressState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    authorize_admin(&state, &headers)?;
+    let store = require_store(&state)?;
+
+    let revoked = store.revoke_api_key(&id).await.map_err(|e| {
+        tracing::error!(error = %e, "failed to revoke api key");
+        ApiError::internal("Failed to revoke API key")
+    })?;
+
+    if revoked {
+        info!(id = %id, "api key revoked");
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "API key not found",
+        ))
+    }
+}
+
 async fn healthz_handler() -> StatusCode {
     StatusCode::OK
 }
@@ -600,6 +769,11 @@ pub fn build_app() -> Router<IngressState> {
         .route("/healthz", get(healthz_handler))
         .route("/avs-metadata", get(avs_metadata_handler))
         .route("/trigger", post(trigger_task_handler))
+        .route(
+            "/admin/keys",
+            post(create_api_key_handler).get(list_api_keys_handler),
+        )
+        .route("/admin/keys/:id", delete(revoke_api_key_handler))
         .layer(axum::middleware::map_response(wrap_framework_error))
 }
 
@@ -803,6 +977,53 @@ mod tests {
             state.password = Some(password.to_string());
             let app = build_app().with_state(state);
             (app, receiver)
+        }
+
+        /// Builds an app backed by an in-memory store, optionally with an admin key and/or a
+        /// legacy password. Returns the store handle so tests can mint/revoke keys directly, and
+        /// the receiver so accepted tasks have somewhere to land (a dropped receiver would make
+        /// `/trigger` fail on send).
+        async fn make_app_with_store(
+            admin_key: Option<&str>,
+            password: Option<&str>,
+        ) -> (Router, SqliteStore, crate::creator::TaskReceiver) {
+            let (sender, receiver) = crate::creator::task_channel();
+            let queue_depth = crate::creator::task_queue_depth();
+            let store = SqliteStore::connect_in_memory()
+                .await
+                .expect("in-memory store should open");
+            let mut state = IngressState::without_metrics(sender, queue_depth)
+                .with_store(store.clone())
+                .with_admin_key(admin_key.map(str::to_string));
+            state.password = password.map(str::to_string);
+            let app = build_app().with_state(state);
+            (app, store, receiver)
+        }
+
+        fn admin_request(
+            method: Method,
+            uri: &str,
+            token: Option<&str>,
+            body: &str,
+        ) -> Request<Body> {
+            let mut builder = Request::builder().method(method).uri(uri);
+            if let Some(token) = token {
+                builder = builder.header("Authorization", format!("Bearer {token}"));
+            }
+            builder
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        }
+
+        fn bearer_request(body: &str, token: &str) -> Request<Body> {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/trigger")
+                .header("content-type", "application/json")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap()
         }
 
         fn json_request(body: &str) -> Request<Body> {
@@ -1291,6 +1512,198 @@ mod tests {
                 .unwrap();
             let resp = app.oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // -- admin API + API-key auth tests --
+
+        async fn created_key_json(resp: axum::response::Response) -> serde_json::Value {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).expect("create response should be JSON")
+        }
+
+        #[tokio::test]
+        async fn admin_create_returns_503_when_admin_key_unset() {
+            let (app, _store, _rx) = make_app_with_store(None, None).await;
+            let req = admin_request(Method::POST, "/admin/keys", None, "{}");
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::NotConfigured);
+        }
+
+        #[tokio::test]
+        async fn admin_create_rejects_missing_or_wrong_credential() {
+            let (app, _store, _rx) = make_app_with_store(Some("admin-secret"), None).await;
+            // No credential.
+            let resp = app
+                .clone()
+                .oneshot(admin_request(Method::POST, "/admin/keys", None, "{}"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            // Wrong credential.
+            let resp = app
+                .oneshot(admin_request(
+                    Method::POST,
+                    "/admin/keys",
+                    Some("wrong"),
+                    "{}",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn admin_create_issues_key_with_prefix() {
+            let (app, _store, _rx) = make_app_with_store(Some("admin-secret"), None).await;
+            let req = admin_request(
+                Method::POST,
+                "/admin/keys",
+                Some("admin-secret"),
+                r#"{"label":"client-a"}"#,
+            );
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let json = created_key_json(resp).await;
+            assert!(
+                json["key"].as_str().unwrap().starts_with("gk_"),
+                "created key should carry the gk_ prefix"
+            );
+            assert_eq!(json["label"], "client-a");
+            assert!(json["id"].as_str().is_some());
+            assert!(json["created_at"].as_i64().unwrap() > 0);
+        }
+
+        #[tokio::test]
+        async fn admin_create_accepts_empty_body_as_unlabeled() {
+            let (app, _store, _rx) = make_app_with_store(Some("admin-secret"), None).await;
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/admin/keys")
+                .header("Authorization", "Bearer admin-secret")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let json = created_key_json(resp).await;
+            assert!(json["label"].is_null(), "empty body should yield no label");
+        }
+
+        #[tokio::test]
+        async fn admin_list_returns_metadata_without_key_value() {
+            let (app, store, _rx) = make_app_with_store(Some("admin-secret"), None).await;
+            let created = store
+                .create_api_key(Some("client-a".to_string()))
+                .await
+                .unwrap();
+
+            let resp = app
+                .oneshot(admin_request(
+                    Method::GET,
+                    "/admin/keys",
+                    Some("admin-secret"),
+                    "",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let entries = list.as_array().expect("list should be a JSON array");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0]["id"], created.id);
+            assert_eq!(entries[0]["label"], "client-a");
+            assert!(
+                entries[0].get("key").is_none(),
+                "listing must never expose the key value"
+            );
+            assert!(
+                entries[0].get("key_hash").is_none(),
+                "listing must never expose the key hash"
+            );
+        }
+
+        #[tokio::test]
+        async fn admin_revoke_returns_204_then_404() {
+            let (app, store, _rx) = make_app_with_store(Some("admin-secret"), None).await;
+            let created = store.create_api_key(None).await.unwrap();
+
+            let uri = format!("/admin/keys/{}", created.id);
+            let resp = app
+                .clone()
+                .oneshot(admin_request(
+                    Method::DELETE,
+                    &uri,
+                    Some("admin-secret"),
+                    "",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+            // Revoking again reports 404 — no active key with that id remains.
+            let resp = app
+                .oneshot(admin_request(
+                    Method::DELETE,
+                    &uri,
+                    Some("admin-secret"),
+                    "",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn trigger_accepts_valid_api_key() {
+            let (app, store, mut rx) = make_app_with_store(None, None).await;
+            let created = store.create_api_key(None).await.unwrap();
+
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(rx.try_recv().is_ok(), "valid key should queue the task");
+        }
+
+        #[tokio::test]
+        async fn trigger_rejects_revoked_api_key() {
+            let (app, store, _rx) = make_app_with_store(None, None).await;
+            let created = store.create_api_key(None).await.unwrap();
+            store.revoke_api_key(&created.id).await.unwrap();
+
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn trigger_rejects_unknown_key_when_store_present() {
+            let (app, _store, _rx) = make_app_with_store(None, None).await;
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), "gk_unknown"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn trigger_password_fallback_still_authorizes_with_store_present() {
+            let (app, _store, mut rx) = make_app_with_store(None, Some("legacy-secret")).await;
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), "legacy-secret"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(rx.try_recv().is_ok());
         }
 
         // -- queue capacity tests --

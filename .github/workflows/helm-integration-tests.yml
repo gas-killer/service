@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 60
     env:
       CI_INGRESS_PASSWORD: ci-test-password
+      CI_ADMIN_KEY: ci-admin-key
 
     steps:
       - name: Checkout repository
@@ -153,6 +154,7 @@ jobs:
             --set secrets.fundedKey="$FUNDED_KEY" \
             --set secrets.l2ForkUrl="$L2_FORK_URL" \
             --set secrets.ingressPassword="$CI_INGRESS_PASSWORD" \
+            --set secrets.adminKey="$CI_ADMIN_KEY" \
             --set node.image.repository=service \
             --set node.image.tag=node-local \
             --set node.image.pullPolicy=Never \
@@ -356,6 +358,59 @@ jobs:
           sleep 10
 
           echo "Port forwarding established"
+
+      - name: Verify API key admin flow
+        run: |
+          # Exercises the full API-key lifecycle against the deployed router and its persistent
+          # SQLite store: admin auth is enforced, a key is minted and listed (never leaking the
+          # secret), and revocation is enforced immediately on the task path. Runs before the
+          # on-chain trigger and does not disturb it — the revoked/invalid keys never enqueue a
+          # task (auth is rejected before validation).
+          set -euo pipefail
+          ROUTER_URL=http://localhost:8080
+
+          # A well-formed task body so /trigger reaches the handler's auth check rather than
+          # failing JSON extraction first; field values are irrelevant because auth is evaluated
+          # before validation.
+          TASK_BODY='{"body":{"target_address":"0x0000000000000000000000000000000000000001","call_data":[171,205,239,1],"transition_index":0,"from_address":"0x0000000000000000000000000000000000000002","value":"0","block_height":1}}'
+
+          echo "=== Admin endpoints reject requests without a credential ==="
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$ROUTER_URL/admin/keys")
+          [ "$CODE" = "401" ] || { echo "expected 401 without admin credential, got $CODE"; exit 1; }
+
+          echo "=== Mint an API key ==="
+          CREATE=$(curl -s -X POST -H "Authorization: Bearer $CI_ADMIN_KEY" \
+            -H "Content-Type: application/json" -d '{"label":"ci-e2e"}' "$ROUTER_URL/admin/keys")
+          echo "create response: $CREATE"
+          KEY=$(echo "$CREATE" | jq -r '.key')
+          ID=$(echo "$CREATE" | jq -r '.id')
+          case "$KEY" in gk_*) ;; *) echo "minted key missing gk_ prefix: $KEY"; exit 1;; esac
+
+          echo "=== Listing shows the key id but never the secret ==="
+          LIST=$(curl -s -H "Authorization: Bearer $CI_ADMIN_KEY" "$ROUTER_URL/admin/keys")
+          echo "list response: $LIST"
+          echo "$LIST" | jq -e --arg id "$ID" 'any(.[]; .id == $id)' >/dev/null \
+            || { echo "created key not listed"; exit 1; }
+          if echo "$LIST" | jq -e 'any(.[]; has("key"))' >/dev/null; then
+            echo "listing leaked the key value"; exit 1
+          fi
+
+          echo "=== The minted key passes the /trigger auth gate ==="
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $KEY" \
+            -H "Content-Type: application/json" -d "$TASK_BODY" "$ROUTER_URL/trigger")
+          [ "$CODE" != "401" ] || { echo "a valid key was rejected on /trigger"; exit 1; }
+
+          echo "=== Revoke the key ==="
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer $CI_ADMIN_KEY" "$ROUTER_URL/admin/keys/$ID")
+          [ "$CODE" = "204" ] || { echo "expected 204 on revoke, got $CODE"; exit 1; }
+
+          echo "=== The revoked key is rejected on /trigger ==="
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $KEY" \
+            -H "Content-Type: application/json" -d "$TASK_BODY" "$ROUTER_URL/trigger")
+          [ "$CODE" = "401" ] || { echo "revoked key still accepted on /trigger (got $CODE)"; exit 1; }
+
+          echo "API key admin flow verified"
 
       - name: Verify shared data was created
         run: |

@@ -28,4 +28,4 @@ pub use gas_killer_common::GasKillerTaskData;
 pub use gas_killer_common::GasKillerValidator;
 pub use ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody, ValidationError};
 pub use orchestrator::GasKillerOrchestrator;
-pub use store::SqliteStore;
+pub use store::{ApiKeyMetadata, CreatedApiKey, SqliteStore};

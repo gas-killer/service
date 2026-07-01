@@ -79,9 +79,10 @@ pub async fn create_listening_creator_with_server(
     .with_metrics(Arc::clone(&metrics));
     let providers = build_ingress_providers()?;
     let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
-    if ingress_password.is_none() {
+    let admin_key = env::var("ADMIN_KEY").ok().filter(|k| !k.is_empty());
+    if admin_key.is_none() {
         tracing::warn!(
-            "INGRESS_PASSWORD is not set — /trigger endpoint is unauthenticated; set INGRESS_PASSWORD in production"
+            "ADMIN_KEY is not set — /admin/keys endpoints are disabled; set ADMIN_KEY to manage API keys"
         );
     }
     let operator_sets = {
@@ -152,7 +153,8 @@ pub async fn create_listening_creator_with_server(
         ingress_password,
         avs_metadata,
     )
-    .with_store(store);
+    .with_store(store)
+    .with_admin_key(admin_key);
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });

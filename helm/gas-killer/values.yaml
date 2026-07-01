@@ -112,11 +112,16 @@ secrets:
   # Example: --set secrets.l2HttpRpc=https://rpc.gnosischain.com
   l2HttpRpc: ""
 
-  # Static Bearer token password for ingress authentication.
-  # Requests to /trigger must include: Authorization: Bearer <password>
-  # Leave empty to disable authentication (default).
+  # Legacy shared Bearer token for /trigger, retained during the API-key migration.
+  # Requests may authenticate with: Authorization: Bearer <password>
+  # Leave empty to rely solely on API keys (see adminKey).
   # Override with: --set secrets.ingressPassword=<your-password>
   ingressPassword: ""
+
+  # Shared secret guarding the /admin/keys endpoints, used to mint and revoke API keys via
+  # Authorization: Bearer <adminKey>. Leave empty to disable the admin API.
+  # Override with: --set secrets.adminKey=<your-admin-key>
+  adminKey: ""
 
 # L1 (Anvil) configuration - only used in LOCAL mode
 l1:

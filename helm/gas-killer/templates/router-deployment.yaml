@@ -300,6 +300,14 @@ spec:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: INGRESS_PASSWORD
             {{- end }}
+            {{- if or .Values.secrets.adminKey .Values.secrets.existingSecret }}
+            - name: ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: ADMIN_KEY
+                  optional: true
+            {{- end }}
             - name: AVS_METADATA_NAME
               value: {{ .Values.router.avsMetadata.name | quote }}
             - name: AVS_METADATA_WEBSITE
