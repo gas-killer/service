@@ -34,6 +34,8 @@ pub struct MetricsCollector {
     pub round_latency_seconds: Histogram,
     /// Current number of tasks sitting in the ingress queue waiting to be processed.
     pub task_queue_depth: Gauge<i64, AtomicI64>,
+    /// Whether the SQLite store answered its most recent health check (1 = up, 0 = down).
+    pub db_up: Gauge<i64, AtomicI64>,
     /// Time to detect which chain a target contract is deployed on (seconds).
     pub executor_chain_detection_seconds: Histogram,
     /// Time for the payload-hash preflight computation (seconds).
@@ -142,6 +144,13 @@ impl MetricsCollector {
             task_queue_depth.clone(),
         );
 
+        let db_up = Gauge::default();
+        registry.register(
+            "gas_killer_db_up",
+            "Whether the SQLite store answered its most recent health check (1 = up, 0 = down)",
+            db_up.clone(),
+        );
+
         // Single same-RPC round-trips (~5-150ms); fine low-end buckets so p50/p95 resolve.
         let rpc_buckets = [
             0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5,
@@ -201,6 +210,7 @@ impl MetricsCollector {
             p2p_round_trip_seconds,
             round_latency_seconds,
             task_queue_depth,
+            db_up,
             executor_chain_detection_seconds,
             executor_hash_preflight_seconds,
             executor_supports_interface_seconds,
@@ -237,5 +247,18 @@ mod tests {
         ));
         assert!(output.contains("gas_killer_round_latency_seconds_count 1"));
         assert!(output.contains("gas_killer_round_latency_seconds_sum 12.5"));
+    }
+
+    #[test]
+    fn test_db_up_gauge_registered_and_reports_status() {
+        let metrics = MetricsCollector::new();
+        metrics.db_up.set(1);
+
+        let output = metrics.encode();
+        assert!(output.contains("Whether the SQLite store answered its most recent health check"));
+        assert!(output.contains("gas_killer_db_up 1"));
+
+        metrics.db_up.set(0);
+        assert!(metrics.encode().contains("gas_killer_db_up 0"));
     }
 }

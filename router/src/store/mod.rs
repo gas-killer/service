@@ -118,6 +118,17 @@ impl SqliteStore {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+
+    /// Runs a trivial liveness query against the store, returning an error if the pool
+    /// cannot serve it — e.g. the backing volume was detached, filled, or went read-only.
+    /// Drives the `gas_killer_db_up` metric.
+    pub async fn health_check(&self) -> anyhow::Result<()> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .context("sqlite health check")?;
+        Ok(())
+    }
 }
 
 /// Resolves the database path from the `DATA_DIR` environment variable.
@@ -192,6 +203,17 @@ mod tests {
             .await
             .expect("reopened store should serve queries");
         assert_eq!(one, 1);
+    }
+
+    #[tokio::test]
+    async fn health_check_succeeds_on_open_store() {
+        let store = SqliteStore::connect_in_memory()
+            .await
+            .expect("in-memory store should open");
+        store
+            .health_check()
+            .await
+            .expect("health check should pass against an open store");
     }
 
     #[test]
