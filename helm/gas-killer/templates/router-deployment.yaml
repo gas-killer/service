@@ -7,6 +7,14 @@ metadata:
     app.kubernetes.io/component: router
 spec:
   replicas: 1
+  {{- if .Values.router.persistence.enabled }}
+  # The data volume is ReadWriteOnce. A RollingUpdate surges a new pod before the old one
+  # terminates; if it schedules on a different node it hits a Multi-Attach error and the
+  # rollout wedges. Recreate tears down the old pod (releasing the volume) before starting
+  # the replacement — brief upgrade downtime, but correct for an RWO-backed singleton.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "gas-killer.selectorLabels" . | nindent 6 }}
