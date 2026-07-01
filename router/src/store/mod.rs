@@ -120,10 +120,16 @@ impl SqliteStore {
     }
 }
 
-/// Resolves the database path from `DATA_DIR` (default [`DEFAULT_DATA_DIR`]) as
-/// `<DATA_DIR>/router.db`.
+/// Resolves the database path from the `DATA_DIR` environment variable.
 fn resolve_db_path() -> PathBuf {
-    let dir = std::env::var("DATA_DIR").unwrap_or_else(|_| DEFAULT_DATA_DIR.to_string());
+    db_path_from_dir(std::env::var("DATA_DIR").ok())
+}
+
+/// Builds the database path from an optional data directory, applying [`DEFAULT_DATA_DIR`]
+/// when unset, as `<dir>/router.db`. Split from [`resolve_db_path`] so both the default and
+/// override branches are testable without mutating process-wide environment state.
+fn db_path_from_dir(dir: Option<String>) -> PathBuf {
+    let dir = dir.unwrap_or_else(|| DEFAULT_DATA_DIR.to_string());
     Path::new(&dir).join(DATABASE_FILENAME)
 }
 
@@ -189,9 +195,15 @@ mod tests {
     }
 
     #[test]
-    fn db_path_defaults_to_data_dir() {
-        // Exercised without mutating process env: the default branch is what ships in prod.
-        let path = Path::new(DEFAULT_DATA_DIR).join(DATABASE_FILENAME);
-        assert_eq!(path, Path::new("/data/router.db"));
+    fn db_path_defaults_to_data_dir_when_unset() {
+        assert_eq!(db_path_from_dir(None), Path::new("/data/router.db"));
+    }
+
+    #[test]
+    fn db_path_honors_data_dir_override() {
+        assert_eq!(
+            db_path_from_dir(Some("/app/data".to_string())),
+            Path::new("/app/data/router.db")
+        );
     }
 }
