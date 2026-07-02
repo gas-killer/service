@@ -27,7 +27,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     cargo build --release -p gas-killer-router && \
     cp /app/target/release/gas-killer-router /usr/local/bin/gas-killer-router && \
-    cp /app/target/release/generate_key /usr/local/bin/generate_key
+    cp /app/target/release/generate_key /usr/local/bin/generate_key && \
+    cp /app/target/release/create_api_key /usr/local/bin/create_api_key
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -46,6 +47,7 @@ RUN useradd -m -u 1000 -s /bin/bash appuser
 # Copy binaries from builder
 COPY --from=builder /usr/local/bin/gas-killer-router /usr/local/bin/gas-killer-router
 COPY --from=builder /usr/local/bin/generate_key /usr/local/bin/generate_key
+COPY --from=builder /usr/local/bin/create_api_key /usr/local/bin/create_api_key
 
 # Copy configuration files
 COPY config /app/config
