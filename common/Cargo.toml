@@ -26,6 +26,7 @@ commonware-avs-bindings = { workspace = true }
 # Commonware (for codec and eigenlayer)
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-runtime = { workspace = true }
 
 # Config
 dotenv = { workspace = true }
@@ -39,6 +40,3 @@ tokio = { workspace = true }
 # Logging
 tracing = { workspace = true }
 url = { workspace = true }
-
-# Metrics
-prometheus-client = { workspace = true }
