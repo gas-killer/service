@@ -91,6 +91,13 @@ Shared data PVC name
 {{- end }}
 
 {{/*
+Router persistent data PVC name
+*/}}
+{{- define "gas-killer.routerdata.fullname" -}}
+{{- printf "%s-router-data" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Config ConfigMap name
 */}}
 {{- define "gas-killer.config.fullname" -}}

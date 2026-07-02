@@ -336,6 +336,19 @@ router:
     type: ClusterIP
     port: 3000
     ingressPort: 8080
+  # Durable SQLite store for the router (API keys, task state). The store path is exposed
+  # to the binary via the DATA_DIR env var. When enabled, a PersistentVolumeClaim keeps the
+  # data across pod restarts; when disabled, an emptyDir is used and data is lost on restart
+  # (acceptable for ephemeral or dev clusters).
+  persistence:
+    enabled: true
+    mountPath: /data
+    storageClass: ""
+    size: 1Gi
+    accessMode: ReadWriteOnce
+    # Applied as the pod's securityContext.fsGroup so the non-root container user can write
+    # to the mounted volume. The router image runs as 'appuser' (uid/gid 1000).
+    fsGroup: 1000
   resources:
     requests:
       memory: "512Mi"

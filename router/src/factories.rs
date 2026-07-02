@@ -8,6 +8,7 @@ use crate::ingress::{
     start_gas_killer_http_server,
 };
 use crate::metrics::MetricsCollector;
+use crate::store::SqliteStore;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_provider::{
     Identity, Provider, ProviderBuilder, RootProvider,
@@ -25,8 +26,13 @@ use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
 use commonware_runtime::Metrics;
 use gas_killer_common::{ChainRole, GasKillerValidator};
 use std::collections::HashMap;
+use std::time::Duration;
 use std::{env, str::FromStr, sync::Arc};
 use tracing::info;
+
+/// How often the background loop re-checks SQLite store liveness for the `gas_killer_db_up`
+/// metric. Aligned with a typical Prometheus scrape interval so the gauge stays fresh.
+const DB_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Wallet provider that uses SimpleNonceManager to always fetch the pending nonce from the
 /// chain rather than caching it locally. This prevents nonce corruption when a transaction
@@ -117,6 +123,26 @@ pub async fn create_listening_creator_with_server(
             .filter(|s| !s.is_empty()),
         operator_sets,
     };
+    // Open the durable store and apply migrations before serving traffic. A failure here
+    // aborts router startup rather than running against an unmigrated or unwritable store.
+    let store = SqliteStore::connect().await?;
+
+    // Publish store liveness as `gas_killer_db_up`. connect() already proved the store
+    // answers, so seed the gauge to 1; a background loop then re-checks so a later volume
+    // loss (detached PVC, full or read-only disk) surfaces as db_up=0 on the dashboard.
+    metrics.db_up.set(1);
+    {
+        let store = store.clone();
+        let metrics = Arc::clone(&metrics);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(DB_HEALTH_CHECK_INTERVAL);
+            loop {
+                ticker.tick().await;
+                metrics.db_up.set(store.health_check().await.is_ok() as i64);
+            }
+        });
+    }
+
     let ingress_state = IngressState::new(
         sender,
         queue_depth,
@@ -125,7 +151,8 @@ pub async fn create_listening_creator_with_server(
         providers,
         ingress_password,
         avs_metadata,
-    );
+    )
+    .with_store(store);
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });
