@@ -39,16 +39,15 @@ bytes = { workspace = true }
 
 # CLI / Config
 clap = { workspace = true }
-# Upstream AVS crates
-commonware-avs-core = { workspace = true }
-commonware-avs-router = { workspace = true }
-commonware-avs-eigenlayer = { workspace = true }
 
 # Commonware ecosystem
+commonware-actor = { workspace = true }
 commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
+commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 dotenv = { workspace = true }
