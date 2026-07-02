@@ -664,3 +664,12 @@ ingress:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
   # Secret name for TLS certificate. Leave empty to disable TLS.
   tlsSecretName: gaskiller-tls
+  # Explicit allowlist of URL path prefixes exposed through the public Ingress. Anything not
+  # listed — notably the /admin/* key-management endpoints — is NOT routed publicly and is
+  # reachable only in-cluster (ClusterIP Service, `kubectl port-forward`, or `kubectl exec`).
+  # This keeps admin behind cluster access in addition to ADMIN_KEY. Add a path here only if it
+  # genuinely needs to be internet-facing.
+  publicPaths:
+    - /trigger
+    - /avs-metadata
+    - /healthz

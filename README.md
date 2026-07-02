@@ -149,8 +149,9 @@ curl -X POST http://localhost:8080/trigger \
 
 Note: `call_data` is a JSON array of bytes (not a hex string), `value` is a U256 hex string, and `block_height` must be non-zero.
 
-When the router has a persistent store (the default), `/trigger` requires a valid API key. With
-`ADMIN_KEY` set, mint one via the admin API — the raw key is returned exactly once:
+When the router has a persistent store (the default), `/trigger` requires a valid API key, minted
+through the admin API (`POST /admin/keys`) using `ADMIN_KEY`. The raw key is returned exactly
+once. Locally (docker-compose) the admin API is on `localhost:8080`:
 ```bash
 curl -X POST http://localhost:8080/admin/keys \
   -H "Authorization: Bearer <ADMIN_KEY>" \
@@ -159,24 +160,33 @@ curl -X POST http://localhost:8080/admin/keys \
 # → {"id":"...","key":"gk_...","label":"my-client","created_at":...,"invalid_at":1893456000}
 ```
 
-Or use the `create_api_key` tool, which wraps the admin API: it targets a deployed environment
-by name (`--env prod` → `https://api.gaskiller.xyz`, `--env testnet`/`dev` →
-`https://testnet.gaskiller.xyz`) or an explicit `--url`, authenticating with the `ADMIN_KEY`
-environment variable. `--expires-at` accepts `never`, a relative duration, or an explicit unix
-timestamp:
+On a Kubernetes deployment the `/admin/*` endpoints are **not** exposed through the public Ingress
+(only `/trigger`, `/avs-metadata`, `/healthz` are — see `ingress.publicPaths` in the chart).
+Reach them in-cluster — e.g. `kubectl exec` into the router pod, where `ADMIN_KEY` is already in
+the environment:
 ```bash
-ADMIN_KEY=... create_api_key --env prod --label my-client --expires-at "7 days"
+POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}')
+kubectl exec "$POD" -- sh -c 'curl -s -X POST \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d "{\"label\":\"my-client\"}" http://localhost:8080/admin/keys'
 ```
-
-Then include the minted key as the Bearer token on requests, and revoke it when no longer needed:
+Or `kubectl port-forward svc/<release>-router 8080:8080` and use the `create_api_key` tool
+(`ADMIN_KEY` read from the Secret), which wraps the admin API and parses `--expires-at` (`never`,
+a relative duration like `7 days`, or a unix timestamp):
 ```bash
-curl -X POST http://localhost:8080/trigger \
+ADMIN_KEY=$(kubectl get secret <release>-secret -o jsonpath='{.data.ADMIN_KEY}' | base64 -d) \
+  create_api_key --url http://localhost:8080 --label my-client --expires-at "7 days"
+```
+The tool's `--env prod`/`--env testnet` shortcuts target the public hostnames, so they work only
+if you have deliberately added `/admin` to `ingress.publicPaths`.
+
+Then include the minted key as the Bearer token on task requests (revoke via the same in-cluster
+admin path when no longer needed):
+```bash
+curl -X POST https://<host>/trigger \
   -H "Authorization: Bearer gk_..." \
   -H "Content-Type: application/json" \
   -d '...'
-
-curl -X DELETE http://localhost:8080/admin/keys/<id> \
-  -H "Authorization: Bearer <ADMIN_KEY>"
 ```
 
 Use the `send_request` script for a complete end-to-end trigger against an ArraySummation contract.

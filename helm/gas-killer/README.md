@@ -191,6 +191,15 @@ Override any of these with `--set ingress.tlsSecretName=...`,
 cert-manager will automatically provision the TLS certificates. The nginx-ingress
 controller handles HTTP → HTTPS redirects automatically.
 
+### Public paths (admin API is not exposed)
+
+The router Ingress routes an explicit allowlist of paths, `ingress.publicPaths` (default
+`/trigger`, `/avs-metadata`, `/healthz`). Any path not listed — in particular the `/admin/*`
+key-management endpoints — is **not** routed publicly and is reachable only in-cluster: via the
+ClusterIP Service, `kubectl port-forward svc/<release>-router 8080:8080`, or
+`kubectl exec` into the router pod. This keeps admin behind cluster access **in addition** to
+`ADMIN_KEY`. Add a path to `ingress.publicPaths` only if it genuinely must be internet-facing.
+
 ## Monitoring (Prometheus + Grafana)
 
 Metrics are exposed at `/metrics` on port 8081 of the router and node pods. The monitoring stack
