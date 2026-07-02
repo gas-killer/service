@@ -24,3 +24,9 @@ terraform.tfstate
 terraform.tfstate.*
 *.tfstate
 *.tfstate.*
+
+# Router SQLite store — created at runtime under DATA_DIR; never committed.
+# Matches the database file and its WAL/SHM sidecars in any directory.
+router.db
+router.db-*
+/data/

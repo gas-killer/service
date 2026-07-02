@@ -99,7 +99,7 @@ See `values.yaml` for all available configuration options.
 | `secrets.forkUrl` | Anvil fork URL (required for LOCAL mode) | `""` |
 | `secrets.privateKey` | Deployer private key | `""` |
 | `secrets.fundedKey` | Funded account private key | `""` |
-| `secrets.ingressPassword` | Bearer token password for `/trigger` auth. **Required** when `global.environment=TESTNET` and `router.ingress.enabled=true`. Requests must include `Authorization: Bearer <value>`. | `""` |
+| `secrets.adminKey` | Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke per-client API keys via `Authorization: Bearer <value>`. Clients then authenticate `/trigger` with their minted key. **Required** when `global.environment=TESTNET` and `router.ingress.enabled=true`. | `""` |
 
 ## Architecture
 
@@ -190,6 +190,15 @@ Override any of these with `--set ingress.tlsSecretName=...`,
 
 cert-manager will automatically provision the TLS certificates. The nginx-ingress
 controller handles HTTP → HTTPS redirects automatically.
+
+### Public paths (admin API is not exposed)
+
+The router Ingress routes an explicit allowlist of paths, `ingress.publicPaths` (default
+`/trigger`, `/avs-metadata`, `/healthz`). Any path not listed — in particular the `/admin/*`
+key-management endpoints — is **not** routed publicly and is reachable only in-cluster: via the
+ClusterIP Service, `kubectl port-forward svc/<release>-router 8080:8080`, or
+`kubectl exec` into the router pod. This keeps admin behind cluster access **in addition** to
+`ADMIN_KEY`. Add a path to `ingress.publicPaths` only if it genuinely must be internet-facing.
 
 ## Monitoring (Prometheus + Grafana)
 

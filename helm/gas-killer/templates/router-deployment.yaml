@@ -7,6 +7,14 @@ metadata:
     app.kubernetes.io/component: router
 spec:
   replicas: 1
+  {{- if .Values.router.persistence.enabled }}
+  # The data volume is ReadWriteOnce. A RollingUpdate surges a new pod before the old one
+  # terminates; if it schedules on a different node it hits a Multi-Attach error and the
+  # rollout wedges. Recreate tears down the old pod (releasing the volume) before starting
+  # the replacement — brief upgrade downtime, but correct for an RWO-backed singleton.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "gas-killer.selectorLabels" . | nindent 6 }}
@@ -18,6 +26,11 @@ spec:
         app.kubernetes.io/component: router
     spec:
       terminationGracePeriodSeconds: {{ .Values.router.terminationGracePeriodSeconds }}
+      # fsGroup makes the mounted data volume writable by the non-root container user so the
+      # router can create its SQLite database under DATA_DIR. Applies whether the volume is
+      # PVC-backed or an emptyDir.
+      securityContext:
+        fsGroup: {{ .Values.router.persistence.fsGroup }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -276,14 +289,17 @@ spec:
               value: "{{ .Values.router.ingressBindHost }}:{{ .Values.router.ingressPort }}"
             - name: RUST_BACKTRACE
               value: "1"
+            - name: DATA_DIR
+              value: {{ .Values.router.persistence.mountPath | quote }}
             - name: INGRESS_TIMEOUT_MS
               value: {{ .Values.router.ingress.timeoutMs | quote }}
-            {{- if or (and (eq .Values.global.environment "TESTNET") .Values.router.ingress.enabled) .Values.secrets.ingressPassword }}
-            - name: INGRESS_PASSWORD
+            {{- if or (and (eq .Values.global.environment "TESTNET") .Values.router.ingress.enabled) .Values.secrets.adminKey .Values.secrets.existingSecret }}
+            - name: ADMIN_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: INGRESS_PASSWORD
+                  key: ADMIN_KEY
+                  optional: true
             {{- end }}
             - name: AVS_METADATA_NAME
               value: {{ .Values.router.avsMetadata.name | quote }}
@@ -364,6 +380,8 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+            - name: router-data
+              mountPath: {{ .Values.router.persistence.mountPath }}
             {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
             - name: router-secrets
               mountPath: /app/secrets
@@ -382,6 +400,13 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" . }}
+        - name: router-data
+          {{- if .Values.router.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "gas-killer.routerdata.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
         {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
         - name: router-secrets
           emptyDir: {}

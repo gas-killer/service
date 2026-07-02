@@ -5,7 +5,7 @@
 #
 # Requires:
 #   HTTP_RPC          — HTTP RPC endpoint
-#   INGRESS_PASSWORD  — Bearer token for /trigger (if enabled on the server)
+#   GAS_KILLER_API_KEY  — API key sent as `Authorization: Bearer <key>` on /trigger (if the server requires auth)
 #
 # Structure:
 #   1. smoke   — single serial request with on-chain verification; confirms the
@@ -16,6 +16,7 @@
 
 router_url           = "https://testnet.gaskiller.xyz"
 http_rpc             = "$HTTP_RPC"
+api_key              = "$GAS_KILLER_API_KEY"   # /trigger auth: set $GAS_KILLER_API_KEY in env, or paste a literal gk_ key
 ingress_timeout_secs = 60
 
 # ── Burst test with 10 concurrent requests ──────────────────────────────────

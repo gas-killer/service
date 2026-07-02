@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CI_INGRESS_PASSWORD: ci-test-password
+      CI_ADMIN_KEY: ci-admin-key
 
     steps:
       - name: Checkout repository
@@ -152,7 +152,7 @@ jobs:
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \
             --set secrets.l2ForkUrl="$L2_FORK_URL" \
-            --set secrets.ingressPassword="$CI_INGRESS_PASSWORD" \
+            --set secrets.adminKey="$CI_ADMIN_KEY" \
             --set node.image.repository=service \
             --set node.image.tag=node-local \
             --set node.image.pullPolicy=Never \
@@ -316,6 +316,20 @@ jobs:
 
           echo "All pods are ready!"
 
+      - name: Verify router persistence
+        run: |
+          # The router opens its SQLite store under DATA_DIR (/data) at startup and aborts if
+          # the volume is missing or not writable by the non-root user. Assert the database
+          # file exists so a persistence regression surfaces here instead of as a generic
+          # readiness timeout or a downstream task failure.
+          ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}')
+          echo "Router pod: $ROUTER_POD"
+          echo "=== Contents of /data ==="
+          kubectl exec "$ROUTER_POD" -- ls -l /data
+          echo "=== Asserting /data/router.db exists ==="
+          kubectl exec "$ROUTER_POD" -- test -f /data/router.db
+          echo "router.db is present and the persistent volume is writable"
+
       - name: Setup port forwarding for testing
         run: |
           # Find actual service names (they include the chart name)
@@ -342,6 +356,68 @@ jobs:
           sleep 10
 
           echo "Port forwarding established"
+
+      - name: Verify API key admin flow
+        run: |
+          # Exercises the full API-key lifecycle against the deployed router and its persistent
+          # SQLite store: admin auth is enforced, a key is minted and listed (never leaking the
+          # secret), and revocation is enforced immediately on the task path. Runs before the
+          # on-chain trigger and does not disturb it — the revoked/invalid keys never enqueue a
+          # task (auth is rejected before validation).
+          set -euo pipefail
+          ROUTER_URL=http://localhost:8080
+
+          # A well-formed task body so /trigger reaches the handler's auth check rather than
+          # failing JSON extraction first; field values are irrelevant because auth is evaluated
+          # before validation.
+          TASK_BODY='{"body":{"target_address":"0x0000000000000000000000000000000000000001","call_data":[171,205,239,1],"transition_index":0,"from_address":"0x0000000000000000000000000000000000000002","value":"0","block_height":1}}'
+
+          echo "=== Admin endpoints reject requests without a credential ==="
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$ROUTER_URL/admin/keys")
+          [ "$CODE" = "401" ] || { echo "expected 401 without admin credential, got $CODE"; exit 1; }
+
+          echo "=== Mint an API key ==="
+          CREATE=$(curl -s -X POST -H "Authorization: Bearer $CI_ADMIN_KEY" \
+            -H "Content-Type: application/json" -d '{"label":"ci-e2e"}' "$ROUTER_URL/admin/keys")
+          echo "create response: $CREATE"
+          KEY=$(echo "$CREATE" | jq -r '.key')
+          ID=$(echo "$CREATE" | jq -r '.id')
+          case "$KEY" in gk_*) ;; *) echo "minted key missing gk_ prefix: $KEY"; exit 1;; esac
+
+          echo "=== Listing shows the key id but never the secret ==="
+          LIST=$(curl -s -H "Authorization: Bearer $CI_ADMIN_KEY" "$ROUTER_URL/admin/keys")
+          echo "list response: $LIST"
+          echo "$LIST" | jq -e --arg id "$ID" 'any(.[]; .id == $id)' >/dev/null \
+            || { echo "created key not listed"; exit 1; }
+          if echo "$LIST" | jq -e 'any(.[]; has("key"))' >/dev/null; then
+            echo "listing leaked the key value"; exit 1
+          fi
+
+          echo "=== The minted key passes the /trigger auth gate ==="
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $KEY" \
+            -H "Content-Type: application/json" -d "$TASK_BODY" "$ROUTER_URL/trigger")
+          [ "$CODE" != "401" ] || { echo "a valid key was rejected on /trigger"; exit 1; }
+
+          echo "=== Revoke the key ==="
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer $CI_ADMIN_KEY" "$ROUTER_URL/admin/keys/$ID")
+          [ "$CODE" = "204" ] || { echo "expected 204 on revoke, got $CODE"; exit 1; }
+
+          echo "=== The revoked key is rejected on /trigger ==="
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $KEY" \
+            -H "Content-Type: application/json" -d "$TASK_BODY" "$ROUTER_URL/trigger")
+          [ "$CODE" = "401" ] || { echo "revoked key still accepted on /trigger (got $CODE)"; exit 1; }
+
+          echo "API key admin flow verified"
+
+          # Mint a working key for the remaining e2e steps, which authenticate /trigger with it.
+          # The value is written to GITHUB_ENV (not echoed) so later steps pick it up.
+          WORKING=$(curl -s -X POST -H "Authorization: Bearer $CI_ADMIN_KEY" \
+            -H "Content-Type: application/json" -d '{"label":"ci-e2e-runner"}' "$ROUTER_URL/admin/keys")
+          WORKING_KEY=$(echo "$WORKING" | jq -r '.key')
+          case "$WORKING_KEY" in gk_*) ;; *) echo "failed to mint working key"; exit 1;; esac
+          echo "GAS_KILLER_API_KEY=$WORKING_KEY" >> "$GITHUB_ENV"
+          echo "provisioned working API key for downstream steps"
 
       - name: Verify shared data was created
         run: |
@@ -402,7 +478,8 @@ jobs:
           export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
           export GAS_KILLER_TRIGGER_URL=http://localhost:8080/trigger
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-          export INGRESS_PASSWORD="$CI_INGRESS_PASSWORD"
+          # send_request authenticates /trigger with GAS_KILLER_API_KEY, minted in the admin-flow
+          # step and exported via GITHUB_ENV.
 
           # Get ArraySummation address from deployment file
           ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.arraySummation' "$AVS_DEPLOYMENT_PATH")
@@ -513,7 +590,7 @@ jobs:
           PAYLOAD="{\"body\":{\"target_address\":\"$YIELD_DISTRIBUTOR\",\"call_data\":$BYTES_ARRAY,\"transition_index\":$INITIAL_COUNT,\"from_address\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\",\"value\":\"0\",\"block_height\":$BLOCK}}"
           echo "Payload: $PAYLOAD"
 
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $CI_INGRESS_PASSWORD" -d "$PAYLOAD" "$ROUTER_URL/trigger")
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $GAS_KILLER_API_KEY" -d "$PAYLOAD" "$ROUTER_URL/trigger")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | head -1)
           echo "Router response ($HTTP_CODE): $BODY"

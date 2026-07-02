@@ -112,11 +112,11 @@ secrets:
   # Example: --set secrets.l2HttpRpc=https://rpc.gnosischain.com
   l2HttpRpc: ""
 
-  # Static Bearer token password for ingress authentication.
-  # Requests to /trigger must include: Authorization: Bearer <password>
-  # Leave empty to disable authentication (default).
-  # Override with: --set secrets.ingressPassword=<your-password>
-  ingressPassword: ""
+  # Shared secret guarding the /admin/keys endpoints, used to mint and revoke per-client API
+  # keys via Authorization: Bearer <adminKey>. Clients then authenticate /trigger with their
+  # minted key. Required for TESTNET deployments with ingress enabled.
+  # Override with: --set secrets.adminKey=<your-admin-key>
+  adminKey: ""
 
 # L1 (Anvil) configuration - only used in LOCAL mode
 l1:
@@ -336,6 +336,19 @@ router:
     type: ClusterIP
     port: 3000
     ingressPort: 8080
+  # Durable SQLite store for the router (API keys, task state). The store path is exposed
+  # to the binary via the DATA_DIR env var. When enabled, a PersistentVolumeClaim keeps the
+  # data across pod restarts; when disabled, an emptyDir is used and data is lost on restart
+  # (acceptable for ephemeral or dev clusters).
+  persistence:
+    enabled: true
+    mountPath: /data
+    storageClass: ""
+    size: 1Gi
+    accessMode: ReadWriteOnce
+    # Applied as the pod's securityContext.fsGroup so the non-root container user can write
+    # to the mounted volume. The router image runs as 'appuser' (uid/gid 1000).
+    fsGroup: 1000
   resources:
     requests:
       memory: "512Mi"
@@ -651,3 +664,12 @@ ingress:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
   # Secret name for TLS certificate. Leave empty to disable TLS.
   tlsSecretName: gaskiller-tls
+  # Explicit allowlist of URL path prefixes exposed through the public Ingress. Anything not
+  # listed — notably the /admin/* key-management endpoints — is NOT routed publicly and is
+  # reachable only in-cluster (ClusterIP Service, `kubectl port-forward`, or `kubectl exec`).
+  # This keeps admin behind cluster access in addition to ADMIN_KEY. Add a path here only if it
+  # genuinely needs to be internet-facing.
+  publicPaths:
+    - /trigger
+    - /avs-metadata
+    - /healthz

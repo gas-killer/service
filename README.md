@@ -112,7 +112,7 @@ Optional environment variables:
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
 - `INGRESS_TIMEOUT_MS`: Timeout for waiting on ingress tasks in milliseconds (default: 0, no timeout)
-- `INGRESS_PASSWORD`: Static Bearer token password for ingress authentication. Omit or leave empty to disable auth.
+- `ADMIN_KEY`: Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke the per-client API keys that authenticate `/trigger`. Omit or leave empty to disable the admin API.
 - `QUORUM_NUMBER`: Quorum number to use (default: 0)
 
 Contributor key files are generated automatically by the Docker setup and do not need to be set manually.
@@ -149,17 +149,50 @@ curl -X POST http://localhost:8080/trigger \
 
 Note: `call_data` is a JSON array of bytes (not a hex string), `value` is a U256 hex string, and `block_height` must be non-zero.
 
-If `INGRESS_PASSWORD` is set, include the Bearer token:
+When the router has a persistent store (the default), `/trigger` requires a valid API key, minted
+through the admin API (`POST /admin/keys`) using `ADMIN_KEY`. The raw key is returned exactly
+once. Locally (docker-compose) the admin API is on `localhost:8080`:
 ```bash
-curl -X POST http://localhost:8080/trigger \
-  -H "Authorization: Bearer <your-password>" \
+curl -X POST http://localhost:8080/admin/keys \
+  -H "Authorization: Bearer <ADMIN_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "my-client", "invalid_at": 1893456000}'   # invalid_at optional; unix ts, future
+# → {"id":"...","key":"gk_...","label":"my-client","created_at":...,"invalid_at":1893456000}
+```
+
+On a Kubernetes deployment the `/admin/*` endpoints are **not** exposed through the public Ingress
+(only `/trigger`, `/avs-metadata`, `/healthz` are — see `ingress.publicPaths` in the chart).
+Reach them in-cluster. The `create_api_key` tool ships in the router image, defaults to the
+in-cluster `http://localhost:8080`, and reads `ADMIN_KEY` from the pod env — so `kubectl exec`
+needs no target flag:
+```bash
+POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}')
+kubectl exec "$POD" -- create_api_key --label my-client --expires-at "7 days"
+# fallback if the binary predates the image: curl localhost:8080/admin/keys with $ADMIN_KEY
+```
+Or `kubectl port-forward svc/<release>-router 8080:8080` and run the tool locally, reading
+`ADMIN_KEY` from the Secret (it still defaults to `http://localhost:8080`):
+```bash
+ADMIN_KEY=$(kubectl get secret <release>-secret -o jsonpath='{.data.ADMIN_KEY}' | base64 -d) \
+  create_api_key --label my-client --expires-at "7 days"
+```
+`--expires-at` accepts `never`, a relative duration like `7 days`, or a unix timestamp. The tool's
+`--env prod`/`--env testnet` shortcuts target the public hostnames, so they work only if you have
+deliberately added `/admin` to `ingress.publicPaths` — otherwise they 404 at the edge.
+
+Then include the minted key as the Bearer token on task requests (revoke via the same in-cluster
+admin path when no longer needed):
+```bash
+curl -X POST https://<host>/trigger \
+  -H "Authorization: Bearer gk_..." \
   -H "Content-Type: application/json" \
   -d '...'
 ```
 
-Use the `send_request` script for a complete end-to-end trigger against an ArraySummation contract:
+Use the `send_request` script for a complete end-to-end trigger against an ArraySummation contract.
+Set `GAS_KILLER_API_KEY` to a minted key when the router requires auth:
 ```bash
-cargo run -p scripts --bin send_request
+GAS_KILLER_API_KEY=gk_... cargo run -p scripts --bin send_request
 ```
 
 ## Development

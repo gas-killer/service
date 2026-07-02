@@ -5,6 +5,7 @@
 
 router_url = "https://testnet.gaskiller.xyz"
 http_rpc   = "$HTTP_RPC"
+api_key    = "$GAS_KILLER_API_KEY"   # /trigger auth: set $GAS_KILLER_API_KEY in env, or paste a literal gk_ key
 
 # ── Serial smoke test with on-chain verification ─────────────────
 [[scenarios]]

@@ -5,6 +5,10 @@
 
 router_url           = "http://localhost:8080"
 http_rpc             = "$HTTP_RPC"  # env var interpolation supported; required when block_height = 0, verify = true, or transition_index = "auto"
+# API key sent as `Authorization: Bearer <key>` on every /trigger request. Mint one with the
+# create_api_key tool. Reads the GAS_KILLER_API_KEY env var (like http_rpc above); replace with a
+# literal "gk_..." key to override, or "" to leave requests unauthenticated.
+api_key              = "$GAS_KILLER_API_KEY"
 # ingress_timeout_secs = 30         # HTTP client timeout for all requests in this scenario file (default: 30, 0 = no timeout)
 
 # ── Scenario 1: serial smoke test with on-chain verification ─────────────────
