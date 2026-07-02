@@ -72,6 +72,12 @@ pub struct IngressState {
     /// Durable SQLite store shared with the orchestrator. `None` when persistence is not
     /// configured (e.g. in tests); the admin API and API-key auth require it.
     pub store: Option<SqliteStore>,
+    /// Escape hatch that permits unauthenticated task submission when no store is configured.
+    /// Task auth is otherwise fail-closed: with no store, `/trigger` rejects every request. Only
+    /// the test/dev constructor [`IngressState::without_metrics`] sets this, so the production
+    /// path ([`IngressState::new`], which always attaches a store) can never accidentally serve
+    /// an open endpoint.
+    pub allow_unauthenticated: bool,
 }
 
 impl IngressState {
@@ -92,9 +98,15 @@ impl IngressState {
             admin_key: None,
             avs_metadata,
             store: None,
+            allow_unauthenticated: false,
         }
     }
 
+    /// Bare constructor for tests and local development: no metrics, providers, store, or admin
+    /// key. Because it has no store, it permits unauthenticated task submission
+    /// (`allow_unauthenticated`) so store-less harnesses can exercise `/trigger`. Never use in
+    /// production — build with [`IngressState::new`] and [`IngressState::with_store`], which are
+    /// fail-closed.
     pub fn without_metrics(sender: TaskSender, queue_depth: TaskQueueDepth) -> Self {
         Self {
             sender,
@@ -105,6 +117,7 @@ impl IngressState {
             admin_key: None,
             avs_metadata: AvsMetadata::default(),
             store: None,
+            allow_unauthenticated: true,
         }
     }
 
@@ -149,11 +162,16 @@ fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
 }
 
 /// Authorizes a task-submission request. When a durable store is configured — always the case
-/// in production — a valid, unrevoked API key is required. When no store is configured
-/// (development and tests) the endpoint is open.
+/// in production — a valid, unrevoked API key is required. With no store, the request is rejected
+/// unless `allow_unauthenticated` is set (the test/dev bare constructor), so a missing store
+/// fails closed rather than silently opening the endpoint.
 async fn authorize_task_request(state: &IngressState, headers: &HeaderMap) -> Result<(), ApiError> {
     let Some(store) = &state.store else {
-        return Ok(());
+        return if state.allow_unauthenticated {
+            Ok(())
+        } else {
+            Err(ApiError::unauthorized())
+        };
     };
 
     if let Some(token) = bearer_token(headers) {
@@ -198,6 +216,15 @@ fn require_store(state: &IngressState) -> Result<&SqliteStore, ApiError> {
             "Persistence is not configured",
         )
     })
+}
+
+/// Current unix time in seconds. Falls back to 0 if the system clock is before the epoch (never
+/// in practice), which only makes the past-expiry check maximally permissive.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Onchain validation errors for incoming task requests.
@@ -604,15 +631,6 @@ pub async fn trigger_task_handler(
 }
 
 /// Request body for `POST /admin/keys`. The whole body is optional; an empty body creates an
-/// Current unix time in seconds. Falls back to 0 if the system clock is before the epoch (never
-/// in practice), which only makes the past-expiry check maximally permissive.
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// unlabeled key. `invalid_at` is an optional unix timestamp at which the key expires; omit or
 /// send `null` for a key that never expires. It must be in the future.
 #[derive(Debug, Default, Deserialize)]
@@ -1410,10 +1428,25 @@ mod tests {
 
         #[tokio::test]
         async fn test_no_store_configured_accepts_unauthenticated() {
-            // With no durable store (development / tests) the endpoint is open.
+            // The bare test/dev constructor opts into unauthenticated access, so a store-less
+            // harness can exercise /trigger.
             let (app, _queue) = make_app();
             let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn test_no_store_without_opt_in_fails_closed() {
+            // Mirrors the production posture: a state with no store and no unauthenticated
+            // opt-in must reject task submission rather than serving an open endpoint.
+            let (sender, _receiver) = crate::creator::task_channel();
+            let queue_depth = crate::creator::task_queue_depth();
+            let mut state = IngressState::without_metrics(sender, queue_depth);
+            state.allow_unauthenticated = false;
+            let app = build_app().with_state(state);
+
+            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         }
 
         #[tokio::test]
