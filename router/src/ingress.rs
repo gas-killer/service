@@ -604,11 +604,23 @@ pub async fn trigger_task_handler(
 }
 
 /// Request body for `POST /admin/keys`. The whole body is optional; an empty body creates an
-/// unlabeled key.
-#[derive(Debug, Deserialize)]
+/// Current unix time in seconds. Falls back to 0 if the system clock is before the epoch (never
+/// in practice), which only makes the past-expiry check maximally permissive.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// unlabeled key. `invalid_at` is an optional unix timestamp at which the key expires; omit or
+/// send `null` for a key that never expires. It must be in the future.
+#[derive(Debug, Default, Deserialize)]
 pub struct CreateApiKeyRequest {
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub invalid_at: Option<i64>,
 }
 
 /// `POST /admin/keys` — issues a new API key. Admin-only. The response carries the raw key
@@ -621,27 +633,40 @@ async fn create_api_key_handler(
     authorize_admin(&state, &headers)?;
     let store = require_store(&state)?;
 
-    // The body is an optional JSON object carrying a human-readable label; an empty body means
-    // "no label". Blank labels are normalized away so listings never show empty strings.
-    let label = if body.is_empty() {
-        None
+    // The body is an optional JSON object; an empty body means an unlabeled, never-expiring key.
+    let request = if body.is_empty() {
+        CreateApiKeyRequest::default()
     } else {
-        serde_json::from_slice::<CreateApiKeyRequest>(&body)
-            .map_err(|e| {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::InvalidRequest,
-                    format!("invalid request body: {e}"),
-                )
-            })?
-            .label
-    }
-    .filter(|l| !l.trim().is_empty());
+        serde_json::from_slice::<CreateApiKeyRequest>(&body).map_err(|e| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                format!("invalid request body: {e}"),
+            )
+        })?
+    };
 
-    let created = store.create_api_key(label).await.map_err(|e| {
-        tracing::error!(error = %e, "failed to create api key");
-        ApiError::internal("Failed to create API key")
-    })?;
+    // Blank labels are normalized away so listings never show empty strings.
+    let label = request.label.filter(|l| !l.trim().is_empty());
+
+    // Reject an expiry that is already in the past — such a key would be born dead.
+    if let Some(invalid_at) = request.invalid_at
+        && invalid_at <= unix_now()
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "invalid_at must be a unix timestamp in the future",
+        ));
+    }
+
+    let created = store
+        .create_api_key(label, request.invalid_at)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to create api key");
+            ApiError::internal("Failed to create API key")
+        })?;
     info!(id = %created.id, "api key created");
     Ok((StatusCode::CREATED, Json(created)))
 }
@@ -1508,6 +1533,39 @@ mod tests {
             assert_eq!(json["label"], "client-a");
             assert!(json["id"].as_str().is_some());
             assert!(json["created_at"].as_i64().unwrap() > 0);
+            assert!(json["invalid_at"].is_null(), "no expiry was requested");
+        }
+
+        #[tokio::test]
+        async fn admin_create_honors_future_expiry() {
+            let (app, _store, _rx) = make_app_with_store(Some("admin-secret")).await;
+            // Year 2100 — comfortably in the future.
+            let req = admin_request(
+                Method::POST,
+                "/admin/keys",
+                Some("admin-secret"),
+                r#"{"invalid_at":4102444800}"#,
+            );
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let json = created_key_json(resp).await;
+            assert_eq!(json["invalid_at"].as_i64(), Some(4_102_444_800));
+        }
+
+        #[tokio::test]
+        async fn admin_create_rejects_past_expiry() {
+            let (app, _store, _rx) = make_app_with_store(Some("admin-secret")).await;
+            // A 1970 timestamp is already in the past.
+            let req = admin_request(
+                Method::POST,
+                "/admin/keys",
+                Some("admin-secret"),
+                r#"{"invalid_at":1}"#,
+            );
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
         }
 
         #[tokio::test]
@@ -1529,7 +1587,7 @@ mod tests {
         async fn admin_list_returns_metadata_without_key_value() {
             let (app, store, _rx) = make_app_with_store(Some("admin-secret")).await;
             let created = store
-                .create_api_key(Some("client-a".to_string()))
+                .create_api_key(Some("client-a".to_string()), None)
                 .await
                 .unwrap();
 
@@ -1564,7 +1622,7 @@ mod tests {
         #[tokio::test]
         async fn admin_revoke_returns_204_then_404() {
             let (app, store, _rx) = make_app_with_store(Some("admin-secret")).await;
-            let created = store.create_api_key(None).await.unwrap();
+            let created = store.create_api_key(None, None).await.unwrap();
 
             let uri = format!("/admin/keys/{}", created.id);
             let resp = app
@@ -1595,7 +1653,7 @@ mod tests {
         #[tokio::test]
         async fn trigger_accepts_valid_api_key() {
             let (app, store, mut rx) = make_app_with_store(None).await;
-            let created = store.create_api_key(None).await.unwrap();
+            let created = store.create_api_key(None, None).await.unwrap();
 
             let resp = app
                 .oneshot(bearer_request(&valid_body(), &created.key))
@@ -1608,7 +1666,7 @@ mod tests {
         #[tokio::test]
         async fn trigger_rejects_revoked_api_key() {
             let (app, store, _rx) = make_app_with_store(None).await;
-            let created = store.create_api_key(None).await.unwrap();
+            let created = store.create_api_key(None, None).await.unwrap();
             store.revoke_api_key(&created.id).await.unwrap();
 
             let resp = app

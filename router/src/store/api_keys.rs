@@ -34,6 +34,8 @@ pub struct CreatedApiKey {
     pub key: String,
     pub label: Option<String>,
     pub created_at: i64,
+    /// Unix timestamp at which the key stops authenticating, or `None` if it never expires.
+    pub invalid_at: Option<i64>,
 }
 
 /// Non-secret metadata about an active API key, safe to list. Deliberately omits the key value
@@ -44,6 +46,9 @@ pub struct ApiKeyMetadata {
     pub label: Option<String>,
     pub created_at: i64,
     pub last_used: Option<i64>,
+    /// Unix timestamp at which the key expires, or `None` if it never expires. Listed keys are
+    /// always still valid, so this is only ever null or a future time.
+    pub invalid_at: Option<i64>,
 }
 
 /// Generates a fresh opaque key: `gk_` followed by 32 hex-encoded random bytes.
@@ -67,20 +72,27 @@ fn hash_key(raw: &str) -> String {
 }
 
 impl SqliteStore {
-    /// Issues a new API key with an optional human-readable label, persisting only its hash.
-    /// The returned [`CreatedApiKey`] carries the raw key value, which the caller must surface
-    /// to the operator immediately — it cannot be retrieved again.
-    pub async fn create_api_key(&self, label: Option<String>) -> anyhow::Result<CreatedApiKey> {
+    /// Issues a new API key with an optional human-readable label and optional expiry
+    /// (`invalid_at`, a unix timestamp; `None` never expires), persisting only its hash. The
+    /// returned [`CreatedApiKey`] carries the raw key value, which the caller must surface to the
+    /// operator immediately — it cannot be retrieved again.
+    pub async fn create_api_key(
+        &self,
+        label: Option<String>,
+        invalid_at: Option<i64>,
+    ) -> anyhow::Result<CreatedApiKey> {
         let key = generate_key();
         let id = generate_id();
         let key_hash = hash_key(&key);
 
         let created_at: i64 = sqlx::query_scalar(
-            "INSERT INTO api_keys (id, key_hash, label) VALUES (?1, ?2, ?3) RETURNING created_at",
+            "INSERT INTO api_keys (id, key_hash, label, invalid_at) \
+             VALUES (?1, ?2, ?3, ?4) RETURNING created_at",
         )
         .bind(&id)
         .bind(&key_hash)
         .bind(label.as_deref())
+        .bind(invalid_at)
         .fetch_one(self.pool())
         .await
         .context("inserting api key")?;
@@ -90,15 +102,16 @@ impl SqliteStore {
             key,
             label,
             created_at,
+            invalid_at,
         })
     }
 
-    /// Lists metadata for every active (unrevoked) key, most recently created first. The key
-    /// values and hashes are never returned.
+    /// Lists metadata for every still-valid key (neither revoked nor expired), most recently
+    /// created first. The key values and hashes are never returned.
     pub async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyMetadata>> {
-        let rows = sqlx::query_as::<_, (String, Option<String>, i64, Option<i64>)>(
-            "SELECT id, label, created_at, last_used FROM api_keys \
-             WHERE revoked_at IS NULL ORDER BY created_at DESC, id",
+        let rows = sqlx::query_as::<_, (String, Option<String>, i64, Option<i64>, Option<i64>)>(
+            "SELECT id, label, created_at, last_used, invalid_at FROM api_keys \
+             WHERE invalid_at IS NULL OR invalid_at > unixepoch() ORDER BY created_at DESC, id",
         )
         .fetch_all(self.pool())
         .await
@@ -106,21 +119,26 @@ impl SqliteStore {
 
         Ok(rows
             .into_iter()
-            .map(|(id, label, created_at, last_used)| ApiKeyMetadata {
-                id,
-                label,
-                created_at,
-                last_used,
-            })
+            .map(
+                |(id, label, created_at, last_used, invalid_at)| ApiKeyMetadata {
+                    id,
+                    label,
+                    created_at,
+                    last_used,
+                    invalid_at,
+                },
+            )
             .collect())
     }
 
-    /// Revokes the key with the given id, taking effect immediately for subsequent
-    /// authentication. Returns `true` if an active key was revoked, `false` if no active key
-    /// with that id exists (already revoked or never issued).
+    /// Revokes the key with the given id, taking effect immediately by stamping `invalid_at`
+    /// with the current time (overriding any later scheduled expiry). Returns `true` if a
+    /// currently-valid key was revoked, `false` if no such key exists (already revoked, already
+    /// expired, or never issued).
     pub async fn revoke_api_key(&self, id: &str) -> anyhow::Result<bool> {
         let result = sqlx::query(
-            "UPDATE api_keys SET revoked_at = unixepoch() WHERE id = ?1 AND revoked_at IS NULL",
+            "UPDATE api_keys SET invalid_at = unixepoch() \
+             WHERE id = ?1 AND (invalid_at IS NULL OR invalid_at > unixepoch())",
         )
         .bind(id)
         .execute(self.pool())
@@ -130,15 +148,17 @@ impl SqliteStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Authenticates a presented key. Returns the key's id when it matches an active
-    /// (unrevoked) key, stamping `last_used` in the same statement; returns `None` when the key
-    /// is unknown or revoked. Lookup is by hash, so the raw secret is never compared byte-wise.
+    /// Authenticates a presented key. Returns the key's id when it matches a still-valid key
+    /// (neither revoked nor past its expiry), stamping `last_used` in the same statement;
+    /// returns `None` when the key is unknown, revoked, or expired. Lookup is by hash, so the raw
+    /// secret is never compared byte-wise.
     pub async fn verify_api_key(&self, presented: &str) -> anyhow::Result<Option<String>> {
         let key_hash = hash_key(presented);
 
         let id: Option<String> = sqlx::query_scalar(
             "UPDATE api_keys SET last_used = unixepoch() \
-             WHERE key_hash = ?1 AND revoked_at IS NULL RETURNING id",
+             WHERE key_hash = ?1 AND (invalid_at IS NULL OR invalid_at > unixepoch()) \
+             RETURNING id",
         )
         .bind(&key_hash)
         .fetch_optional(self.pool())
@@ -163,7 +183,7 @@ mod tests {
     async fn created_key_has_expected_shape() {
         let store = store().await;
         let created = store
-            .create_api_key(Some("client-a".to_string()))
+            .create_api_key(Some("client-a".to_string()), None)
             .await
             .expect("key creation should succeed");
 
@@ -176,13 +196,14 @@ mod tests {
         assert_eq!(created.label.as_deref(), Some("client-a"));
         assert!(created.created_at > 0, "created_at should be stamped");
         assert!(!created.id.is_empty());
+        assert_eq!(created.invalid_at, None, "no expiry was requested");
     }
 
     #[tokio::test]
     async fn each_key_is_unique() {
         let store = store().await;
-        let a = store.create_api_key(None).await.unwrap();
-        let b = store.create_api_key(None).await.unwrap();
+        let a = store.create_api_key(None, None).await.unwrap();
+        let b = store.create_api_key(None, None).await.unwrap();
         assert_ne!(a.key, b.key);
         assert_ne!(a.id, b.id);
     }
@@ -190,7 +211,7 @@ mod tests {
     #[tokio::test]
     async fn verify_accepts_valid_key_and_stamps_last_used() {
         let store = store().await;
-        let created = store.create_api_key(None).await.unwrap();
+        let created = store.create_api_key(None, None).await.unwrap();
 
         let id = store
             .verify_api_key(&created.key)
@@ -214,7 +235,7 @@ mod tests {
     #[tokio::test]
     async fn verify_rejects_unknown_key() {
         let store = store().await;
-        store.create_api_key(None).await.unwrap();
+        store.create_api_key(None, None).await.unwrap();
 
         let result = store
             .verify_api_key("gk_deadbeef")
@@ -226,7 +247,7 @@ mod tests {
     #[tokio::test]
     async fn revoked_key_no_longer_authenticates() {
         let store = store().await;
-        let created = store.create_api_key(None).await.unwrap();
+        let created = store.create_api_key(None, None).await.unwrap();
 
         assert!(
             store.revoke_api_key(&created.id).await.unwrap(),
@@ -241,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_is_not_idempotent_success() {
         let store = store().await;
-        let created = store.create_api_key(None).await.unwrap();
+        let created = store.create_api_key(None, None).await.unwrap();
 
         assert!(store.revoke_api_key(&created.id).await.unwrap());
         assert!(
@@ -258,11 +279,11 @@ mod tests {
     async fn list_excludes_revoked_keys() {
         let store = store().await;
         let keep = store
-            .create_api_key(Some("keep".to_string()))
+            .create_api_key(Some("keep".to_string()), None)
             .await
             .unwrap();
         let drop = store
-            .create_api_key(Some("drop".to_string()))
+            .create_api_key(Some("drop".to_string()), None)
             .await
             .unwrap();
 
@@ -272,6 +293,64 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, keep.id);
         assert_eq!(listed[0].label.as_deref(), Some("keep"));
+    }
+
+    // A timestamp far in the future ("year 2100"), used to exercise a key that carries an expiry
+    // but has not lapsed.
+    const FUTURE: i64 = 4_102_444_800;
+
+    #[tokio::test]
+    async fn key_with_future_expiry_authenticates_and_lists() {
+        let store = store().await;
+        let created = store.create_api_key(None, Some(FUTURE)).await.unwrap();
+        assert_eq!(created.invalid_at, Some(FUTURE));
+
+        assert!(
+            store.verify_api_key(&created.key).await.unwrap().is_some(),
+            "a key whose expiry is in the future should authenticate"
+        );
+
+        let listed = store.list_api_keys().await.unwrap();
+        let entry = listed
+            .iter()
+            .find(|k| k.id == created.id)
+            .expect("an unexpired key should be listed");
+        assert_eq!(
+            entry.invalid_at,
+            Some(FUTURE),
+            "listing should surface expiry"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_key_is_rejected_and_unlisted() {
+        let store = store().await;
+        // An expiry in the distant past (1970) is already lapsed at creation.
+        let created = store.create_api_key(None, Some(1)).await.unwrap();
+
+        assert!(
+            store.verify_api_key(&created.key).await.unwrap().is_none(),
+            "a key past its expiry must not authenticate"
+        );
+        assert!(
+            store.list_api_keys().await.unwrap().is_empty(),
+            "an expired key must not appear in the active listing"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_a_future_expiry_key_invalidates_it_immediately() {
+        let store = store().await;
+        let created = store.create_api_key(None, Some(FUTURE)).await.unwrap();
+
+        assert!(
+            store.revoke_api_key(&created.id).await.unwrap(),
+            "revoking a key with a pending expiry should report success"
+        );
+        assert!(
+            store.verify_api_key(&created.key).await.unwrap().is_none(),
+            "revocation must invalidate the key ahead of its scheduled expiry"
+        );
     }
 
     #[test]

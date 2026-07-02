@@ -155,8 +155,17 @@ When the router has a persistent store (the default), `/trigger` requires a vali
 curl -X POST http://localhost:8080/admin/keys \
   -H "Authorization: Bearer <ADMIN_KEY>" \
   -H "Content-Type: application/json" \
-  -d '{"label": "my-client"}'
-# → {"id":"...","key":"gk_...","label":"my-client","created_at":...}
+  -d '{"label": "my-client", "invalid_at": 1893456000}'   # invalid_at optional; unix ts, future
+# → {"id":"...","key":"gk_...","label":"my-client","created_at":...,"invalid_at":1893456000}
+```
+
+Or use the `create_api_key` tool, which wraps the admin API: it targets a deployed environment
+by name (`--env prod` → `https://api.gaskiller.xyz`, `--env testnet`/`dev` →
+`https://testnet.gaskiller.xyz`) or an explicit `--url`, authenticating with the `ADMIN_KEY`
+environment variable. `--expires-at` accepts `never`, a relative duration, or an explicit unix
+timestamp:
+```bash
+ADMIN_KEY=... create_api_key --env prod --label my-client --expires-at "7 days"
 ```
 
 Then include the minted key as the Bearer token on requests, and revoke it when no longer needed:
