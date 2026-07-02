@@ -323,9 +323,8 @@ fn main() {
         // full mesh: every participant dials every other, so both ends frequently dial at once and
         // one connection loses the reservation race. The loser must re-dial quickly, and an operator
         // that restarts must rejoin the signing quorum in seconds rather than ~a minute. Restore fast
-        // (re)discovery (these match Config::local's values) while keeping recommended's
-        // abuse-resistance (concurrent-handshake cap, subnet rate limit, ping cadence).
-        // `peer_connection_cooldown` is the minimum time between per-peer connection reservations.
+// (re)discovery while keeping recommended's abuse-resistance (concurrent-handshake cap, subnet
+        // rate limit, ping cadence).
         p2p_cfg.dial_frequency = Duration::from_millis(500);
         p2p_cfg.peer_connection_cooldown = Duration::from_secs(1);
         p2p_cfg.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(16));
