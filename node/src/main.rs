@@ -35,8 +35,8 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 #[derive(Clone)]
 struct HealthState {
     ready: Arc<AtomicBool>,
-    // `tokio::Context` is no longer `Clone`; `Arc` makes the axum handler state cloneable.
-    // `encode()` resolves through `Deref`, and the metrics registry is shared across contexts.
+    // `Arc` makes the axum handler state cloneable; `encode()` resolves through `Deref`,
+    // and the metrics registry is shared across contexts.
     context: Arc<tokio::Context>,
     validator_metrics: Arc<ValidatorMetrics>,
 }
@@ -318,8 +318,6 @@ fn main() {
         // where external operators are behind NAT. IP-based pre-filtering cannot work in either
         // case; authentication relies entirely on the cryptographic handshake (peer public keys
         // checked against the registered operator set), which is secure for both topologies.
-        // (Renamed from `attempt_unregistered_handshakes` in commonware 2026.5.0; same
-        // semantics: skip the source-IP match so known peers can connect from unexpected IPs.)
         p2p_cfg.bypass_ip_check = true;
 
         // recommended() throttles peer discovery for large open gossip networks where aggressive
@@ -329,9 +327,7 @@ fn main() {
         // that restarts must rejoin the signing quorum in seconds rather than ~a minute. Restore fast
         // (re)discovery (these match Config::local's values) while keeping recommended's
         // abuse-resistance (concurrent-handshake cap, subnet rate limit, ping cadence).
-        // Note (2026.5.0): the old `query_frequency` knob was removed, and the old
-        // `allowed_connection_rate_per_peer = 1/s` is now expressed as its inverse,
-        // `peer_connection_cooldown = 1s` (minimum time between per-peer connection reservations).
+        // `peer_connection_cooldown` is the minimum time between per-peer connection reservations.
         p2p_cfg.dial_frequency = Duration::from_millis(500);
         p2p_cfg.peer_connection_cooldown = Duration::from_secs(1);
         p2p_cfg.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(16));
@@ -347,8 +343,7 @@ fn main() {
             tracing::info!(key = ?key, addr = ?addr, "oracle recipient");
         }
 
-        // Register authorized peers with the oracle. `track` is synchronous now and
-        // `recipients` already holds `Address` values.
+        // Register the authorized peer set (id 0) with the oracle.
         oracle.track(0, Map::from_iter_dedup(recipients));
 
         // Build contributor list and G1 map from operator states

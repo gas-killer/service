@@ -38,9 +38,9 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 #[derive(Clone)]
 struct HealthState {
     ready: Arc<AtomicBool>,
-    // `tokio::Context` is no longer `Clone`, but axum requires the handler state to
-    // be `Clone`. An `Arc` makes the state cloneable; `encode()` (which takes `&self`)
-    // still resolves through `Deref`, and the registry is shared across all contexts.
+    // axum requires the handler state to be `Clone`. An `Arc` makes the state cloneable;
+    // `encode()` (which takes `&self`) resolves through `Deref`, and the registry is
+    // shared across all contexts.
     context: Arc<tokio::Context>,
     metrics: Arc<MetricsCollector>,
 }
@@ -185,8 +185,6 @@ fn main() {
     // where external operators are behind NAT. IP-based pre-filtering cannot work in either
     // case; authentication relies entirely on the cryptographic handshake (peer public keys
     // checked against the registered operator set), which is secure for both topologies.
-    // (Renamed from `attempt_unregistered_handshakes` in commonware 2026.5.0; same
-    // semantics: skip the source-IP match so known peers can connect from unexpected IPs.)
     p2p_cfg.bypass_ip_check = true;
 
     // recommended() throttles peer discovery for large open gossip networks where aggressive
@@ -196,9 +194,7 @@ fn main() {
     // restarts must rejoin the signing quorum in seconds rather than ~a minute. Restore fast
     // (re)discovery (these match Config::local's values) while keeping recommended's
     // abuse-resistance (concurrent-handshake cap, subnet rate limit, ping cadence).
-    // Note (2026.5.0): the old `query_frequency` knob was removed, and the old
-    // `allowed_connection_rate_per_peer = 1/s` is now expressed as its inverse,
-    // `peer_connection_cooldown = 1s` (minimum time between per-peer connection reservations).
+    // `peer_connection_cooldown` is the minimum time between per-peer connection reservations.
     p2p_cfg.dial_frequency = Duration::from_millis(500);
     p2p_cfg.peer_connection_cooldown = Duration::from_secs(1);
     p2p_cfg.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(16));
@@ -274,8 +270,7 @@ fn main() {
             .finish();
         _ = tracing::subscriber::set_default(subscriber);
 
-        // Provide authorized peers. `track` registers a peer set (id 0) and is no
-        // longer async; `recipients` already holds `Address` values.
+        // Register the authorized peer set (id 0).
         let authorized = Map::from_iter_dedup(recipients);
         oracle.track(0, authorized);
 
@@ -305,11 +300,10 @@ fn main() {
         // Custom Prometheus metrics — shared with executor, creator, and ingress via builder
         let metrics = Arc::new(MetricsCollector::new());
 
-        // `tokio::Context` is no longer `Clone`, and the orchestrator builder consumes
-        // the root context by value (it self-prefixes its metrics with "orchestrator").
-        // Derive every child context we still need *before* moving the root context in.
-        // All children share the same metrics registry, so `/metrics` encoding from any
-        // of them reports the full set.
+        // The orchestrator builder consumes the root context by value (it self-prefixes
+        // its metrics with "orchestrator"), so derive every child context we still need
+        // before moving the root context in. All children share the same metrics
+        // registry, so `/metrics` encoding from any of them reports the full set.
         let executor_ctx = context.child("executor");
         let speculative_ctx = context.child("speculative_prebuild");
         let orchestrator_task_ctx = context.child("orchestrator_task");
