@@ -24,11 +24,11 @@ async-trait = "0.1"
 axum = "0.7"
 bytes = "1.10.1"
 clap = "4.5.37"
-commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update" }
-commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update" }
-commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update" }
-commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update"}
-commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "9-research-spike-commonware-library-update"}
+commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
 commonware-codec = "2026.5.0"
 commonware-cryptography = "2026.5.0"
 commonware-macros = "2026.5.0"
