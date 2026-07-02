@@ -19,6 +19,10 @@ struct Config {
     router_url: String,
     /// Required when any request uses `block_height = 0` or `verify = true`.
     http_rpc: Option<String>,
+    /// API key sent as `Authorization: Bearer <key>` on every `/trigger` request. Mint one with
+    /// the `create_api_key` tool. Falls back to the `GAS_KILLER_API_KEY` environment variable
+    /// when unset; leave empty for a router that does not require auth.
+    api_key: Option<String>,
     #[serde(default = "default_ingress_timeout_secs")]
     ingress_timeout_secs: u64,
     #[serde(default)]
@@ -232,6 +236,7 @@ async fn verify_on_chain(
 async fn send_request(
     client: &Client,
     router_url: &str,
+    api_key: Option<&str>,
     cfg: &RequestConfig,
     current_block: u64,
     provider: Option<&ReadOnlyProvider>,
@@ -331,10 +336,10 @@ async fn send_request(
     let url = format!("{}/trigger", router_url.trim_end_matches('/'));
     let start = Instant::now();
     let mut req = client.post(&url).json(&payload);
-    if let Ok(api_key) = std::env::var("GAS_KILLER_API_KEY")
-        && !api_key.is_empty()
+    if let Some(key) = api_key
+        && !key.is_empty()
     {
-        req = req.header("Authorization", format!("Bearer {api_key}"));
+        req = req.header("Authorization", format!("Bearer {key}"));
     }
     let resp = req.send().await;
     let elapsed = start.elapsed();
@@ -429,6 +434,7 @@ fn print_result(result: &RequestResult, index: usize, total: usize) {
 async fn run_scenario(
     client: Arc<Client>,
     router_url: Arc<String>,
+    api_key: Arc<Option<String>>,
     scenario: &Scenario,
     current_block: u64,
     provider: Option<Arc<ReadOnlyProvider>>,
@@ -451,6 +457,7 @@ async fn run_scenario(
                 let result = send_request(
                     &client,
                     &router_url,
+                    api_key.as_deref(),
                     req_cfg,
                     current_block,
                     provider.as_deref(),
@@ -473,12 +480,14 @@ async fn run_scenario(
                 .map(|(i, req_cfg)| {
                     let client = client.clone();
                     let router_url = router_url.clone();
+                    let api_key = api_key.clone();
                     let req_cfg = req_cfg.clone();
                     let provider = provider.clone();
                     tokio::spawn(async move {
                         send_request(
                             &client,
                             &router_url,
+                            api_key.as_deref(),
                             &req_cfg,
                             current_block,
                             provider.as_deref(),
@@ -851,7 +860,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = Arc::new(client_builder.build()?);
     let router_url = Arc::new(config.router_url.clone());
 
+    // The config field takes precedence; fall back to the environment so CI/automation can inject
+    // a key without editing the scenario file.
+    let api_key = Arc::new(
+        config
+            .api_key
+            .clone()
+            .filter(|k| !k.is_empty())
+            .or_else(|| std::env::var("GAS_KILLER_API_KEY").ok())
+            .filter(|k| !k.is_empty()),
+    );
+
     println!("Router: {}", config.router_url);
+    println!(
+        "API key: {}",
+        if api_key.is_some() {
+            "configured"
+        } else {
+            "none"
+        }
+    );
 
     let mut all_results: Vec<RequestResult> = Vec::new();
 
@@ -859,6 +887,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let results = run_scenario(
             client.clone(),
             router_url.clone(),
+            api_key.clone(),
             scenario,
             current_block,
             provider.clone(),

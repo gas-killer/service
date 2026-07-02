@@ -23,6 +23,7 @@
 
 router_url           = "https://testnet.gaskiller.xyz"
 http_rpc             = "$GNOSIS_RPC_URL"
+api_key              = ""   # /trigger auth: mint with create_api_key; empty falls back to $GAS_KILLER_API_KEY
 ingress_timeout_secs = 120
 
 # ── 1. Baseline — single serial requests with 5 s breathing room between them ─

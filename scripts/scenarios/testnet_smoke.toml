@@ -5,6 +5,7 @@
 
 router_url = "https://testnet.gaskiller.xyz"
 http_rpc   = "$HTTP_RPC"
+api_key    = ""   # /trigger auth: mint with create_api_key; empty falls back to $GAS_KILLER_API_KEY
 
 # ── Serial smoke test with on-chain verification ─────────────────
 [[scenarios]]
