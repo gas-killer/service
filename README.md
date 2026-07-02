@@ -162,23 +162,23 @@ curl -X POST http://localhost:8080/admin/keys \
 
 On a Kubernetes deployment the `/admin/*` endpoints are **not** exposed through the public Ingress
 (only `/trigger`, `/avs-metadata`, `/healthz` are — see `ingress.publicPaths` in the chart).
-Reach them in-cluster — e.g. `kubectl exec` into the router pod, where `ADMIN_KEY` is already in
-the environment:
+Reach them in-cluster. The `create_api_key` tool ships in the router image, defaults to the
+in-cluster `http://localhost:8080`, and reads `ADMIN_KEY` from the pod env — so `kubectl exec`
+needs no target flag:
 ```bash
 POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}')
-kubectl exec "$POD" -- sh -c 'curl -s -X POST \
-  -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
-  -d "{\"label\":\"my-client\"}" http://localhost:8080/admin/keys'
+kubectl exec "$POD" -- create_api_key --label my-client --expires-at "7 days"
+# fallback if the binary predates the image: curl localhost:8080/admin/keys with $ADMIN_KEY
 ```
-Or `kubectl port-forward svc/<release>-router 8080:8080` and use the `create_api_key` tool
-(`ADMIN_KEY` read from the Secret), which wraps the admin API and parses `--expires-at` (`never`,
-a relative duration like `7 days`, or a unix timestamp):
+Or `kubectl port-forward svc/<release>-router 8080:8080` and run the tool locally, reading
+`ADMIN_KEY` from the Secret (it still defaults to `http://localhost:8080`):
 ```bash
 ADMIN_KEY=$(kubectl get secret <release>-secret -o jsonpath='{.data.ADMIN_KEY}' | base64 -d) \
-  create_api_key --url http://localhost:8080 --label my-client --expires-at "7 days"
+  create_api_key --label my-client --expires-at "7 days"
 ```
-The tool's `--env prod`/`--env testnet` shortcuts target the public hostnames, so they work only
-if you have deliberately added `/admin` to `ingress.publicPaths`.
+`--expires-at` accepts `never`, a relative duration like `7 days`, or a unix timestamp. The tool's
+`--env prod`/`--env testnet` shortcuts target the public hostnames, so they work only if you have
+deliberately added `/admin` to `ingress.publicPaths` — otherwise they 404 at the edge.
 
 Then include the minted key as the Bearer token on task requests (revoke via the same in-cluster
 admin path when no longer needed):

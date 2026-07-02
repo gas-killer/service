@@ -1,35 +1,49 @@
-//! Operator tool: mint a new API key against a deployed router's admin API.
+//! Operator tool: mint a new API key by calling `POST /admin/keys` on the router.
 //!
-//! Targets an environment by name (`--env`) or an explicit base URL (`--url`), calling
-//! `POST /admin/keys` on the router. Authentication uses the `ADMIN_KEY` environment variable,
-//! which must match the router's configured admin secret. The raw key is printed once and is
-//! never recoverable afterwards.
+//! The `/admin/*` endpoints are not exposed through the public Ingress, so admin operations run
+//! **in-cluster**: `kubectl exec` into the router pod, or `kubectl port-forward` to its Service.
+//! Accordingly this defaults to `http://localhost:8080` — the router as seen from inside the pod
+//! or across a port-forward. Authentication uses the `ADMIN_KEY` environment variable (already
+//! present in the pod's env). The raw key is printed once and is never recoverable afterwards.
 //!
 //! ```text
-//! ADMIN_KEY=... create_api_key --env prod --label my-client --expires-at "7 days"
-//! ADMIN_KEY=... create_api_key --env testnet --expires-at 1893456000   # explicit unix ts
-//! ADMIN_KEY=... create_api_key --url http://localhost:8080             # local router
+//! # In-pod (ADMIN_KEY comes from the container env; no target flag needed):
+//! kubectl exec <router-pod> -- create_api_key --label my-client --expires-at "7 days"
+//!
+//! # Across a port-forward (ADMIN_KEY read from the Secret):
+//! ADMIN_KEY=... create_api_key --url http://localhost:8080 --label my-client
 //! ```
+//!
+//! `--env prod`/`--env testnet` target the public hostnames and therefore only work if `/admin`
+//! has been deliberately added to the Ingress allowlist (`ingress.publicPaths`); by default those
+//! modes 404 at the edge. Prefer the in-cluster path above.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::{Arg, Command};
 
+/// In-cluster router address: the router as seen from inside the pod or across a port-forward.
+const DEFAULT_URL: &str = "http://localhost:8080";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let matches = Command::new("create_api_key")
-        .about("Mint a Gas Killer API key against a deployed router's admin API")
+        .about("Mint a Gas Killer API key via the router admin API (defaults to in-cluster http://localhost:8080)")
         .arg(
             Arg::new("env")
                 .long("env")
-                .default_value("testnet")
-                .help("Target environment: prod, testnet, or dev"),
+                .help(
+                    "Target a public environment (prod|testnet|dev) instead of the in-cluster \
+                     URL. Only works if /admin is publicly exposed (ingress.publicPaths); admin \
+                     is private by default, so prefer --url for in-cluster access",
+                ),
         )
         .arg(
             Arg::new("url")
                 .long("url")
-                .help("Explicit router base URL, overriding --env (e.g. http://localhost:8080)"),
+                .help("Router base URL to target (default http://localhost:8080). Use the \
+                       in-cluster address via kubectl exec or port-forward"),
         )
         .arg(
             Arg::new("label")
@@ -52,11 +66,10 @@ async fn main() -> Result<()> {
         .filter(|k| !k.is_empty())
         .context("ADMIN_KEY must be set to authenticate against the admin API")?;
 
-    let base = match matches.get_one::<String>("url") {
-        Some(url) => url.clone(),
-        None => base_url_for_env(matches.get_one::<String>("env").expect("env has a default"))?
-            .to_string(),
-    };
+    let base = resolve_base(
+        matches.get_one::<String>("url").map(String::as_str),
+        matches.get_one::<String>("env").map(String::as_str),
+    )?;
     let base = base.trim_end_matches('/').to_string();
     let endpoint = format!("{base}/admin/keys");
 
@@ -113,6 +126,17 @@ async fn main() -> Result<()> {
     println!("Store this key now — it is not persisted in the clear and cannot be shown again.");
 
     Ok(())
+}
+
+/// Resolves the router base URL to target. An explicit `--url` wins; otherwise a named `--env`
+/// resolves to its public URL; otherwise the in-cluster default, which is how admin operations
+/// normally run (the public Ingress does not route `/admin`).
+fn resolve_base(url: Option<&str>, env: Option<&str>) -> Result<String> {
+    Ok(match (url, env) {
+        (Some(url), _) => url.to_string(),
+        (None, Some(env)) => base_url_for_env(env)?.to_string(),
+        (None, None) => DEFAULT_URL.to_string(),
+    })
 }
 
 /// Resolves an environment name to the router's public base URL.
@@ -216,6 +240,27 @@ mod tests {
             "https://testnet.gaskiller.xyz/"
         );
         assert!(base_url_for_env("staging").is_err());
+    }
+
+    #[test]
+    fn base_resolution_defaults_to_in_cluster() {
+        // No flags → in-cluster localhost (admin is not public), not a public env.
+        assert_eq!(resolve_base(None, None).unwrap(), DEFAULT_URL);
+        // Explicit --url wins, including over --env.
+        assert_eq!(
+            resolve_base(Some("http://r:8080"), None).unwrap(),
+            "http://r:8080"
+        );
+        assert_eq!(
+            resolve_base(Some("http://r:8080"), Some("prod")).unwrap(),
+            "http://r:8080"
+        );
+        // A named env resolves to its public URL.
+        assert_eq!(
+            resolve_base(None, Some("prod")).unwrap(),
+            "https://api.gaskiller.xyz/"
+        );
+        assert!(resolve_base(None, Some("staging")).is_err());
     }
 
     #[test]
