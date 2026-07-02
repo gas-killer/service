@@ -38,9 +38,6 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 #[derive(Clone)]
 struct HealthState {
     ready: Arc<AtomicBool>,
-    // axum requires the handler state to be `Clone`. An `Arc` makes the state cloneable;
-    // `encode()` (which takes `&self`) resolves through `Deref`, and the registry is
-    // shared across all contexts.
     context: Arc<tokio::Context>,
     metrics: Arc<MetricsCollector>,
 }
@@ -300,10 +297,6 @@ fn main() {
         // Custom Prometheus metrics — shared with executor, creator, and ingress via builder
         let metrics = Arc::new(MetricsCollector::new());
 
-        // The orchestrator builder consumes the root context by value (it self-prefixes
-        // its metrics with "orchestrator"), so derive every child context we still need
-        // before moving the root context in. All children share the same metrics
-        // registry, so `/metrics` encoding from any of them reports the full set.
         let executor_ctx = context.child("executor");
         let speculative_ctx = context.child("speculative_prebuild");
         let orchestrator_task_ctx = context.child("orchestrator_task");

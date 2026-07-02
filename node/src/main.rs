@@ -35,8 +35,6 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 #[derive(Clone)]
 struct HealthState {
     ready: Arc<AtomicBool>,
-    // `Arc` makes the axum handler state cloneable; `encode()` resolves through `Deref`,
-    // and the metrics registry is shared across contexts.
     context: Arc<tokio::Context>,
     validator_metrics: Arc<ValidatorMetrics>,
 }
