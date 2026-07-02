@@ -233,6 +233,13 @@ else
     docker compose logs --tail=100 router || true
     echo -e "${YELLOW}Recent node logs:${NC}"
     docker compose logs --tail=50 node-1 node-2 node-3 || true
+    # Trace the verifyAndUpdate transaction, if one was submitted, to surface a revert reason.
+    # cast run re-simulates the transaction, so this is best-effort diagnostic output.
+    TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -o "transaction_hash=0x[a-fA-F0-9]*" | sed 's/transaction_hash=//' | tail -1)
+    if [ -n "$TX_HASH" ] && command -v cast >/dev/null 2>&1; then
+        echo -e "${YELLOW}Execution trace for $TX_HASH:${NC}"
+        cast run "$TX_HASH" --rpc-url http://localhost:8545 || true
+    fi
     exit 1
 fi
 
@@ -240,22 +247,12 @@ fi
 echo -e "${YELLOW}Recent router logs:${NC}"
 docker compose logs --tail=50 router || true
 
-# Extract transaction hash from router logs and show execution trace
-echo -e "${YELLOW}Extracting transaction hash and showing execution trace...${NC}"
+# Print the execution trace of the successful verifyAndUpdate for inspection.
+# debug_traceTransaction reflects the real mined execution, not a re-simulation.
 TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -o "transaction_hash=0x[a-fA-F0-9]*" | sed 's/transaction_hash=//' | tail -1)
-
-if [ -n "$TX_HASH" ]; then
-    echo -e "${GREEN}Found transaction hash: $TX_HASH${NC}"
-    echo -e "${YELLOW}Running cast trace...${NC}"
-
-    # Check if cast is available
-    if command -v cast >/dev/null 2>&1; then
-        cast run "$TX_HASH" --rpc-url http://localhost:8545 || echo -e "${YELLOW}Cast trace failed, transaction may still be pending${NC}"
-    else
-        echo -e "${YELLOW}Warning: cast (Foundry) not found. Install with: curl -L https://foundry.paradigm.xyz | bash && foundryup${NC}"
-    fi
-else
-    echo -e "${YELLOW}Warning: Could not find transaction hash in router logs${NC}"
+if [ -n "$TX_HASH" ] && command -v cast >/dev/null 2>&1; then
+    echo -e "${YELLOW}Execution trace for $TX_HASH:${NC}"
+    cast rpc debug_traceTransaction "$TX_HASH" '{"tracer":"callTracer"}' --rpc-url http://localhost:8545 | jq '.' || true
 fi
 
 echo -e "${GREEN}✅ Test passed - Stack is up and array summation completed successfully!${NC}"

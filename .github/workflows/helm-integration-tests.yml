@@ -426,6 +426,9 @@ jobs:
           INITIAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 | tr -d '[:space:]')
           echo "Initial stateTransitionCount: $INITIAL_COUNT"
 
+          # Block height before triggering, used to bound the SumCalculated event query below.
+          START_BLOCK=$(cast block-number --rpc-url http://localhost:8545)
+
           NUM_TRIGGERS=3
           SUCCESSFUL=0
 
@@ -461,9 +464,10 @@ jobs:
             exit 1
           fi
 
-          # Check for SumCalculated events
+          # Count SumCalculated events emitted since the triggers began.
           EVENT_TOPIC=$(cast keccak 'SumCalculated(uint256,uint256)')
-          EVENT_COUNT=$(cast logs --from-block 0 --address "$ARRAY_SUMMATION_ADDRESS" --topic $EVENT_TOPIC --rpc-url http://localhost:8545 2>/dev/null | grep -c "blockNumber" || echo "0")
+          EVENT_JSON=$(cast logs --from-block "$START_BLOCK" --address "$ARRAY_SUMMATION_ADDRESS" "$EVENT_TOPIC" --rpc-url http://localhost:8545 --json 2>/dev/null || echo '[]')
+          EVENT_COUNT=$(echo "$EVENT_JSON" | jq 'length')
           echo "Found $EVENT_COUNT SumCalculated events"
 
           if [ "$EVENT_COUNT" -ge "$NUM_TRIGGERS" ]; then
