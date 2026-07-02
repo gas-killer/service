@@ -76,7 +76,6 @@ gas-killer-common = { workspace = true }
 governor = { workspace = true }
 hex = { workspace = true }
 num-bigint = { workspace = true }
-prometheus-client = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
