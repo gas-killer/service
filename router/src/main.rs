@@ -228,13 +228,15 @@ fn main() {
     // full mesh, so keep discovery fast (500ms dial cadence) for quick (re)join while retaining
     // recommended's abuse-resistance (concurrent-handshake cap, subnet rate limit, ping cadence).
     p2p_cfg.dial_frequency = Duration::from_millis(500);
-    // Keep recommended()'s 60s peer_connection_cooldown ("minimum time between connection
-    // reservations for a single peer"). The pre-migration code forced this to 1s, but under
-    // commonware-p2p 2026.5.0 re-reserving an already-connected peer every second opens a
-    // competing connection that loses the reservation race and tears down with a
-    // HandshakeError(DecryptionFailed) — which intermittently kills the router<->node link and
-    // silently drops in-flight directive broadcasts. 60s lets an established link persist.
-    p2p_cfg.peer_connection_cooldown = Duration::from_secs(60);
+    // `peer_connection_cooldown` is the minimum time between dial reservations for a
+    // single peer, so it also bounds how fast a FAILED initial dial retries. The
+    // router starts after the nodes (compose staggers it), so the nodes' first dials
+    // fail; a long cooldown then delays reconnection past the round timeout and the
+    // first task certifies as a skip. Keep it short so the static mesh re-forms within
+    // a couple of seconds of the router coming up. (A larger value was briefly used to
+    // damp a HandshakeError(DecryptionFailed) reconnect flap, but that was specific to
+    // slow QEMU-emulated CI hosts and does not occur on native amd64.)
+    p2p_cfg.peer_connection_cooldown = Duration::from_secs(3);
     p2p_cfg.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(16));
 
     // Start runtime
