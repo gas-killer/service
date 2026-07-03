@@ -1,7 +1,7 @@
 use crate::creator::{TaskQueueDepth, TaskSender};
-use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ErrorCode};
+use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ApiQuery, ErrorCode};
 use crate::metrics::MetricsCollector;
-use crate::store::{ApiKeyMetadata, CreatedApiKey, SqliteStore, TaskStatus};
+use crate::store::{ApiKeyMetadata, CreatedApiKey, SqliteStore, Task, TaskStatus};
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use axum::{
@@ -161,13 +161,13 @@ fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
         .is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
 }
 
-/// Authorizes a task-submission request, returning the authenticated key's id when a store is
-/// configured. When a durable store is present — always the case in production — a valid,
-/// unrevoked API key is required and its id is returned so the submitted task can be scoped to
-/// its owner. With no store, the request is rejected unless `allow_unauthenticated` is set (the
-/// test/dev bare constructor), which yields `None`; a missing store fails closed rather than
-/// silently opening the endpoint.
-async fn authorize_task_request(
+/// Authenticates the caller against the durable store, returning the API key's id. Used by
+/// every task endpoint (submission and status) to identify — and scope work to — the calling
+/// key. When a store is present — always the case in production — a valid, unrevoked API key is
+/// required and its id is returned. With no store, the request is rejected unless
+/// `allow_unauthenticated` is set (the test/dev bare constructor), which yields `None`; a missing
+/// store fails closed rather than silently opening the endpoint.
+async fn authenticate_caller(
     state: &IngressState,
     headers: &HeaderMap,
 ) -> Result<Option<String>, ApiError> {
@@ -565,7 +565,7 @@ pub async fn submit_task_handler(
     headers: HeaderMap,
     ApiJson(request): ApiJson<GasKillerTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskAcceptedResponse>), ApiError> {
-    let key_id = authorize_task_request(&state, &headers).await?;
+    let key_id = authenticate_caller(&state, &headers).await?;
 
     // Load-shed before any validation work. Onchain validation costs multiple RPC
     // round-trips, so rejecting at-capacity requests up front keeps an overloaded
@@ -618,7 +618,7 @@ pub async fn submit_task_handler(
     }
 
     // Persistence is required to hand back a task id and to survive restarts. A configured store
-    // always authenticates (see `authorize_task_request`), so `key_id` is `Some` here; an absent
+    // always authenticates (see `authenticate_caller`), so `key_id` is `Some` here; an absent
     // id is treated as unauthorized rather than unwrapped.
     let store = require_store(&state)?;
     let key_id = key_id.ok_or_else(ApiError::unauthorized)?;
@@ -656,6 +656,111 @@ pub async fn submit_task_handler(
             status: task.status,
         }),
     ))
+}
+
+/// Full task state returned by the status endpoints (`GET /tasks/{id}` and `GET /tasks`).
+///
+/// `created_at`/`updated_at` are unix timestamps in seconds, matching the timestamp convention
+/// used elsewhere in the API (e.g. the admin key listing). `payload` is populated once the task
+/// reaches `ready`; `error` once it is `failed` or `expired`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskView {
+    pub task_id: String,
+    pub status: TaskStatus,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub error: Option<String>,
+    pub payload: Option<String>,
+}
+
+impl From<Task> for TaskView {
+    fn from(task: Task) -> Self {
+        Self {
+            task_id: task.id,
+            status: task.status,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+            error: task.error,
+            payload: task.payload,
+        }
+    }
+}
+
+/// Page size used by `GET /tasks` when the caller does not specify `limit`.
+const DEFAULT_TASK_PAGE_SIZE: i64 = 50;
+/// Largest page size `GET /tasks` will serve; larger `limit` values are clamped down to it.
+const MAX_TASK_PAGE_SIZE: i64 = 200;
+
+/// Query parameters for `GET /tasks`: an optional status filter and pagination bounds.
+#[derive(Debug, Deserialize)]
+pub struct ListTasksQuery {
+    #[serde(default)]
+    status: Option<TaskStatus>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+}
+
+/// Handler for `GET /tasks/{task_id}` — returns the full state of a single task.
+///
+/// A task is visible only to the API key that created it: an unknown id yields `404`, and a task
+/// owned by a different key yields `403` (kept distinct from `404` so a caller can tell "no such
+/// task" from "not yours").
+pub async fn get_task_handler(
+    State(state): State<IngressState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> Result<Json<TaskView>, ApiError> {
+    let key_id = authenticate_caller(&state, &headers).await?;
+    let store = require_store(&state)?;
+    let key_id = key_id.ok_or_else(ApiError::unauthorized)?;
+
+    let task = store
+        .get_task(&task_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to fetch task");
+            ApiError::internal("Internal error: failed to fetch task")
+        })?
+        .ok_or_else(|| ApiError::not_found("Task not found"))?;
+
+    if task.key_id != key_id {
+        return Err(ApiError::forbidden("Task belongs to a different API key"));
+    }
+
+    Ok(Json(task.into()))
+}
+
+/// Handler for `GET /tasks` — lists the calling key's tasks, newest first.
+///
+/// Scoped to the caller's API key; supports an optional `?status=` filter and `?limit=`/`?offset=`
+/// pagination. `limit` defaults to [`DEFAULT_TASK_PAGE_SIZE`] and is clamped to
+/// `[1, MAX_TASK_PAGE_SIZE]`; a negative `offset` is treated as `0`.
+pub async fn list_tasks_handler(
+    State(state): State<IngressState>,
+    headers: HeaderMap,
+    ApiQuery(params): ApiQuery<ListTasksQuery>,
+) -> Result<Json<Vec<TaskView>>, ApiError> {
+    let key_id = authenticate_caller(&state, &headers).await?;
+    let store = require_store(&state)?;
+    let key_id = key_id.ok_or_else(ApiError::unauthorized)?;
+
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_TASK_PAGE_SIZE)
+        .clamp(1, MAX_TASK_PAGE_SIZE);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let tasks = store
+        .list_tasks_for_key(&key_id, params.status, limit, offset)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to list tasks");
+            ApiError::internal("Internal error: failed to list tasks")
+        })?;
+
+    Ok(Json(tasks.into_iter().map(TaskView::from).collect()))
 }
 
 /// Request body for `POST /admin/keys`. The whole body is optional; an empty body creates an
@@ -818,8 +923,9 @@ pub fn build_app() -> Router<IngressState> {
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/avs-metadata", get(avs_metadata_handler))
-        .route("/tasks", post(submit_task_handler))
-        // Deprecated alias for `/tasks`, kept to ease client migration; identical behavior.
+        .route("/tasks", post(submit_task_handler).get(list_tasks_handler))
+        .route("/tasks/:task_id", get(get_task_handler))
+        // Deprecated alias for `POST /tasks`, kept to ease client migration; identical behavior.
         .route("/trigger", post(submit_task_handler))
         .route(
             "/admin/keys",
@@ -1890,6 +1996,223 @@ mod tests {
                 receiver.try_recv().is_err(),
                 "invalid task must not be pushed to queue"
             );
+        }
+
+        // -- status polling tests (GET /tasks/{id}, GET /tasks) --
+
+        fn get_request(uri: &str, token: Option<&str>) -> Request<Body> {
+            let mut builder = Request::builder().method(Method::GET).uri(uri);
+            if let Some(token) = token {
+                builder = builder.header("Authorization", format!("Bearer {token}"));
+            }
+            builder.body(Body::empty()).unwrap()
+        }
+
+        async fn task_view(resp: axum::response::Response) -> TaskView {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).expect("task view should deserialize")
+        }
+
+        async fn task_views(resp: axum::response::Response) -> Vec<TaskView> {
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice(&bytes).expect("task list should deserialize")
+        }
+
+        /// Persists a task for `key_id` directly through the store, returning its id.
+        async fn seed_task(store: &SqliteStore, key_id: &str) -> String {
+            store
+                .create_task(key_id, &valid_request().body)
+                .await
+                .expect("seeding a task should succeed")
+                .id
+        }
+
+        #[tokio::test]
+        async fn get_task_returns_owner_task() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+            let id = seed_task(&store, &key.id).await;
+
+            let resp = app
+                .oneshot(get_request(&format!("/tasks/{id}"), Some(&key.key)))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let view = task_view(resp).await;
+            assert_eq!(view.task_id, id);
+            assert_eq!(view.status, TaskStatus::Queued);
+            assert!(view.payload.is_none());
+            assert!(view.error.is_none());
+            assert!(view.created_at > 0);
+        }
+
+        #[tokio::test]
+        async fn get_task_ready_includes_payload() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+            let id = seed_task(&store, &key.id).await;
+            store.mark_task_ready(&id, "0xdeadbeef").await.unwrap();
+
+            let view = task_view(
+                app.oneshot(get_request(&format!("/tasks/{id}"), Some(&key.key)))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(view.status, TaskStatus::Ready);
+            assert_eq!(view.payload.as_deref(), Some("0xdeadbeef"));
+        }
+
+        #[tokio::test]
+        async fn get_task_failed_includes_error() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+            let id = seed_task(&store, &key.id).await;
+            store
+                .mark_task_failed(&id, "aggregation timed out")
+                .await
+                .unwrap();
+
+            let view = task_view(
+                app.oneshot(get_request(&format!("/tasks/{id}"), Some(&key.key)))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(view.status, TaskStatus::Failed);
+            assert_eq!(view.error.as_deref(), Some("aggregation timed out"));
+        }
+
+        #[tokio::test]
+        async fn get_unknown_task_returns_404() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+            let resp = app
+                .oneshot(get_request("/tasks/does-not-exist", Some(&key.key)))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::NotFound);
+        }
+
+        #[tokio::test]
+        async fn get_task_owned_by_other_key_returns_403() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let owner = store.create_api_key(None, None).await.unwrap();
+            let other = store.create_api_key(None, None).await.unwrap();
+            let id = seed_task(&store, &owner.id).await;
+
+            let resp = app
+                .oneshot(get_request(&format!("/tasks/{id}"), Some(&other.key)))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::Forbidden);
+        }
+
+        #[tokio::test]
+        async fn get_task_without_token_returns_401() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+            let id = seed_task(&store, &key.id).await;
+            let resp = app
+                .oneshot(get_request(&format!("/tasks/{id}"), None))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn list_tasks_is_scoped_to_key_newest_first() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let key_a = store.create_api_key(None, None).await.unwrap();
+            let key_b = store.create_api_key(None, None).await.unwrap();
+            seed_task(&store, &key_a.id).await;
+            seed_task(&store, &key_a.id).await;
+            seed_task(&store, &key_b.id).await;
+
+            let resp = app
+                .oneshot(get_request("/tasks", Some(&key_a.key)))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let views = task_views(resp).await;
+            assert_eq!(views.len(), 2, "list must be scoped to the calling key");
+            assert!(
+                views.windows(2).all(|w| w[0].created_at >= w[1].created_at),
+                "tasks must be newest first"
+            );
+        }
+
+        #[tokio::test]
+        async fn list_tasks_filters_by_status() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+            let ready = seed_task(&store, &key.id).await;
+            seed_task(&store, &key.id).await;
+            store.mark_task_ready(&ready, "0x00").await.unwrap();
+
+            let views = task_views(
+                app.oneshot(get_request("/tasks?status=ready", Some(&key.key)))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(views.len(), 1);
+            assert_eq!(views[0].task_id, ready);
+            assert_eq!(views[0].status, TaskStatus::Ready);
+        }
+
+        #[tokio::test]
+        async fn list_tasks_paginates() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+            for _ in 0..3 {
+                seed_task(&store, &key.id).await;
+            }
+
+            let first = task_views(
+                app.clone()
+                    .oneshot(get_request("/tasks?limit=2", Some(&key.key)))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(first.len(), 2);
+
+            let second = task_views(
+                app.oneshot(get_request("/tasks?limit=2&offset=2", Some(&key.key)))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(second.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn list_tasks_rejects_bad_status_with_envelope() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+            let resp = app
+                .oneshot(get_request("/tasks?status=bogus", Some(&key.key)))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
+        }
+
+        #[tokio::test]
+        async fn list_tasks_without_token_returns_401() {
+            let (app, _store, _rx) = make_app_with_store(None).await;
+            let resp = app.oneshot(get_request("/tasks", None)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         }
     }
 

@@ -11,9 +11,10 @@
 //! any time. Status codes are carried alongside the code internally and are unchanged
 //! from the per-endpoint behaviour they replace.
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Request};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{FromRequest, FromRequestParts, Query, Request};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, async_trait};
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,9 @@ pub enum ErrorCode {
     QueueFull,
     /// The request is missing valid authentication credentials.
     Unauthorized,
+    /// The caller is authenticated but not permitted to access the requested resource (e.g. a
+    /// task owned by a different API key).
+    Forbidden,
     /// An upstream RPC endpoint failed or is unreachable.
     RpcUnavailable,
     /// No contract is deployed at the requested target address on any supported chain.
@@ -101,6 +105,16 @@ impl ApiError {
         )
     }
 
+    /// 403 with [`ErrorCode::Forbidden`].
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, message)
+    }
+
+    /// 404 with [`ErrorCode::NotFound`].
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message)
+    }
+
     /// 503 with [`ErrorCode::QueueFull`].
     pub fn queue_full(message: impl Into<String>) -> Self {
         Self::new(
@@ -158,6 +172,32 @@ where
     }
 }
 
+/// A `Query<T>` extractor that emits the [`ApiErrorEnvelope`] on failure instead of axum's
+/// default plain-text body, so a malformed query string (an unknown `?status=` value, a
+/// non-integer `?limit=`) shares the same error contract as the rest of the API. The status
+/// from the underlying [`QueryRejection`] is preserved (400).
+pub struct ApiQuery<T>(pub T);
+
+#[async_trait]
+impl<S, T> FromRequestParts<S> for ApiQuery<T>
+where
+    Query<T>: FromRequestParts<S, Rejection = QueryRejection>,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(value)) => Ok(ApiQuery(value)),
+            Err(rejection) => Err(ApiError::new(
+                rejection.status(),
+                ErrorCode::InvalidRequest,
+                rejection.body_text(),
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +213,7 @@ mod tests {
             (ErrorCode::RateLimited, "RATE_LIMITED"),
             (ErrorCode::QueueFull, "QUEUE_FULL"),
             (ErrorCode::Unauthorized, "UNAUTHORIZED"),
+            (ErrorCode::Forbidden, "FORBIDDEN"),
             (ErrorCode::RpcUnavailable, "RPC_UNAVAILABLE"),
             (ErrorCode::ContractNotFound, "CONTRACT_NOT_FOUND"),
             (ErrorCode::InvalidRequest, "INVALID_REQUEST"),
