@@ -38,6 +38,9 @@ NODE_COUNT="${NODE_COUNT:-3}"
 FORK_URL="${FORK_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
 PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 FUNDED_KEY="${FUNDED_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+# Guards the /admin/keys endpoints used to mint the API keys that authenticate /trigger. A fixed
+# dev value for the local harness; override by exporting ADMIN_KEY.
+ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 SKIP_CLEANUP="${SKIP_CLEANUP:-false}"
 
@@ -169,6 +172,7 @@ helm install "$HELM_RELEASE" ./helm/gas-killer \
     --set secrets.forkUrl="$FORK_URL" \
     --set secrets.privateKey="$PRIVATE_KEY" \
     --set secrets.fundedKey="$FUNDED_KEY" \
+    --set secrets.adminKey="$ADMIN_KEY" \
     --set node.image.repository=avs \
     --set node.image.tag=node-local \
     --set node.image.pullPolicy=Never \
@@ -282,6 +286,30 @@ echo -e "${GREEN}ArraySummation deployment completed${NC}"
 
 # Step 12: Trigger Gas Killer task
 echo -e "${YELLOW}Step 12: Triggering Gas Killer task...${NC}"
+
+# Mint an API key so task submission is authenticated. The router requires a valid, unrevoked
+# key on /trigger; mint one via the admin API (guarded by ADMIN_KEY) and hand it to send_request
+# through GAS_KILLER_API_KEY.
+CREATE_RESP=$(curl -s -X POST \
+    -H "Authorization: Bearer $ADMIN_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"label":"helm-test"}' \
+    http://localhost:8080/admin/keys)
+if command -v jq >/dev/null 2>&1; then
+    GAS_KILLER_API_KEY=$(printf '%s' "$CREATE_RESP" | jq -r '.key // empty')
+else
+    GAS_KILLER_API_KEY=$(printf '%s' "$CREATE_RESP" | grep -o '"key"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/')
+fi
+case "$GAS_KILLER_API_KEY" in
+    gk_*) ;;
+    *)
+        echo -e "${RED}Failed to mint API key. Admin response: $CREATE_RESP${NC}"
+        kubectl logs -l app.kubernetes.io/component=router --tail 50 || true
+        exit 1
+        ;;
+esac
+export GAS_KILLER_API_KEY
+echo -e "${GREEN}Minted API key for task submission${NC}"
 
 cd scripts
 export GAS_KILLER_ROUTER_URL=http://localhost:8080

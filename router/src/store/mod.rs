@@ -9,6 +9,10 @@
 //! feature that needs a table adds its own migration; this module owns only connection
 //! setup and the migration runner.
 
+mod api_keys;
+
+pub use api_keys::{ApiKeyMetadata, CreatedApiKey};
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

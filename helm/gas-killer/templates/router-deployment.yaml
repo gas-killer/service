@@ -293,12 +293,13 @@ spec:
               value: {{ .Values.router.persistence.mountPath | quote }}
             - name: INGRESS_TIMEOUT_MS
               value: {{ .Values.router.ingress.timeoutMs | quote }}
-            {{- if or (and (eq .Values.global.environment "TESTNET") .Values.router.ingress.enabled) .Values.secrets.ingressPassword }}
-            - name: INGRESS_PASSWORD
+            {{- if or (and (eq .Values.global.environment "TESTNET") .Values.router.ingress.enabled) .Values.secrets.adminKey .Values.secrets.existingSecret }}
+            - name: ADMIN_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
-                  key: INGRESS_PASSWORD
+                  key: ADMIN_KEY
+                  optional: true
             {{- end }}
             - name: AVS_METADATA_NAME
               value: {{ .Values.router.avsMetadata.name | quote }}

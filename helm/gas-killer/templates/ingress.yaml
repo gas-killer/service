@@ -26,11 +26,18 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          - path: /
+          {{- /*
+            Explicit allowlist of public paths. Any path not listed (notably /admin/*) is not
+            routed here and stays reachable only in-cluster. Falls back to the router's public
+            routes if publicPaths is unset, never to a catch-all "/".
+          */}}
+          {{- range .Values.ingress.publicPaths | default (list "/trigger" "/avs-metadata" "/healthz") }}
+          - path: {{ . | quote }}
             pathType: Prefix
             backend:
               service:
-                name: {{ include "gas-killer.router.fullname" . }}
+                name: {{ include "gas-killer.router.fullname" $ }}
                 port:
                   name: ingress
+          {{- end }}
 {{- end }}

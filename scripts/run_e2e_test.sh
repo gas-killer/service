@@ -13,6 +13,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$PROJECT_ROOT/logs"
 
+# Task submission is authenticated with per-client API keys minted through the admin API, which
+# is guarded by ADMIN_KEY. Use a fixed dev value unless the caller overrides it; docker-compose
+# reads the same default for the router so the two stay in sync.
+export ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
+
 # Track if test passed
 TEST_PASSED=false
 
@@ -216,6 +221,31 @@ echo -e "${GREEN}Router ingress is ready (${elapsed}s)${NC}"
 # Step 9: Brief wait for services to stabilize
 echo -e "${YELLOW}Step 9: Waiting briefly for services to stabilize...${NC}"
 sleep 5
+
+# Step 9b: Mint an API key so task submission is authenticated. The router requires a valid,
+# unrevoked key on /trigger; mint one via the admin API (guarded by ADMIN_KEY) and hand it to
+# send_request through GAS_KILLER_API_KEY.
+echo -e "${YELLOW}Step 9b: Minting an API key via the admin endpoint...${NC}"
+CREATE_RESP=$(curl -s -X POST \
+    -H "Authorization: Bearer $ADMIN_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"label":"e2e"}' \
+    http://localhost:8080/admin/keys)
+if command -v jq >/dev/null 2>&1; then
+    GAS_KILLER_API_KEY=$(printf '%s' "$CREATE_RESP" | jq -r '.key // empty')
+else
+    GAS_KILLER_API_KEY=$(printf '%s' "$CREATE_RESP" | grep -o '"key"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/')
+fi
+case "$GAS_KILLER_API_KEY" in
+    gk_*) ;;
+    *)
+        echo -e "${RED}Failed to mint API key. Admin response: $CREATE_RESP${NC}"
+        docker compose logs --tail=50 router || true
+        exit 1
+        ;;
+esac
+export GAS_KILLER_API_KEY
+echo -e "${GREEN}Minted API key for task submission${NC}"
 
 # Step 10: Trigger Gas Killer task and verify execution
 echo -e "${YELLOW}Step 10: Triggering task and verifying execution...${NC}"
