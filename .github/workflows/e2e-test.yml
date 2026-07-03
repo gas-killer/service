@@ -64,6 +64,11 @@ jobs:
           fi
 
       - name: Run test
+        env:
+          # The ECDSA AVS stack is deployed by the eigenlayer setup image. Pinned to
+          # the companion PR build of BreadchainCoop/eigenlayer-bls-local; repin to
+          # "latest" once that PR merges.
+          EIGENLAYER_IMAGE: ghcr.io/breadchaincoop/eigenlayer:pr-ron-gas-killer-ecdsa-stack
         run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log; exit ${PIPESTATUS[0]}
 
       - name: Show router logs

@@ -32,6 +32,7 @@ eigenlayer:
     lstContract: "0x00c71b0fcadE911B2feeE9912De4Fe19eB04ca56"
     lstStrategy: "0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574"
     allocationManager: "0x42583067658071247ec8CE0A516A58f682002d07"
+    avsDirectory: "0xa789c91ECDdae96865913130B786140Ee17aF545"
   quorum:
     minimumStake: "100000000000000000"   # 0.1 stETH
     maxOperatorCount: 4

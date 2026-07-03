@@ -106,7 +106,7 @@ echo "Environment configuration complete"
 
 # Step 3: Pull Docker images
 echo -e "${YELLOW}Step 3: Pulling Docker images...${NC}"
-docker compose pull
+docker compose pull --ignore-pull-failures
 
 # Step 4: Build service images
 echo -e "${YELLOW}Step 4: Building service Docker images...${NC}"

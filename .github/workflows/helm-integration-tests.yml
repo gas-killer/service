@@ -88,9 +88,13 @@ jobs:
 
       - name: Pre-pull external images into kind
         run: |
+          # TODO(BreadchainCoop/eigenlayer-bls-local ECDSA-stack PR): repin the
+          # eigenlayer image to "latest" once the ECDSA stack lands on main.
+          EIGENLAYER_IMAGE_TAG="pr-ron-gas-killer-ecdsa-stack"
+          echo "EIGENLAYER_IMAGE_TAG=$EIGENLAYER_IMAGE_TAG" >> "$GITHUB_ENV"
           IMAGES=(
             "ghcr.io/breadchaincoop/ethereum:latest"
-            "ghcr.io/breadchaincoop/eigenlayer:latest"
+            "ghcr.io/breadchaincoop/eigenlayer:$EIGENLAYER_IMAGE_TAG"
             "ghcr.io/breadchaincoop/target-contracts/bridge:latest"
           )
           for IMAGE in "${IMAGES[@]}"; do
@@ -128,6 +132,7 @@ jobs:
           LST_CONTRACT="0x00c71b0fcadE911B2feeE9912De4Fe19eB04ca56"
           LST_STRATEGY="0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574"
           ALLOCATION_MANAGER="0x42583067658071247ec8CE0A516A58f682002d07"
+          AVS_DIRECTORY="0xa789c91ECDdae96865913130B786140Ee17aF545"
 
           echo "Installing Helm chart with fork URL: $FORK_URL"
 
@@ -148,6 +153,8 @@ jobs:
             --set eigenlayer.contracts.lstContract="$LST_CONTRACT" \
             --set eigenlayer.contracts.lstStrategy="$LST_STRATEGY" \
             --set eigenlayer.contracts.allocationManager="$ALLOCATION_MANAGER" \
+            --set eigenlayer.contracts.avsDirectory="$AVS_DIRECTORY" \
+            --set eigenlayer.image.tag="$EIGENLAYER_IMAGE_TAG" \
             --set secrets.forkUrl="$FORK_URL" \
             --set secrets.privateKey="$PRIVATE_KEY" \
             --set secrets.fundedKey="$FUNDED_KEY" \

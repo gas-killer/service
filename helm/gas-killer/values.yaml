@@ -151,6 +151,9 @@ eigenlayer:
   # No defaults: set these explicitly via an overrides file (e.g. testnet-overrides.yaml).
   contracts:
     delegationManager: ""
+    # AVSDirectory — the setup job registers operators with the Gas Killer
+    # ECDSAStakeRegistry through it
+    avsDirectory: ""
     strategyManager: ""
     lstContract: ""
     lstStrategy: ""
