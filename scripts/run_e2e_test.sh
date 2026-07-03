@@ -2,6 +2,14 @@
 
 set -e
 
+# Host port for the router ingress (remap when 8080 is taken on the host).
+# Exported before docker compose up so the port mapping picks it up, and before
+# .env is sourced so the URL always tracks the chosen port.
+ROUTER_INGRESS_PORT="${ROUTER_INGRESS_PORT:-8080}"
+export ROUTER_INGRESS_PORT
+export GAS_KILLER_ROUTER_URL="http://localhost:${ROUTER_INGRESS_PORT}"
+export GAS_KILLER_TRIGGER_URL="http://localhost:${ROUTER_INGRESS_PORT}/trigger"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -149,6 +157,9 @@ cd "$PROJECT_ROOT/scripts"
 
 # Source environment and run deployment
 source ../.env
+# .env carries GAS_KILLER_ROUTER_URL=...:8080; re-pin it to the chosen ingress port.
+export GAS_KILLER_ROUTER_URL="http://localhost:${ROUTER_INGRESS_PORT}"
+export GAS_KILLER_TRIGGER_URL="http://localhost:${ROUTER_INGRESS_PORT}/trigger"
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
@@ -202,7 +213,7 @@ cd "$PROJECT_ROOT"
 
 # Step 8: Wait for router ingress to be reachable
 echo -e "${YELLOW}Step 8: Waiting for router ingress to be ready...${NC}"
-ROUTER_HEALTH_URL="http://localhost:8080/healthz"
+ROUTER_HEALTH_URL="http://localhost:${ROUTER_INGRESS_PORT}/healthz"
 ROUTER_TIMEOUT=120
 ROUTER_INTERVAL=3
 elapsed=0
@@ -230,7 +241,7 @@ CREATE_RESP=$(curl -s -X POST \
     -H "Authorization: Bearer $ADMIN_KEY" \
     -H "Content-Type: application/json" \
     -d '{"label":"e2e"}' \
-    http://localhost:8080/admin/keys)
+    "http://localhost:${ROUTER_INGRESS_PORT}/admin/keys")
 if command -v jq >/dev/null 2>&1; then
     GAS_KILLER_API_KEY=$(printf '%s' "$CREATE_RESP" | jq -r '.key // empty')
 else

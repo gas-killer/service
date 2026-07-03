@@ -199,7 +199,7 @@ services:
       - "sleep 45 && exec gas-killer-router --key-file /app/router_orchestrator.json --port 3000"
     ports:
       - "4000:3000"
-      - "8080:8080"
+      - "${ROUTER_INGRESS_PORT:-8080}:8080"
       - "8081:8081"  # metrics / healthz
     restart: unless-stopped
 
