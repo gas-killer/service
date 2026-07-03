@@ -691,6 +691,22 @@ const DEFAULT_TASK_PAGE_SIZE: i64 = 50;
 /// Largest page size `GET /tasks` will serve; larger `limit` values are clamped down to it.
 const MAX_TASK_PAGE_SIZE: i64 = 200;
 
+/// Resolves the effective page size from the caller's optional `limit`: defaulted to
+/// [`DEFAULT_TASK_PAGE_SIZE`] and clamped to `[1, MAX_TASK_PAGE_SIZE]`, so a request can never
+/// ask for a zero, negative, or unbounded page.
+fn clamp_page_limit(limit: Option<i64>) -> i64 {
+    limit
+        .unwrap_or(DEFAULT_TASK_PAGE_SIZE)
+        .clamp(1, MAX_TASK_PAGE_SIZE)
+}
+
+/// Resolves the effective offset from the caller's optional `offset`: defaulted to 0 with
+/// negatives floored to 0. SQLite treats a negative OFFSET as 0 anyway; normalizing here keeps
+/// the bound explicit and independent of the backing store.
+fn clamp_offset(offset: Option<i64>) -> i64 {
+    offset.unwrap_or(0).max(0)
+}
+
 /// Query parameters for `GET /tasks`: an optional status filter and pagination bounds.
 #[derive(Debug, Deserialize)]
 pub struct ListTasksQuery {
@@ -746,11 +762,8 @@ pub async fn list_tasks_handler(
     let store = require_store(&state)?;
     let key_id = key_id.ok_or_else(ApiError::unauthorized)?;
 
-    let limit = params
-        .limit
-        .unwrap_or(DEFAULT_TASK_PAGE_SIZE)
-        .clamp(1, MAX_TASK_PAGE_SIZE);
-    let offset = params.offset.unwrap_or(0).max(0);
+    let limit = clamp_page_limit(params.limit);
+    let offset = clamp_offset(params.offset);
 
     let tasks = store
         .list_tasks_for_key(&key_id, params.status, limit, offset)
@@ -1106,6 +1119,39 @@ mod tests {
             req.validate().unwrap_err(),
             ValidationError::ZeroTargetAddress
         );
+    }
+
+    // -- pagination bound tests --
+
+    #[test]
+    fn page_limit_defaults_when_unset() {
+        assert_eq!(clamp_page_limit(None), DEFAULT_TASK_PAGE_SIZE);
+    }
+
+    #[test]
+    fn page_limit_clamps_to_bounds() {
+        // Above the cap is clamped down; below 1 (zero or negative) is floored to 1.
+        assert_eq!(
+            clamp_page_limit(Some(MAX_TASK_PAGE_SIZE + 1)),
+            MAX_TASK_PAGE_SIZE
+        );
+        assert_eq!(clamp_page_limit(Some(10_000)), MAX_TASK_PAGE_SIZE);
+        assert_eq!(clamp_page_limit(Some(0)), 1);
+        assert_eq!(clamp_page_limit(Some(-5)), 1);
+        // A value already within range passes through unchanged.
+        assert_eq!(clamp_page_limit(Some(25)), 25);
+        assert_eq!(
+            clamp_page_limit(Some(MAX_TASK_PAGE_SIZE)),
+            MAX_TASK_PAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn offset_defaults_and_floors_negatives() {
+        assert_eq!(clamp_offset(None), 0);
+        assert_eq!(clamp_offset(Some(-1)), 0);
+        assert_eq!(clamp_offset(Some(0)), 0);
+        assert_eq!(clamp_offset(Some(42)), 42);
     }
 
     // -- HTTP handler integration tests --
