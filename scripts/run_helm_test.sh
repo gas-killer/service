@@ -273,7 +273,12 @@ cd scripts
 export HTTP_RPC=http://localhost:8545
 export WS_RPC=ws://localhost:8545
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
-export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
+# EigenLayer core on the Sepolia fork: the deploy script deploys the
+# ECDSAStakeRegistry + GasKillerServiceManager against these and registers the
+# operators. A fresh ECDSA ArraySummationFactory is deployed too (the
+# pre-migration BLS factory on Sepolia is ABI-incompatible, so no
+# ARRAY_SUMMATION_FACTORY_ADDRESS here).
+export DELEGATION_MANAGER_ADDRESS="${DELEGATION_MANAGER_ADDRESS:-0xD4A7E1Bd8015057293f0D0A557088c286942e84b}"
 export ARRAY_SUMMATION_ARRAY_SIZE=100
 export ARRAY_SUMMATION_MAX_VALUE=1000
 export ARRAY_SUMMATION_SEED=42

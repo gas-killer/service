@@ -57,11 +57,13 @@ router:
   ingress:
     timeoutMs: "0"
 
-# Deploy the smoke-test target (ArraySummation) wired to a real BLSSignatureChecker after
-# AVS setup, then publish its address to a ConfigMap. Read it for the local smoke test:
+# Deploy the smoke-test target (ArraySummation) after AVS setup, then publish its
+# address to a ConfigMap. DISABLED for the ECDSA migration: the solidity-sdk image
+# still ships the BLS-era contracts. Use scripts/deploy_array_summation instead
+# (deploys the ECDSAStakeRegistry + service manager and registers the operators).
 #   kubectl get configmap gas-killer-smoke-target -o jsonpath='{.data.target}'
 deployTarget:
-  enabled: true
+  enabled: false
   image:
     # `latest` is published on pushes to main (solidity-sdk docker-publish workflow).
     # Pin with --set deployTarget.image.tag=<sha> if you need a specific build.

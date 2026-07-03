@@ -428,6 +428,11 @@ bridge:
 # BLSSignatureChecker against the freshly-deployed AVS, then publishes its address to a
 # ConfigMap for the local smoke test. Opt-in (off by default; enable on testnet).
 deployTarget:
+  # INCOMPATIBLE with the ECDSA migration: the solidity-sdk image still deploys the
+  # BLS-era ArraySummation (BLSSignatureChecker-wired). Deploy the smoke target with
+  # `cargo run -p scripts --bin deploy_array_summation` instead (see
+  # scripts/run_helm_test.sh step 11), which also provisions the ECDSAStakeRegistry
+  # and registers the operators. Re-enable once solidity-sdk ships the ECDSA SDK.
   enabled: false
   image:
     # Built from gas-killer/solidity-sdk (forge + the SDK contracts). Tag must be set at deploy.
