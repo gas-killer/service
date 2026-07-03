@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .to::<u64>();
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
-        .unwrap_or_else(|_| "http://localhost:8080/trigger".to_string());
+        .unwrap_or_else(|_| "http://localhost:8080/tasks".to_string());
     println!("Posting GasKiller task to {}", url);
 
     let client = reqwest::Client::new();

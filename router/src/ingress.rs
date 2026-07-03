@@ -1,7 +1,7 @@
 use crate::creator::{TaskQueueDepth, TaskSender};
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ErrorCode};
 use crate::metrics::MetricsCollector;
-use crate::store::{ApiKeyMetadata, CreatedApiKey, SqliteStore};
+use crate::store::{ApiKeyMetadata, CreatedApiKey, SqliteStore, TaskStatus};
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use axum::{
@@ -161,14 +161,19 @@ fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
         .is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
 }
 
-/// Authorizes a task-submission request. When a durable store is configured — always the case
-/// in production — a valid, unrevoked API key is required. With no store, the request is rejected
-/// unless `allow_unauthenticated` is set (the test/dev bare constructor), so a missing store
-/// fails closed rather than silently opening the endpoint.
-async fn authorize_task_request(state: &IngressState, headers: &HeaderMap) -> Result<(), ApiError> {
+/// Authorizes a task-submission request, returning the authenticated key's id when a store is
+/// configured. When a durable store is present — always the case in production — a valid,
+/// unrevoked API key is required and its id is returned so the submitted task can be scoped to
+/// its owner. With no store, the request is rejected unless `allow_unauthenticated` is set (the
+/// test/dev bare constructor), which yields `None`; a missing store fails closed rather than
+/// silently opening the endpoint.
+async fn authorize_task_request(
+    state: &IngressState,
+    headers: &HeaderMap,
+) -> Result<Option<String>, ApiError> {
     let Some(store) = &state.store else {
         return if state.allow_unauthenticated {
-            Ok(())
+            Ok(None)
         } else {
             Err(ApiError::unauthorized())
         };
@@ -176,7 +181,7 @@ async fn authorize_task_request(state: &IngressState, headers: &HeaderMap) -> Re
 
     if let Some(token) = bearer_token(headers) {
         match store.verify_api_key(token).await {
-            Ok(Some(_)) => return Ok(()),
+            Ok(Some(id)) => return Ok(Some(id)),
             Ok(None) => {}
             Err(e) => {
                 tracing::error!(error = %e, "api key verification failed");
@@ -540,19 +545,27 @@ impl GasKillerTaskRequest {
     }
 }
 
+/// Body returned by `POST /tasks` (and its deprecated alias `POST /trigger`) when a task is
+/// accepted: the id the client polls for status, and the task's initial state.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct GasKillerTaskResponse {
-    pub success: bool,
-    pub message: String,
+pub struct TaskAcceptedResponse {
+    pub task_id: String,
+    pub status: TaskStatus,
 }
 
-// Handler for POST /trigger
-pub async fn trigger_task_handler(
+/// Handler for `POST /tasks`, and its deprecated alias `POST /trigger`.
+///
+/// Validates the request, persists it as a `queued` task before responding — so a restart can
+/// recover work already acknowledged to the client — then enqueues it for aggregation and returns
+/// the task id for status polling. Persistence requires a configured store and an authenticated
+/// key that owns the task; validation and load-shedding stay synchronous and run first, so a
+/// malformed or at-capacity request is rejected before any task row is written.
+pub async fn submit_task_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
     ApiJson(request): ApiJson<GasKillerTaskRequest>,
-) -> Result<(StatusCode, Json<GasKillerTaskResponse>), ApiError> {
-    authorize_task_request(&state, &headers).await?;
+) -> Result<(StatusCode, Json<TaskAcceptedResponse>), ApiError> {
+    let key_id = authorize_task_request(&state, &headers).await?;
 
     // Load-shed before any validation work. Onchain validation costs multiple RPC
     // round-trips, so rejecting at-capacity requests up front keeps an overloaded
@@ -604,7 +617,22 @@ pub async fn trigger_task_handler(
         return Err(e.into());
     }
 
+    // Persistence is required to hand back a task id and to survive restarts. A configured store
+    // always authenticates (see `authorize_task_request`), so `key_id` is `Some` here; an absent
+    // id is treated as unauthorized rather than unwrapped.
+    let store = require_store(&state)?;
+    let key_id = key_id.ok_or_else(ApiError::unauthorized)?;
+
+    let task = store
+        .create_task(&key_id, &request.body)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to persist task");
+            ApiError::internal("Internal error: failed to persist task")
+        })?;
+
     info!(
+        task_id = %task.id,
         target_address = %request.body.target_address,
         from_address = %request.body.from_address,
         block_height = request.body.block_height,
@@ -614,7 +642,7 @@ pub async fn trigger_task_handler(
     let depth = state.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
     if state.sender.send(request).is_err() {
         state.queue_depth.fetch_sub(1, Ordering::Relaxed);
-        tracing::error!("task channel closed, dropping request");
+        tracing::error!(task_id = %task.id, "task channel closed, dropping request");
         return Err(ApiError::internal("Internal error: task queue unavailable"));
     }
     if let Some(m) = &state.metrics {
@@ -622,10 +650,10 @@ pub async fn trigger_task_handler(
         m.task_queue_depth.set(depth as i64);
     }
     Ok((
-        StatusCode::OK,
-        Json(GasKillerTaskResponse {
-            success: true,
-            message: "Task queued".to_string(),
+        StatusCode::ACCEPTED,
+        Json(TaskAcceptedResponse {
+            task_id: task.id,
+            status: task.status,
         }),
     ))
 }
@@ -790,7 +818,9 @@ pub fn build_app() -> Router<IngressState> {
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/avs-metadata", get(avs_metadata_handler))
-        .route("/trigger", post(trigger_task_handler))
+        .route("/tasks", post(submit_task_handler))
+        // Deprecated alias for `/tasks`, kept to ease client migration; identical behavior.
+        .route("/trigger", post(submit_task_handler))
         .route(
             "/admin/keys",
             post(create_api_key_handler).get(list_api_keys_handler),
@@ -974,7 +1004,7 @@ mod tests {
 
     // -- HTTP handler integration tests --
     //
-    // These tests call trigger_task_handler through the real Axum router using
+    // These tests call submit_task_handler through the real Axum router using
     // tower::ServiceExt::oneshot, so they exercise JSON extraction, status codes,
     // and queue interaction end-to-end without binding a port.
 
@@ -1027,9 +1057,15 @@ mod tests {
         }
 
         fn bearer_request(body: &str, token: &str) -> Request<Body> {
+            bearer_request_to("/trigger", body, token)
+        }
+
+        /// A POST to an arbitrary submission URI with a Bearer token, so tests can exercise both
+        /// `/tasks` and its `/trigger` alias through the same helper.
+        fn bearer_request_to(uri: &str, body: &str, token: &str) -> Request<Body> {
             Request::builder()
                 .method(Method::POST)
-                .uri("/trigger")
+                .uri(uri)
                 .header("content-type", "application/json")
                 .header("Authorization", format!("Bearer {token}"))
                 .body(Body::from(body.to_string()))
@@ -1059,11 +1095,11 @@ mod tests {
             .to_string()
         }
 
-        async fn response_body(resp: axum::response::Response) -> GasKillerTaskResponse {
+        async fn accepted_body(resp: axum::response::Response) -> TaskAcceptedResponse {
             let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
                 .await
                 .unwrap();
-            serde_json::from_slice(&bytes).unwrap()
+            serde_json::from_slice(&bytes).expect("accepted response should deserialize")
         }
 
         async fn error_envelope(resp: axum::response::Response) -> crate::error::ApiErrorEnvelope {
@@ -1088,18 +1124,33 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_valid_request_returns_200_and_queues_task() {
-            let (app, mut receiver) = make_app();
-            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+        async fn test_valid_request_returns_202_and_queues_task() {
+            let (app, store, mut receiver) = make_app_with_store(None).await;
+            let created = store.create_api_key(None, None).await.unwrap();
 
-            assert_eq!(resp.status(), StatusCode::OK);
-            let body = response_body(resp).await;
-            assert!(body.success);
-            assert_eq!(body.message, "Task queued");
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let body = accepted_body(resp).await;
+            assert_eq!(body.status, TaskStatus::Queued);
+            let id = uuid::Uuid::parse_str(&body.task_id).expect("task_id should be a UUID");
+            assert_eq!(id.get_version_num(), 4, "task ids must be UUID v4");
             assert!(
                 receiver.try_recv().is_ok(),
                 "task should have been pushed to queue"
             );
+
+            // The task is persisted before the response, scoped to the submitting key.
+            let persisted = store
+                .get_task(&body.task_id)
+                .await
+                .unwrap()
+                .expect("accepted task should be persisted");
+            assert_eq!(persisted.key_id, created.id);
+            assert_eq!(persisted.status, TaskStatus::Queued);
         }
 
         #[tokio::test]
@@ -1397,20 +1448,17 @@ mod tests {
 
         #[tokio::test]
         async fn test_valid_request_does_not_leave_extra_tasks() {
-            // Two sequential valid requests → queue should hold exactly two tasks
-            let (sender, mut receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
-            let app1 = build_app().with_state(IngressState::without_metrics(
-                sender.clone(),
-                queue_depth.clone(),
-            ));
-            let app2 = build_app().with_state(IngressState::without_metrics(
-                sender.clone(),
-                queue_depth.clone(),
-            ));
+            // Two sequential valid requests → queue should hold exactly two tasks.
+            let (app, store, mut receiver) = make_app_with_store(None).await;
+            let created = store.create_api_key(None, None).await.unwrap();
 
-            app1.oneshot(json_request(&valid_body())).await.unwrap();
-            app2.oneshot(json_request(&valid_body())).await.unwrap();
+            app.clone()
+                .oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
+            app.oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
 
             assert!(receiver.try_recv().is_ok());
             assert!(receiver.try_recv().is_ok());
@@ -1427,12 +1475,15 @@ mod tests {
         // the always-open utility endpoints.
 
         #[tokio::test]
-        async fn test_no_store_configured_accepts_unauthenticated() {
-            // The bare test/dev constructor opts into unauthenticated access, so a store-less
-            // harness can exercise /trigger.
+        async fn test_submission_without_store_returns_503() {
+            // Submission now persists before responding, so it requires a store even on the
+            // unauthenticated dev path: a valid request that clears validation is rejected as
+            // not-configured rather than silently accepted and dropped.
             let (app, _queue) = make_app();
             let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::NotConfigured);
         }
 
         #[tokio::test]
@@ -1692,8 +1743,45 @@ mod tests {
                 .oneshot(bearer_request(&valid_body(), &created.key))
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let body = accepted_body(resp).await;
+            assert_eq!(body.status, TaskStatus::Queued);
             assert!(rx.try_recv().is_ok(), "valid key should queue the task");
+        }
+
+        #[tokio::test]
+        async fn tasks_endpoint_accepts_valid_api_key_and_persists() {
+            let (app, store, mut rx) = make_app_with_store(None).await;
+            let created = store.create_api_key(None, None).await.unwrap();
+
+            let resp = app
+                .oneshot(bearer_request_to("/tasks", &valid_body(), &created.key))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let body = accepted_body(resp).await;
+            assert_eq!(body.status, TaskStatus::Queued);
+            assert!(rx.try_recv().is_ok(), "valid key should queue the task");
+
+            let persisted = store
+                .get_task(&body.task_id)
+                .await
+                .unwrap()
+                .expect("accepted task should be persisted");
+            assert_eq!(persisted.key_id, created.id);
+        }
+
+        #[tokio::test]
+        async fn tasks_endpoint_rejects_missing_token_when_store_present() {
+            let (app, _store, _rx) = make_app_with_store(None).await;
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri("/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(valid_body()))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         }
 
         #[tokio::test]
@@ -1765,13 +1853,21 @@ mod tests {
         async fn test_queue_one_below_limit_still_accepts() {
             let (sender, _receiver) = crate::creator::task_channel();
             let queue_depth = crate::creator::task_queue_depth();
-            let mut state = IngressState::without_metrics(sender, queue_depth.clone());
+            let store = SqliteStore::connect_in_memory()
+                .await
+                .expect("in-memory store should open");
+            let created = store.create_api_key(None, None).await.unwrap();
+            let mut state =
+                IngressState::without_metrics(sender, queue_depth.clone()).with_store(store);
             state.max_queue_depth = 2;
             queue_depth.store(1, std::sync::atomic::Ordering::Relaxed);
             let app = build_app().with_state(state);
 
-            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
         }
 
         #[tokio::test]
