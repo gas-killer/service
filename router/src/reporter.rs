@@ -23,7 +23,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor, tokio};
 use commonware_utils::NZUsize;
 use commonware_utils::channel::oneshot;
-use gas_killer_common::bn254::{Bn254Certificate, Bn254Scheme};
+use gas_killer_common::ecdsa::{EcdsaCertificate, EcdsaScheme};
 use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, info, trace, warn};
 
@@ -35,9 +35,9 @@ pub struct CertifiedHeight {
     /// The certified digest — either a task's expected payload hash or
     /// `skip_digest(height)`.
     pub digest: Digest,
-    /// The BN254 certificate (signer bitmap + aggregated G1 signature) as
+    /// The ECDSA certificate (signer bitmap + per-signer signatures) as
     /// assembled by the engine and re-verified by this reporter.
-    pub certificate: Bn254Certificate,
+    pub certificate: EcdsaCertificate,
 }
 
 pub type CertifiedSender = UnboundedSender<CertifiedHeight>;
@@ -61,7 +61,7 @@ const MAILBOX_CAPACITY: usize = 1024;
 /// Messages processed by the [`CertReporter`] actor.
 enum Message {
     /// A newly assembled (or replayed) certificate from the engine.
-    Certified(Certificate<Bn254Scheme, Digest>),
+    Certified(Certificate<EcdsaScheme, Digest>),
     /// A tip fast-forward from the engine.
     Tip(Height),
     /// Query: the next height the engine needs a certificate for.
@@ -88,7 +88,7 @@ pub struct CertReporterMailbox {
 }
 
 impl Reporter for CertReporterMailbox {
-    type Activity = Activity<Bn254Scheme, Digest>;
+    type Activity = Activity<EcdsaScheme, Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity {
@@ -138,7 +138,7 @@ pub struct CertReporter {
     context: tokio::Context,
     mailbox: mailbox::Receiver<Message>,
     /// Verifier scheme (`me() == None`) used to re-verify certificates.
-    scheme: Bn254Scheme,
+    scheme: EcdsaScheme,
     /// Certified digest per height: dedupe (replay-idempotency) + query source.
     certified: BTreeMap<u64, Digest>,
     /// Next height the engine needs a certificate for (see [`CertReporterMailbox::get_tip`]).
@@ -154,7 +154,7 @@ impl CertReporter {
     /// `scheme` must be the same verifier instance the engine runs with.
     pub fn new(
         context: tokio::Context,
-        scheme: Bn254Scheme,
+        scheme: EcdsaScheme,
         submit: CertifiedSender,
     ) -> (Self, CertReporterMailbox) {
         let (sender, receiver) = mailbox::new(context.child("mailbox"), NZUsize!(MAILBOX_CAPACITY));
@@ -188,7 +188,7 @@ impl CertReporter {
         info!("cert reporter mailbox closed; exiting");
     }
 
-    fn handle_certified(&mut self, certificate: Certificate<Bn254Scheme, Digest>) {
+    fn handle_certified(&mut self, certificate: Certificate<EcdsaScheme, Digest>) {
         let height = certificate.item.height.get();
         let digest = certificate.item.digest;
 

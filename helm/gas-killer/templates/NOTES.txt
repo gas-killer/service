@@ -10,7 +10,7 @@ The Gas Killer AVS stack is being deployed with the following components:
 {{- if .Values.l2.enabled }}
 - L2 (Anvil) - Local blockchain with forked L2 state
 {{- end }}
-- {{ .Values.global.nodeCount }} operator nodes - BLS signing and task execution
+- {{ .Values.global.nodeCount }} operator nodes - ECDSA signing and task execution
 - Router - Request routing and aggregation
 
 == JOBS ==

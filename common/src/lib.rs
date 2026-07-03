@@ -1,7 +1,7 @@
 pub mod bindings;
-pub mod bn254;
 pub mod config;
 pub mod consensus;
+pub mod ecdsa;
 pub mod eigenlayer;
 pub mod providers;
 pub mod task_data;
@@ -21,11 +21,11 @@ pub use task_data::GasKillerTaskData;
 pub use tasks::{TaskDirective, skip_digest};
 pub use validator::{GasKillerValidator, ValidatorMetrics};
 
-// Re-export BN254 signing types for convenience (node/router identity + scheme)
-pub use bn254::{Bn254, Bn254Certificate, Bn254Scheme, G1PublicKey, get_signer};
+// Re-export ECDSA signing types for convenience (node/router identity + scheme)
+pub use ecdsa::{Ecdsa, EcdsaCertificate, EcdsaScheme, get_signer};
 
 // Re-export operator-set types for convenience
-pub use eigenlayer::{CommonwarePublicKeys, EigenStakingClient, OperatorInfo, QuorumInfo};
+pub use eigenlayer::{EigenStakingClient, OperatorInfo, QuorumInfo};
 
 // Re-export provider types for convenience
 pub use bindings::{ReadOnlyProvider, WalletProvider};

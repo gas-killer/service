@@ -33,7 +33,7 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Metrics;
 use commonware_utils::NZUsize;
 use commonware_utils::channel::oneshot;
-use gas_killer_common::bn254::PublicKey;
+use gas_killer_common::ecdsa::PublicKey;
 use gas_killer_common::{GasKillerTaskData, TaskDirective};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;

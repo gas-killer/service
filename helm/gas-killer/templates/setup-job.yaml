@@ -50,7 +50,7 @@ spec:
               echo "L1 is ready!"
         {{- end }}
         {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
-        # Restore avs_deploy.json and BLS keys from Secret Manager if the PVC is empty
+        # Restore avs_deploy.json and ECDSA keys from Secret Manager if the PVC is empty
         # (e.g. after cluster recreation). If secrets don't exist yet this is a fresh
         # install — exit 0 and let eigenlayer-setup run normally.
         - name: fetch-avs-deploy
@@ -101,15 +101,15 @@ spec:
                 > /root/.nodes/avs_deploy.json
               echo "Restored avs_deploy.json"
 
-              # Restore each operator's BLS key — fails fast if any secret is missing.
+              # Restore each operator's ECDSA key — fails fast if any secret is missing.
               {{- $nodeCount := int .Values.global.nodeCount }}
               {{- range $i := until $nodeCount }}
               {{- $nodeIndex := add $i 1 }}
               gcloud secrets versions access latest \
-                --secret="${PREFIX}-node-{{ $nodeIndex }}-bls-key" \
+                --secret="${PREFIX}-node-{{ $nodeIndex }}-ecdsa-key" \
                 --project="${PROJECT}" \
-                > /root/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json
-              echo "Restored testacc{{ $nodeIndex }} BLS key"
+                > /root/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.ecdsa.key.json
+              echo "Restored testacc{{ $nodeIndex }} ECDSA key"
               {{- end }}
 
               # Fix permissions so non-root containers can read the files
@@ -206,8 +206,8 @@ spec:
                   {{- $nodeCount := int .Values.global.nodeCount }}
                   {{- range $i := until $nodeCount }}
                   {{- $nodeIndex := add $i 1 }}
-                  if [ ! -f "/root/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json" ]; then
-                    echo "Error: testacc{{ $nodeIndex }}.private.bls.key.json not found"
+                  if [ ! -f "/root/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.ecdsa.key.json" ]; then
+                    echo "Error: testacc{{ $nodeIndex }}.private.ecdsa.key.json not found"
                     exit 1
                   fi
                   {{- end }}

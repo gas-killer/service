@@ -7,10 +7,7 @@ use alloy_provider::Provider;
 use anyhow::Result;
 use gas_killer_common::ChainRole;
 use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
-use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::IBLSSignatureCheckerTypes as RetrieverIBLSTypes;
-use gas_killer_common::bindings::gaskillersdk::{
-    BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes,
-};
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -163,39 +160,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     async fn execute_verification(
         &mut self,
         msg_hash: FixedBytes<32>,
-        quorum_numbers: Bytes,
-        current_block_number: u32,
-        non_signer_data: RetrieverIBLSTypes::NonSignerStakesAndSignature,
+        signatures: Vec<Bytes>,
         task_data: Option<&GasKillerTaskData>,
     ) -> Result<ExecutionResult> {
-        let data = non_signer_data;
-
-        // Convert the non-signer data to the format expected by the GasKillerSDK
-        let non_signer_struct_data = GasKillerIBLSTypes::NonSignerStakesAndSignature {
-            nonSignerQuorumBitmapIndices: data.nonSignerQuorumBitmapIndices,
-            nonSignerPubkeys: data
-                .nonSignerPubkeys
-                .into_iter()
-                .map(|p| BN254::G1Point { X: p.X, Y: p.Y })
-                .collect(),
-            quorumApks: data
-                .quorumApks
-                .into_iter()
-                .map(|p| BN254::G1Point { X: p.X, Y: p.Y })
-                .collect(),
-            apkG2: BN254::G2Point {
-                X: data.apkG2.X,
-                Y: data.apkG2.Y,
-            },
-            sigma: BN254::G1Point {
-                X: data.sigma.X,
-                Y: data.sigma.Y,
-            },
-            quorumApkIndices: data.quorumApkIndices,
-            totalStakeIndices: data.totalStakeIndices,
-            nonSignerStakeIndices: data.nonSignerStakeIndices,
-        };
-
         // Validate that task data is provided
         let task_data = task_data
             .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
@@ -283,23 +250,18 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 
         let gas_killer_sdk = GasKillerSDK::new(target_addr, provider);
 
-        // Execute the gas killer verifyAndUpdate
-        // Use referenceBlockNumber = current_block_number - 1 so that eth_estimateGas (which
-        // simulates at the current block) satisfies the on-chain check:
-        //   require(referenceBlockNumber < block.number)
-        // Without the decrement, eth_estimateGas at block N sees referenceBlockNumber == N
-        // and reverts with FutureBlockNumber.
+        // Execute the gas killer verifyAndUpdate with the quorum's ECDSA
+        // signatures (65-byte r||s||v, ascending signer address — the order the
+        // contract enforces).
         info!("Sending verifyAndUpdate transaction");
         let tx_send_start = Instant::now();
         let send_result = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
-                quorum_numbers,
-                current_block_number.saturating_sub(1),
                 storage_updates,
                 transition_index,
                 target_function,
-                non_signer_struct_data,
+                signatures,
             )
             .send()
             .await
@@ -358,15 +320,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
     /// Submits `verifyAndUpdate` for a certified height, recording round-trip
     /// and execution metrics. Called by [`crate::submitter::Submitter`] with the
-    /// aggregation height as the metric key (previously the upstream
-    /// `BlsSignatureVerificationHandler::handle_verification` with `round`).
+    /// aggregation height as the metric key.
+    ///
+    /// `signatures` are the certificate's 65-byte `r || s || v` ECDSA signatures,
+    /// ordered by strictly ascending signer address (the on-chain dedupe order).
     pub async fn handle_verification(
         &mut self,
         height: u64,
         msg_hash: FixedBytes<32>,
-        quorum_numbers: Bytes,
-        current_block_number: u32,
-        non_signer_data: RetrieverIBLSTypes::NonSignerStakesAndSignature,
+        signatures: Vec<Bytes>,
         task_data: Option<&GasKillerTaskData>,
     ) -> Result<ExecutionResult> {
         // Record P2P round-trip: time from this height's sequencer dispatch to a
@@ -385,13 +347,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let exec_start = Instant::now();
 
         let result = self
-            .execute_verification(
-                msg_hash,
-                quorum_numbers,
-                current_block_number,
-                non_signer_data,
-                task_data,
-            )
+            .execute_verification(msg_hash, signatures, task_data)
             .await;
 
         if let Some(m) = &self.metrics {

@@ -36,7 +36,7 @@ spec:
       {{- end }}
       initContainers:
         {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
-        # Fetch BLS key, avs_deploy.json, and the router public key from GCP Secret Manager.
+        # Fetch ECDSA key, avs_deploy.json, and the router public key from GCP Secret Manager.
         # Workload Identity provides authentication — no static credentials needed.
         # Retries until the key-export job has populated all secrets.
         - name: fetch-secrets
@@ -67,7 +67,7 @@ spec:
                 echo "Fetched ${name}"
               }
 
-              fetch_secret "${PREFIX}-node-{{ $nodeIndex }}-bls-key" /app/secrets/bls-key.json
+              fetch_secret "${PREFIX}-node-{{ $nodeIndex }}-ecdsa-key" /app/secrets/ecdsa-key.json
               fetch_secret "${PREFIX}-avs-deploy"                    /app/secrets/avs_deploy.json
               fetch_secret "${PREFIX}-router-public-key"             /app/secrets/public_orchestrator.json
               echo "All node secrets fetched successfully"
@@ -84,7 +84,7 @@ spec:
             - -c
             - |
               echo "Waiting for setup to complete (timeout: {{ $root.Values.global.initTimeout }}s)..."
-              KEY_FILE="/app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json"
+              KEY_FILE="/app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.ecdsa.key.json"
               TIMEOUT={{ $root.Values.global.initTimeout }}
               ELAPSED=0
               until [ -f /app/.nodes/.setup_complete ] && [ -f "$KEY_FILE" ]; do
@@ -174,9 +174,9 @@ spec:
           args:
             - "--key-file"
             {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
-            - "/app/secrets/bls-key.json"
+            - "/app/secrets/ecdsa-key.json"
             {{- else }}
-            - "/app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json"
+            - "/app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.ecdsa.key.json"
             {{- end }}
             - "--port"
             - {{ $nodePort | quote }}

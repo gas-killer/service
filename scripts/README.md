@@ -1,6 +1,6 @@
 # Local Test Scripts
 
-This directory contains scripts for running local version of the BLS signature aggregation system.
+This directory contains scripts for running a local version of the ECDSA signature aggregation system.
 
 ## Running the Test Locally
 

@@ -1,30 +1,26 @@
 //! EigenLayer operator-set discovery, vendored from `commonware-restaking`.
 //!
-//! [`EigenStakingClient`] reads the quorum-0 operator set (addresses, stakes, BN254
-//! public keys, sockets) from the deployed EigenLayer middleware contracts. The
-//! router and nodes use this at startup to build the (static) participant set for
-//! the aggregation engine, so every process MUST observe the same operator list —
-//! participant indices are positions in the sorted G2-key order.
+//! [`EigenStakingClient`] reads the quorum-0 operator set (addresses, stakes,
+//! sockets) from the deployed EigenLayer middleware contracts. The router and
+//! nodes use this at startup to build the (static) participant set for the
+//! aggregation engine, so every process MUST observe the same operator list —
+//! participant indices are positions in the sorted operator-address order.
 //!
-//! Behavior is unchanged from the old `commonware_avs_eigenlayer` crate:
-//! `QUORUM_THRESHOLD()`/`THRESHOLD_DENOMINATOR()` reads, quorum-0 operator state at
-//! the current block, and socket strings.
+//! With the ECDSA scheme the operator's registered Ethereum address IS the
+//! signing identity, so no on-chain public-key material needs to be fetched —
+//! only the operator addresses (from the operator state retriever) and the
+//! sockets (from the registration events indexed by the operator info service).
 
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use eigen_client_avsregistry::reader::AvsRegistryChainReader;
 use eigen_common::get_provider;
-use eigen_crypto_bls::{BlsG1Point, BlsG2Point};
 use eigen_services_operatorsinfo::operator_info::OperatorInfoService;
 use eigen_services_operatorsinfo::operatorsinfo_inmemory::OperatorInfoServiceInMemory;
 use eigen_utils::rewardsv2::middleware::operator_state_retriever::OperatorStateRetriever;
-use serde::Deserialize;
 use serde_json::Value;
-use std::str::FromStr;
+use std::fs;
 use std::sync::Arc;
-use std::{env, fs};
-
-use crate::bn254::{G1PublicKey, PublicKey};
 
 // Minimal interface for the threshold reads on the AVS service manager (wrapper).
 // Vendored in place of the old `AvsServiceManagerWrapper` binding: only these two
@@ -37,44 +33,13 @@ alloy::sol! {
     }
 }
 
-/// An operator's BN254 public keys in the vendored `crate::bn254` representation.
-///
-/// `g2_pub_key` is the registered identity/signing key; `g1_pub_key` is the paired
-/// G1 point needed for on-chain `NonSignerStakesAndSignature` assembly.
-#[derive(Clone)]
-pub struct CommonwarePublicKeys {
-    pub g1_pub_key: G1PublicKey,
-    pub g2_pub_key: PublicKey,
-}
-
-impl CommonwarePublicKeys {
-    /// Converts from the `eigen-crypto-bls` point types returned by the operator
-    /// info service.
-    pub fn from_bls_keys(g1_pub_key: BlsG1Point, g2_pub_key: BlsG2Point) -> Self {
-        let g1_pub_key = G1PublicKey::from(g1_pub_key.g1());
-        let g2_pub_key = PublicKey::from(g2_pub_key.g2());
-        Self {
-            g1_pub_key,
-            g2_pub_key,
-        }
-    }
-}
-
-impl std::fmt::Debug for CommonwarePublicKeys {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CommonwarePublicKeys")
-            .field("g1_pub_key", &format!("{:?}", self.g1_pub_key))
-            .field("g2_pub_key", &format!("{:?}", self.g2_pub_key))
-            .finish()
-    }
-}
-
 /// One operator's registration state in a quorum.
 #[derive(Debug, Clone)]
 pub struct OperatorInfo {
+    /// The operator's registered Ethereum address — also its ECDSA signing
+    /// identity in the aggregation scheme.
     pub address: Address,
     pub stake: U256,
-    pub pub_keys: Option<CommonwarePublicKeys>,
     pub socket: Option<String>,
     pub quorum_number: u8,
 }
@@ -88,8 +53,8 @@ pub struct QuorumInfo {
     /// THRESHOLD_DENOMINATOR)`.
     ///
     /// Informational only (startup logs): the aggregation engine's quorum is fixed
-    /// at N3f1 (`n - (n-1)/3`), and the authoritative stake check runs on-chain in
-    /// `BLSSignatureChecker` during `verifyAndUpdate`.
+    /// at N3f1 (`n - (n-1)/3`), and the authoritative operator-count check runs
+    /// on-chain in `GasKillerSDK.verifyAndUpdate`.
     pub threshold: usize,
     pub total_stake: U256,
     pub operators: Vec<OperatorInfo>,
@@ -214,8 +179,9 @@ impl EigenStakingClient {
         })
     }
 
-    /// Reads the quorum-0 operator state (stakes, keys, sockets) at the current
-    /// block, backfilling operator registration events from the deploy block.
+    /// Reads the quorum-0 operator state (addresses, stakes, sockets) at the
+    /// current block, backfilling operator registration events from the deploy
+    /// block.
     pub async fn get_operator_states(&self) -> Result<Vec<QuorumInfo>, Box<dyn std::error::Error>> {
         // Query current block and backfill operator events
         let provider = get_provider(&self.http_endpoint);
@@ -255,18 +221,6 @@ impl EigenStakingClient {
                 let stake = U256::from(op.stake);
                 total_stake += stake;
 
-                let pub_keys = if let Ok(info) = self
-                    .operator_info_service
-                    .get_operator_info(op.operator)
-                    .await
-                {
-                    info.map(|keys| {
-                        CommonwarePublicKeys::from_bls_keys(keys.g1_pub_key, keys.g2_pub_key)
-                    })
-                } else {
-                    None
-                };
-
                 let socket = self
                     .operator_info_service
                     .get_operator_socket(op.operator)
@@ -277,7 +231,6 @@ impl EigenStakingClient {
                 quorum_operators.push(OperatorInfo {
                     address: op.operator,
                     stake,
-                    pub_keys,
                     socket,
                     quorum_number: quorum_number as u8,
                 });
@@ -297,54 +250,5 @@ impl EigenStakingClient {
         }
 
         Ok(quorum_infos)
-    }
-}
-
-/// The AVS deployment JSON (`AVS_DEPLOYMENT_PATH`) as consumed by the router's
-/// on-chain submission path.
-#[derive(Debug, Deserialize)]
-pub struct AvsDeployment {
-    pub addresses: ContractAddresses,
-}
-
-/// Contract addresses from the deployment JSON. Unrecognized keys are ignored.
-#[derive(Debug, Deserialize)]
-pub struct ContractAddresses {
-    #[serde(rename = "registryCoordinator")]
-    pub registry_coordinator: String,
-    #[serde(rename = "blsapkRegistry")]
-    pub bls_apk_registry: String,
-    #[serde(rename = "blsSigCheck")]
-    pub bls_sig_check_operator_state_retriever: String,
-}
-
-impl AvsDeployment {
-    /// Loads the deployment JSON from the path in `AVS_DEPLOYMENT_PATH`.
-    pub fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let deployment_path =
-            env::var("AVS_DEPLOYMENT_PATH").map_err(|_| "AVS_DEPLOYMENT_PATH must be set")?;
-        let content = fs::read_to_string(deployment_path)?;
-        let deployment: AvsDeployment = serde_json::from_str(&content)?;
-        Ok(deployment)
-    }
-
-    pub fn registry_coordinator_address(
-        &self,
-    ) -> Result<Address, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(Address::from_str(&self.addresses.registry_coordinator)?)
-    }
-
-    pub fn bls_apk_registry_address(
-        &self,
-    ) -> Result<Address, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(Address::from_str(&self.addresses.bls_apk_registry)?)
-    }
-
-    pub fn bls_sig_check_operator_state_retriever_address(
-        &self,
-    ) -> Result<Address, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(Address::from_str(
-            &self.addresses.bls_sig_check_operator_state_retriever,
-        )?)
     }
 }

@@ -8,41 +8,28 @@
 //! - No assignment, or a digest that matches neither the assignment nor the skip
 //!   digest: pre-restart leftovers — log and notify ([`ResolutionKind::Foreign`]);
 //!   the sequencer re-assigns any in-flight task.
-//! - Expected digest: assemble the EigenLayer submission (signer bitmap →
-//!   registered G1/G2 keys → operator addresses → `NonSignerStakesAndSignature`)
-//!   and call [`GasKillerHandler::handle_verification`], with bounded retries.
+//! - Expected digest: pair the certificate's signer bitmap with its ECDSA
+//!   signatures, sort by signer address (the on-chain dedupe order), and call
+//!   [`GasKillerHandler::handle_verification`], with bounded retries.
 //!
-//! The EigenLayer read flow (block pinning, memoized `pubkeyHashToOperator`
-//! resolution with parallel cache misses, `getNonSignerStakesAndSignature`) is
-//! ported from the vendored `commonware-restaking` BLS executor; the only
-//! difference is that the certificate already carries the aggregated signature,
-//! so no signature aggregation happens here.
+//! Unlike the BLS predecessor there is no on-chain read path here: the
+//! certificate already carries everything `verifyAndUpdate` needs (the operators'
+//! 65-byte `r || s || v` signatures), so no operator-registry lookups, stake
+//! retrieval, or block pinning happen before submission.
 
 use crate::executor::GasKillerHandler;
 use crate::factories::SimpleWalletProvider;
 use crate::reporter::{CertifiedHeight, CertifiedReceiver};
 use crate::sequencer::{Resolution, ResolutionKind, ResolutionSender, SharedAssignments};
-use alloy::eips::BlockId;
-use alloy::network::Ethereum;
-use alloy::sol_types::SolValue;
-use alloy_primitives::{Address, Bytes, FixedBytes, U256, keccak256};
-use alloy_provider::Provider;
+use alloy_primitives::{Bytes, FixedBytes};
 use anyhow::Result;
 use commonware_cryptography::sha256::Digest;
-use eigen_crypto_bls::convert_to_g1_point;
-use gas_killer_common::bindings::ReadOnlyProvider;
-use gas_killer_common::bindings::bls_apk_registry::BLSApkRegistry::BLSApkRegistryInstance;
-use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::{
-    BLSSigCheckOperatorStateRetriever::BLSSigCheckOperatorStateRetrieverInstance, BN254::G1Point,
-};
-use gas_killer_common::bn254::{Bn254Certificate, Bn254Scheme, G1PublicKey, PublicKey};
+use gas_killer_common::EcdsaCertificate;
+use gas_killer_common::ecdsa::EcdsaScheme;
 use gas_killer_common::skip_digest;
 use gas_killer_common::task_data::GasKillerTaskData;
-use std::collections::HashMap;
-use std::future::IntoFuture;
-use std::str::FromStr;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// Retries after the first failed submission attempt.
 const MAX_RETRIES: u32 = 2;
@@ -50,35 +37,12 @@ const MAX_RETRIES: u32 = 2;
 /// Delay before the first retry; doubles per attempt.
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Computes the `BLSApkRegistry` pubkey hash used to key `pubkeyHashToOperator`.
-///
-/// This is `keccak256(abi_encode(G1Point { X, Y }))` for the operator's G1 public
-/// key, matching the hash the registry stores on-chain.
-fn pubkey_hash(g1_pubkey: &G1PublicKey) -> Result<FixedBytes<32>> {
-    let g1_point = G1Point {
-        X: U256::from_str(&g1_pubkey.get_x())
-            .map_err(|e| anyhow::anyhow!("Failed to parse X coordinate: {}", e))?,
-        Y: U256::from_str(&g1_pubkey.get_y())
-            .map_err(|e| anyhow::anyhow!("Failed to parse Y coordinate: {}", e))?,
-    };
-    Ok(keccak256(g1_point.abi_encode()))
-}
-
 /// Consumes certified heights and drives the on-chain submission.
 pub struct Submitter {
-    /// Verifier scheme: maps certificate signer bitmaps to registered keys.
-    scheme: Bn254Scheme,
-    /// L1 read-side provider (operator state lives on L1 only).
-    view_only_provider: ReadOnlyProvider,
-    bls_apk_registry: BLSApkRegistryInstance<ReadOnlyProvider, Ethereum>,
-    bls_operator_state_retriever:
-        BLSSigCheckOperatorStateRetrieverInstance<ReadOnlyProvider, Ethereum>,
-    registry_coordinator_address: Address,
+    /// Verifier scheme: maps certificate signer bitmaps to operator addresses.
+    scheme: EcdsaScheme,
     /// Executes the final `verifyAndUpdate` transaction (multi-chain write side).
     handler: GasKillerHandler<SimpleWalletProvider>,
-    /// Memoized `pubkeyHashToOperator` results: an operator's address never
-    /// changes for a registered G2 key, so entries never expire.
-    operator_cache: HashMap<PublicKey, Address>,
     /// Height → expected digest + task, written by the sequencer.
     assignments: SharedAssignments,
     /// Verified certificates from the reporter.
@@ -88,16 +52,8 @@ pub struct Submitter {
 }
 
 impl Submitter {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        scheme: Bn254Scheme,
-        view_only_provider: ReadOnlyProvider,
-        bls_apk_registry: BLSApkRegistryInstance<ReadOnlyProvider, Ethereum>,
-        bls_operator_state_retriever: BLSSigCheckOperatorStateRetrieverInstance<
-            ReadOnlyProvider,
-            Ethereum,
-        >,
-        registry_coordinator_address: Address,
+        scheme: EcdsaScheme,
         handler: GasKillerHandler<SimpleWalletProvider>,
         assignments: SharedAssignments,
         certified: CertifiedReceiver,
@@ -105,12 +61,7 @@ impl Submitter {
     ) -> Self {
         Self {
             scheme,
-            view_only_provider,
-            bls_apk_registry,
-            bls_operator_state_retriever,
-            registry_coordinator_address,
             handler,
-            operator_cache: HashMap::new(),
             assignments,
             certified,
             resolutions,
@@ -235,176 +186,145 @@ impl Submitter {
         &mut self,
         height: u64,
         digest: Digest,
-        certificate: &Bn254Certificate,
+        certificate: &EcdsaCertificate,
         task: &GasKillerTaskData,
     ) -> Result<crate::executor::ExecutionResult> {
-        // Bitmap → registered keys, in participant order. The certificate was
-        // verified by the reporter, so the bitmap length matches the set.
-        let participating = self.scheme.signer_g2_keys(&certificate.signers);
-        let participating_g1 = self.scheme.signer_g1_points(&certificate.signers);
-        if participating.is_empty() || participating.len() != participating_g1.len() {
-            return Err(anyhow::anyhow!(
-                "signer bitmap resolved to an inconsistent key set ({} G2 / {} G1)",
-                participating.len(),
-                participating_g1.len()
-            ));
-        }
-
-        // The certificate's aggregated G1 signature is the on-chain sigma.
-        let sigma = convert_to_g1_point(certificate.signature.get_point())
-            .map_err(|e| anyhow::anyhow!("Failed to convert to G1 point: {}", e))?;
-        let sigma_struct = G1Point {
-            X: U256::from_str(&sigma.X.to_string())
-                .map_err(|e| anyhow::anyhow!("Failed to parse X coordinate: {}", e))?,
-            Y: U256::from_str(&sigma.Y.to_string())
-                .map_err(|e| anyhow::anyhow!("Failed to parse Y coordinate: {}", e))?,
-        };
+        // Bitmap → operator addresses, in participant order. The certificate was
+        // verified by the reporter, so the bitmap length matches the set and the
+        // signature list is index-aligned with the bitmap's ascending iteration.
+        let signatures = ordered_signatures(&self.scheme, certificate)?;
 
         let msg_hash = FixedBytes::<32>::from_slice(digest.as_ref());
-
-        // Fetch the current block number once up front. All subsequent eth_calls
-        // are pinned to this block so the entire verification reads a consistent
-        // EVM state snapshot — both the operator registry lookups and the
-        // non-signer stakes call.
-        let current_block_number = self
-            .view_only_provider
-            .get_block_number()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?;
-        let reference_block = BlockId::from(current_block_number);
-
-        // Resolve an operator address for every participating signer.
-        //
-        // Phase 1: take cache hits synchronously. Cache misses — the first
-        // certificate, or whenever a new operator joins — each need a
-        // `pubkeyHashToOperator` RPC call, so record their slot index and
-        // precomputed pubkey hash.
-        let mut operators: Vec<Option<Address>> = Vec::with_capacity(participating.len());
-        let mut misses: Vec<(usize, PublicKey, FixedBytes<32>)> = Vec::new();
-        for (index, (contributor, g1_pubkey)) in participating
-            .iter()
-            .zip(participating_g1.iter())
-            .enumerate()
-        {
-            match self.operator_cache.get(contributor) {
-                Some(address) => operators.push(Some(*address)),
-                None => {
-                    operators.push(None);
-                    misses.push((index, contributor.clone(), pubkey_hash(g1_pubkey)?));
-                }
-            }
-        }
-
-        // Phase 2: resolve all cache misses with a single round-trip of latency
-        // by firing the lookups concurrently, then write them back to the cache.
-        // Steady-state (all operators cached) skips this entirely.
-        if !misses.is_empty() {
-            debug!(
-                height,
-                cache_misses = misses.len(),
-                "resolving operator addresses for cache misses in parallel"
-            );
-            let calls: Vec<_> = misses
-                .iter()
-                .map(|(_, _, hash)| {
-                    self.bls_apk_registry
-                        .pubkeyHashToOperator(*hash)
-                        .block(reference_block)
-                })
-                .collect();
-            let resolved =
-                futures::future::join_all(calls.iter().map(|call| call.call().into_future())).await;
-
-            for ((index, contributor, _), result) in misses.into_iter().zip(resolved) {
-                let address = result.map_err(|e| {
-                    anyhow::anyhow!("Failed to get operator from pubkey hash: {}", e)
-                })?;
-                self.operator_cache.insert(contributor, address);
-                operators[index] = Some(address);
-            }
-        }
-
-        let operators = operators
-            .into_iter()
-            .collect::<Option<Vec<Address>>>()
-            .ok_or_else(|| anyhow::anyhow!("Failed to resolve all operator addresses"))?;
-
-        let quorum_numbers = Bytes::from_str("0x00")
-            .map_err(|e| anyhow::anyhow!("Failed to parse quorum numbers: {}", e))?;
-
-        // Pinning the call to reference_block ensures the eth_call executes
-        // against the same EVM state snapshot used for operator resolution above.
-        let non_signer_data = self
-            .bls_operator_state_retriever
-            .getNonSignerStakesAndSignature(
-                self.registry_coordinator_address,
-                quorum_numbers.clone(),
-                sigma_struct,
-                operators,
-                current_block_number
-                    .try_into()
-                    .map_err(|e| anyhow::anyhow!("block number overflows u32: {}", e))?,
-            )
-            .block(reference_block)
-            .call()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get non-signer stakes and signature: {}", e))?;
+        info!(
+            height,
+            signers = signatures.len(),
+            "submitting ECDSA quorum certificate"
+        );
 
         self.handler
-            .handle_verification(
-                height,
-                msg_hash,
-                quorum_numbers,
-                current_block_number
-                    .try_into()
-                    .map_err(|e| anyhow::anyhow!("Failed to convert block number: {}", e))?,
-                non_signer_data,
-                Some(task),
-            )
+            .handle_verification(height, msg_hash, signatures, Some(task))
             .await
     }
+}
+
+/// Pairs a verified certificate's signer bitmap with its signatures and returns
+/// the raw 65-byte signatures sorted by ascending signer address — the order
+/// `GasKillerSDK.verifyAndUpdate` enforces to reject duplicate signers.
+///
+/// Participant order (the certificate's signature order) is already ascending by
+/// address bytes, so this sort is a no-op in practice; it stays as a defensive
+/// guarantee of the on-chain calling convention rather than an assumption about
+/// the participant set's ordering.
+fn ordered_signatures(scheme: &EcdsaScheme, certificate: &EcdsaCertificate) -> Result<Vec<Bytes>> {
+    let addresses = scheme.signer_addresses(&certificate.signers);
+    if addresses.is_empty() || addresses.len() != certificate.signatures.len() {
+        return Err(anyhow::anyhow!(
+            "signer bitmap resolved to an inconsistent signer set ({} addresses / {} signatures)",
+            addresses.len(),
+            certificate.signatures.len()
+        ));
+    }
+
+    let mut pairs: Vec<_> = addresses
+        .into_iter()
+        .zip(certificate.signatures.iter())
+        .collect();
+    pairs.sort_by_key(|(address, _)| *address);
+
+    Ok(pairs
+        .into_iter()
+        .map(|(_, signature)| Bytes::copy_from_slice(signature.as_ref()))
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::Address;
+    use commonware_consensus::aggregation::types::Item;
+    use commonware_consensus::types::Height;
+    use commonware_cryptography::certificate::Scheme as _;
+    use commonware_cryptography::{Hasher as _, Sha256, Signer as _};
+    use commonware_parallel::Sequential;
+    use commonware_utils::ordered::Set;
+    use commonware_utils::{N3f1, TryCollect};
+    use gas_killer_common::ecdsa::{Ecdsa, PublicKey};
 
-    /// Builds a `G1PublicKey` from decimal affine coordinates.
-    fn g1(x: &str, y: &str) -> G1PublicKey {
-        G1PublicKey::create_from_g1_coordinates(x, y).expect("valid on-curve G1 coordinates")
+    /// Builds a 4-participant scheme set plus a verifier, participant-ordered.
+    fn setup() -> (Vec<Ecdsa>, EcdsaScheme) {
+        let keys: Vec<Ecdsa> = (0..4).map(Ecdsa::from_seed).collect();
+        let participants: Set<PublicKey> = keys
+            .iter()
+            .map(|k| k.public_key())
+            .try_collect()
+            .expect("distinct keys");
+        let verifier = EcdsaScheme::verifier(participants);
+        (keys, verifier)
+    }
+
+    fn certificate_for(
+        keys: &[Ecdsa],
+        verifier: &EcdsaScheme,
+        payload: &[u8],
+    ) -> (EcdsaCertificate, [u8; 32]) {
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        let digest = hasher.finalize();
+        let digest_bytes: [u8; 32] = digest.as_ref().try_into().unwrap();
+        let subject = Item {
+            height: Height::new(1),
+            digest,
+        };
+
+        let schemes: Vec<EcdsaScheme> = keys
+            .iter()
+            .map(|k| EcdsaScheme::signer(verifier.participants().clone(), k.private_key()).unwrap())
+            .collect();
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| {
+                s.sign::<commonware_cryptography::sha256::Digest>(&subject)
+                    .unwrap()
+            })
+            .collect();
+        let certificate = verifier
+            .assemble::<_, N3f1>(attestations, &Sequential)
+            .unwrap();
+        (certificate, digest_bytes)
     }
 
     #[test]
-    fn pubkey_hash_matches_keccak_of_abi_encoded_point() {
-        // BN254 G1 generator (1, 2).
-        let pk = g1("1", "2");
-        let expected = keccak256(
-            G1Point {
-                X: U256::from(1u8),
-                Y: U256::from(2u8),
-            }
-            .abi_encode(),
-        );
-        assert_eq!(pubkey_hash(&pk).unwrap(), expected);
+    fn ordered_signatures_are_ascending_and_recover_to_operators() {
+        let (keys, verifier) = setup();
+        let (certificate, digest) = certificate_for(&keys, &verifier, b"submitter ordering");
+
+        let signatures = ordered_signatures(&verifier, &certificate).unwrap();
+        assert_eq!(signatures.len(), 3);
+
+        // Recovered signer addresses are strictly ascending — the contract's
+        // dedupe order — and every signer is one of the operators.
+        let operators: Vec<Address> = verifier
+            .participants()
+            .iter()
+            .map(|k| k.address())
+            .collect();
+        let mut last = Address::ZERO;
+        for raw in &signatures {
+            let sig = gas_killer_common::ecdsa::Signature::try_from(raw.as_ref()).unwrap();
+            let recovered = sig.recover(&digest).unwrap();
+            assert!(recovered > last, "signers must be strictly ascending");
+            assert!(operators.contains(&recovered), "signer must be an operator");
+            last = recovered;
+        }
     }
 
     #[test]
-    fn pubkey_hash_is_deterministic_and_distinct_per_point() {
-        // Generator G and 2G — distinct on-curve points.
-        let g = g1("1", "2");
-        let two_g = g1(
-            "1368015179489954701390400359078579693043519447331113978918064868415326638035",
-            "9918110051302171585080402603319702774565515993150576347155970296011118125764",
-        );
-        assert_eq!(
-            pubkey_hash(&g).unwrap(),
-            pubkey_hash(&g).unwrap(),
-            "hash must be deterministic"
-        );
-        assert_ne!(
-            pubkey_hash(&g).unwrap(),
-            pubkey_hash(&two_g).unwrap(),
-            "distinct points must hash distinctly"
-        );
+    fn ordered_signatures_rejects_count_mismatch() {
+        let (keys, verifier) = setup();
+        let (mut certificate, _) = certificate_for(&keys, &verifier, b"count mismatch");
+        certificate.signatures.pop();
+
+        assert!(ordered_signatures(&verifier, &certificate).is_err());
     }
 }

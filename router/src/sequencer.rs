@@ -39,7 +39,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_p2p::{Receiver as NetworkReceiver, Recipients, Sender as NetworkSender};
-use gas_killer_common::bn254::PublicKey;
+use gas_killer_common::ecdsa::PublicKey;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};

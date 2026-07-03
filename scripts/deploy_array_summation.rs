@@ -1,3 +1,4 @@
+use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
@@ -15,8 +16,79 @@ struct AvsDeploymentJson {
 struct AvsAddresses {
     #[serde(rename = "avsServiceManagerWrapper")]
     avs_service_manager_wrapper: String,
-    #[serde(rename = "IncredibleSquaringTaskManager")]
-    bls_sig_check: String,
+}
+
+/// One operator key file (`testaccN.private.ecdsa.key.json`) as produced by the
+/// eigenlayer setup container: `{"privateKey": "0x...", "publicKey": "<address>"}`.
+#[derive(Debug, Deserialize)]
+struct OperatorEcdsaKeyFile {
+    #[serde(rename = "publicKey")]
+    public_key: String,
+}
+
+/// Resolves the initial operator set for the ArraySummation deployment.
+///
+/// `OPERATOR_ADDRESSES` (comma-separated `0x...` addresses) takes precedence;
+/// otherwise the operator addresses are read from the
+/// `operator_keys/*.private.ecdsa.key.json` files next to the AVS deployment JSON
+/// (the layout the eigenlayer setup container produces under `config/.nodes`).
+fn resolve_operator_addresses(
+    avs_deployment_path: &str,
+) -> Result<Vec<Address>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Ok(raw) = env::var("OPERATOR_ADDRESSES") {
+        let addresses = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.parse::<Address>()
+                    .map_err(|_| format!("Invalid address in OPERATOR_ADDRESSES: {s}").into())
+            })
+            .collect::<Result<Vec<Address>, Box<dyn std::error::Error + Send + Sync>>>()?;
+        if !addresses.is_empty() {
+            return Ok(addresses);
+        }
+    }
+
+    let deployment_dir = std::path::Path::new(avs_deployment_path)
+        .parent()
+        .ok_or("AVS_DEPLOYMENT_PATH has no parent directory")?;
+    let keys_dir = deployment_dir.join("operator_keys");
+    let mut addresses = Vec::new();
+    let entries = fs::read_dir(&keys_dir).map_err(|e| {
+        format!(
+            "Failed to read {} (set OPERATOR_ADDRESSES to pass the operator set explicitly): {e}",
+            keys_dir.display()
+        )
+    })?;
+    let mut paths: Vec<_> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".private.ecdsa.key.json"))
+        })
+        .collect();
+    paths.sort();
+    for path in paths {
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        let key_file: OperatorEcdsaKeyFile = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
+        let address: Address = key_file
+            .public_key
+            .parse()
+            .map_err(|_| format!("Invalid publicKey in {}", path.display()))?;
+        addresses.push(address);
+    }
+    if addresses.is_empty() {
+        return Err(format!(
+            "No operator ECDSA key files found in {} and OPERATOR_ADDRESSES is unset",
+            keys_dir.display()
+        )
+        .into());
+    }
+    Ok(addresses)
 }
 
 #[tokio::main]
@@ -28,8 +100,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let http_rpc = env::var("HTTP_RPC").map_err(|_| "HTTP_RPC environment variable is required")?;
     let private_key =
         env::var("PRIVATE_KEY").map_err(|_| "PRIVATE_KEY environment variable is required")?;
-    let array_summation_factory_address = env::var("ARRAY_SUMMATION_FACTORY_ADDRESS")
-        .map_err(|_| "ARRAY_SUMMATION_FACTORY_ADDRESS environment variable is required")?;
     let array_size = env::var("ARRAY_SUMMATION_ARRAY_SIZE")
         .map_err(|_| "ARRAY_SUMMATION_ARRAY_SIZE environment variable is required")?
         .parse::<u64>()
@@ -42,11 +112,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map_err(|_| "ARRAY_SUMMATION_SEED environment variable is required")?
         .parse::<u64>()
         .map_err(|_| "ARRAY_SUMMATION_SEED must be a valid number")?;
-
-    // Parse addresses
-    let factory_address: Address = array_summation_factory_address
-        .parse()
-        .map_err(|_| "Invalid ARRAY_SUMMATION_FACTORY_ADDRESS format")?;
 
     // Get AVS address from deployment JSON
     let avs_deployment_path = env::var("AVS_DEPLOYMENT_PATH")
@@ -65,23 +130,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .parse()
         .map_err(|_| "Invalid avsServiceManagerWrapper address format in deployment JSON")?;
 
-    // Get BLS signature checker address from deployment JSON
-    let bls_address: Address = avs_deployment
-        .addresses
-        .bls_sig_check
-        .parse()
-        .map_err(|_| "Invalid IncredibleSquaringTaskManager address format")?;
-    println!("🔐 Using BLS Signature Checker: {}", bls_address);
+    // Resolve the operator ECDSA signing quorum for the new contract.
+    let operators = resolve_operator_addresses(&avs_deployment_path)?;
+    println!("🔐 Initial operator set ({}):", operators.len());
+    for operator in &operators {
+        println!("   {}", operator);
+    }
 
-    // Setup provider and signer
+    // Setup provider and signer. The deployer doubles as the contract's
+    // operator-registry admin.
     let signer: PrivateKeySigner = private_key
         .parse()
         .map_err(|_| "Invalid private key format")?;
+    let operator_admin = signer.address();
     let provider = ProviderBuilder::new()
-        .wallet(signer)
+        .wallet(EthereumWallet::from(signer))
         .connect_http(http_rpc.parse().map_err(|_| "Invalid RPC URL")?);
 
-    // Sanity checks: ensure target addresses have code deployed
+    // Sanity check: ensure the AVS wrapper has code deployed
     println!("🔍 Checking deployed code of contracts...");
     let code_avs = provider
         .get_code_at(avs_address)
@@ -95,19 +161,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .into());
     }
 
-    let code_bls = provider.get_code_at(bls_address).await.map_err(|e| {
-        format!(
-            "Failed to get code for BLS Signature Checker {}: {}",
-            bls_address, e
-        )
-    })?;
-    if code_bls.as_ref().is_empty() {
-        return Err(format!(
-            "BLS Signature Checker {} has no code deployed. Ensure addresses.blsSigCheck is correct or set BLS_SIGNATURE_CHECKER_ADDRESS.",
-            bls_address
-        )
-        .into());
-    }
+    // Resolve the factory: reuse ARRAY_SUMMATION_FACTORY_ADDRESS when it points
+    // at deployed code, otherwise deploy a fresh ECDSA factory (the pre-migration
+    // BLS factory on public networks is ABI-incompatible with this deployment).
+    let factory_address: Address = match env::var("ARRAY_SUMMATION_FACTORY_ADDRESS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(raw) => {
+            let addr: Address = raw
+                .parse()
+                .map_err(|_| "Invalid ARRAY_SUMMATION_FACTORY_ADDRESS format")?;
+            let code = provider
+                .get_code_at(addr)
+                .await
+                .map_err(|e| format!("Failed to get code for factory {}: {}", addr, e))?;
+            if code.as_ref().is_empty() {
+                return Err(format!(
+                    "ARRAY_SUMMATION_FACTORY_ADDRESS {} has no code deployed; unset it to deploy a fresh ECDSA factory",
+                    addr
+                )
+                .into());
+            }
+            println!("🏭 Using existing ArraySummationFactory at: {}", addr);
+            addr
+        }
+        None => {
+            println!("🏭 Deploying a fresh ArraySummationFactory...");
+            let factory = ArraySummationFactory::deploy(provider.clone())
+                .await
+                .map_err(|e| format!("Failed to deploy ArraySummationFactory: {}", e))?;
+            let addr = *factory.address();
+            println!("✅ ArraySummationFactory deployed at: {}", addr);
+            addr
+        }
+    };
 
     // Optionally use pre-deployed contract if ARRAY_SUMMATION_ADDRESS is provided
     let maybe_existing = env::var("ARRAY_SUMMATION_ADDRESS").ok();
@@ -156,7 +244,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         let deploy_call = factory.deployArraySummation(
             avs_address,
-            bls_address,
+            operator_admin,
+            operators.clone(),
             U256::from(array_size),
             U256::from(max_value),
             U256::from(seed),
@@ -203,23 +292,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Update deployment JSON if it exists
     update_deployment_json(
         &avs_deployment_path,
-        &array_summation_factory_address,
+        &format!("{:?}", factory_address),
         &format!("{:?}", deployed_address),
     )?;
 
     println!("🎉 Deployment completed successfully!");
     println!("📋 Summary:");
-    println!(
-        "  ArraySummation Factory: {}",
-        array_summation_factory_address
-    );
+    println!("  ArraySummation Factory: {}", factory_address);
     if used_existing {
         println!("  ArraySummation Contract (existing): {}", deployed_address);
     } else {
         println!("  ArraySummation Contract: {}", deployed_address);
     }
     println!("  AVS Service Manager Wrapper: {}", avs_address);
-    println!("  BLS Sig Check: {}", bls_address);
+    println!("  Operator Admin: {}", operator_admin);
+    println!("  Operators: {}", operators.len());
 
     Ok(())
 }

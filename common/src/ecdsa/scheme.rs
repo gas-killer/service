@@ -1,34 +1,34 @@
-//! BN254 multisig [`certificate::Scheme`] for the aggregation engine.
+//! secp256k1 ECDSA multisig [`certificate::Scheme`] for the aggregation engine.
 //!
-//! [`Bn254Scheme`] mirrors the bls12381 multisig reference implementation
-//! (`commonware_cryptography::certificate::bls12381_multisig`) with two deliberate
+//! [`EcdsaScheme`] mirrors the secp256r1 multisig reference implementation
+//! (`commonware_cryptography::certificate::secp256r1`) with two deliberate
 //! differences:
 //!
-//! 1. **Signing covers ONLY the raw 32-byte digest** — `map_to_curve(digest) * sk`
-//!    with no namespace and no height (see [`Bn254::sign_digest`]). This is what
-//!    keeps assembled certificates verifiable by the deployed EigenLayer contracts,
-//!    which recompute exactly `map_to_curve(task_digest)` on-chain.
-//! 2. The G2 identity key doubles as the signing key (no `BiMap` indirection), and a
-//!    parallel `Vec<G1PublicKey>` in participant order lets the router translate a
-//!    certificate's signer bitmap into the G1 points needed for the on-chain
-//!    `NonSignerStakesAndSignature` submission.
+//! 1. **Signing covers ONLY the raw 32-byte digest** — the digest is signed as an
+//!    Ethereum prehash with no namespace and no height (see [`Ecdsa::sign_digest`]).
+//!    This is what keeps assembled certificates verifiable by
+//!    `GasKillerSDK.verifyAndUpdate`, which recovers each signer with exactly
+//!    `ecrecover(task_digest, v, r, s)` on-chain.
+//! 2. The participant identity is the operator's 20-byte Ethereum address (the key
+//!    EigenLayer registration is bound to), and verification is recovery-based —
+//!    no separate signing public key needs distribution.
 //!
 //! # Replay domain (READ BEFORE "FIXING")
 //!
 //! Because the signature binds only the digest — not the `Item`'s height, the epoch,
 //! or any namespace — signatures for the same digest are interchangeable across
-//! heights and deployments. This matches the security model of the pre-migration
-//! system: the digest itself binds `(transitionIndex, target, selector,
+//! heights and deployments. This matches the security model of the BN254 scheme it
+//! replaces: the digest itself binds `(transitionIndex, target, selector,
 //! storageUpdates)` and the contract enforces strict transition-index ordering, so
 //! replaying an identical digest at another height is harmless (it would submit the
 //! same state transition, which the contract accepts at most once). Do NOT add the
 //! height or a namespace to the preimage — that would break on-chain verification.
 //!
-//! Rogue-key note: certificates aggregate signatures/keys by plain point addition;
-//! this is safe only because operators prove possession of their BN254 keys at
-//! EigenLayer registration time.
+//! Unlike BLS aggregation there is no rogue-key concern: every signature is verified
+//! individually against its participant's address.
 
-use super::{Bn254, G1PublicKey, PrivateKey, PublicKey, Signature, aggregate_signatures};
+use super::{Ecdsa, PrivateKey, PublicKey, Signature};
+use alloy_primitives::Address;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::aggregation::types::Item;
@@ -42,54 +42,43 @@ use rand_core::CryptoRngCore;
 /// Extracts the raw 32 digest bytes from an [`Item`]'s digest.
 ///
 /// The scheme only supports 32-byte digests (`sha256::Digest` in this system):
-/// `map_to_curve` consumes exactly 32 bytes and the deployed contracts hash 32-byte
-/// task digests. Returns `None` for any other digest width instead of panicking so a
-/// mis-instantiated scheme fails verification rather than the process.
+/// the deployed contracts recover signatures over 32-byte task digests. Returns
+/// `None` for any other digest width instead of panicking so a mis-instantiated
+/// scheme fails verification rather than the process.
 fn item_digest<D: Digest>(item: &Item<D>) -> Option<[u8; 32]> {
     item.digest.as_ref().try_into().ok()
 }
 
-/// BN254 multisig certificate scheme over a fixed participant set.
+/// secp256k1 ECDSA multisig certificate scheme over a fixed participant set.
 ///
-/// Participant indices are positions in the `ordered::Set` of G2 public keys (sorted
-/// by compressed bytes) — every node and the router MUST build the set from the same
-/// operator list or attestations will be attributed to the wrong signer and blocked
-/// by the engine (`PeerMismatch`).
+/// Participant indices are positions in the `ordered::Set` of operator addresses
+/// (sorted by address bytes) — every node and the router MUST build the set from
+/// the same operator list or attestations will be attributed to the wrong signer
+/// and blocked by the engine (`PeerMismatch`).
 #[derive(Clone, Debug)]
-pub struct Bn254Scheme {
-    /// Ordered G2 identity/signing keys; participant indices are positions here.
+pub struct EcdsaScheme {
+    /// Ordered operator addresses; participant indices are positions here.
     participants: Set<PublicKey>,
-    /// G1 public keys in the SAME order as `participants` (index-aligned).
-    g1_keys: Vec<G1PublicKey>,
     /// Our participant index and signer; `None` for verifier-only instances.
-    signer: Option<(Participant, Bn254)>,
+    signer: Option<(Participant, Ecdsa)>,
 }
 
-impl Bn254Scheme {
+impl EcdsaScheme {
     /// Creates a signing scheme instance.
     ///
-    /// `g1_keys` must be index-aligned with `participants` (i.e. `g1_keys[i]` is the
-    /// G1 key registered for `participants[i]`); build both from the same sorted
-    /// operator list.
-    ///
-    /// Returns `None` if `private_key`'s G2 public key is not in the participant set
-    /// (mirroring the bls12381 multisig reference).
+    /// Returns `None` if `private_key`'s address is not in the participant set
+    /// (mirroring the multisig reference implementations).
     ///
     /// # Panics
     ///
-    /// Panics if `g1_keys.len() != participants.len()` or the participant set is
-    /// empty — construction-time configuration errors, never network input.
-    pub fn signer(
-        participants: Set<PublicKey>,
-        g1_keys: Vec<G1PublicKey>,
-        private_key: PrivateKey,
-    ) -> Option<Self> {
-        Self::validate_participants(&participants, &g1_keys);
-        let signer = Bn254::new(private_key);
+    /// Panics if the participant set is empty — a construction-time configuration
+    /// error, never network input (quorum math panics on `n == 0`).
+    pub fn signer(participants: Set<PublicKey>, private_key: PrivateKey) -> Option<Self> {
+        Self::validate_participants(&participants);
+        let signer = Ecdsa::new(private_key);
         let index = participants.index(&signer.public_key())?;
         Some(Self {
             participants,
-            g1_keys,
             signer: Some((index, signer)),
         })
     }
@@ -100,58 +89,43 @@ impl Bn254Scheme {
     ///
     /// # Panics
     ///
-    /// Panics if `g1_keys.len() != participants.len()` or the participant set is
-    /// empty — construction-time configuration errors, never network input.
-    pub fn verifier(participants: Set<PublicKey>, g1_keys: Vec<G1PublicKey>) -> Self {
-        Self::validate_participants(&participants, &g1_keys);
+    /// Panics if the participant set is empty — a construction-time configuration
+    /// error, never network input.
+    pub fn verifier(participants: Set<PublicKey>) -> Self {
+        Self::validate_participants(&participants);
         Self {
             participants,
-            g1_keys,
             signer: None,
         }
     }
 
-    fn validate_participants(participants: &Set<PublicKey>, g1_keys: &[G1PublicKey]) {
+    fn validate_participants(participants: &Set<PublicKey>) {
         assert!(
             !participants.is_empty(),
             "participant set must not be empty (quorum math panics on n == 0)"
         );
-        assert_eq!(
-            participants.len(),
-            g1_keys.len(),
-            "g1_keys must be index-aligned with participants"
-        );
     }
 
-    /// Maps a certificate's signer bitmap to the signers' G1 public keys (participant
-    /// order). The router feeds these to `BLSApkRegistry.pubkeyHashToOperator` to
-    /// resolve operator addresses for the on-chain submission.
+    /// Maps a certificate's signer bitmap to the signers' Ethereum addresses
+    /// (participant order). The router pairs these with the certificate's
+    /// signatures for the on-chain `verifyAndUpdate` submission.
     ///
-    /// Out-of-range bits are skipped; only call with a bitmap from a certificate that
-    /// passed [`Scheme::verify_certificate`] (which enforces
+    /// Out-of-range bits are skipped; only call with a bitmap from a certificate
+    /// that passed [`Scheme::verify_certificate`] (which enforces
     /// `signers.len() == participants.len()`).
-    pub fn signer_g1_points(&self, signers: &Signers) -> Vec<G1PublicKey> {
+    pub fn signer_addresses(&self, signers: &Signers) -> Vec<Address> {
         signers
             .iter()
-            .filter_map(|participant| self.g1_keys.get(usize::from(participant)).cloned())
-            .collect()
-    }
-
-    /// Maps a certificate's signer bitmap to the signers' G2 public keys (participant
-    /// order). Same caveats as [`Bn254Scheme::signer_g1_points`].
-    pub fn signer_g2_keys(&self, signers: &Signers) -> Vec<PublicKey> {
-        signers
-            .iter()
-            .filter_map(|participant| self.participants.key(participant).cloned())
+            .filter_map(|participant| self.participants.key(participant).map(|k| k.address()))
             .collect()
     }
 }
 
-impl Scheme for Bn254Scheme {
+impl Scheme for EcdsaScheme {
     type Subject<'a, D: Digest> = &'a Item<D>;
     type PublicKey = PublicKey;
     type Signature = Signature;
-    type Certificate = Bn254Certificate;
+    type Certificate = EcdsaCertificate;
 
     fn me(&self) -> Option<Participant> {
         self.signer.as_ref().map(|(index, _)| *index)
@@ -161,7 +135,7 @@ impl Scheme for Bn254Scheme {
         &self.participants
     }
 
-    /// Signs `map_to_curve(subject.digest) * sk` — the raw digest ONLY.
+    /// Signs the raw digest ONLY (Ethereum prehash semantics).
     ///
     /// The subject's height and the derived `_AGG_ACK` namespace are deliberately
     /// ignored; see the module docs for why this is required for on-chain
@@ -226,12 +200,17 @@ impl Scheme for Bn254Scheme {
             return None;
         }
 
-        // Produce the signer bitmap and the aggregated (point-added) signature.
+        // Certificate signatures are stored in ascending participant-index order —
+        // the same order the bitmap iterates — so verification (and the on-chain
+        // submission) can zip bitmap indices with signatures positionally.
+        entries.sort_by_key(|(signer, _)| *signer);
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signers);
-        let signature = aggregate_signatures(&signatures)?;
 
-        Some(Bn254Certificate { signers, signature })
+        Some(EcdsaCertificate {
+            signers,
+            signatures,
+        })
     }
 
     fn verify_certificate<R, D, M>(
@@ -253,6 +232,11 @@ impl Scheme for Bn254Scheme {
             return false;
         }
 
+        // Every bitmap signer must have exactly one signature.
+        if certificate.signers.count() != certificate.signatures.len() {
+            return false;
+        }
+
         // Enforce the quorum under the caller's fault model (the aggregation engine
         // always passes N3f1: quorum = n - (n-1)/3).
         if certificate.signers.count() < self.participants.quorum::<M>() as usize {
@@ -263,28 +247,27 @@ impl Scheme for Bn254Scheme {
             return false;
         };
 
-        // Aggregate the bitmap signers' G2 keys and do ONE pairing check of the
-        // aggregate signature against the raw digest.
-        let mut publics = Vec::with_capacity(certificate.signers.count());
-        for signer in certificate.signers.iter() {
+        // Verify each signature against its bitmap participant's address.
+        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.key(signer) else {
                 return false;
             };
-            publics.push(public_key.clone());
+            if !public_key.verify_digest(&digest, signature) {
+                return false;
+            }
         }
-        super::aggregate_verify(&publics, None, &digest, &certificate.signature)
+        true
     }
 
     fn is_attributable() -> bool {
-        // Certificates carry the signer bitmap alongside the aggregate signature,
-        // and individual G1 signatures are independently verifiable.
+        // Certificates carry the signer bitmap alongside per-signer signatures,
+        // each independently verifiable.
         true
     }
 
     fn is_batchable() -> bool {
-        // Every certificate verification is an independent pairing over a different
-        // digest; no batch verification is implemented, so eager per-certificate
-        // verification is preferred (unlike the bls12381 reference).
+        // Recovery-based verification has no batch form; eager per-certificate
+        // verification is preferred.
         false
     }
 
@@ -297,60 +280,73 @@ impl Scheme for Bn254Scheme {
     }
 }
 
-/// Certificate formed by an aggregated BN254 G1 signature plus the bitmap of signers
-/// that contributed to it.
+/// Certificate formed by the bitmap of contributing signers plus their individual
+/// 65-byte ECDSA signatures in ascending participant-index order (the bitmap's
+/// iteration order).
 ///
-/// Codec mirrors the bls12381 multisig reference: `signers` (varint-length bitmap)
-/// followed by the fixed 32-byte signature; `Read::Cfg` is the maximum participant
-/// count (upper bound only — exact sizing is enforced by
-/// [`Scheme::verify_certificate`]).
+/// Codec: `signers` (varint-length bitmap) followed by exactly `signers.count()`
+/// fixed 65-byte signatures; `Read::Cfg` is the maximum participant count (upper
+/// bound only — exact sizing is enforced by [`Scheme::verify_certificate`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Bn254Certificate {
+pub struct EcdsaCertificate {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
-    /// Aggregated (point-added) G1 signature covering all contributed signatures.
-    pub signature: Signature,
+    /// Per-signer signatures, index-aligned with the bitmap's ascending iteration.
+    pub signatures: Vec<Signature>,
 }
 
-impl Write for Bn254Certificate {
+impl Write for EcdsaCertificate {
     fn write(&self, writer: &mut impl BufMut) {
         self.signers.write(writer);
-        self.signature.write(writer);
+        for signature in &self.signatures {
+            signature.write(writer);
+        }
     }
 }
 
-impl EncodeSize for Bn254Certificate {
+impl EncodeSize for EcdsaCertificate {
     fn encode_size(&self) -> usize {
-        self.signers.encode_size() + self.signature.encode_size()
+        self.signers.encode_size()
+            + self
+                .signatures
+                .iter()
+                .map(|signature| signature.encode_size())
+                .sum::<usize>()
     }
 }
 
-impl Read for Bn254Certificate {
+impl Read for EcdsaCertificate {
     type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_participants: &usize) -> Result<Self, Error> {
         let signers = Signers::read_cfg(reader, max_participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
-                "bn254::Bn254Certificate",
+                "ecdsa::EcdsaCertificate",
                 "Certificate contains no signers",
             ));
         }
 
-        // Unlike the reference's `Lazy` signature, decode (and validate the G1
-        // point) eagerly: certificates are rare and small, and this rejects
+        // Exactly one signature per bitmap signer. Decoding (and canonical-form
+        // validation) is eager: certificates are rare and small, and this rejects
         // malformed bytes at the decode boundary.
-        let signature = Signature::read(reader)?;
+        let mut signatures = Vec::with_capacity(signers.count());
+        for _ in 0..signers.count() {
+            signatures.push(Signature::read(reader)?);
+        }
 
-        Ok(Self { signers, signature })
+        Ok(Self {
+            signers,
+            signatures,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bn254::{aggregate_verify, get_signer};
-    use commonware_codec::{Decode, Encode, FixedSize};
+    use crate::ecdsa::get_signer;
+    use commonware_codec::{Decode, Encode};
     use commonware_consensus::aggregation::types::{Ack, Certificate as AggCertificate};
     use commonware_consensus::types::{Epoch, Height};
     use commonware_cryptography::sha256::Digest as Sha256Digest;
@@ -361,34 +357,24 @@ mod tests {
     /// Deterministic signer set with participant-ordered schemes.
     ///
     /// Returns `(signers, verifier)` where `signers[i]` is the scheme whose
-    /// participant index is `i` (i.e. sorted by G2 compressed bytes).
-    fn setup(n: usize) -> (Vec<Bn254Scheme>, Bn254Scheme) {
-        let keys: Vec<Bn254> = (0..n).map(|i| Bn254::from_seed(i as u64)).collect();
+    /// participant index is `i` (i.e. sorted by address bytes).
+    fn setup(n: usize) -> (Vec<EcdsaScheme>, EcdsaScheme) {
+        let keys: Vec<Ecdsa> = (0..n).map(|i| Ecdsa::from_seed(i as u64)).collect();
         let participants: Set<PublicKey> = keys
             .iter()
             .map(|k| k.public_key())
             .try_collect()
             .expect("no duplicate keys");
-        // g1_keys must be index-aligned with the sorted participant set.
-        let g1_keys: Vec<G1PublicKey> = participants
-            .iter()
-            .map(|pk| {
-                keys.iter()
-                    .find(|k| &k.public_key() == pk)
-                    .expect("participant derives from keys")
-                    .public_g1()
-            })
-            .collect();
 
-        let mut schemes: Vec<Bn254Scheme> = keys
+        let mut schemes: Vec<EcdsaScheme> = keys
             .iter()
             .map(|k| {
-                Bn254Scheme::signer(participants.clone(), g1_keys.clone(), k.private_key())
+                EcdsaScheme::signer(participants.clone(), k.private_key())
                     .expect("key is in participant set")
             })
             .collect();
         schemes.sort_by_key(|s| s.me().expect("signer scheme has an index"));
-        let verifier = Bn254Scheme::verifier(participants, g1_keys);
+        let verifier = EcdsaScheme::verifier(participants);
         (schemes, verifier)
     }
 
@@ -402,10 +388,10 @@ mod tests {
     }
 
     fn sign_all(
-        schemes: &[Bn254Scheme],
+        schemes: &[EcdsaScheme],
         item: &Item<Sha256Digest>,
         count: usize,
-    ) -> Vec<Attestation<Bn254Scheme>> {
+    ) -> Vec<Attestation<EcdsaScheme>> {
         schemes
             .iter()
             .take(count)
@@ -503,6 +489,7 @@ mod tests {
         let certificate = verifier.assemble::<_, N3f1>(at, &Sequential).unwrap();
         assert_eq!(certificate.signers.count(), quorum);
         assert_eq!(certificate.signers.len(), 4);
+        assert_eq!(certificate.signatures.len(), quorum);
         assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             &subject,
@@ -540,6 +527,27 @@ mod tests {
         ));
     }
 
+    // Assemble must order signatures by participant index regardless of the
+    // order attestations arrive in.
+    #[test]
+    fn assemble_orders_signatures_by_participant_index() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup(4);
+        let subject = item(12, b"unordered attestations");
+
+        let mut attestations = sign_all(&schemes, &subject, 3);
+        attestations.reverse();
+        let certificate = verifier
+            .assemble::<_, N3f1>(attestations, &Sequential)
+            .unwrap();
+        assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            &subject,
+            &certificate,
+            &Sequential,
+        ));
+    }
+
     #[test]
     fn assemble_rejects_out_of_range_signer() {
         let (schemes, verifier) = setup(4);
@@ -554,7 +562,7 @@ mod tests {
         );
     }
 
-    // (c) Tampered bitmap / wrong participant count rejected.
+    // (c) Tampered bitmap / signature list / wrong participant count rejected.
     #[test]
     fn tampered_certificates_rejected() {
         let mut rng = test_rng();
@@ -565,12 +573,12 @@ mod tests {
             .assemble::<_, N3f1>(attestations, &Sequential)
             .unwrap();
 
-        // Claiming an extra signer that did not sign fails the pairing check.
+        // Claiming an extra signer that did not sign fails (count mismatch).
         let mut extra_signer: Vec<Participant> = certificate.signers.iter().collect();
         extra_signer.push(Participant::new(3));
-        let tampered = Bn254Certificate {
+        let tampered = EcdsaCertificate {
             signers: Signers::from(4, extra_signer),
-            signature: certificate.signature.clone(),
+            signatures: certificate.signatures.clone(),
         };
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
@@ -581,9 +589,9 @@ mod tests {
 
         // Dropping a signer from the bitmap (below quorum) is rejected.
         let fewer: Vec<Participant> = certificate.signers.iter().take(2).collect();
-        let below_quorum = Bn254Certificate {
+        let below_quorum = EcdsaCertificate {
             signers: Signers::from(4, fewer),
-            signature: certificate.signature.clone(),
+            signatures: certificate.signatures[..2].to_vec(),
         };
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
@@ -592,15 +600,16 @@ mod tests {
             &Sequential,
         ));
 
-        // Swapping which participants are claimed (same count) fails the pairing.
-        let swapped = Bn254Certificate {
-            signers: Signers::from(4, [1u32, 2, 3].map(Participant::new)),
-            signature: certificate.signature.clone(),
+        // Swapping which participants are claimed (same count) fails recovery.
+        let signers: Vec<Participant> = certificate.signers.iter().collect();
+        let swapped_participants: Vec<Participant> = signers
+            .iter()
+            .map(|p| Participant::new((p.get() + 1) % 4))
+            .collect();
+        let swapped = EcdsaCertificate {
+            signers: Signers::from(4, swapped_participants),
+            signatures: certificate.signatures.clone(),
         };
-        assert_ne!(
-            swapped.signers, certificate.signers,
-            "test requires a different signer set"
-        );
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             &subject,
@@ -608,11 +617,20 @@ mod tests {
             &Sequential,
         ));
 
+        // Reordering the signature list breaks positional attribution.
+        let mut reordered = certificate.clone();
+        reordered.signatures.swap(0, 1);
+        assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            &subject,
+            &reordered,
+            &Sequential,
+        ));
+
         // Bitmap sized for a different participant count is rejected outright.
-        let signers: Vec<Participant> = certificate.signers.iter().collect();
-        let oversized = Bn254Certificate {
+        let oversized = EcdsaCertificate {
             signers: Signers::from(5, signers.clone()),
-            signature: certificate.signature.clone(),
+            signatures: certificate.signatures.clone(),
         };
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
@@ -620,9 +638,9 @@ mod tests {
             &oversized,
             &Sequential,
         ));
-        let undersized = Bn254Certificate {
+        let undersized = EcdsaCertificate {
             signers: Signers::from(3, signers),
-            signature: certificate.signature,
+            signatures: certificate.signatures,
         };
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
@@ -644,47 +662,53 @@ mod tests {
 
         let encoded = certificate.encode();
         let decoded =
-            Bn254Certificate::decode_cfg(encoded.clone(), &verifier.certificate_codec_config())
+            EcdsaCertificate::decode_cfg(encoded.clone(), &verifier.certificate_codec_config())
                 .expect("decode certificate");
         assert_eq!(decoded, certificate);
 
         // The unbounded (journal) config also decodes it.
-        let decoded_unbounded = Bn254Certificate::decode_cfg(
+        let decoded_unbounded = EcdsaCertificate::decode_cfg(
             encoded.clone(),
-            &Bn254Scheme::certificate_codec_config_unbounded(),
+            &EcdsaScheme::certificate_codec_config_unbounded(),
         )
         .expect("decode certificate unbounded");
         assert_eq!(decoded_unbounded, certificate);
 
         // A tighter bound than the actual bitmap is rejected.
-        assert!(Bn254Certificate::decode_cfg(encoded, &2).is_err());
+        assert!(EcdsaCertificate::decode_cfg(encoded, &2).is_err());
 
         // Certificates with no signers are rejected at decode time.
-        let empty = Bn254Certificate {
+        let empty = EcdsaCertificate {
             signers: Signers::from(4, std::iter::empty::<Participant>()),
-            signature: certificate.signature.clone(),
+            signatures: Vec::new(),
         };
-        assert!(Bn254Certificate::decode_cfg(empty.encode(), &4).is_err());
+        assert!(EcdsaCertificate::decode_cfg(empty.encode(), &4).is_err());
 
-        // A corrupted signature (not a decodable G1 point: 0xff-filled bytes encode
-        // an out-of-range field element) fails decode, not verification.
+        // A corrupted signature (0xff-filled: invalid parity byte) fails decode,
+        // not verification.
         let mut corrupt = certificate.encode_mut();
         let len = corrupt.len();
-        corrupt[len - Signature::SIZE..].fill(0xff);
-        assert!(Bn254Certificate::decode_cfg(corrupt.freeze(), &4).is_err());
+        corrupt[len - 65..].fill(0xff);
+        assert!(EcdsaCertificate::decode_cfg(corrupt.freeze(), &4).is_err());
+
+        // A truncated signature list fails decode.
+        let mut truncated = certificate.encode_mut();
+        let len = truncated.len();
+        truncated.truncate(len - 65);
+        assert!(EcdsaCertificate::decode_cfg(truncated.freeze(), &4).is_err());
     }
 
     // (e) ON-CHAIN PARITY ANCHOR. This is the on-chain compatibility guarantee:
     // - the scheme's attestation signature bytes equal the low-level
-    //   `sign_digest` (old `Bn254::sign(None, digest)`) bytes for a fixed key;
-    // - the assembled certificate's aggregate equals `aggregate_signatures` of the
-    //   individual signatures;
-    // - `aggregate_verify(participating_g2, None, digest, aggregate)` holds.
-    // If this test breaks, certificates will no longer verify inside the deployed
-    // `BLSSignatureChecker` contracts. Do not "fix" it by changing the preimage.
+    //   `sign_digest` bytes for a fixed key (65-byte r||s||v, v in {27,28}, low-s);
+    // - every certificate signature recovers to its bitmap participant's address
+    //   via Ethereum's prehash recovery — exactly the `ecrecover(msgHash, v, r, s)`
+    //   the deployed `GasKillerSDK.verifyAndUpdate` evaluates.
+    // If this test breaks, certificates will no longer verify on-chain. Do not
+    // "fix" it by changing the preimage.
     #[test]
     fn onchain_parity_anchor() {
-        let keys: Vec<Bn254> = ["101", "202", "303", "404"]
+        let keys: Vec<Ecdsa> = ["101", "202", "303", "404"]
             .iter()
             .map(|k| get_signer(k))
             .collect();
@@ -693,15 +717,6 @@ mod tests {
             .map(|k| k.public_key())
             .try_collect()
             .expect("distinct keys");
-        let g1_keys: Vec<G1PublicKey> = participants
-            .iter()
-            .map(|pk| {
-                keys.iter()
-                    .find(|k| &k.public_key() == pk)
-                    .unwrap()
-                    .public_g1()
-            })
-            .collect();
 
         let mut hasher = Sha256::new();
         hasher.update(b"fixed on-chain task digest");
@@ -713,11 +728,9 @@ mod tests {
         };
 
         // 1. Attestation signature bytes == low-level raw digest signature bytes.
-        let mut schemes: Vec<Bn254Scheme> = keys
+        let mut schemes: Vec<EcdsaScheme> = keys
             .iter()
-            .map(|k| {
-                Bn254Scheme::signer(participants.clone(), g1_keys.clone(), k.private_key()).unwrap()
-            })
+            .map(|k| EcdsaScheme::signer(participants.clone(), k.private_key()).unwrap())
             .collect();
         schemes.sort_by_key(|s| s.me().unwrap());
         for key in &keys {
@@ -730,50 +743,43 @@ mod tests {
             assert_eq!(
                 attestation.signature.get().unwrap().as_ref(),
                 low_level.as_ref(),
-                "scheme signature must be bit-identical to Bn254 sign(None, digest)"
+                "scheme signature must be bit-identical to Ecdsa::sign_digest"
             );
         }
 
-        // 2. Assembled aggregate == aggregate_signatures of the individual sigs.
+        // 2. Every certificate signature recovers to its participant's address —
+        // exactly the ecrecover check the deployed contract evaluates.
         let quorum_schemes = &schemes[..3];
         let attestations: Vec<_> = quorum_schemes
             .iter()
             .map(|s| s.sign::<Sha256Digest>(&subject).unwrap())
             .collect();
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(attestations.clone(), &Sequential)
+            .assemble::<_, N3f1>(attestations, &Sequential)
             .unwrap();
 
-        let individual: Vec<Signature> = attestations
-            .iter()
-            .map(|a| a.signature.get().unwrap().clone())
-            .collect();
-        let expected_aggregate = aggregate_signatures(&individual).unwrap();
-        assert_eq!(certificate.signature.as_ref(), expected_aggregate.as_ref());
-
-        // 3. aggregate_verify over the participating G2 keys accepts it — exactly
-        // the pairing the deployed contract evaluates.
-        let verifier = Bn254Scheme::verifier(participants, g1_keys);
-        let participating_g2 = verifier.signer_g2_keys(&certificate.signers);
-        assert_eq!(participating_g2.len(), 3);
-        assert!(aggregate_verify(
-            &participating_g2,
-            None,
-            &digest_bytes,
-            &certificate.signature
-        ));
-
-        // The G1 helper resolves the same participants (for the on-chain call).
-        let participating_g1 = verifier.signer_g1_points(&certificate.signers);
-        assert_eq!(participating_g1.len(), 3);
-        for (g1, g2) in participating_g1.iter().zip(&participating_g2) {
-            let key = keys.iter().find(|k| &k.public_key() == g2).unwrap();
-            assert_eq!(g1, &key.public_g1());
+        let verifier = EcdsaScheme::verifier(participants.clone());
+        let addresses = verifier.signer_addresses(&certificate.signers);
+        assert_eq!(addresses.len(), 3);
+        for (address, signature) in addresses.iter().zip(&certificate.signatures) {
+            assert_eq!(
+                signature.recover(&digest_bytes),
+                Some(*address),
+                "certificate signature must ecrecover to the bitmap participant"
+            );
+            let raw = signature.as_ref();
+            assert!(raw[64] == 27 || raw[64] == 28, "v must be 27/28 on-chain");
         }
+
+        // 3. The participant order (and thus the signature order) is ascending by
+        // address — the strictly-ascending-signers order verifyAndUpdate enforces.
+        let mut sorted = addresses.clone();
+        sorted.sort();
+        assert_eq!(addresses, sorted);
     }
 
     // (f) Engine-integration smoke test through the aggregation types. Proves the
-    // blanket `aggregation::scheme::Scheme<D>` marker holds for Bn254Scheme (the
+    // blanket `aggregation::scheme::Scheme<D>` marker holds for EcdsaScheme (the
     // same entry points the engine uses: Ack::sign / Ack::verify /
     // Certificate::from_acks / Certificate::verify with M = N3f1).
     #[test]
@@ -782,7 +788,7 @@ mod tests {
         let (schemes, verifier) = setup(4);
         let subject = item(11, b"engine smoke");
 
-        let acks: Vec<Ack<Bn254Scheme, Sha256Digest>> = schemes
+        let acks: Vec<Ack<EcdsaScheme, Sha256Digest>> = schemes
             .iter()
             .map(|s| Ack::sign(s, Epoch::zero(), subject.clone()).expect("participant signs"))
             .collect();

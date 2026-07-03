@@ -73,7 +73,7 @@ ethereum:
 
 The current node readiness probe checks if the `gas-killer` process is running. For production deployments, consider implementing a proper health/readiness endpoint in the node application that verifies:
 - Connection to Ethereum RPC
-- BLS key loaded
+- ECDSA key loaded
 - P2P network connectivity
 
 ### Init Container Timeouts

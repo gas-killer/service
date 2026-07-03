@@ -1,10 +1,10 @@
 //! Gas Killer Node - Aggregation participant for the Gas Killer AVS
 //!
-//! The node runs the commonware-consensus aggregation engine with the BN254
-//! multisig scheme: for every height the router announces a task on p2p channel 1,
-//! the node validates it via EVMSketch, signs the expected task digest (or the
-//! skip digest when the router abandons the height), and gossips TipAcks on
-//! channel 0 until the height certifies.
+//! The node runs the commonware-consensus aggregation engine with the secp256k1
+//! ECDSA multisig scheme: for every height the router announces a task on p2p
+//! channel 1, the node validates it via EVMSketch, signs the expected task digest
+//! (or the skip digest when the router abandons the height) with its operator
+//! ECDSA key, and gossips TipAcks on channel 0 until the height certifies.
 
 mod automaton;
 mod reporter;
@@ -27,9 +27,9 @@ use commonware_runtime::{Metrics, Quota, Runner, Spawner, Supervisor, tokio};
 use commonware_utils::ordered::{Map, Quorum as _, Set};
 use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
 use eigen_logging::log_level::LogLevel;
-use gas_killer_common::bn254::{Bn254, G1PublicKey, PublicKey, get_signer};
+use gas_killer_common::ecdsa::{Ecdsa, PublicKey, get_signer};
 use gas_killer_common::{
-    Bn254Scheme, GasKillerValidator, OrchestratorConfig, SpeculativePrebuildConfig,
+    EcdsaScheme, GasKillerValidator, OrchestratorConfig, SpeculativePrebuildConfig,
     StaticEpochMonitor, ValidatorMetrics, ack_messages_per_second, agg_activity_timeout,
     agg_window, get_operator_states, load_key_from_file, load_orchestrator_config,
     p2p_message_backlog, p2p_quota_period, rebroadcast_interval, round_timeout, storage_directory,
@@ -127,7 +127,7 @@ fn resolve_with_retry(
     None
 }
 
-fn configure_identity(matches: &clap::ArgMatches) -> (Bn254, u16) {
+fn configure_identity(matches: &clap::ArgMatches) -> (Ecdsa, u16) {
     let key_file = matches
         .get_one::<String>("key-file")
         .expect("Please provide key file");
@@ -162,12 +162,12 @@ fn main() {
 
     // Parse arguments
     let matches = Command::new("gas-killer-node")
-        .about("Gas Killer AVS node - BN254 signature aggregation participant")
+        .about("Gas Killer AVS node - ECDSA signature aggregation participant")
         .arg(
             Arg::new("key-file")
                 .long("key-file")
                 .required(true)
-                .help("Path to the JSON file containing the BLS private key"),
+                .help("Path to the JSON file containing the operator's ECDSA private key"),
         )
         .arg(
             Arg::new("port")
@@ -179,7 +179,7 @@ fn main() {
             Arg::new("orchestrator")
                 .long("orchestrator")
                 .required(true)
-                .help("Path to orchestrator config file (JSON with G2 coordinates and port)"),
+                .help("Path to orchestrator config file (JSON with the router's address and port)"),
         )
         .get_matches();
 
@@ -226,7 +226,7 @@ fn main() {
             }
 
             for participant in participants {
-                let verifier = participant.pub_keys.as_ref().unwrap().g2_pub_key.clone();
+                let verifier = PublicKey::from(participant.address);
                 tracing::info!(key = ?verifier, "registered authorized peer");
                 if let Some(socket) = &participant.socket {
                     // Try to resolve hostname:port with retries (Docker DNS may need time)
@@ -253,14 +253,9 @@ fn main() {
                 }
             }
 
-            // Parse orchestrator (router) public key from G2 coordinates
-            orchestrator_pub_key = PublicKey::create_from_g2_coordinates(
-                &orchestrator_config.g2_x1,
-                &orchestrator_config.g2_x2,
-                &orchestrator_config.g2_y1,
-                &orchestrator_config.g2_y2,
-            )
-            .expect("Invalid orchestrator G2 coordinates");
+            // Parse the orchestrator (router) identity: its Ethereum address
+            orchestrator_pub_key = PublicKey::from_address_str(&orchestrator_config.publicKey)
+                .expect("Invalid orchestrator address");
             tracing::info!(key = ?orchestrator_pub_key, "registered orchestrator key");
 
             // Resolve orchestrator address (hostname:port or IP:port) with retries
@@ -383,28 +378,26 @@ fn main() {
         );
         let _ = oracle.track(0, peers);
 
-        // Build the ordered participant set (G2 keys, sorted by compressed bytes)
-        // with the index-aligned G1 key vector. Participant indices are positions
-        // in this sorted order — the router builds the identical set from the same
-        // operator state, so attestations attribute to the same indices everywhere.
+        // Build the ordered participant set (operator addresses, sorted by byte
+        // order). Participant indices are positions in this sorted order — the
+        // router builds the identical set from the same operator state, so
+        // attestations attribute to the same indices everywhere.
         let operators = &quorum_infos[quorum_number].operators;
         if operators.is_empty() {
             panic!("No operators found");
         }
-        let key_map: Map<PublicKey, G1PublicKey> =
-            Map::from_iter_dedup(operators.iter().map(|operator| {
-                let keys = operator.pub_keys.as_ref().expect("operator has BLS keys");
-                (keys.g2_pub_key.clone(), keys.g1_pub_key.clone())
-            }));
-        let participants: Set<PublicKey> = Set::from_iter_dedup(key_map.iter().cloned());
-        let g1_keys: Vec<G1PublicKey> = key_map.iter_pairs().map(|(_, g1)| g1.clone()).collect();
+        let participants: Set<PublicKey> = Set::from_iter_dedup(
+            operators
+                .iter()
+                .map(|operator| PublicKey::from(operator.address)),
+        );
         for key in participants.iter() {
             tracing::info!(key = ?key, "registered participant");
         }
 
         // The engine's quorum is fixed at N3f1 (n - (n-1)/3); the contract-derived
-        // stake threshold is informational only (the authoritative stake check
-        // runs on-chain in BLSSignatureChecker during verifyAndUpdate).
+        // threshold is informational only (the authoritative operator-count check
+        // runs on-chain in GasKillerSDK.verifyAndUpdate).
         tracing::info!(
             participants = participants.len(),
             quorum = participants.quorum::<N3f1>(),
@@ -413,15 +406,14 @@ fn main() {
         );
 
         // Signing scheme over the participant set; our own participant index is
-        // derived from our G2 key's position in the sorted set.
-        let scheme = Bn254Scheme::signer(participants, g1_keys, signer.private_key())
-            .unwrap_or_else(|| {
-                panic!(
-                    "own BN254 G2 key {:?} is not in the quorum-{quorum_number} operator set; \
+        // derived from our address's position in the sorted set.
+        let scheme = EcdsaScheme::signer(participants, signer.private_key()).unwrap_or_else(|| {
+            panic!(
+                "own operator address {:?} is not in the quorum-{quorum_number} operator set; \
                      register the operator on-chain before starting the node",
-                    signer.public_key()
-                )
-            });
+                signer.public_key()
+            )
+        });
 
         // Create network channels (must all be registered BEFORE network.start()):
         // channel 0 carries the engine's TipAck gossip, channel 1 the router's
@@ -520,7 +512,7 @@ fn main() {
         // Static single-epoch supervision: ConstantProvider serves the same scheme
         // for every epoch and the monitor never fires. Keep a clone of the monitor
         // in the root future — it must outlive the engine or the engine exits.
-        let provider = ConstantProvider::<Bn254Scheme, Epoch>::new(scheme);
+        let provider = ConstantProvider::<EcdsaScheme, Epoch>::new(scheme);
         let monitor = StaticEpochMonitor::new();
         let monitor_guard = monitor.clone();
 
@@ -596,7 +588,7 @@ fn main() {
             }
         });
 
-        // BLS key loaded and engine spawned — node is ready to participate
+        // ECDSA key loaded and engine spawned — node is ready to participate
         ready.store(true, Ordering::Relaxed);
 
         // Start network; blocks the root future (and thus keeps every spawned

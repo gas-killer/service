@@ -101,7 +101,11 @@ where
     ))
 }
 
-/// Configuration for loading BLS private keys from JSON files
+/// Configuration for loading ECDSA private keys from JSON files.
+///
+/// Matches both the legacy `{"privateKey": ...}` shape and the EigenLayer
+/// `*.private.ecdsa.key.json` shape (`{"privateKey": "0x...", "publicKey": ...}` —
+/// unknown fields are ignored).
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct KeyConfig {
@@ -112,16 +116,14 @@ pub struct KeyConfig {
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct OrchestratorConfig {
-    pub g2_x1: String,
-    pub g2_x2: String,
-    pub g2_y1: String,
-    pub g2_y2: String,
+    /// The router's p2p identity: its Ethereum address (`0x...` hex).
+    pub publicKey: String,
     pub port: String,
     #[serde(default)]
     pub address: Option<String>,
 }
 
-/// Loads a BLS private key from a JSON file
+/// Loads an ECDSA private key from a JSON file
 ///
 /// # Arguments
 /// * `path` - Path to the JSON file containing the key
@@ -359,13 +361,13 @@ fn parse_secs_env_duration(value: Option<&str>, default_secs: f64) -> std::time:
         .unwrap_or_else(|| std::time::Duration::from_secs_f64(default_secs))
 }
 
-/// Maximum age (in blocks) of a reference block, falling back to the contract default
+/// Maximum age (in blocks) of a task's reference block, falling back to the default
 /// when `BLOCK_STALE_MEASURE` is unset or unparseable.
 ///
-/// Mirrors `DEFAULT_BLOCK_STALE_MEASURE` in `GasKillerSDK.sol`. The service reuses this
-/// value as an off-chain policy bound: it rejects gas-analysis requests whose
-/// `block_height` is older than this window (see ingress validation), and sizes the
-/// speculative executor cache to cover it.
+/// An off-chain policy bound (the ECDSA `GasKillerSDK` no longer checks reference
+/// blocks on-chain): the service rejects gas-analysis requests whose `block_height`
+/// is older than this window (see ingress validation), and sizes the speculative
+/// executor cache to cover it.
 pub const DEFAULT_BLOCK_STALE_MEASURE: u64 = 300;
 
 /// Reads the staleness window from `BLOCK_STALE_MEASURE`, defaulting to

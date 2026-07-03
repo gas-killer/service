@@ -7,7 +7,11 @@ use alloy_provider::{
 
 /// ERC-165 interface ID for the GasKiller interface. A target contract must
 /// report support for this ID before the router submits `verifyAndUpdate`.
-pub const GAS_KILLER_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0x93, 0xde, 0x45, 0x31]);
+///
+/// `type(IGasKillerSDK).interfaceId` — the selector of
+/// `verifyAndUpdate(bytes32,bytes,uint256,bytes4,bytes[])` (the ECDSA variant),
+/// the interface's only function.
+pub const GAS_KILLER_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0xd5, 0x77, 0xa8, 0xd3]);
 
 /// Provider with wallet capabilities (for transactions).
 pub type WalletProvider = FillProvider<
@@ -42,29 +46,3 @@ pub type ReadOnlyProvider = FillProvider<
     dead_code
 )]
 pub mod gaskillersdk;
-
-#[allow(
-    non_camel_case_types,
-    non_snake_case,
-    clippy::pub_underscore_fields,
-    clippy::style,
-    clippy::empty_structs_with_brackets,
-    clippy::too_many_arguments,
-    clippy::type_complexity,
-    missing_docs,
-    dead_code
-)]
-pub mod bls_apk_registry;
-
-#[allow(
-    non_camel_case_types,
-    non_snake_case,
-    clippy::pub_underscore_fields,
-    clippy::style,
-    clippy::empty_structs_with_brackets,
-    clippy::too_many_arguments,
-    clippy::type_complexity,
-    missing_docs,
-    dead_code
-)]
-pub mod bls_sig_check_operator_state_retriever;

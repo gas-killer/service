@@ -2,16 +2,14 @@
 //! on-chain submitter.
 //!
 //! The router is NOT a signing participant. It runs the commonware aggregation
-//! engine with a verifier-only [`Bn254Scheme`] (`me() == None`): the engine
-//! validates the nodes' TipAcks on channel 0, assembles BN254 certificates at
+//! engine with a verifier-only [`EcdsaScheme`] (`me() == None`): the engine
+//! validates the nodes' TipAcks on channel 0, assembles ECDSA certificates at
 //! quorum, journals them, and reports them to the [`CertReporter`]. Task flow:
 //! HTTP ingress → sequencer (assigns aggregation heights, broadcasts
 //! [`gas_killer_common::TaskDirective`]s on channel 1) → nodes sign → engine
 //! certifies → submitter calls `GasKillerSDK.verifyAndUpdate` on-chain.
 
 use ::tokio::net::TcpListener;
-use ark_bn254::G2Affine;
-use ark_serialize::CanonicalDeserialize;
 use axum::{
     Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
 };
@@ -31,7 +29,7 @@ use commonware_runtime::{
 use commonware_utils::ordered::{Map, Quorum as _, Set};
 use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
 use eigen_logging::log_level::LogLevel;
-use gas_killer_common::bn254::{Bn254Scheme, G1PublicKey, PublicKey};
+use gas_killer_common::ecdsa::{EcdsaScheme, PublicKey};
 use gas_killer_common::get_operator_states;
 use gas_killer_common::{
     GasKillerValidator, SpeculativePrebuildConfig, StaticEpochMonitor, ack_messages_per_second,
@@ -145,7 +143,7 @@ fn resolve_with_retry(
 fn main() {
     // Parse arguments (flags unchanged from the pre-migration router).
     let matches = Command::new("orchestrator")
-        .about("generate and verify BN254 Multi-Signatures")
+        .about("collect and verify ECDSA multi-signatures")
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
@@ -157,7 +155,7 @@ fn main() {
             Arg::new("key-file")
                 .long("key-file")
                 .required(true)
-                .help("Path to the JSON file containing the router BLS private key"),
+                .help("Path to the JSON file containing the router ECDSA private key"),
         )
         .arg(
             Arg::new("port")
@@ -179,14 +177,10 @@ fn main() {
     let port = port.parse::<u16>().expect("Port not well-formed");
     tracing::info!(port, "loaded port");
 
-    // Log the router's public key G2 coordinates for config generation
+    // Log the router's identity for config generation
     let my_pub_key = signer.public_key();
-    let g2_point = G2Affine::deserialize_compressed(my_pub_key.as_ref()).unwrap();
-    println!("Router G2 coordinates for public_orchestrator.json:");
-    println!("  g2_x1: {}", g2_point.x.c0);
-    println!("  g2_x2: {}", g2_point.x.c1);
-    println!("  g2_y1: {}", g2_point.y.c0);
-    println!("  g2_y2: {}", g2_point.y.c1);
+    println!("Router identity for public_orchestrator.json:");
+    println!("  publicKey: {my_pub_key}");
 
     // Initialize runtime. A stable storage directory is REQUIRED: the engine's
     // certificate journal must survive restarts (the runtime default is a
@@ -274,7 +268,7 @@ fn main() {
                 panic!("Please provide at least one participant");
             }
             for participant in participants {
-                let verifier = participant.pub_keys.unwrap().g2_pub_key;
+                let verifier = PublicKey::from(participant.address);
                 if let Some(socket) = participant.socket {
                     // Try to resolve hostname:port with retries (Docker DNS may need time)
                     if let Some(socket_addr) =
@@ -320,32 +314,25 @@ fn main() {
         );
         let _ = oracle.track(0, peers);
 
-        // Build the participant set (sorted G2 keys — participant indices derive
-        // from this order on every process) and the index-aligned G1 keys.
+        // Build the participant set (sorted operator addresses — participant
+        // indices derive from this order on every process), IDENTICAL to the
+        // node's construction in gas-killer-node/src/main.rs.
         let operators = &quorum_infos[quorum_number].operators;
         if operators.is_empty() {
             panic!("Please provide at least one contributor");
         }
-        // Build the G2->G1 map with `from_iter_dedup` (sort + first-write-wins on a
-        // duplicate G2 key) — IDENTICAL to the node's construction in
-        // gas-killer-node/src/main.rs. If node and router deduped differently (e.g.
-        // last-write-wins here), a duplicate G2 key bound to different G1 keys would
-        // silently misalign the two sides' G1 assignment at that participant index.
-        let key_map: Map<PublicKey, G1PublicKey> =
-            Map::from_iter_dedup(operators.iter().map(|operator| {
-                let keys = operator.pub_keys.as_ref().expect("operator has BLS keys");
-                tracing::info!(key = ?keys.g2_pub_key, "registered contributor");
-                (keys.g2_pub_key.clone(), keys.g1_pub_key.clone())
-            }));
-        let participants: Set<PublicKey> = Set::from_iter_dedup(key_map.iter().cloned());
-        let g1_keys: Vec<G1PublicKey> = key_map.iter_pairs().map(|(_, g1)| g1.clone()).collect();
+        let participants: Set<PublicKey> = Set::from_iter_dedup(operators.iter().map(|operator| {
+            let key = PublicKey::from(operator.address);
+            tracing::info!(key = ?key, "registered contributor");
+            key
+        }));
 
         // Verifier-only scheme: the router validates acks and assembles
         // certificates but never signs (its key is not in the participant set).
-        let scheme = Bn254Scheme::verifier(participants, g1_keys);
+        let scheme = EcdsaScheme::verifier(participants);
         // The contract-derived threshold is informational only: the engine's
-        // quorum is fixed at N3f1 (n - (n-1)/3) and the authoritative stake
-        // check runs on-chain in BLSSignatureChecker.
+        // quorum is fixed at N3f1 (n - (n-1)/3) and the authoritative
+        // operator-count check runs on-chain in GasKillerSDK.verifyAndUpdate.
         tracing::info!(
             participants = scheme.participants().len(),
             engine_quorum = scheme.participants().quorum::<N3f1>(),
@@ -414,7 +401,7 @@ fn main() {
             context.child("engine"),
             AggregationConfig {
                 monitor: StaticEpochMonitor::new(),
-                provider: ConstantProvider::<Bn254Scheme, Epoch>::new(scheme.clone()),
+                provider: ConstantProvider::<EcdsaScheme, Epoch>::new(scheme.clone()),
                 automaton: RouterAutomaton::new(assignments.clone()),
                 reporter: reporter_mailbox.clone(),
                 blocker: oracle.clone(),
@@ -518,7 +505,7 @@ fn main() {
             }
         });
 
-        // BLS key loaded, engine + sequencer + submitter spawned — router is
+        // ECDSA key loaded, engine + sequencer + submitter spawned — router is
         // ready to collect certificates.
         ready.store(true, Ordering::Relaxed);
 

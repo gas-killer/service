@@ -24,10 +24,7 @@ use alloy_provider::{
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
 use gas_killer_common::ChainRole;
-use gas_killer_common::bindings::bls_apk_registry::BLSApkRegistry;
-use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
-use gas_killer_common::bn254::Bn254Scheme;
-use gas_killer_common::eigenlayer::AvsDeployment;
+use gas_killer_common::ecdsa::EcdsaScheme;
 use std::collections::HashMap;
 use std::{env, str::FromStr, sync::Arc};
 use tracing::info;
@@ -200,46 +197,22 @@ async fn create_wallet_provider_for_chain(
 
 /// Creates the [`Submitter`] configured for Gas Killer operations with multi-chain support.
 ///
-/// The submitter's read side (view_only_provider, BLS contracts) always points at L1 via
-/// `HTTP_RPC` and `AVS_DEPLOYMENT_PATH`. Operator state lives on L1 and is not
-/// available on the L2 mimic contract.
+/// The certificate carries the operators' ECDSA signatures, so the submitter has
+/// no on-chain read side — only wallet providers for the write path.
 ///
-/// `L2_HTTP_RPC` is used exclusively for the write side: submitting `verifyAndUpdate`
+/// `L2_HTTP_RPC` is used for the write side: submitting `verifyAndUpdate`
 /// transactions on L2 when the target contract lives there.
-#[allow(clippy::too_many_arguments)]
 pub async fn create_submitter(
-    scheme: Bn254Scheme,
+    scheme: EcdsaScheme,
     assignments: SharedAssignments,
     certified: CertifiedReceiver,
     resolutions: ResolutionSender,
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
 ) -> Result<Submitter> {
-    let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
     let l2_http_rpc = env::var("L2_HTTP_RPC").ok();
-
-    let deployment =
-        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
-    info!("Submitter reads operator state from L1 (HTTP_RPC)");
-
-    let view_only_provider = ProviderBuilder::new().connect_http(
-        url::Url::parse(&http_rpc)
-            .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", http_rpc, e))?,
-    );
-
-    let bls_apk_registry_address = deployment
-        .bls_apk_registry_address()
-        .map_err(|e| anyhow::anyhow!("Failed to get BLS APK registry address: {}", e))?;
-    let registry_coordinator_address = deployment
-        .registry_coordinator_address()
-        .map_err(|e| anyhow::anyhow!("Failed to get registry coordinator address: {}", e))?;
-    let bls_operator_state_retriever_address = deployment
-        .bls_sig_check_operator_state_retriever_address()
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
-        })?;
 
     // Create wallet providers for each supported chain, keyed by actual EVM chain ID.
     // `chain_roles` records the role behind each numeric ID so the executor can pick
@@ -302,13 +275,6 @@ pub async fn create_submitter(
         info!("L2_HTTP_RPC not set, L2 chain support disabled");
     }
 
-    let bls_apk_registry =
-        BLSApkRegistry::new(bls_apk_registry_address, view_only_provider.clone());
-    let bls_operator_state_retriever = BLSSigCheckOperatorStateRetriever::new(
-        bls_operator_state_retriever_address,
-        view_only_provider.clone(),
-    );
-
     // Optional override (seconds) for the verifyAndUpdate receipt-wait timeout.
     // Unset falls back to the executor's per-chain defaults.
     let receipt_timeout_override = env::var("EXECUTOR_RECEIPT_TIMEOUT_SECS")
@@ -324,10 +290,6 @@ pub async fn create_submitter(
 
     Ok(Submitter::new(
         scheme,
-        view_only_provider,
-        bls_apk_registry,
-        bls_operator_state_retriever,
-        registry_coordinator_address,
         gas_killer_handler,
         assignments,
         certified,

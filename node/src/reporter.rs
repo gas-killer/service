@@ -19,7 +19,7 @@ use commonware_cryptography::sha256::Digest;
 use commonware_runtime::Metrics;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge, GaugeExt as _, raw};
 use commonware_utils::NZUsize;
-use gas_killer_common::{Bn254Scheme, skip_digest};
+use gas_killer_common::{EcdsaScheme, skip_digest};
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,7 +33,7 @@ const MAILBOX_CAPACITY: usize = 1024;
 /// Activities reported by the engine, wrapped so the overflow policy can be
 /// implemented locally (never drop: a lost `Certified` would undercount and a
 /// lost `Tip` could stall TaskBook pruning until the next fast-forward).
-struct Report(Activity<Bn254Scheme, Digest>);
+struct Report(Activity<EcdsaScheme, Digest>);
 
 impl mailbox::Policy for Report {
     type Overflow = VecDeque<Self>;
@@ -50,7 +50,7 @@ pub struct ReporterMailbox {
 }
 
 impl Reporter for ReporterMailbox {
-    type Activity = Activity<Bn254Scheme, Digest>;
+    type Activity = Activity<EcdsaScheme, Digest>;
 
     /// Enqueues the activity for the actor; never blocks (the engine calls this
     /// inline from its event loop and during journal replay).

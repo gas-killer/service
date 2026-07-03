@@ -3,17 +3,18 @@
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io/gas--killer/service-blue.svg)](https://github.com/gas-killer/service/pkgs/container/service)
 
-Gas Killer service implementation built on EigenLayer with BLS signature aggregation for optimized transaction execution.
+Gas Killer service implementation built on EigenLayer with ECDSA (secp256k1) signature aggregation for optimized transaction execution.
 
 ## Overview
 
-The service coordinates multiple operator nodes to sign task digests, assembles their BN254 signatures into quorum certificates via the commonware-consensus aggregation engine, and executes the result onchain via `verifyAndUpdate`.
+The service coordinates multiple operator nodes to sign task digests with their EigenLayer operator ECDSA keys, assembles the signatures into quorum certificates via the commonware-consensus aggregation engine, and executes the result onchain via `verifyAndUpdate` (which recovers every signer with `ecrecover`).
 
 ## Repository Structure
 
 - **`router/`** — Router service: sequences tasks, assembles certificates (verifier-only engine), and executes onchain
 - **`node/`** — Operator node: validates and signs tasks
 - **`common/`** — Shared types, validation logic, and EVM gas analysis
+- **`contracts/`** — Foundry project: ECDSA `GasKillerSDK`, example `ArraySummation` + factory
 - **`config/`** — Operator and orchestrator key/config files
 - **`scripts/`** — Helper binaries for deployment and end-to-end testing
 - **`helm/`** — Kubernetes Helm chart for full-stack deployment
@@ -83,13 +84,14 @@ docker compose up -d
 ## Architecture
 
 Aggregation is built on the `commonware-consensus` **aggregation engine** with a custom
-**BN254 attributable multisig scheme** (signer bitmap + one aggregated G1 signature per
-certificate). The previous hand-rolled star-topology aggregator and all
-`commonware-avs-*` / `commonware-restaking` git dependencies were dropped; the pieces
-still required (BN254 key/curve handling, the EigenLayer staking client, the
-`BLSApkRegistry`/`BLSSigCheckOperatorStateRetriever` bindings, and the
-`NonSignerStakesAndSignature` retrieval flow) are vendored into `common/`. The on-chain
-verification path (`GasKillerSDK.verifyAndUpdate` + `BLSSignatureChecker`) is unchanged.
+**secp256k1 ECDSA attributable multisig scheme** (signer bitmap + one 65-byte
+`r || s || v` signature per signer). An operator's signing identity is its registered
+EigenLayer **Ethereum address**: nodes sign with the same ECDSA key they registered
+with, and the on-chain `GasKillerSDK.verifyAndUpdate` recovers every signer with
+`ecrecover` and checks it against the contract's operator registry — no BLS
+aggregation, pairing checks, or `NonSignerStakesAndSignature` assembly anywhere. The
+ECDSA contracts live in this repo under `contracts/` (Foundry project); their compiled
+artifacts feed the alloy bindings in `common/src/bindings/` and `scripts/bindings/`.
 
 ```
                         POST /trigger
@@ -104,11 +106,11 @@ verification path (`GasKillerSDK.verifyAndUpdate` + `BLSSignatureChecker`) is un
   ┌──────────────────────────┼───────────────────────────┐
   │ node 1..N (signing participants)                     │ router (verifier-only)
   │  aggregation engine, p2p channel 0:                  │  aggregation engine:
-  │   propose(H): wait for the directive for H,          │  validates acks, assembles a
-  │   validate the task via EVMSketch, sign the          │  BN254 certificate at quorum
+  │   propose(H): wait for the directive for H,          │  validates acks, assembles an
+  │   validate the task via EVMSketch, sign the          │  ECDSA certificate at quorum
   │   expected digest (or the skip digest) with          │            │
-  │   the node's BN254 key, gossip TipAcks               │  submitter: bitmap → operators,
-  └──────────────────────────────────────────────────────┘  getNonSignerStakesAndSignature,
+  │   the node's operator ECDSA key, gossip TipAcks      │  submitter: bitmap → signatures
+  └──────────────────────────────────────────────────────┘  (sorted by signer address),
                                                             GasKillerSDK.verifyAndUpdate
 ```
 
@@ -125,16 +127,16 @@ verification path (`GasKillerSDK.verifyAndUpdate` + `BLSSignatureChecker`) is un
   the router runs it verifier-only (it holds no share of any signing key) — it
   validates the nodes' acks, assembles certificates at quorum, journals them, and
   hands them to the submitter.
-- **BN254 multisig scheme**: nodes sign the raw 32-byte task digest with EigenLayer's
-  `map_to_curve` hashing and **no namespace** — byte-identical to the pre-migration
-  signatures — so certificates verify on-chain against the operators' registered BN254
-  keys. The certificate binds only the digest, not the height; the digest itself binds
-  `(transitionIndex, target, selector, storageUpdates)` and the contract enforces
-  transition-index ordering, so replaying an identical digest across heights is
-  harmless.
-- **Submitter** (router): maps the certificate's signer bitmap to operator G1 keys,
-  fetches `NonSignerStakesAndSignature` from `BLSSigCheckOperatorStateRetriever`, and
-  calls `GasKillerSDK.verifyAndUpdate`.
+- **ECDSA multisig scheme**: nodes sign the raw 32-byte task digest with their
+  operator secp256k1 key (Ethereum prehash semantics, **no namespace**, no EIP-191
+  prefix) — exactly what `ecrecover(taskDigest, v, r, s)` validates on-chain against
+  the operators' registered addresses. The certificate binds only the digest, not the
+  height; the digest itself binds `(transitionIndex, target, selector,
+  storageUpdates)` and the contract enforces transition-index ordering, so replaying
+  an identical digest across heights is harmless.
+- **Submitter** (router): pairs the certificate's signer bitmap with its 65-byte
+  signatures, sorts them by ascending signer address (the contract's dedupe order),
+  and calls `GasKillerSDK.verifyAndUpdate` — no on-chain reads before submission.
 - **Validator** (`common/`): EVM gas analysis (EVMSketch) computing the storage
   updates and the expected task digest on both router and nodes.
 
@@ -285,15 +287,16 @@ cargo run -p scripts --bin send_request
 ### Dependencies
 - `alloy`: Ethereum interaction
 - `commonware-consensus`: Aggregation engine (certificate assembly over heights)
-- `commonware-cryptography`: Cryptographic primitives and the certificate `Scheme` trait implemented by our BN254 multisig scheme
+- `commonware-cryptography`: Cryptographic primitives and the certificate `Scheme` trait implemented by our secp256k1 ECDSA multisig scheme
 - `commonware-p2p`: P2P networking
 - `commonware-runtime`: Runtime utilities and journal-backed storage
 - `gas-analyzer-evmsketch`: EVM gas analysis and storage update computation
-- `eigen-*` / `ark-*`: EigenLayer SDK and BN254 curve arithmetic
+- `eigen-*`: EigenLayer SDK (operator-set discovery)
 
 The former `commonware-avs-*` (`commonware-restaking`) git dependencies were dropped in
 the aggregation migration; the parts still needed are vendored under `common/src/`
-(`bn254/`, `eigenlayer.rs`, `bindings/`).
+(`ecdsa/`, `eigenlayer.rs`, `bindings/`). The ECDSA `GasKillerSDK` contract sources are
+under `contracts/` (`forge build` / `forge test`).
 
 ### Code Quality
 ```bash

@@ -1,15 +1,12 @@
-use ark_bn254::G2Affine;
-use ark_ff::PrimeField;
-use ark_serialize::CanonicalDeserialize;
 use clap::{Arg, Command, value_parser};
 use commonware_cryptography::Signer;
-use gas_killer_common::bn254::get_signer;
+use gas_killer_common::ecdsa::get_signer;
 use rand::RngCore;
 use std::os::unix::fs::PermissionsExt;
 
 fn main() {
     let matches = Command::new("generate_key")
-        .about("Generate a BLS keypair for the router orchestrator")
+        .about("Generate an ECDSA keypair for the router orchestrator")
         .arg(
             Arg::new("output-dir")
                 .long("output-dir")
@@ -60,19 +57,23 @@ fn main() {
         }
     }
 
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    let sk = ark_bn254::Fr::from_be_bytes_mod_order(&bytes);
-    let private_key_decimal = sk.to_string();
+    // Rejection-sample a valid secp256k1 scalar (a uniform 32-byte string is
+    // outside the scalar field with probability ~2^-128, but loop anyway).
+    let private_key_hex = loop {
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        let candidate = format!("0x{}", hex::encode(bytes));
+        if std::panic::catch_unwind(|| get_signer(&candidate)).is_ok() {
+            break candidate;
+        }
+    };
 
-    let signer = get_signer(&private_key_decimal);
-    let pub_key_bytes = signer.public_key();
-    let g2 = G2Affine::deserialize_compressed(pub_key_bytes.as_ref())
-        .expect("failed to deserialize G2 point from freshly generated key");
+    let signer = get_signer(&private_key_hex);
+    let public_key = signer.public_key();
 
     let priv_path = dir.join("router_orchestrator.json");
     let priv_json =
-        serde_json::to_string_pretty(&serde_json::json!({ "privateKey": private_key_decimal }))
+        serde_json::to_string_pretty(&serde_json::json!({ "privateKey": private_key_hex }))
             .expect("failed to serialize private key");
     std::fs::write(&priv_path, &priv_json)
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", priv_path.display()));
@@ -81,10 +82,7 @@ fn main() {
 
     let pub_path = dir.join("public_orchestrator.json");
     let pub_json = serde_json::to_string_pretty(&serde_json::json!({
-        "g2_x1": g2.x.c0.to_string(),
-        "g2_x2": g2.x.c1.to_string(),
-        "g2_y1": g2.y.c0.to_string(),
-        "g2_y2": g2.y.c1.to_string(),
+        "publicKey": public_key.to_string(),
         "port": router_port.to_string(),
         "address": router_address
     }))
@@ -99,11 +97,8 @@ fn main() {
     std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644))
         .unwrap_or_else(|e| panic!("failed to chmod {}: {e}", marker.display()));
 
-    println!("Generated router BLS keypair:");
+    println!("Generated router ECDSA keypair:");
     println!("  private key → {}", priv_path.display());
     println!("  public key  → {}", pub_path.display());
-    println!("  g2_x1: {}", g2.x.c0);
-    println!("  g2_x2: {}", g2.x.c1);
-    println!("  g2_y1: {}", g2.y.c0);
-    println!("  g2_y2: {}", g2.y.c1);
+    println!("  publicKey: {public_key}");
 }
