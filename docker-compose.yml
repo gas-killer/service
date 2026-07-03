@@ -16,7 +16,10 @@ services:
 
   eigenlayer:
     platform: linux/amd64
-    image: ghcr.io/breadchaincoop/eigenlayer:latest
+    # The setup image also deploys the Gas Killer ECDSA stack (ECDSAStakeRegistry +
+    # GasKillerServiceManager) and registers the operators with it. Override to pin
+    # a specific build (e.g. a pr- tag) or a locally built image.
+    image: ${EIGENLAYER_IMAGE:-ghcr.io/breadchaincoop/eigenlayer:latest}
     depends_on:
       ethereum:
         condition: service_started

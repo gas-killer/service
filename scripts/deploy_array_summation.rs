@@ -1,38 +1,11 @@
 use alloy::network::EthereumWallet;
-use alloy::primitives::{Address, B256, U256, keccak256};
+use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::signers::SignerSync;
 use alloy::signers::local::PrivateKeySigner;
 use bindings::arraysummationfactory::ArraySummationFactory;
-use bindings::ecdsastakeregistry::{
-    ECDSAStakeRegistry, IECDSAStakeRegistryTypes, ISignatureUtilsMixinTypes,
-};
-use bindings::gaskillerservicemanager::GasKillerServiceManager;
 use serde::Deserialize;
 use std::env;
 use std::fs;
-
-// Minimal AVSDirectory surface: the EIP-712 digest operators sign to register
-// with an AVS.
-alloy::sol! {
-    #[sol(rpc)]
-    interface IAVSDirectory {
-        function calculateOperatorAVSRegistrationDigestHash(
-            address operator,
-            address avs,
-            bytes32 salt,
-            uint256 expiry
-        ) external view returns (bytes32);
-    }
-}
-
-/// EigenLayer AVSDirectory on Sepolia (the chain the local anvil stack forks).
-/// Override with `AVS_DIRECTORY_ADDRESS` on other networks.
-const DEFAULT_SEPOLIA_AVS_DIRECTORY: &str = "0xa789c91ECDdae96865913130B786140Ee17aF545";
-
-/// Stake-threshold percentage the registry enforces (matches the 66% quorum the
-/// BLS deployment used).
-const QUORUM_THRESHOLD_PERCENT: u64 = 66;
 
 #[derive(Debug, Deserialize)]
 struct AvsDeploymentJson {
@@ -43,64 +16,17 @@ struct AvsDeploymentJson {
 struct AvsAddresses {
     #[serde(rename = "avsServiceManagerWrapper")]
     avs_service_manager_wrapper: String,
-    /// The LST strategy the operators deposited into during setup; weights the
-    /// ECDSA quorum.
-    strategy: Option<String>,
-}
-
-/// One operator key file (`testaccN.private.ecdsa.key.json`) as produced by the
-/// eigenlayer setup container: `{"privateKey": "0x...", "publicKey": "<address>"}`.
-#[derive(Debug, Deserialize)]
-struct OperatorEcdsaKeyFile {
-    #[serde(rename = "privateKey")]
-    private_key: String,
+    /// The Gas Killer ECDSA service manager (the AVS operators registered to via
+    /// the AVSDirectory), deployed by the eigenlayer setup container.
+    #[serde(rename = "gasKillerServiceManager")]
+    gas_killer_service_manager: Option<String>,
+    /// The EigenLayer ECDSAStakeRegistry verifying operator quorums, deployed by
+    /// the eigenlayer setup container.
+    #[serde(rename = "ecdsaStakeRegistry")]
+    ecdsa_stake_registry: Option<String>,
 }
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
-
-/// Loads the operator ECDSA signers from the `operator_keys/*.private.ecdsa.key.json`
-/// files next to the AVS deployment JSON (the layout the eigenlayer setup
-/// container produces under `config/.nodes`). The signers are needed to register
-/// each operator with the `ECDSAStakeRegistry` (registration is `msg.sender`-bound
-/// and requires the operator's AVSDirectory signature).
-fn load_operator_signers(avs_deployment_path: &str) -> Result<Vec<PrivateKeySigner>, DynError> {
-    let deployment_dir = std::path::Path::new(avs_deployment_path)
-        .parent()
-        .ok_or("AVS_DEPLOYMENT_PATH has no parent directory")?;
-    let keys_dir = deployment_dir.join("operator_keys");
-    let entries = fs::read_dir(&keys_dir)
-        .map_err(|e| format!("Failed to read {}: {e}", keys_dir.display()))?;
-    let mut paths: Vec<_> = entries
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".private.ecdsa.key.json"))
-        })
-        .collect();
-    paths.sort();
-
-    let mut signers = Vec::new();
-    for path in paths {
-        let content = fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-        let key_file: OperatorEcdsaKeyFile = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
-        let signer: PrivateKeySigner = key_file
-            .private_key
-            .parse()
-            .map_err(|_| format!("Invalid privateKey in {}", path.display()))?;
-        signers.push(signer);
-    }
-    if signers.is_empty() {
-        return Err(format!(
-            "No operator ECDSA key files found in {}",
-            keys_dir.display()
-        )
-        .into());
-    }
-    Ok(signers)
-}
 
 fn env_address(name: &str) -> Result<Option<Address>, DynError> {
     match env::var(name).ok().filter(|s| !s.trim().is_empty()) {
@@ -115,7 +41,7 @@ fn env_address(name: &str) -> Result<Option<Address>, DynError> {
 
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
-    println!("🚀 Deploying Gas Killer ECDSA AVS stack + ArraySummation...");
+    println!("🚀 Deploying ArraySummation...");
 
     dotenv::dotenv().ok();
 
@@ -135,7 +61,9 @@ async fn main() -> Result<(), DynError> {
         .parse::<u64>()
         .map_err(|_| "ARRAY_SUMMATION_SEED must be a valid number")?;
 
-    // Get AVS address from deployment JSON
+    // Get AVS addresses from the deployment JSON (produced by the eigenlayer
+    // setup container, which also deploys the ECDSA stack and registers the
+    // operators with it).
     let avs_deployment_path = env::var("AVS_DEPLOYMENT_PATH")
         .map_err(|_| "AVS_DEPLOYMENT_PATH environment variable is required")?;
 
@@ -146,199 +74,73 @@ async fn main() -> Result<(), DynError> {
     let avs_deployment: AvsDeploymentJson = serde_json::from_str(&avs_content)
         .map_err(|e| format!("Failed to parse AVS deployment JSON: {}", e))?;
 
-    let wrapper_address: Address = avs_deployment
-        .addresses
-        .avs_service_manager_wrapper
-        .parse()
-        .map_err(|_| "Invalid avsServiceManagerWrapper address format in deployment JSON")?;
+    // The target contract's AVS reference: prefer the Gas Killer ECDSA service
+    // manager (the AVS the operators actually registered to), fall back to the
+    // legacy wrapper.
+    let avs_address: Address = match &avs_deployment.addresses.gas_killer_service_manager {
+        Some(addr) => addr
+            .parse()
+            .map_err(|_| "Invalid gasKillerServiceManager address in deployment JSON")?,
+        None => avs_deployment
+            .addresses
+            .avs_service_manager_wrapper
+            .parse()
+            .map_err(|_| "Invalid avsServiceManagerWrapper address format in deployment JSON")?,
+    };
 
-    // EigenLayer core addresses.
-    let delegation_manager = env_address("DELEGATION_MANAGER_ADDRESS")?
-        .ok_or("DELEGATION_MANAGER_ADDRESS environment variable is required")?;
-    let avs_directory = env_address("AVS_DIRECTORY_ADDRESS")?
-        .unwrap_or_else(|| DEFAULT_SEPOLIA_AVS_DIRECTORY.parse().expect("valid const"));
-    let allocation_manager = env_address("ALLOCATION_MANAGER_ADDRESS")?.unwrap_or(Address::ZERO);
-    let rewards_coordinator = env_address("REWARDS_COORDINATOR_ADDRESS")?.unwrap_or(Address::ZERO);
-    // Quorum strategy: the LST strategy operators deposited into during setup.
-    let strategy: Address = match env_address("LST_STRATEGY_ADDRESS")? {
+    // The ECDSA stake registry verifying operator quorums: env override first,
+    // else the address the setup container wrote into the deployment JSON.
+    let registry_address: Address = match env_address("ECDSA_STAKE_REGISTRY_ADDRESS")? {
         Some(addr) => addr,
         None => avs_deployment
             .addresses
-            .strategy
+            .ecdsa_stake_registry
             .as_deref()
-            .ok_or("Set LST_STRATEGY_ADDRESS or provide addresses.strategy in the deployment JSON")?
+            .ok_or(
+                "ecdsaStakeRegistry missing from the deployment JSON — the eigenlayer setup \
+                 container must deploy the ECDSA stack (or set ECDSA_STAKE_REGISTRY_ADDRESS)",
+            )?
             .parse()
-            .map_err(|_| "Invalid strategy address in deployment JSON")?,
+            .map_err(|_| "Invalid ecdsaStakeRegistry address in deployment JSON")?,
     };
+    println!("🏦 Using ECDSAStakeRegistry: {}", registry_address);
 
-    // Setup deployer provider/signer. The deployer owns the stake registry and
-    // service manager.
+    // Setup provider and signer
     let signer: PrivateKeySigner = private_key
         .parse()
         .map_err(|_| "Invalid private key format")?;
-    let deployer = signer.address();
-    let rpc_url: url::Url = http_rpc.parse().map_err(|_| "Invalid RPC URL")?;
     let provider = ProviderBuilder::new()
         .wallet(EthereumWallet::from(signer))
-        .connect_http(rpc_url.clone());
+        .connect_http(http_rpc.parse().map_err(|_| "Invalid RPC URL")?);
 
-    // Deploy (or reuse) the ECDSA stake registry + service manager and register
-    // the operators.
-    let registry_address: Address = match env_address("ECDSA_STAKE_REGISTRY_ADDRESS")? {
-        Some(addr) => {
-            let code = provider
-                .get_code_at(addr)
-                .await
-                .map_err(|e| format!("Failed to get code for stake registry {}: {}", addr, e))?;
-            if code.as_ref().is_empty() {
-                return Err(format!(
-                    "ECDSA_STAKE_REGISTRY_ADDRESS {} has no code deployed; unset it to deploy fresh",
-                    addr
-                )
-                .into());
-            }
-            println!("🏦 Using existing ECDSAStakeRegistry at: {}", addr);
-            addr
-        }
-        None => {
-            let operator_signers = load_operator_signers(&avs_deployment_path)?;
-            println!("🔐 Operator set ({}):", operator_signers.len());
-            for operator in &operator_signers {
-                println!("   {}", operator.address());
-            }
+    // Sanity checks: ensure target addresses have code deployed
+    println!("🔍 Checking deployed code of contracts...");
+    let code_avs = provider
+        .get_code_at(avs_address)
+        .await
+        .map_err(|e| format!("Failed to get code for AVS address {}: {}", avs_address, e))?;
+    if code_avs.as_ref().is_empty() {
+        return Err(format!(
+            "AVS service manager {} has no code deployed. Check AVS_DEPLOYMENT_PATH.",
+            avs_address
+        )
+        .into());
+    }
 
-            // 1. Deploy the stake registry (immutably bound to the DelegationManager).
-            println!("🏦 Deploying ECDSAStakeRegistry...");
-            let registry = ECDSAStakeRegistry::deploy(provider.clone(), delegation_manager)
-                .await
-                .map_err(|e| format!("Failed to deploy ECDSAStakeRegistry: {}", e))?;
-            println!("✅ ECDSAStakeRegistry deployed at: {}", registry.address());
-
-            // 2. Deploy the service manager wired to the registry and EigenLayer core.
-            println!("🏛  Deploying GasKillerServiceManager...");
-            let service_manager = GasKillerServiceManager::deploy(
-                provider.clone(),
-                avs_directory,
-                *registry.address(),
-                rewards_coordinator,
-                delegation_manager,
-                allocation_manager,
-                deployer,
-            )
-            .await
-            .map_err(|e| format!("Failed to deploy GasKillerServiceManager: {}", e))?;
-            println!(
-                "✅ GasKillerServiceManager deployed at: {}",
-                service_manager.address()
-            );
-
-            // 3. Initialize the registry: single-strategy quorum (10_000 BPS) and a
-            // placeholder threshold (raised after registration when total weight is
-            // known).
-            let quorum = IECDSAStakeRegistryTypes::Quorum {
-                strategies: vec![IECDSAStakeRegistryTypes::StrategyParams {
-                    strategy,
-                    multiplier: alloy::primitives::Uint::<96, 2>::from(10_000u64),
-                }],
-            };
-            registry
-                .initialize(*service_manager.address(), U256::ZERO, quorum)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to send registry initialize: {}", e))?
-                .get_receipt()
-                .await
-                .map_err(|e| format!("registry initialize not mined: {}", e))?;
-            println!("✅ ECDSAStakeRegistry initialized");
-
-            // 4. Register every operator: sign the AVSDirectory registration digest
-            // with the operator key and call registerOperatorWithSignature as the
-            // operator (signing key == operator address — what the nodes sign with).
-            let directory = IAVSDirectory::new(avs_directory, provider.clone());
-            let latest_block = provider
-                .get_block(alloy::eips::BlockId::latest())
-                .await
-                .map_err(|e| format!("Failed to fetch latest block: {}", e))?
-                .ok_or("Latest block unavailable")?;
-            let expiry = U256::from(latest_block.header.timestamp + 24 * 60 * 60);
-
-            for operator in &operator_signers {
-                let operator_address = operator.address();
-                let salt = keccak256(
-                    [
-                        operator_address.as_slice(),
-                        b"gas-killer-ecdsa-registration",
-                    ]
-                    .concat(),
-                );
-                let digest: B256 = directory
-                    .calculateOperatorAVSRegistrationDigestHash(
-                        operator_address,
-                        *service_manager.address(),
-                        salt,
-                        expiry,
-                    )
-                    .call()
-                    .await
-                    .map_err(|e| format!("Failed to compute registration digest: {}", e))?;
-                let signature = operator
-                    .sign_hash_sync(&digest)
-                    .map_err(|e| format!("Failed to sign registration digest: {}", e))?;
-
-                let operator_provider = ProviderBuilder::new()
-                    .wallet(EthereumWallet::from(operator.clone()))
-                    .connect_http(rpc_url.clone());
-                let operator_registry =
-                    ECDSAStakeRegistry::new(*registry.address(), operator_provider);
-                operator_registry
-                    .registerOperatorWithSignature(
-                        ISignatureUtilsMixinTypes::SignatureWithSaltAndExpiry {
-                            signature: signature.as_bytes().into(),
-                            salt,
-                            expiry,
-                        },
-                        operator_address,
-                    )
-                    .send()
-                    .await
-                    .map_err(|e| format!("Failed to register operator {operator_address}: {e}"))?
-                    .get_receipt()
-                    .await
-                    .map_err(|e| format!("registration of {operator_address} not mined: {e}"))?;
-                println!("✅ Registered operator {}", operator_address);
-            }
-
-            // 5. Set the stake threshold to 66% of the registered total weight.
-            let total_weight = registry
-                .getLastCheckpointTotalWeight()
-                .call()
-                .await
-                .map_err(|e| format!("Failed to read total weight: {}", e))?;
-            if total_weight.is_zero() {
-                return Err(
-                    "Registered operators have zero total weight; check the quorum \
-                     strategy and operator deposits"
-                        .into(),
-                );
-            }
-            let threshold = (total_weight * U256::from(QUORUM_THRESHOLD_PERCENT) + U256::from(99))
-                / U256::from(100);
-            registry
-                .updateStakeThreshold(threshold)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to send updateStakeThreshold: {}", e))?
-                .get_receipt()
-                .await
-                .map_err(|e| format!("updateStakeThreshold not mined: {}", e))?;
-            println!(
-                "✅ Stake threshold set to {} ({}% of total weight {})",
-                threshold, QUORUM_THRESHOLD_PERCENT, total_weight
-            );
-
-            *registry.address()
-        }
-    };
+    let code_registry = provider.get_code_at(registry_address).await.map_err(|e| {
+        format!(
+            "Failed to get code for ECDSAStakeRegistry {}: {}",
+            registry_address, e
+        )
+    })?;
+    if code_registry.as_ref().is_empty() {
+        return Err(format!(
+            "ECDSAStakeRegistry {} has no code deployed. Ensure the eigenlayer setup deployed \
+             the ECDSA stack or set ECDSA_STAKE_REGISTRY_ADDRESS.",
+            registry_address
+        )
+        .into());
+    }
 
     // Resolve the factory: reuse ARRAY_SUMMATION_FACTORY_ADDRESS when it points
     // at deployed code, otherwise deploy a fresh ECDSA factory (the pre-migration
@@ -416,7 +218,7 @@ async fn main() -> Result<(), DynError> {
         println!("🚀 Sending deployment transaction...");
 
         let deploy_call = factory.deployArraySummation(
-            wrapper_address,
+            avs_address,
             registry_address,
             U256::from(array_size),
             U256::from(max_value),
@@ -466,19 +268,18 @@ async fn main() -> Result<(), DynError> {
         &avs_deployment_path,
         &format!("{:?}", factory_address),
         &format!("{:?}", deployed_address),
-        &format!("{:?}", registry_address),
     )?;
 
     println!("🎉 Deployment completed successfully!");
     println!("📋 Summary:");
-    println!("  ECDSAStakeRegistry: {}", registry_address);
     println!("  ArraySummation Factory: {}", factory_address);
     if used_existing {
         println!("  ArraySummation Contract (existing): {}", deployed_address);
     } else {
         println!("  ArraySummation Contract: {}", deployed_address);
     }
-    println!("  AVS Service Manager Wrapper: {}", wrapper_address);
+    println!("  AVS Service Manager: {}", avs_address);
+    println!("  ECDSAStakeRegistry: {}", registry_address);
 
     Ok(())
 }
@@ -487,7 +288,6 @@ fn update_deployment_json(
     avs_deployment_path: &str,
     factory_address: &str,
     deployed_address: &str,
-    registry_address: &str,
 ) -> Result<(), DynError> {
     // Try to read existing deployment file
     let deployment_content = match fs::read_to_string(avs_deployment_path) {
@@ -509,7 +309,6 @@ fn update_deployment_json(
     // Add addresses
     deployment["addresses"]["arraySummationFactory"] = serde_json::json!(factory_address);
     deployment["addresses"]["arraySummation"] = serde_json::json!(deployed_address);
-    deployment["addresses"]["ecdsaStakeRegistry"] = serde_json::json!(registry_address);
 
     // Write back to file
     let updated_json = serde_json::to_string_pretty(&deployment)
