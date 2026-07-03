@@ -1,0 +1,8 @@
+{
+  "lib/eigenlayer-middleware": {
+    "tag": {
+      "name": "v1.5.0",
+      "rev": "a7a5492b5a0107745c7f4938d37a8f64985274d6"
+    }
+  }
+}

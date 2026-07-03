@@ -9,22 +9,25 @@
 //!   digest: pre-restart leftovers — log and notify ([`ResolutionKind::Foreign`]);
 //!   the sequencer re-assigns any in-flight task.
 //! - Expected digest: pair the certificate's signer bitmap with its ECDSA
-//!   signatures, sort by signer address (the on-chain dedupe order), and call
+//!   signatures, sort by operator address (the order `ECDSAStakeRegistry`
+//!   enforces on-chain), pin a reference block, and call
 //!   [`GasKillerHandler::handle_verification`], with bounded retries.
 //!
-//! Unlike the BLS predecessor there is no on-chain read path here: the
-//! certificate already carries everything `verifyAndUpdate` needs (the operators'
-//! 65-byte `r || s || v` signatures), so no operator-registry lookups, stake
-//! retrieval, or block pinning happen before submission.
+//! The only on-chain read before submission is a single L1 `eth_blockNumber`
+//! (the reference block for the stake registry's signing-key and stake-weight
+//! checkpoint lookups); the certificate itself carries the operators' 65-byte
+//! `r || s || v` signatures.
 
 use crate::executor::GasKillerHandler;
 use crate::factories::SimpleWalletProvider;
 use crate::reporter::{CertifiedHeight, CertifiedReceiver};
 use crate::sequencer::{Resolution, ResolutionKind, ResolutionSender, SharedAssignments};
-use alloy_primitives::{Bytes, FixedBytes};
+use alloy_primitives::{Address, Bytes, FixedBytes};
+use alloy_provider::Provider;
 use anyhow::Result;
 use commonware_cryptography::sha256::Digest;
 use gas_killer_common::EcdsaCertificate;
+use gas_killer_common::bindings::ReadOnlyProvider;
 use gas_killer_common::ecdsa::EcdsaScheme;
 use gas_killer_common::skip_digest;
 use gas_killer_common::task_data::GasKillerTaskData;
@@ -41,6 +44,9 @@ const INITIAL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 pub struct Submitter {
     /// Verifier scheme: maps certificate signer bitmaps to operator addresses.
     scheme: EcdsaScheme,
+    /// L1 read-side provider: supplies the reference block for the stake
+    /// registry's checkpoint lookups (operator state lives on L1 only).
+    view_only_provider: ReadOnlyProvider,
     /// Executes the final `verifyAndUpdate` transaction (multi-chain write side).
     handler: GasKillerHandler<SimpleWalletProvider>,
     /// Height → expected digest + task, written by the sequencer.
@@ -54,6 +60,7 @@ pub struct Submitter {
 impl Submitter {
     pub fn new(
         scheme: EcdsaScheme,
+        view_only_provider: ReadOnlyProvider,
         handler: GasKillerHandler<SimpleWalletProvider>,
         assignments: SharedAssignments,
         certified: CertifiedReceiver,
@@ -61,6 +68,7 @@ impl Submitter {
     ) -> Self {
         Self {
             scheme,
+            view_only_provider,
             handler,
             assignments,
             certified,
@@ -192,17 +200,37 @@ impl Submitter {
         // Bitmap → operator addresses, in participant order. The certificate was
         // verified by the reporter, so the bitmap length matches the set and the
         // signature list is index-aligned with the bitmap's ascending iteration.
-        let signatures = ordered_signatures(&self.scheme, certificate)?;
+        let (operators, signatures) = ordered_signatures(&self.scheme, certificate)?;
 
         let msg_hash = FixedBytes::<32>::from_slice(digest.as_ref());
+
+        // The reference block for the stake registry's checkpoint lookups. The
+        // executor passes `current - 1` on-chain so eth_estimateGas (which
+        // simulates at the current block) sees a strictly past block.
+        let current_block_number = self
+            .view_only_provider
+            .get_block_number()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get block number: {}", e))?;
+
         info!(
             height,
             signers = signatures.len(),
+            reference_block = current_block_number.saturating_sub(1),
             "submitting ECDSA quorum certificate"
         );
 
         self.handler
-            .handle_verification(height, msg_hash, signatures, Some(task))
+            .handle_verification(
+                height,
+                msg_hash,
+                current_block_number
+                    .try_into()
+                    .map_err(|e| anyhow::anyhow!("block number overflows u32: {}", e))?,
+                operators,
+                signatures,
+                Some(task),
+            )
             .await
     }
 }
@@ -215,7 +243,10 @@ impl Submitter {
 /// address bytes, so this sort is a no-op in practice; it stays as a defensive
 /// guarantee of the on-chain calling convention rather than an assumption about
 /// the participant set's ordering.
-fn ordered_signatures(scheme: &EcdsaScheme, certificate: &EcdsaCertificate) -> Result<Vec<Bytes>> {
+fn ordered_signatures(
+    scheme: &EcdsaScheme,
+    certificate: &EcdsaCertificate,
+) -> Result<(Vec<Address>, Vec<Bytes>)> {
     let addresses = scheme.signer_addresses(&certificate.signers);
     if addresses.is_empty() || addresses.len() != certificate.signatures.len() {
         return Err(anyhow::anyhow!(
@@ -233,8 +264,8 @@ fn ordered_signatures(scheme: &EcdsaScheme, certificate: &EcdsaCertificate) -> R
 
     Ok(pairs
         .into_iter()
-        .map(|(_, signature)| Bytes::copy_from_slice(signature.as_ref()))
-        .collect())
+        .map(|(address, signature)| (address, Bytes::copy_from_slice(signature.as_ref())))
+        .unzip())
 }
 
 #[cfg(test)]
@@ -299,20 +330,23 @@ mod tests {
         let (keys, verifier) = setup();
         let (certificate, digest) = certificate_for(&keys, &verifier, b"submitter ordering");
 
-        let signatures = ordered_signatures(&verifier, &certificate).unwrap();
+        let (signers, signatures) = ordered_signatures(&verifier, &certificate).unwrap();
+        assert_eq!(signers.len(), 3);
         assert_eq!(signatures.len(), 3);
 
-        // Recovered signer addresses are strictly ascending — the contract's
-        // dedupe order — and every signer is one of the operators.
+        // Recovered signer addresses match the operator list positionally, are
+        // strictly ascending — the registry's dedupe order — and every signer is
+        // one of the operators.
         let operators: Vec<Address> = verifier
             .participants()
             .iter()
             .map(|k| k.address())
             .collect();
         let mut last = Address::ZERO;
-        for raw in &signatures {
+        for (operator, raw) in signers.iter().zip(&signatures) {
             let sig = gas_killer_common::ecdsa::Signature::try_from(raw.as_ref()).unwrap();
             let recovered = sig.recover(&digest).unwrap();
+            assert_eq!(recovered, *operator, "signature must be index-aligned");
             assert!(recovered > last, "signers must be strictly ascending");
             assert!(operators.contains(&recovered), "signer must be an operator");
             last = recovered;

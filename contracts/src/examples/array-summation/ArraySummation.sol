@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.27;
 
 import {GasKillerSDK} from "../../GasKillerSDK.sol";
 
@@ -35,22 +35,19 @@ contract ArraySummation is GasKillerSDK {
 
     /// @notice Deploy a new ArraySummation contract and initialise the array
     /// @param _avsAddress The AVS service manager address this contract is scoped to
-    /// @param _operatorAdmin The address allowed to mutate the operator registry
-    /// @param _operators Initial operator ECDSA addresses forming the signing quorum
+    /// @param _ecdsaStakeRegistry The EigenLayer ECDSA stake registry verifying operator quorums
     /// @param _arraySize Number of elements to generate; must be > 0
     /// @param _maxValue Exclusive upper bound for element values; must be > 0
     /// @param _seed Seed for pseudorandom generation; 0 falls back to `block.timestamp`
     constructor(
         address _avsAddress,
-        address _operatorAdmin,
-        address[] memory _operators,
+        address _ecdsaStakeRegistry,
         uint256 _arraySize,
         uint256 _maxValue,
         uint256 _seed
     ) {
         _setAvsAddress(_avsAddress);
-        _setOperatorAdmin(_operatorAdmin);
-        _registerOperators(_operators);
+        _setECDSAStakeRegistry(_ecdsaStakeRegistry);
 
         if (_arraySize == 0 || _maxValue == 0) {
             revert InvalidConfiguration();

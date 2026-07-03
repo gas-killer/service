@@ -224,8 +224,9 @@ async fn create_wallet_provider_for_chain(
 
 /// Creates the [`Submitter`] configured for Gas Killer operations with multi-chain support.
 ///
-/// The certificate carries the operators' ECDSA signatures, so the submitter has
-/// no on-chain read side — only wallet providers for the write path.
+/// The submitter's read side (a single `eth_blockNumber` per submission, anchoring
+/// the stake registry's checkpoint lookups) always points at L1 via `HTTP_RPC` —
+/// the `ECDSAStakeRegistry` lives on L1.
 ///
 /// `L2_HTTP_RPC` is used for the write side: submitting `verifyAndUpdate`
 /// transactions on L2 when the target contract lives there.
@@ -237,9 +238,15 @@ pub async fn create_submitter(
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
 ) -> Result<Submitter> {
+    let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
     let l2_http_rpc = env::var("L2_HTTP_RPC").ok();
+
+    let view_only_provider = ProviderBuilder::new().connect_http(
+        url::Url::parse(&http_rpc)
+            .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", http_rpc, e))?,
+    );
 
     // Create wallet providers for each supported chain, keyed by actual EVM chain ID.
     // `chain_roles` records the role behind each numeric ID so the executor can pick
@@ -317,6 +324,7 @@ pub async fn create_submitter(
 
     Ok(Submitter::new(
         scheme,
+        view_only_provider,
         gas_killer_handler,
         assignments,
         certified,

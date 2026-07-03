@@ -160,6 +160,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     async fn execute_verification(
         &mut self,
         msg_hash: FixedBytes<32>,
+        current_block_number: u32,
+        operators: Vec<Address>,
         signatures: Vec<Bytes>,
         task_data: Option<&GasKillerTaskData>,
     ) -> Result<ExecutionResult> {
@@ -251,16 +253,23 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let gas_killer_sdk = GasKillerSDK::new(target_addr, provider);
 
         // Execute the gas killer verifyAndUpdate with the quorum's ECDSA
-        // signatures (65-byte r||s||v, ascending signer address — the order the
-        // contract enforces).
+        // signatures (65-byte r||s||v, index-aligned with the ascending operator
+        // list — the order ECDSAStakeRegistry enforces).
+        //
+        // Use referenceBlockNumber = current_block_number - 1 so that eth_estimateGas
+        // (which simulates at the current block) satisfies both the on-chain check
+        // `require(referenceBlockNumber < block.number)` and the stake registry's
+        // checkpoint lookups (`getAtBlock` requires a strictly past block).
         info!("Sending verifyAndUpdate transaction");
         let tx_send_start = Instant::now();
         let send_result = gas_killer_sdk
             .verifyAndUpdate(
                 msg_hash,
+                current_block_number.saturating_sub(1),
                 storage_updates,
                 transition_index,
                 target_function,
+                operators,
                 signatures,
             )
             .send()
@@ -322,12 +331,18 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// and execution metrics. Called by [`crate::submitter::Submitter`] with the
     /// aggregation height as the metric key.
     ///
-    /// `signatures` are the certificate's 65-byte `r || s || v` ECDSA signatures,
-    /// ordered by strictly ascending signer address (the on-chain dedupe order).
+    /// `operators` are the certificate's signer addresses in strictly ascending
+    /// order (the order `ECDSAStakeRegistry` enforces) and `signatures` their
+    /// index-aligned 65-byte `r || s || v` ECDSA signatures.
+    /// `current_block_number` anchors the registry's stake/signing-key lookups
+    /// (the call uses `current_block_number - 1` as the reference block).
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_verification(
         &mut self,
         height: u64,
         msg_hash: FixedBytes<32>,
+        current_block_number: u32,
+        operators: Vec<Address>,
         signatures: Vec<Bytes>,
         task_data: Option<&GasKillerTaskData>,
     ) -> Result<ExecutionResult> {
@@ -347,7 +362,13 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let exec_start = Instant::now();
 
         let result = self
-            .execute_verification(msg_hash, signatures, task_data)
+            .execute_verification(
+                msg_hash,
+                current_block_number,
+                operators,
+                signatures,
+                task_data,
+            )
             .await;
 
         if let Some(m) = &self.metrics {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.27;
 
 import {ArraySummation} from "./ArraySummation.sol";
 
@@ -11,8 +11,7 @@ contract ArraySummationFactory {
     /// @notice Emitted when a new ArraySummation contract is deployed via this factory
     /// @param contractAddress Address of the newly deployed ArraySummation contract
     /// @param avsAddress The AVS service manager address passed to the contract
-    /// @param operatorAdmin The operator-registry admin address passed to the contract
-    /// @param operatorCount Number of initial operators registered on the contract
+    /// @param ecdsaStakeRegistry The EigenLayer ECDSA stake registry passed to the contract
     /// @param arraySize Number of elements in the initialised array
     /// @param maxValue Upper bound used for element generation
     /// @param seed Entropy seed used for array initialisation
@@ -20,8 +19,7 @@ contract ArraySummationFactory {
     event ArraySummationDeployed(
         address indexed contractAddress,
         address indexed avsAddress,
-        address indexed operatorAdmin,
-        uint256 operatorCount,
+        address indexed ecdsaStakeRegistry,
         uint256 arraySize,
         uint256 maxValue,
         uint256 seed,
@@ -41,10 +39,8 @@ contract ArraySummationFactory {
     struct ContractInfo {
         /// @notice The AVS service manager address the contract was configured with
         address avsAddress;
-        /// @notice The operator-registry admin address the contract was configured with
-        address operatorAdmin;
-        /// @notice Number of initial operators registered at deployment
-        uint256 operatorCount;
+        /// @notice The EigenLayer ECDSA stake registry the contract was configured with
+        address ecdsaStakeRegistry;
         /// @notice Number of elements in the contract's array
         uint256 arraySize;
         /// @notice Upper bound used for element generation
@@ -59,16 +55,14 @@ contract ArraySummationFactory {
 
     /// @notice Deploy a new ArraySummation contract
     /// @param _avsAddress The AVS service manager address for the new contract
-    /// @param _operatorAdmin The address allowed to mutate the new contract's operator registry
-    /// @param _operators Initial operator ECDSA addresses forming the signing quorum
+    /// @param _ecdsaStakeRegistry The EigenLayer ECDSA stake registry verifying operator quorums
     /// @param _arraySize The size of the array to initialize
     /// @param _maxValue The maximum value for array elements
     /// @param _seed The seed for array initialization
     /// @return contractAddress The address of the deployed contract
     function deployArraySummation(
         address _avsAddress,
-        address _operatorAdmin,
-        address[] calldata _operators,
+        address _ecdsaStakeRegistry,
         uint256 _arraySize,
         uint256 _maxValue,
         uint256 _seed
@@ -77,7 +71,7 @@ contract ArraySummationFactory {
 
         // Deploy the new contract
         ArraySummation newContract =
-            new ArraySummation(_avsAddress, _operatorAdmin, _operators, _arraySize, _maxValue, _seed);
+            new ArraySummation(_avsAddress, _ecdsaStakeRegistry, _arraySize, _maxValue, _seed);
         contractAddress = address(newContract);
 
         // Track the deployment
@@ -87,8 +81,7 @@ contract ArraySummationFactory {
 
         contractInfo[contractAddress] = ContractInfo({
             avsAddress: _avsAddress,
-            operatorAdmin: _operatorAdmin,
-            operatorCount: _operators.length,
+            ecdsaStakeRegistry: _ecdsaStakeRegistry,
             arraySize: _arraySize,
             maxValue: _maxValue,
             seed: _seed,
@@ -97,14 +90,7 @@ contract ArraySummationFactory {
         });
 
         emit ArraySummationDeployed(
-            contractAddress,
-            _avsAddress,
-            _operatorAdmin,
-            _operators.length,
-            _arraySize,
-            _maxValue,
-            _seed,
-            deploymentIndex
+            contractAddress, _avsAddress, _ecdsaStakeRegistry, _arraySize, _maxValue, _seed, deploymentIndex
         );
     }
 

@@ -9,9 +9,9 @@ use alloy_provider::{
 /// report support for this ID before the router submits `verifyAndUpdate`.
 ///
 /// `type(IGasKillerSDK).interfaceId` — the selector of
-/// `verifyAndUpdate(bytes32,bytes,uint256,bytes4,bytes[])` (the ECDSA variant),
-/// the interface's only function.
-pub const GAS_KILLER_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0xd5, 0x77, 0xa8, 0xd3]);
+/// `verifyAndUpdate(bytes32,uint32,bytes,uint256,bytes4,address[],bytes[])`
+/// (the ECDSAStakeRegistry variant), the interface's only function.
+pub const GAS_KILLER_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0xeb, 0x9e, 0xcb, 0x2e]);
 
 /// Provider with wallet capabilities (for transactions).
 pub type WalletProvider = FillProvider<

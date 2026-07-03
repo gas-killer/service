@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.27;
 
 import {IERC165} from "./IERC165.sol";
 
 /// @title IGasKillerSDK
 /// @notice Interface for GasKillerSDK contracts
 /// @dev Defines the core functionality that GasKillerSDK implementations must provide.
-///      State updates are approved by an ECDSA quorum: registered operators sign the
-///      task digest with their secp256k1 keys, and the contract recovers each signer
-///      with `ecrecover` and checks the quorum threshold.
+///      State updates are approved by an ECDSA operator quorum verified by EigenLayer's
+///      `ECDSAStakeRegistry` (ERC-1271 `isValidSignature`): operators sign the task
+///      digest with their registered signing keys, and the registry checks each
+///      signature and the signed stake weight at the reference block.
 interface IGasKillerSDK is IERC165 {
     // Custom errors
 
@@ -24,36 +25,32 @@ interface IGasKillerSDK is IERC165 {
     /// @notice Thrown when an unrecognised state update operation type is encountered
     error InvalidOperation();
 
-    /// @notice Thrown when fewer than `QUORUM_THRESHOLD`% of registered operators signed
-    error InsufficientQuorumThreshold();
+    /// @notice Thrown when the stake registry does not return the ERC-1271 magic value
+    error InvalidQuorumSignature();
 
-    /// @notice Thrown when recovered signer addresses are not in strictly ascending order
-    ///         (ascending order is required so duplicate signatures cannot inflate the count)
-    error UnorderedSignatures();
+    /// @notice Thrown when `referenceBlockNumber` is older than `blockStaleMeasure` blocks ago
+    error StaleBlockNumber();
 
-    /// @notice Thrown when a recovered signer is not a registered operator
-    /// @param signer The recovered address that is not registered
-    error NotRegisteredOperator(address signer);
-
-    /// @notice Thrown when an operator-registry mutation is attempted by anyone but the operator admin
-    error NotOperatorAdmin();
-
-    /// @notice Thrown when registering an operator that is already registered, registering
-    ///         the zero address, or deregistering an operator that is not registered
-    error InvalidOperator(address operator);
+    /// @notice Thrown when `referenceBlockNumber` is greater than or equal to the current block number
+    error FutureBlockNumber();
 
     /// @notice Verify the operators' ECDSA quorum signatures and apply the encoded state updates
     /// @param msgHash The hash of the message to verify (sha256 of the encoded task)
+    /// @param referenceBlockNumber The block number at which operator signing keys and
+    ///        stake weights are evaluated by the stake registry
     /// @param storageUpdates The storage updates to verify and apply
     /// @param transitionIndex The transition index
     /// @param targetFunction The target function selector
-    /// @param signatures 65-byte `r || s || v` ECDSA signatures over `msgHash`, ordered by
-    ///        strictly ascending signer address
+    /// @param operators Operator addresses that signed, in strictly ascending order
+    /// @param signatures 65-byte `r || s || v` ECDSA signatures over `msgHash`,
+    ///        index-aligned with `operators`
     function verifyAndUpdate(
         bytes32 msgHash,
+        uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
         bytes4 targetFunction,
+        address[] calldata operators,
         bytes[] calldata signatures
     ) external;
 }

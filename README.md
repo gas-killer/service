@@ -87,11 +87,15 @@ Aggregation is built on the `commonware-consensus` **aggregation engine** with a
 **secp256k1 ECDSA attributable multisig scheme** (signer bitmap + one 65-byte
 `r || s || v` signature per signer). An operator's signing identity is its registered
 EigenLayer **Ethereum address**: nodes sign with the same ECDSA key they registered
-with, and the on-chain `GasKillerSDK.verifyAndUpdate` recovers every signer with
-`ecrecover` and checks it against the contract's operator registry — no BLS
+with, and the on-chain `GasKillerSDK.verifyAndUpdate` delegates quorum verification to
+EigenLayer's **`ECDSAStakeRegistry`** (eigenlayer-middleware, ERC-1271
+`isValidSignature`), which validates every signature against the operator's registered
+signing key at the reference block and enforces the stake-weight threshold — no BLS
 aggregation, pairing checks, or `NonSignerStakesAndSignature` assembly anywhere. The
-ECDSA contracts live in this repo under `contracts/` (Foundry project); their compiled
-artifacts feed the alloy bindings in `common/src/bindings/` and `scripts/bindings/`.
+contracts live in this repo under `contracts/` (Foundry project; `eigenlayer-middleware`
+is a git submodule, so clone with `--recurse-submodules` for contract development);
+their compiled artifacts feed the alloy bindings in `common/src/bindings/` and
+`scripts/bindings/`.
 
 ```
                         POST /trigger
@@ -129,14 +133,20 @@ artifacts feed the alloy bindings in `common/src/bindings/` and `scripts/binding
   hands them to the submitter.
 - **ECDSA multisig scheme**: nodes sign the raw 32-byte task digest with their
   operator secp256k1 key (Ethereum prehash semantics, **no namespace**, no EIP-191
-  prefix) — exactly what `ecrecover(taskDigest, v, r, s)` validates on-chain against
-  the operators' registered addresses. The certificate binds only the digest, not the
+  prefix) — exactly what the `ECDSAStakeRegistry` validates on-chain against the
+  operator's registered signing key. The certificate binds only the digest, not the
   height; the digest itself binds `(transitionIndex, target, selector,
   storageUpdates)` and the contract enforces transition-index ordering, so replaying
   an identical digest across heights is harmless.
 - **Submitter** (router): pairs the certificate's signer bitmap with its 65-byte
-  signatures, sorts them by ascending signer address (the contract's dedupe order),
-  and calls `GasKillerSDK.verifyAndUpdate` — no on-chain reads before submission.
+  signatures, sorts them by ascending operator address (the registry's dedupe
+  order), pins a reference block (one L1 `eth_blockNumber`), and calls
+  `GasKillerSDK.verifyAndUpdate`, which forwards to
+  `ECDSAStakeRegistry.isValidSignature`.
+- **Operator registration** (deploy-time): `scripts/deploy_array_summation.rs`
+  deploys the `ECDSAStakeRegistry` + `GasKillerServiceManager` pair, registers each
+  operator with an AVSDirectory registration signature (signing key = operator
+  address), and sets the stake threshold to 66% of total registered weight.
 - **Validator** (`common/`): EVM gas analysis (EVMSketch) computing the storage
   updates and the expected task digest on both router and nodes.
 
