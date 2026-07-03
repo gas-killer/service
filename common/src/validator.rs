@@ -10,11 +10,35 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use alloy_primitives::{Address, U256};
+
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
 use crate::task_data::GasKillerTaskData;
 
 use alloy::rpc::types::TransactionRequest;
+
+/// Key identifying a task's expected digest in [`GasKillerValidator`]'s digest cache.
+///
+/// The digest is `sha256(abi.encode(transition_index, target_address, selector,
+/// storage_updates))`, and `storage_updates` is derived by EVMSketch from
+/// `(target_address, call_data, from_address, value, block_height)`. `transition_index`
+/// is a *per-contract* counter, so keying on `(transition_index, block_height)` alone
+/// would collide two tasks for *different* contracts that share the same index and
+/// block — returning the wrong contract's digest. The key covers every field the
+/// digest depends on.
+type DigestCacheKey = (u64, u64, Address, Address, U256, Vec<u8>);
+
+fn digest_cache_key(task: &GasKillerTaskData) -> DigestCacheKey {
+    (
+        task.transition_index,
+        task.block_height,
+        task.target_address,
+        task.from_address,
+        task.value,
+        task.call_data.clone(),
+    )
+}
 use gas_analyzer::{EvmSketchExecutorCache, call_to_encoded_state_updates_with_evmsketch};
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
@@ -91,10 +115,10 @@ pub struct GasKillerValidator {
     providers: Arc<HashMap<ChainRole, ReadOnlyProvider>>,
     /// Default chain for backwards compatibility
     default_chain: ChainRole,
-    /// Cache: (transition_index, block_height) -> computed digest
-    /// Prevents re-running expensive EVMSketch for the same round when the
+    /// Cache: task identity ([`DigestCacheKey`]) -> computed digest.
+    /// Prevents re-running expensive EVMSketch for the same task when the
     /// orchestrator validates multiple signatures for identical task data.
-    digest_cache: Arc<Mutex<HashMap<(u64, u64), Digest>>>,
+    digest_cache: Arc<Mutex<HashMap<DigestCacheKey, Digest>>>,
     /// LRU cache of pre-built EvmSketch executors keyed by (rpc_url, block_number).
     /// Eliminates the 2× eth_getBlockByNumber build cost (~80–120 ms) for the
     /// 2nd…Nth request at the same block height.
@@ -328,7 +352,7 @@ impl GasKillerValidator {
     /// node signature for the same round.
     pub async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
         let digest = task_data.build_payload_hash(storage_updates);
-        let cache_key = (task_data.transition_index, task_data.block_height);
+        let cache_key = digest_cache_key(task_data);
         let mut cache = self.digest_cache.lock().await;
         cache.insert(cache_key, digest);
         debug!(
@@ -537,7 +561,7 @@ impl GasKillerValidator {
     pub async fn expected_digest_for_task(&self, task: &GasKillerTaskData) -> Result<Digest> {
         let task_data = task;
 
-        let cache_key = (task_data.transition_index, task_data.block_height);
+        let cache_key = digest_cache_key(task_data);
 
         // Check cache before running expensive EVMSketch
         {
@@ -591,6 +615,26 @@ mod tests {
     async fn test_validator_creation() {
         let _validator =
             GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
+    }
+
+    #[test]
+    fn digest_cache_key_distinguishes_different_contracts() {
+        // Two tasks for DIFFERENT contracts at the same (transition_index,
+        // block_height) — the exact collision the key must avoid so one task's
+        // cached digest is never returned for the other.
+        let a = create_test_task_data();
+        let mut b = a.clone();
+        b.target_address = Address::from([9u8; 20]);
+        assert_ne!(digest_cache_key(&a), digest_cache_key(&b));
+
+        // Differing call_data (same contract) must also key distinctly, since it
+        // changes the computed storage updates and therefore the digest.
+        let mut c = a.clone();
+        c.call_data = vec![0xde, 0xad, 0xbe, 0xef];
+        assert_ne!(digest_cache_key(&a), digest_cache_key(&c));
+
+        // Identical task identity keys identically (cache hit is intended here).
+        assert_eq!(digest_cache_key(&a), digest_cache_key(&a.clone()));
     }
 
     #[test]

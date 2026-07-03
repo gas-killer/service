@@ -518,6 +518,10 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
         let skip = TaskDirective::Skip { height }.encode();
         let deadline = Instant::now() + self.round_timeout;
         let mut skipping = false;
+        // Latches once the height certifies, so the post-certification wait for the
+        // submitter's resolution (execution may take minutes) stops re-polling the
+        // reporter actor every tick.
+        let mut certified = false;
 
         self.broadcast(announce.clone());
         loop {
@@ -541,8 +545,10 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
                 _ = tokio::time::sleep(self.rebroadcast_interval) => {
                     // Once certified, the directive is moot — the submitter's
                     // resolution is all that remains (execution may take minutes;
-                    // don't broadcast Skip for an already-certified height).
-                    if self.reporter.get(height).await.is_some() {
+                    // don't broadcast Skip for an already-certified height). Poll the
+                    // reporter only until it certifies, then latch and idle.
+                    if certified || self.reporter.get(height).await.is_some() {
+                        certified = true;
                         continue;
                     }
                     // Nodes past this height will never sign it (their engines

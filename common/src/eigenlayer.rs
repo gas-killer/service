@@ -20,7 +20,6 @@ use eigen_services_operatorsinfo::operatorsinfo_inmemory::OperatorInfoServiceInM
 use eigen_utils::rewardsv2::middleware::operator_state_retriever::OperatorStateRetriever;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::{env, fs};
@@ -49,25 +48,6 @@ pub struct CommonwarePublicKeys {
 }
 
 impl CommonwarePublicKeys {
-    /// Builds the key pair from decimal-string coordinates (operator config files).
-    ///
-    /// Returns `None` if any coordinate fails to parse.
-    pub fn from_string_coordinates(
-        g2x1: &str,
-        g2x2: &str,
-        g2y1: &str,
-        g2y2: &str,
-        g1x: &str,
-        g1y: &str,
-    ) -> Option<Self> {
-        let g2_pub_key = PublicKey::create_from_g2_coordinates(g2x1, g2x2, g2y1, g2y2)?;
-        let g1_pub_key = G1PublicKey::create_from_g1_coordinates(g1x, g1y)?;
-        Some(Self {
-            g1_pub_key,
-            g2_pub_key,
-        })
-    }
-
     /// Converts from the `eigen-crypto-bls` point types returned by the operator
     /// info service.
     pub fn from_bls_keys(g1_pub_key: BlsG1Point, g2_pub_key: BlsG2Point) -> Self {
@@ -327,8 +307,7 @@ pub struct AvsDeployment {
     pub addresses: ContractAddresses,
 }
 
-/// Contract addresses from the deployment JSON. Unknown keys are collected in
-/// `extra` and resolvable via [`AvsDeployment::custom_address`].
+/// Contract addresses from the deployment JSON. Unrecognized keys are ignored.
 #[derive(Debug, Deserialize)]
 pub struct ContractAddresses {
     #[serde(rename = "registryCoordinator")]
@@ -337,8 +316,6 @@ pub struct ContractAddresses {
     pub bls_apk_registry: String,
     #[serde(rename = "blsSigCheck")]
     pub bls_sig_check_operator_state_retriever: String,
-    #[serde(flatten)]
-    pub extra: HashMap<String, String>,
 }
 
 impl AvsDeployment {
@@ -369,18 +346,5 @@ impl AvsDeployment {
         Ok(Address::from_str(
             &self.addresses.bls_sig_check_operator_state_retriever,
         )?)
-    }
-
-    /// Resolves an address by its raw JSON key (for contracts not modeled above).
-    pub fn custom_address(
-        &self,
-        name: &str,
-    ) -> Result<Address, Box<dyn std::error::Error + Send + Sync>> {
-        let addr = self
-            .addresses
-            .extra
-            .get(name)
-            .ok_or_else(|| format!("Address '{}' not found in deployment config", name))?;
-        Ok(Address::from_str(addr)?)
     }
 }

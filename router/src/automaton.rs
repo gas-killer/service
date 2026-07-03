@@ -69,9 +69,7 @@ impl Automaton for RouterAutomaton {
     async fn verify(&mut self, _context: Height, _payload: Digest) -> oneshot::Receiver<bool> {
         // The aggregation engine never calls verify (propose-only contract);
         // resolve trivially to satisfy the trait.
-        let (sender, receiver) = oneshot::channel();
-        let _ = sender.send(true);
-        receiver
+        gas_killer_common::trivial_verify()
     }
 }
 

@@ -15,7 +15,6 @@ use axum::{
     Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
 };
 use clap::{Arg, Command};
-use commonware_consensus::Monitor;
 use commonware_consensus::aggregation::{Config as AggregationConfig, Engine};
 use commonware_consensus::types::{Epoch, EpochDelta, HeightDelta};
 use commonware_cryptography::Signer as _;
@@ -25,17 +24,15 @@ use commonware_p2p::{Address, AddressableManager as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_runtime::{Metrics, Quota, Runner, Spawner, Supervisor, tokio};
-use commonware_utils::channel::mpsc;
 use commonware_utils::ordered::{Map, Quorum as _, Set};
-use commonware_utils::sync::Mutex;
 use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::bn254::{Bn254, G1PublicKey, PublicKey, get_signer};
 use gas_killer_common::{
     Bn254Scheme, GasKillerValidator, OrchestratorConfig, SpeculativePrebuildConfig,
-    ValidatorMetrics, ack_messages_per_second, agg_activity_timeout, agg_window,
-    get_operator_states, load_key_from_file, load_orchestrator_config, p2p_message_backlog,
-    p2p_quota_period, rebroadcast_interval, round_timeout, storage_directory,
+    StaticEpochMonitor, ValidatorMetrics, ack_messages_per_second, agg_activity_timeout,
+    agg_window, get_operator_states, load_key_from_file, load_orchestrator_config,
+    p2p_message_backlog, p2p_quota_period, rebroadcast_interval, round_timeout, storage_directory,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
@@ -149,36 +146,6 @@ fn configure_orchestrator(matches: &clap::ArgMatches) -> OrchestratorConfig {
         .get_one::<String>("orchestrator")
         .expect("Please provide orchestrator config file");
     load_orchestrator_config(orchestrator_file)
-}
-
-/// Monitor pinned to a single static epoch: `subscribe` returns `Epoch::zero()`
-/// and a channel that never fires.
-///
-/// The engine exits ("epoch subscription failed") if the sender side of the
-/// subscription drops, so every sender is retained here for the process lifetime
-/// (the monitor itself lives inside the engine, and a clone is additionally held
-/// by the root future).
-#[derive(Clone)]
-struct StaticEpochMonitor {
-    subscribers: Arc<Mutex<Vec<mpsc::Sender<Epoch>>>>,
-}
-
-impl StaticEpochMonitor {
-    fn new() -> Self {
-        Self {
-            subscribers: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-impl Monitor for StaticEpochMonitor {
-    type Index = Epoch;
-
-    async fn subscribe(&mut self) -> (Epoch, mpsc::Receiver<Epoch>) {
-        let (sender, receiver) = mpsc::channel(1);
-        self.subscribers.lock().push(sender);
-        (Epoch::zero(), receiver)
-    }
 }
 
 fn main() {
@@ -469,9 +436,10 @@ fn main() {
         let p2p_backlog = p2p_message_backlog();
         let p2p_quota = Quota::with_period(p2p_quota_period())
             .expect("p2p_quota_period always returns a non-zero duration");
-        let ack_quota = Quota::per_second(ack_messages_per_second());
+        let ack_rate = ack_messages_per_second();
+        let ack_quota = Quota::per_second(ack_rate);
         tracing::info!(
-            ack_messages_per_second = ack_messages_per_second().get(),
+            ack_messages_per_second = ack_rate.get(),
             "engine channel quota"
         );
         let (engine_sender, engine_receiver) =

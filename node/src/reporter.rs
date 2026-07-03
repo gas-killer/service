@@ -64,14 +64,13 @@ pub struct NodeReporter {
     mailbox: mailbox::Receiver<Report>,
     /// Prunes resolved directives as the engine's tip advances.
     task_book: TaskBookMailbox,
-    /// Highest height observed via `Certified` or `Tip`; `None` until the first
-    /// activity arrives. Monotonic (replayed/stale tips are ignored).
-    highest: Option<u64>,
-    /// Mirror of `highest` shared with the directive ingest loop, which reports it
-    /// to a router that is assigning heights below this node's tip.
+    /// Highest height observed via `Certified` or `Tip`, shared with the directive
+    /// ingest loop (which reports it to a router assigning heights below this node's
+    /// tip). This actor is the sole writer, so it doubles as the monotonicity source
+    /// for [`Self::advance`]. Monotonic; replayed/stale tips are ignored.
     tip_handle: Arc<AtomicU64>,
     /// Heights already counted as certified — journal replay re-reports every
-    /// certificate, so counting must dedupe. Pruned below `highest - PRUNE_SLACK`
+    /// certificate, so counting must dedupe. Pruned below `tip - PRUNE_SLACK`
     /// alongside the TaskBook (replay never reaches below the engine's own
     /// `activity_timeout`, which is well inside that slack).
     certified: BTreeSet<u64>,
@@ -115,7 +114,6 @@ impl NodeReporter {
             Self {
                 mailbox: receiver,
                 task_book,
-                highest: None,
                 tip_handle,
                 certified: BTreeSet::new(),
                 height_gauge,
@@ -170,10 +168,13 @@ impl NodeReporter {
     /// Raises the highest observed height, updates the gauge, and prunes both the
     /// TaskBook and the local dedupe set below the retention horizon.
     fn advance(&mut self, height: u64) {
-        if self.highest.is_some_and(|h| height <= h) {
+        // Sole writer, so a plain load/store is race-free. `height <= current`
+        // ignores stale/replayed tips; the one edge it also skips — the very first
+        // activity being height 0 while `tip_handle` is still its initial 0 — is a
+        // harmless no-op (gauge already 0, prune floor 0).
+        if height <= self.tip_handle.load(Ordering::Relaxed) {
             return;
         }
-        self.highest = Some(height);
         self.tip_handle.store(height, Ordering::Relaxed);
         let _ = self.height_gauge.try_set(height);
         let floor = height.saturating_sub(PRUNE_SLACK);

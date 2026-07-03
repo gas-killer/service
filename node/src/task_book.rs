@@ -53,12 +53,10 @@ pub enum Resolution {
 }
 
 /// Heights this far below the highest directive seen are pruned from the log.
-///
-/// Must comfortably exceed the engine's `activity_timeout` (default 256): heights
-/// the engine can still re-request after a restart replay must be answerable. A
-/// directive below this horizon is stale by definition — rule 2 above resolves the
-/// height as Skip regardless. Shared with the reporter, which prunes by engine tip.
-pub(crate) const PRUNE_SLACK: u64 = 1024;
+/// Defined once in `gas_killer_common` and re-exported here (the node reporter and
+/// router reporter share the same horizon). A directive below this horizon is stale
+/// by definition — skip rule 2 resolves the height as Skip regardless.
+pub(crate) use gas_killer_common::PRUNE_SLACK;
 
 /// Mailbox capacity before messages spill to the unbounded overflow queue.
 ///

@@ -23,9 +23,7 @@ use tracing::{debug, info, warn};
 pub struct ExecutionResult {
     pub transaction_hash: String,
     pub block_number: Option<u64>,
-    pub gas_used: Option<u64>,
     pub status: Option<bool>,
-    pub contract_address: Option<String>,
 }
 
 /// Default receipt-wait timeout on L1. At ~12s/block this covers several blocks
@@ -352,9 +350,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Ok(ExecutionResult {
             transaction_hash: format!("{:?}", receipt.transaction_hash),
             block_number: receipt.block_number,
-            gas_used: Some(receipt.gas_used),
             status: Some(receipt.status()),
-            contract_address: receipt.contract_address.map(|addr| format!("{:?}", addr)),
         })
     }
 }

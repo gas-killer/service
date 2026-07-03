@@ -56,10 +56,16 @@ use commonware_utils::{Array, Span, union_unique};
 use eigen_crypto_bn254::utils::map_to_curve;
 use rand_core::CryptoRngCore;
 use std::borrow::Cow;
-use std::fmt::{Debug, Display};
+use std::fmt::{self, Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::str::FromStr;
+
+/// Formats raw key/signature bytes as lowercase hex — the shared `Debug`/`Display`
+/// body for the (non-secret) BN254 point types.
+fn fmt_hex(raw: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "{}", hex::encode(raw))
+}
 
 /// Length of a sha256 digest in bytes.
 const DIGEST_LENGTH: usize = 32;
@@ -385,13 +391,13 @@ impl TryFrom<Vec<u8>> for PublicKey {
 
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.raw))
+        fmt_hex(&self.raw, f)
     }
 }
 
 impl Display for PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.raw))
+        fmt_hex(&self.raw, f)
     }
 }
 
@@ -483,6 +489,12 @@ impl Read for Signature {
         // validates curve membership and subgroup.
         let sig = G1Affine::deserialize_compressed(raw.as_slice())
             .map_err(|_| Error::Invalid("bn254::Signature", "invalid G1 point"))?;
+        // Reject the identity point, for parity with `PublicKey`/`G1PublicKey` reads
+        // and the pre-migration `TryFrom`. A zero signature pairs to the GT identity
+        // and would act as a "free pass" under aggregate verification.
+        if sig.is_zero() {
+            return Err(Error::Invalid("bn254::Signature", "identity G1 point"));
+        }
         Ok(Signature { raw, sig })
     }
 }
@@ -553,13 +565,13 @@ impl TryFrom<Vec<u8>> for Signature {
 
 impl Debug for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.raw))
+        fmt_hex(&self.raw, f)
     }
 }
 
 impl Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.raw))
+        fmt_hex(&self.raw, f)
     }
 }
 
@@ -706,41 +718,14 @@ impl TryFrom<Vec<u8>> for G1PublicKey {
 
 impl Debug for G1PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.raw))
+        fmt_hex(&self.raw, f)
     }
 }
 
 impl Display for G1PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.raw))
+        fmt_hex(&self.raw, f)
     }
-}
-
-/// Aggregates (point-adds) G1 public keys, G2 public keys, and signatures into the
-/// three points the on-chain submission flow needs.
-pub fn get_points(
-    g1: &[G1PublicKey],
-    g2: &[PublicKey],
-    signatures: &[Signature],
-) -> Option<(G1Affine, G2Affine, G1Affine)> {
-    let mut agg_public_g1 = G1Projective::ZERO;
-    for public in g1 {
-        agg_public_g1 += public.key.into_group();
-    }
-    let agg_public_g1 = agg_public_g1.into_affine();
-
-    let mut agg_public_g2 = G2Projective::ZERO;
-    for public in g2 {
-        agg_public_g2 += public.key.into_group();
-    }
-    let agg_public_g2 = agg_public_g2.into_affine();
-
-    let mut agg_signature = G1Projective::ZERO;
-    for signature in signatures {
-        agg_signature += signature.sig.into_group();
-    }
-    let agg_signature = agg_signature.into_affine();
-    Some((agg_public_g1, agg_public_g2, agg_signature))
 }
 
 /// Aggregates signatures by G1 point addition.
@@ -879,18 +864,6 @@ mod tests {
     }
 
     #[test]
-    fn get_points_matches_aggregate_signatures() {
-        let signers: Vec<Bn254> = ["11", "22", "33"].iter().map(|k| get_signer(k)).collect();
-        let g1: Vec<G1PublicKey> = signers.iter().map(|s| s.public_g1()).collect();
-        let g2: Vec<PublicKey> = signers.iter().map(|s| s.public_key()).collect();
-        let signatures: Vec<Signature> = signers.iter().map(|s| s.sign_digest(&digest())).collect();
-
-        let (_, _, agg_sig_point) = get_points(&g1, &g2, &signatures).unwrap();
-        let aggregate = aggregate_signatures(&signatures).unwrap();
-        assert_eq!(Signature::from(agg_sig_point).as_ref(), aggregate.as_ref());
-    }
-
-    #[test]
     fn public_key_codec_roundtrip() {
         let public = get_signer("424242").public_key();
         let encoded = public.encode();
@@ -941,6 +914,26 @@ mod tests {
         assert!(Signature::decode(&[0xffu8; SIGNATURE_LENGTH][..]).is_err());
         assert!(G1PublicKey::decode(&[0xffu8; G1_LENGTH][..]).is_err());
         assert!(PrivateKey::decode(&[0xffu8; PRIVATE_KEY_LENGTH][..]).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_identity_points() {
+        // The identity/zero point is a valid compressed encoding but must be
+        // rejected for every non-secret type: a zero pubkey/signature pairs to the
+        // GT identity and acts as a "free pass" under aggregate verification.
+        let mut g1 = [0u8; G1_LENGTH];
+        G1Affine::identity()
+            .serialize_compressed(&mut g1[..])
+            .unwrap();
+        assert!(Signature::decode(&g1[..]).is_err());
+        assert!(Signature::try_from(&g1[..]).is_err());
+        assert!(G1PublicKey::decode(&g1[..]).is_err());
+
+        let mut g2 = [0u8; PUBLIC_KEY_LENGTH];
+        G2Affine::identity()
+            .serialize_compressed(&mut g2[..])
+            .unwrap();
+        assert!(PublicKey::decode(&g2[..]).is_err());
     }
 
     #[test]

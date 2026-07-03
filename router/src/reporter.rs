@@ -49,11 +49,8 @@ pub fn certified_channel() -> (CertifiedSender, CertifiedReceiver) {
 }
 
 /// Heights this far below the observed tip are pruned from the dedupe map.
-///
-/// Must comfortably exceed the engine's `activity_timeout` (default 256): every
-/// certificate the engine can still report locally must remain answerable for
-/// dedupe and for the sequencer's `get(height)` polling.
-const PRUNE_SLACK: u64 = 1024;
+/// Shared with the node's actors via `gas_killer_common` so they cannot drift.
+use gas_killer_common::PRUNE_SLACK;
 
 /// Mailbox capacity before messages spill to the unbounded overflow queue.
 ///

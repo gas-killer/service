@@ -16,7 +16,6 @@ use axum::{
     Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
 };
 use clap::{Arg, Command};
-use commonware_consensus::Monitor;
 use commonware_consensus::aggregation::{Config as AggregationConfig, Engine};
 use commonware_consensus::types::{Epoch, EpochDelta, HeightDelta};
 use commonware_cryptography::Signer as _;
@@ -29,16 +28,15 @@ use commonware_runtime::{
     Metrics, Quota, Runner, Spawner, Supervisor,
     tokio::{self},
 };
-use commonware_utils::channel::mpsc;
 use commonware_utils::ordered::{Map, Quorum as _, Set};
-use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration, TryCollect as _};
+use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::bn254::{Bn254Scheme, G1PublicKey, PublicKey};
 use gas_killer_common::get_operator_states;
 use gas_killer_common::{
-    GasKillerValidator, SpeculativePrebuildConfig, ack_messages_per_second, agg_activity_timeout,
-    agg_window, get_signer, load_key_from_file, p2p_message_backlog, p2p_quota_period,
-    rebroadcast_interval, storage_directory,
+    GasKillerValidator, SpeculativePrebuildConfig, StaticEpochMonitor, ack_messages_per_second,
+    agg_activity_timeout, agg_window, get_signer, load_key_from_file, p2p_message_backlog,
+    p2p_quota_period, rebroadcast_interval, storage_directory,
 };
 use gas_killer_router::automaton::RouterAutomaton;
 use gas_killer_router::factories::{create_ingress, create_submitter};
@@ -142,43 +140,6 @@ fn resolve_with_retry(
         }
     }
     None
-}
-
-/// Epoch monitor that never fires: one static epoch for the process lifetime.
-///
-/// The engine subscribes exactly once and EXITS if the subscription's sender
-/// side drops, so the monitor keeps a sender alive for as long as the engine
-/// holds it (the engine owns the monitor through its config).
-#[derive(Clone)]
-struct StaticMonitor {
-    /// Kept alive forever; never sends (no epoch transitions in this deployment).
-    _sender: mpsc::Sender<Epoch>,
-    /// Handed out on the single subscription.
-    receiver: Arc<Mutex<Option<mpsc::Receiver<Epoch>>>>,
-}
-
-impl StaticMonitor {
-    fn new() -> Self {
-        let (sender, receiver) = mpsc::channel(1);
-        Self {
-            _sender: sender,
-            receiver: Arc::new(Mutex::new(Some(receiver))),
-        }
-    }
-}
-
-impl Monitor for StaticMonitor {
-    type Index = Epoch;
-
-    async fn subscribe(&mut self) -> (Epoch, mpsc::Receiver<Epoch>) {
-        let receiver = self
-            .receiver
-            .lock()
-            .expect("monitor lock poisoned")
-            .take()
-            .expect("engine subscribes exactly once");
-        (Epoch::zero(), receiver)
-    }
 }
 
 fn main() {
@@ -365,19 +326,19 @@ fn main() {
         if operators.is_empty() {
             panic!("Please provide at least one contributor");
         }
-        let mut g1_by_g2: HashMap<PublicKey, G1PublicKey> = HashMap::new();
-        for operator in operators {
-            let keys = operator.pub_keys.as_ref().unwrap();
-            tracing::info!(key = ?keys.g2_pub_key, "registered contributor");
-            g1_by_g2.insert(keys.g2_pub_key.clone(), keys.g1_pub_key.clone());
-        }
-        let participants: Set<PublicKey> = g1_by_g2
-            .keys()
-            .cloned()
-            .try_collect()
-            .expect("duplicate operator G2 keys");
-        let g1_keys: Vec<G1PublicKey> =
-            participants.iter().map(|pk| g1_by_g2[pk].clone()).collect();
+        // Build the G2->G1 map with `from_iter_dedup` (sort + first-write-wins on a
+        // duplicate G2 key) — IDENTICAL to the node's construction in
+        // gas-killer-node/src/main.rs. If node and router deduped differently (e.g.
+        // last-write-wins here), a duplicate G2 key bound to different G1 keys would
+        // silently misalign the two sides' G1 assignment at that participant index.
+        let key_map: Map<PublicKey, G1PublicKey> =
+            Map::from_iter_dedup(operators.iter().map(|operator| {
+                let keys = operator.pub_keys.as_ref().expect("operator has BLS keys");
+                tracing::info!(key = ?keys.g2_pub_key, "registered contributor");
+                (keys.g2_pub_key.clone(), keys.g1_pub_key.clone())
+            }));
+        let participants: Set<PublicKey> = Set::from_iter_dedup(key_map.iter().cloned());
+        let g1_keys: Vec<G1PublicKey> = key_map.iter_pairs().map(|(_, g1)| g1.clone()).collect();
 
         // Verifier-only scheme: the router validates acks and assembles
         // certificates but never signs (its key is not in the participant set).
@@ -402,9 +363,10 @@ fn main() {
         let p2p_backlog = p2p_message_backlog();
         let p2p_quota = Quota::with_period(p2p_quota_period())
             .expect("p2p_quota_period always returns a non-zero duration");
-        let ack_quota = Quota::per_second(ack_messages_per_second());
+        let ack_rate = ack_messages_per_second();
+        let ack_quota = Quota::per_second(ack_rate);
         tracing::info!(
-            ack_messages_per_second = ack_messages_per_second().get(),
+            ack_messages_per_second = ack_rate.get(),
             "engine channel quota"
         );
         let (ack_sender, ack_receiver) = network.register(ACK_CHANNEL, ack_quota, p2p_backlog);
@@ -451,7 +413,7 @@ fn main() {
         let engine = Engine::new(
             context.child("engine"),
             AggregationConfig {
-                monitor: StaticMonitor::new(),
+                monitor: StaticEpochMonitor::new(),
                 provider: ConstantProvider::<Bn254Scheme, Epoch>::new(scheme.clone()),
                 automaton: RouterAutomaton::new(assignments.clone()),
                 reporter: reporter_mailbox.clone(),

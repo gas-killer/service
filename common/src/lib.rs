@@ -1,6 +1,7 @@
 pub mod bindings;
 pub mod bn254;
 pub mod config;
+pub mod consensus;
 pub mod eigenlayer;
 pub mod providers;
 pub mod task_data;
@@ -14,6 +15,7 @@ pub use config::{
     get_operator_states, load_key_from_file, load_orchestrator_config, p2p_message_backlog,
     p2p_quota_period, rebroadcast_interval, round_timeout, storage_directory,
 };
+pub use consensus::{PRUNE_SLACK, StaticEpochMonitor, trivial_verify};
 pub use providers::{build_read_providers, chain_rpc_urls_from_env};
 pub use task_data::GasKillerTaskData;
 pub use tasks::{TaskDirective, skip_digest};
