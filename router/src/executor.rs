@@ -1,22 +1,32 @@
-use crate::creator::{DispatchTime, take_dispatch_time};
 use crate::metrics::MetricsCollector;
-use gas_killer_common::ChainRole;
-use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
-use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
-use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever::getNonSignerStakesAndSignatureReturn;
-use commonware_avs_router::executor::bls::BlsSignatureVerificationHandler;
-use commonware_avs_router::executor::ExecutionResult;
+use crate::sequencer::{DispatchTime, take_dispatch_time};
 use crate::task_data::GasKillerTaskData;
 use alloy::network::Ethereum;
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
 use anyhow::Result;
-use async_trait::async_trait;
+use gas_killer_common::ChainRole;
+use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
+use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::IBLSSignatureCheckerTypes as RetrieverIBLSTypes;
+use gas_killer_common::bindings::gaskillersdk::{
+    BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+/// Outcome of a `verifyAndUpdate` submission (previously the upstream
+/// `commonware_avs_router::executor::ExecutionResult`, vendored with the dep).
+#[derive(Debug, Clone)]
+pub struct ExecutionResult {
+    pub transaction_hash: String,
+    pub block_number: Option<u64>,
+    pub gas_used: Option<u64>,
+    pub status: Option<bool>,
+    pub contract_address: Option<String>,
+}
 
 /// Default receipt-wait timeout on L1. At ~12s/block this covers several blocks
 /// plus mempool-replacement headroom before the round is abandoned.
@@ -157,11 +167,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         msg_hash: FixedBytes<32>,
         quorum_numbers: Bytes,
         current_block_number: u32,
-        non_signer_data: getNonSignerStakesAndSignatureReturn,
+        non_signer_data: RetrieverIBLSTypes::NonSignerStakesAndSignature,
         task_data: Option<&GasKillerTaskData>,
     ) -> Result<ExecutionResult> {
-        // Unwrap the return type to get the actual data
-        let data = non_signer_data._0;
+        let data = non_signer_data;
 
         // Convert the non-signer data to the format expected by the GasKillerSDK
         let non_signer_struct_data = GasKillerIBLSTypes::NonSignerStakesAndSignature {
@@ -305,7 +314,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 
         // Bound the receipt wait so L1 mempool congestion, RPC degradation, or a
         // dropped transaction can't stall the executor indefinitely. On timeout we
-        // return an error so the orchestrator counts the round as failed and moves on.
+        // return an error so the submitter counts the height as failed and moves on.
         // Unknown chain IDs fall back to the L1 (longer) timeout.
         let chain_role = self.chain_roles.get(&chain_id).copied().unwrap_or_default();
         let receipt_timeout = self.receipt_timeout(chain_role);
@@ -350,26 +359,26 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     }
 }
 
-#[async_trait]
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerificationHandler
-    for GasKillerHandler<P>
-{
-    type TaskData = GasKillerTaskData;
-
-    async fn handle_verification(
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
+    /// Submits `verifyAndUpdate` for a certified height, recording round-trip
+    /// and execution metrics. Called by [`crate::submitter::Submitter`] with the
+    /// aggregation height as the metric key (previously the upstream
+    /// `BlsSignatureVerificationHandler::handle_verification` with `round`).
+    pub async fn handle_verification(
         &mut self,
-        round: u64,
+        height: u64,
         msg_hash: FixedBytes<32>,
         quorum_numbers: Bytes,
         current_block_number: u32,
-        non_signer_data: getNonSignerStakesAndSignatureReturn,
-        task_data: Option<&Self::TaskData>,
+        non_signer_data: RetrieverIBLSTypes::NonSignerStakesAndSignature,
+        task_data: Option<&GasKillerTaskData>,
     ) -> Result<ExecutionResult> {
-        // Record P2P round-trip: time from this round's creator dispatch to threshold signatures
-        // received. Consume the entry keyed by `round` so a failed earlier round (which never
-        // reaches here) cannot contribute a stale, inflated sample. The dispatch instant is kept
-        // so the end-to-end round latency can be observed once execution completes.
-        let dispatch_start = take_dispatch_time(&self.dispatch_time, round);
+        // Record P2P round-trip: time from this height's sequencer dispatch to a
+        // certificate reaching the submitter. Consume the entry keyed by `height`
+        // so a failed earlier height (which never reaches here) cannot contribute
+        // a stale, inflated sample. The dispatch instant is kept so the
+        // end-to-end latency can be observed once execution completes.
+        let dispatch_start = take_dispatch_time(&self.dispatch_time, height);
         if let Some(start) = dispatch_start
             && let Some(m) = &self.metrics
         {
@@ -395,9 +404,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
             match &result {
                 Ok(_) => {
                     m.aggregation_rounds_completed.inc();
-                    // End-to-end round latency: creator dispatch through receipt confirmation.
-                    // Failed rounds are skipped — they have no on-chain confirmation, and a
-                    // receipt-timeout sample would distort the percentiles.
+                    // End-to-end latency: sequencer dispatch through receipt confirmation.
+                    // Failed heights are skipped — they have no on-chain confirmation, and
+                    // a receipt-timeout sample would distort the percentiles.
                     if let Some(start) = dispatch_start {
                         m.round_latency_seconds
                             .observe(start.elapsed().as_secs_f64());

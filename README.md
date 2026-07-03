@@ -7,11 +7,11 @@ Gas Killer service implementation built on EigenLayer with BLS signature aggrega
 
 ## Overview
 
-The service coordinates multiple operator nodes to sign messages, aggregates their BLS signatures when a threshold is reached, and executes the result onchain via `verifyAndUpdate`.
+The service coordinates multiple operator nodes to sign task digests, assembles their BN254 signatures into quorum certificates via the commonware-consensus aggregation engine, and executes the result onchain via `verifyAndUpdate`.
 
 ## Repository Structure
 
-- **`router/`** — Orchestrator service: aggregates signatures and executes onchain
+- **`router/`** — Router service: sequences tasks, assembles certificates (verifier-only engine), and executes onchain
 - **`node/`** — Operator node: validates and signs tasks
 - **`common/`** — Shared types, validation logic, and EVM gas analysis
 - **`config/`** — Operator and orchestrator key/config files
@@ -82,13 +82,125 @@ docker compose up -d
 
 ## Architecture
 
-The system consists of:
+Aggregation is built on the `commonware-consensus` **aggregation engine** with a custom
+**BN254 attributable multisig scheme** (signer bitmap + one aggregated G1 signature per
+certificate). The previous hand-rolled star-topology aggregator and all
+`commonware-avs-*` / `commonware-restaking` git dependencies were dropped; the pieces
+still required (BN254 key/curve handling, the EigenLayer staking client, the
+`BLSApkRegistry`/`BLSSigCheckOperatorStateRetriever` bindings, and the
+`NonSignerStakesAndSignature` retrieval flow) are vendored into `common/`. The on-chain
+verification path (`GasKillerSDK.verifyAndUpdate` + `BLSSignatureChecker`) is unchanged.
 
-- **Orchestrator**: Coordinates the aggregation process
-- **Creator**: Generates payloads and manages rounds
-- **Executor**: Handles onchain execution
-- **Validator**: Validates messages and signatures using EVM gas analysis
-- **Contributors**: Operator nodes that sign messages (implemented in `node/`)
+```
+                        POST /trigger
+                             │
+                     router: HTTP ingress
+                             │
+                     router: sequencer
+        assigns the task the next height H and broadcasts
+        TaskDirective::Announce{H, task} on p2p channel 1
+        (rebroadcast until certified; Skip{H} after ROUND_TIMEOUT)
+                             │
+  ┌──────────────────────────┼───────────────────────────┐
+  │ node 1..N (signing participants)                     │ router (verifier-only)
+  │  aggregation engine, p2p channel 0:                  │  aggregation engine:
+  │   propose(H): wait for the directive for H,          │  validates acks, assembles a
+  │   validate the task via EVMSketch, sign the          │  BN254 certificate at quorum
+  │   expected digest (or the skip digest) with          │            │
+  │   the node's BN254 key, gossip TipAcks               │  submitter: bitmap → operators,
+  └──────────────────────────────────────────────────────┘  getNonSignerStakesAndSignature,
+                                                            GasKillerSDK.verifyAndUpdate
+```
+
+- **Sequencer** (router): dequeues ingress tasks, computes the expected storage updates
+  via EVMSketch, and assigns each task the next aggregation height. Exactly one height
+  is outstanding at a time; the next task is assigned only after the current height
+  certifies (and, for real digests, on-chain execution finishes).
+- **Task-directive channel** (p2p channel 1): the router broadcasts
+  `TaskDirective::Announce { height, task }` and, after `ROUND_TIMEOUT`,
+  `TaskDirective::Skip { height }`. Nodes only receive on this channel. Engine `TipAck`
+  gossip runs on channel 0.
+- **Aggregation engine**: every process runs
+  `commonware_consensus::aggregation::Engine`. Nodes run it as signing participants;
+  the router runs it verifier-only (it holds no share of any signing key) — it
+  validates the nodes' acks, assembles certificates at quorum, journals them, and
+  hands them to the submitter.
+- **BN254 multisig scheme**: nodes sign the raw 32-byte task digest with EigenLayer's
+  `map_to_curve` hashing and **no namespace** — byte-identical to the pre-migration
+  signatures — so certificates verify on-chain against the operators' registered BN254
+  keys. The certificate binds only the digest, not the height; the digest itself binds
+  `(transitionIndex, target, selector, storageUpdates)` and the contract enforces
+  transition-index ordering, so replaying an identical digest across heights is
+  harmless.
+- **Submitter** (router): maps the certificate's signer bitmap to operator G1 keys,
+  fetches `NonSignerStakesAndSignature` from `BLSSigCheckOperatorStateRetriever`, and
+  calls `GasKillerSDK.verifyAndUpdate`.
+- **Validator** (`common/`): EVM gas analysis (EVMSketch) computing the storage
+  updates and the expected task digest on both router and nodes.
+
+### Quorum model
+
+The consensus engine fixes the certificate quorum at `n - floor((n - 1) / 3)` of the
+`n` registered operators (Byzantine fault model, f = floor((n-1)/3)):
+
+| n | quorum | tolerates |
+|---|--------|-----------|
+| 3 | 3-of-3 | 0 faulty  |
+| 4 | 3-of-4 | 1 faulty  |
+| 7 | 5-of-7 | 2 faulty  |
+
+This is stricter than the old `ceil(2n/3)` threshold for n=3: **with 3 operators every
+node must sign every certificate, so a single offline or divergent node halts
+certification until it recovers.** Run **n ≥ 4 operators in production**. The old
+`THRESHOLD` override is gone; the on-chain stake-fraction check
+(`QUORUM_THRESHOLD`/`THRESHOLD_DENOMINATOR`) still runs in the contract at submission.
+
+### Journal storage
+
+Each process needs a writable directory (`STORAGE_DIR`) for the engine's journal — a
+write-ahead log of acks and certificates replayed on restart. docker-compose mounts a
+named volume per service at `/app/data`; the Helm chart mounts an `emptyDir`. A node
+that loses its journal forgets what it acked (safe: it re-signs the same digests); the
+router's journal only caches certificates and is likewise safe to lose. Without any
+writable directory the binaries fall back to `$TMPDIR/gas-killer`, which is for
+bare-metal dev runs only.
+
+### Failure modes and recovery
+
+The engine's tip advances only when heights certify contiguously — **every height the
+router assigns must eventually resolve to a certificate**, either the task digest or
+the skip digest. The router rebroadcasts `Announce` every `REBROADCAST_INTERVAL`,
+switches to `Skip` after `ROUND_TIMEOUT`, and keeps rebroadcasting until the height
+certifies. Nodes sign the skip digest only when told to (`Skip` directive) or when the
+router has demonstrably moved past the height (a directive for a later height exists
+while this one has none) — never on a bare timer.
+
+- **Offline node (n=3)**: quorum is 3-of-3, so certification stalls until the node
+  returns; acks are re-gossiped and the pipeline resumes on its own.
+- **Split-digest stall**: if signers split between the task digest and the skip digest
+  at the same height such that neither reaches quorum (with n=3 any single divergent
+  signer is fatal; with n=4, two), the pipeline wedges at that height and **does not
+  recover automatically**. Manual recovery: stop all node processes, wipe each node's
+  engine journal — `docker compose down` + `docker volume rm <project>_node-{1,2,3}-data`,
+  or delete the node pods in Kubernetes (journals are `emptyDir`) — and restart. Nodes
+  then re-propose the height with no memory of their previous acks and follow the
+  router's current directive. Running n ≥ 4 makes a single divergent signer non-fatal.
+- **Router restart**: the engine replays its certificate journal, the sequencer waits
+  a short settle delay, then resumes from the observed tip. A certificate whose digest
+  matches neither the expected digest nor the skip digest (a node resolved the height
+  from a directive issued by a previous router life) consumes the height and the
+  in-flight task is re-assigned to the next one.
+- **Router journal loss**: if the router's journal is wiped while the nodes keep
+  theirs (e.g. only the router pod is rescheduled), the sequencer would restart at
+  height 0 — below heights the nodes will ever propose again. Nodes detect directives
+  below their own tip and reply with a rate-limited `TipReport`; the router takes the
+  `(f+1)`-th highest reported tip (the same trust rule as the engine's safe-tip) and
+  fast-forwards its next assignment, re-assigning the in-flight task there.
+- **Operator-set changes**: the participant set (and therefore every participant
+  index) is frozen per process at startup from the on-chain registry. Registering or
+  deregistering an operator requires restarting the router and all nodes together —
+  processes with different participant sets reject (and eventually disconnect) each
+  other's acks.
 
 ## Configuration
 
@@ -106,16 +218,22 @@ LOCAL-mode-only:
 - `FORK_URL`: Sepolia RPC URL to fork from (Anvil uses this)
 
 Optional environment variables:
-- `ROUND_TIMEOUT`: Max seconds the router waits for operator signatures on a round before abandoning it and moving to the next task (accepts fractional seconds). The orchestrator submits immediately once the signature threshold is reached, so this only affects rounds that fail to reach quorum. Library default: 30; Helm deployments set 300. Must exceed worst-case node compute + sign time.
-- `REBROADCAST_INTERVAL`: How often (in seconds) the router re-sends the `Start` broadcast for an in-flight round while waiting for signatures (accepts fractional seconds). Set longer than `ROUND_TIMEOUT` to disable intra-round rebroadcasting. Library default: 30; Helm deployments set 300.
-- `THRESHOLD`: Minimum signatures required for aggregation
+- `STORAGE_DIR`: Writable directory for the aggregation engine's journal (default: `/app/data` if writable, else `$TMPDIR/gas-killer`). docker-compose and Helm mount a dedicated volume here — see "Journal storage" above.
+- `AGG_WINDOW`: Heights the aggregation engine works on concurrently above its tip (default: 8).
+- `AGG_ACTIVITY_TIMEOUT`: Heights below the tip the engine keeps tracking before pruning (default: 256). Keep generous — heights pruned past this window can never certify locally.
+- `ROUND_TIMEOUT`: Max seconds the router waits for a certificate on its assigned height before switching from `Announce` to `Skip` broadcasts (accepts fractional seconds). Also the nodes' retry budget for transient validation errors. The engine certifies as soon as quorum signs, so this only affects heights that stall. Library default: 30; Helm deployments set 300. Must exceed worst-case node compute + sign time.
+- `REBROADCAST_INTERVAL`: How often (in seconds) the router re-sends the in-flight `TaskDirective` until the height certifies (accepts fractional seconds); also the engine's internal `TipAck` rebroadcast timeout. Library default: 5; Helm deployments set 15. Must stay well below `ROUND_TIMEOUT`: a node that misses every `Announce` can only resolve the height as a skip.
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
 - `INGRESS_TIMEOUT_MS`: Timeout for waiting on ingress tasks in milliseconds (default: 0, no timeout)
 - `INGRESS_PASSWORD`: Static Bearer token password for ingress authentication. Omit or leave empty to disable auth.
 - `QUORUM_NUMBER`: Quorum number to use (default: 0)
+- `P2P_ACK_MESSAGES_PER_SECOND`: Per-peer rate for the engine's TipAck channel. Defaults to `2 * AGG_ACTIVITY_TIMEOUT / REBROADCAST_INTERVAL + 8`, sized so steady-state ack rebroadcast never hits the p2p limiter (which silently drops over-rate messages). Only override to constrain bandwidth. The legacy `P2P_MESSAGES_PER_SECOND` knob now only governs the task-directive channel.
 
-Contributor key files are generated automatically by the Docker setup and do not need to be set manually.
+Removed after the aggregation migration:
+- `THRESHOLD`: the minimum-signature override no longer exists — the quorum is fixed by the consensus engine at `n - floor((n-1)/3)` (see "Quorum model" above).
+
+Operator (node) key files are generated automatically by the Docker setup and do not need to be set manually.
 
 ## Ingress Mode
 
@@ -166,11 +284,16 @@ cargo run -p scripts --bin send_request
 
 ### Dependencies
 - `alloy`: Ethereum interaction
-- `commonware-avs-*`: AVS protocol types, node, and router libraries
-- `gas-analyzer-evmsketch`: EVM gas analysis and storage update computation
-- `commonware-cryptography`: Cryptographic operations
+- `commonware-consensus`: Aggregation engine (certificate assembly over heights)
+- `commonware-cryptography`: Cryptographic primitives and the certificate `Scheme` trait implemented by our BN254 multisig scheme
 - `commonware-p2p`: P2P networking
-- `commonware-runtime`: Runtime utilities
+- `commonware-runtime`: Runtime utilities and journal-backed storage
+- `gas-analyzer-evmsketch`: EVM gas analysis and storage update computation
+- `eigen-*` / `ark-*`: EigenLayer SDK and BN254 curve arithmetic
+
+The former `commonware-avs-*` (`commonware-restaking`) git dependencies were dropped in
+the aggregation migration; the parts still needed are vendored under `common/src/`
+(`bn254/`, `eigenlayer.rs`, `bindings/`).
 
 ### Code Quality
 ```bash

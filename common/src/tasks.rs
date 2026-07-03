@@ -19,6 +19,8 @@ use crate::task_data::GasKillerTaskData;
 const TAG_ANNOUNCE: u8 = 0;
 /// Wire tag for [`TaskDirective::Skip`].
 const TAG_SKIP: u8 = 1;
+/// Wire tag for [`TaskDirective::TipReport`].
+const TAG_TIP_REPORT: u8 = 2;
 
 /// Domain separator for [`skip_digest`].
 ///
@@ -42,14 +44,24 @@ pub enum TaskDirective {
     /// Abandons `height`; nodes sign [`skip_digest`]`(height)` so the height still
     /// certifies and the pipeline advances.
     Skip { height: u64 },
+    /// Node → router: "my engine tip is `height`, your directive was below it".
+    ///
+    /// Sent (rate-limited) by a node that receives a directive for a height below
+    /// its own aggregation tip — evidence the router lost its journal and is
+    /// assigning heights the nodes will never propose. The router takes the
+    /// `(f+1)`-th highest report (at least one honest node reached it, same trust
+    /// rule as the engine's own safe-tip) and fast-forwards its next assignment.
+    TipReport { height: u64 },
 }
 
 impl TaskDirective {
-    /// The height this directive addresses.
+    /// The height this directive addresses (for [`TaskDirective::TipReport`], the
+    /// reporting node's tip).
     pub fn height(&self) -> u64 {
         match self {
             TaskDirective::Announce { height, .. } => *height,
             TaskDirective::Skip { height } => *height,
+            TaskDirective::TipReport { height } => *height,
         }
     }
 }
@@ -64,6 +76,10 @@ impl Write for TaskDirective {
             }
             TaskDirective::Skip { height } => {
                 TAG_SKIP.write(buf);
+                UInt(*height).write(buf);
+            }
+            TaskDirective::TipReport { height } => {
+                TAG_TIP_REPORT.write(buf);
                 UInt(*height).write(buf);
             }
         }
@@ -82,6 +98,7 @@ impl Read for TaskDirective {
                 Ok(TaskDirective::Announce { height, task })
             }
             TAG_SKIP => Ok(TaskDirective::Skip { height }),
+            TAG_TIP_REPORT => Ok(TaskDirective::TipReport { height }),
             other => Err(Error::InvalidEnum(other)),
         }
     }
@@ -92,7 +109,7 @@ impl EncodeSize for TaskDirective {
         let tag_and_height = 1 + UInt(self.height()).encode_size();
         match self {
             TaskDirective::Announce { task, .. } => tag_and_height + task.encode_size(),
-            TaskDirective::Skip { .. } => tag_and_height,
+            TaskDirective::Skip { .. } | TaskDirective::TipReport { .. } => tag_and_height,
         }
     }
 }
@@ -152,12 +169,21 @@ mod tests {
     }
 
     #[test]
+    fn tip_report_roundtrip() {
+        let original = TaskDirective::TipReport { height: 12_345 };
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.encode_size());
+        let decoded = TaskDirective::decode(encoded).expect("decode failed");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
     fn unknown_tag_rejected() {
         let mut bytes = TaskDirective::Skip { height: 5 }.encode_mut();
-        bytes[0] = 2;
+        bytes[0] = 3;
         assert!(matches!(
             TaskDirective::decode(bytes.freeze()),
-            Err(Error::InvalidEnum(2))
+            Err(Error::InvalidEnum(3))
         ));
     }
 

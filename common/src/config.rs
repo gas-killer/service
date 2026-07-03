@@ -322,6 +322,32 @@ pub fn rebroadcast_interval() -> std::time::Duration {
     )
 }
 
+/// Per-peer send/receive rate for the aggregation-engine TipAck channel (channel 0),
+/// in messages per second.
+///
+/// The engine keeps rebroadcasting a signed height's TipAck every
+/// `REBROADCAST_INTERVAL` until the height falls `AGG_ACTIVITY_TIMEOUT` below the
+/// tip — even after it certifies — so steady-state demand approaches
+/// `AGG_ACTIVITY_TIMEOUT / REBROADCAST_INTERVAL` messages per second per peer. The
+/// p2p send-side limiter SILENTLY DROPS messages to rate-limited peers, so an
+/// undersized quota starves fresh acks and stalls certification. The default is
+/// computed from those two knobs with 2x headroom; override with
+/// `P2P_ACK_MESSAGES_PER_SECOND` (the legacy `P2P_MESSAGES_PER_SECOND` knob only
+/// governs the task-directive channel).
+pub fn ack_messages_per_second() -> std::num::NonZeroU32 {
+    if let Some(v) = env::var("P2P_ACK_MESSAGES_PER_SECOND")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .and_then(std::num::NonZeroU32::new)
+    {
+        return v;
+    }
+    let demand =
+        (agg_activity_timeout() as f64 / rebroadcast_interval().as_secs_f64()).ceil() as u32;
+    std::num::NonZeroU32::new(demand.saturating_mul(2).saturating_add(8).max(8))
+        .expect("quota is always at least 8")
+}
+
 /// Parses a seconds value (fractional allowed) into a `Duration`, falling back to
 /// `default_secs` on malformed, non-positive, non-finite, or non-representable input.
 fn parse_secs_env_duration(value: Option<&str>, default_secs: f64) -> std::time::Duration {

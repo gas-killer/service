@@ -1,5 +1,10 @@
 # Build stage
-FROM rust:1.83-slim AS builder
+# Keep the builder at or above the minimum rustc the lockfile needs (>= 1.91);
+# rust-toolchain.toml (channel = "stable") would otherwise download a toolchain
+# at image-build time. Pin the -bookworm variant so the binary links against the
+# same glibc as the bookworm runtime stage below (the default rust:slim tracks
+# Debian trixie, whose newer glibc is absent on bookworm → GLIBC_2.38 not found).
+FROM rust:1.96-slim-bookworm AS builder
 WORKDIR /app
 RUN apt-get update && apt-get install -y \
     pkg-config \
@@ -50,8 +55,10 @@ COPY --from=builder /usr/local/bin/generate_key /usr/local/bin/generate_key
 # Copy configuration files
 COPY config /app/config
 
-# Set ownership
-RUN chown -R appuser:appuser /app
+# Set ownership. /app/data is the aggregation-engine journal directory
+# (STORAGE_DIR); creating it owned by appuser here means a named volume
+# mounted there inherits writable ownership.
+RUN mkdir -p /app/data && chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser

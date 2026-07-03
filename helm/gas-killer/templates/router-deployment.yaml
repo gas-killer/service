@@ -331,6 +331,8 @@ spec:
               value: {{ .Values.router.p2pMessageBacklog | quote }}
             - name: P2P_MESSAGES_PER_SECOND
               value: {{ .Values.router.p2pMessagesPerSecond | quote }}
+            - name: STORAGE_DIR
+              value: {{ .Values.router.storageDir | quote }}
             - name: PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
@@ -364,6 +366,8 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+            - name: engine-journal
+              mountPath: {{ .Values.router.storageDir | quote }}
             {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
             - name: router-secrets
               mountPath: /app/secrets
@@ -382,6 +386,11 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" . }}
+        # Writable storage for the aggregation engine's journal (STORAGE_DIR).
+        # The router is verifier-only: its journal just caches certificates, so
+        # emptyDir loss on pod rescheduling is safe (tip is re-read from the network).
+        - name: engine-journal
+          emptyDir: {}
         {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
         - name: router-secrets
           emptyDir: {}

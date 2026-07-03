@@ -1,13 +1,18 @@
+//! Construction of the router's environment-configured components: alloy
+//! providers, the HTTP ingress, and the on-chain submitter.
+
 use crate::GasKillerHandler;
-use crate::creator::{
-    DispatchTime, GasKillerConfig, GasKillerCreator, GasKillerCreatorType,
-    ListeningGasKillerCreator, task_channel, task_queue_depth,
-};
 use crate::ingress::{
     AvsMetadata, AvsOperatorSetMetadata, AvsOperatorSetSoftware, IngressState,
     start_gas_killer_http_server,
 };
 use crate::metrics::MetricsCollector;
+use crate::reporter::CertifiedReceiver;
+use crate::sequencer::{
+    DispatchTime, ResolutionSender, SharedAssignments, TaskQueueDepth, TaskReceiver, TaskSender,
+    task_channel, task_queue_depth,
+};
+use crate::submitter::Submitter;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_provider::{
     Identity, Provider, ProviderBuilder, RootProvider,
@@ -18,12 +23,11 @@ use alloy_provider::{
 };
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
-use commonware_avs_eigenlayer::AvsDeployment;
-use commonware_avs_router::bindings::bls_apk_registry::BLSApkRegistry;
-use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
-use commonware_avs_router::executor::bls::BlsEigenlayerExecutor;
-use commonware_runtime::Metrics;
-use gas_killer_common::{ChainRole, GasKillerValidator};
+use gas_killer_common::ChainRole;
+use gas_killer_common::bindings::bls_apk_registry::BLSApkRegistry;
+use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
+use gas_killer_common::bn254::Bn254Scheme;
+use gas_killer_common::eigenlayer::AvsDeployment;
 use std::collections::HashMap;
 use std::{env, str::FromStr, sync::Arc};
 use tracing::info;
@@ -47,30 +51,37 @@ pub type SimpleWalletProvider = FillProvider<
     Ethereum,
 >;
 
-/// Factory function to create a default creator
-pub async fn create_creator() -> anyhow::Result<GasKillerCreatorType> {
-    let creator = GasKillerCreator::new();
-    Ok(GasKillerCreatorType::Basic(creator))
+/// The ingress side of the task pipeline: the sequencer consumes `receiver`;
+/// `sender` is retained by the caller so the channel stays open even when the
+/// HTTP server is disabled (`INGRESS != true`) — a closed channel would shut the
+/// sequencer down.
+pub struct IngressHandles {
+    pub sender: TaskSender,
+    pub receiver: TaskReceiver,
+    pub queue_depth: TaskQueueDepth,
 }
 
-/// Factory function to create a listening creator with HTTP server
-pub async fn create_listening_creator_with_server(
-    addr: String,
-    validator: Arc<GasKillerValidator>,
-    metrics: Arc<MetricsCollector>,
-    dispatch_time: DispatchTime,
-) -> anyhow::Result<GasKillerCreatorType> {
+/// Creates the ingress task channel and, when `INGRESS=true`, spawns the HTTP
+/// server (`/trigger`, `/healthz`, `/avs-metadata`) on `INGRESS_ADDRESS`
+/// (default `0.0.0.0:8080`). Behavior, env knobs, and endpoint shapes are
+/// unchanged from the pre-migration router.
+pub fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHandles> {
     let (sender, receiver) = task_channel();
     let queue_depth = task_queue_depth();
-    let config = GasKillerConfig::default();
-    let creator = ListeningGasKillerCreator::new(
-        receiver,
-        queue_depth.clone(),
-        config,
-        validator,
-        dispatch_time,
-    )
-    .with_metrics(Arc::clone(&metrics));
+
+    let use_ingress = env::var("INGRESS").unwrap_or_default().to_lowercase() == "true";
+    if !use_ingress {
+        info!("INGRESS is not 'true'; HTTP ingress disabled (task channel stays idle)");
+        return Ok(IngressHandles {
+            sender,
+            receiver,
+            queue_depth,
+        });
+    }
+
+    let addr = env::var("INGRESS_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    info!(address = %addr, "starting GasKiller HTTP ingress");
+
     let providers = build_ingress_providers()?;
     let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
     if ingress_password.is_none() {
@@ -118,18 +129,25 @@ pub async fn create_listening_creator_with_server(
         operator_sets,
     };
     let ingress_state = IngressState::new(
-        sender,
-        queue_depth,
+        sender.clone(),
+        queue_depth.clone(),
         gas_killer_common::p2p_message_backlog(),
         metrics,
         providers,
         ingress_password,
         avs_metadata,
     );
+    // Plain tokio::spawn works: the commonware tokio runtime shares the ambient
+    // reactor with axum.
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });
-    Ok(GasKillerCreatorType::Listening(Box::new(creator)))
+
+    Ok(IngressHandles {
+        sender,
+        receiver,
+        queue_depth,
+    })
 }
 
 fn build_ingress_providers()
@@ -180,19 +198,23 @@ async fn create_wallet_provider_for_chain(
     Ok(provider)
 }
 
-/// Creates a new BlsEigenlayerExecutor configured for Gas Killer operations with multi-chain support.
+/// Creates the [`Submitter`] configured for Gas Killer operations with multi-chain support.
 ///
-/// The executor's read side (view_only_provider, BLS contracts) always points at L1 via
+/// The submitter's read side (view_only_provider, BLS contracts) always points at L1 via
 /// `HTTP_RPC` and `AVS_DEPLOYMENT_PATH`. Operator state lives on L1 and is not
 /// available on the L2 mimic contract.
 ///
 /// `L2_HTTP_RPC` is used exclusively for the write side: submitting `verifyAndUpdate`
 /// transactions on L2 when the target contract lives there.
-pub async fn create_gas_killer_executor(
+#[allow(clippy::too_many_arguments)]
+pub async fn create_submitter(
+    scheme: Bn254Scheme,
+    assignments: SharedAssignments,
+    certified: CertifiedReceiver,
+    resolutions: ResolutionSender,
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
-    context: &impl Metrics,
-) -> Result<BlsEigenlayerExecutor<GasKillerHandler<SimpleWalletProvider>>> {
+) -> Result<Submitter> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
@@ -200,7 +222,7 @@ pub async fn create_gas_killer_executor(
 
     let deployment =
         AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
-    info!("Executor reads operator state from L1 (HTTP_RPC)");
+    info!("Submitter reads operator state from L1 (HTTP_RPC)");
 
     let view_only_provider = ProviderBuilder::new().connect_http(
         url::Url::parse(&http_rpc)
@@ -300,12 +322,15 @@ pub async fn create_gas_killer_executor(
         .with_dispatch_time(dispatch_time)
         .with_receipt_timeout(receipt_timeout_override);
 
-    Ok(BlsEigenlayerExecutor::new(
+    Ok(Submitter::new(
+        scheme,
         view_only_provider,
         bls_apk_registry,
         bls_operator_state_retriever,
         registry_coordinator_address,
         gas_killer_handler,
-    )
-    .with_metrics(context))
+        assignments,
+        certified,
+        resolutions,
+    ))
 }

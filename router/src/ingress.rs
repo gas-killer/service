@@ -1,6 +1,6 @@
-use crate::creator::{TaskQueueDepth, TaskSender};
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ErrorCode};
 use crate::metrics::MetricsCollector;
+use crate::sequencer::{TaskQueueDepth, TaskSender};
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use axum::{
@@ -776,17 +776,17 @@ mod tests {
         use axum::http::{Method, Request, StatusCode};
         use tower::util::ServiceExt; // for `oneshot`
 
-        fn make_app() -> (Router, crate::creator::TaskReceiver) {
-            let (sender, receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+        fn make_app() -> (Router, crate::sequencer::TaskReceiver) {
+            let (sender, receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let state = IngressState::without_metrics(sender, queue_depth);
             let app = build_app().with_state(state);
             (app, receiver)
         }
 
-        fn make_app_with_password(password: &str) -> (Router, crate::creator::TaskReceiver) {
-            let (sender, receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+        fn make_app_with_password(password: &str) -> (Router, crate::sequencer::TaskReceiver) {
+            let (sender, receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let mut state = IngressState::without_metrics(sender, queue_depth);
             state.password = Some(password.to_string());
             let app = build_app().with_state(state);
@@ -1155,8 +1155,8 @@ mod tests {
         #[tokio::test]
         async fn test_valid_request_does_not_leave_extra_tasks() {
             // Two sequential valid requests → queue should hold exactly two tasks
-            let (sender, mut receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, mut receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let app1 = build_app().with_state(IngressState::without_metrics(
                 sender.clone(),
                 queue_depth.clone(),
@@ -1239,8 +1239,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_avs_metadata_returns_200_with_valid_json() {
-            let (sender, _receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let mut state = IngressState::without_metrics(sender, queue_depth);
             state.avs_metadata = AvsMetadata {
                 name: "Gas Killer".to_string(),
@@ -1285,8 +1285,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_full_queue_returns_503() {
-            let (sender, _receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let mut state = IngressState::without_metrics(sender, queue_depth.clone());
             state.max_queue_depth = 1;
             queue_depth.store(1, std::sync::atomic::Ordering::Relaxed);
@@ -1301,8 +1301,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_full_queue_increments_at_capacity_metric() {
-            let (sender, _receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let metrics = Arc::new(MetricsCollector::new());
             let mut state = IngressState::without_metrics(sender, queue_depth.clone());
             state.metrics = Some(Arc::clone(&metrics));
@@ -1318,8 +1318,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_queue_one_below_limit_still_accepts() {
-            let (sender, _receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let mut state = IngressState::without_metrics(sender, queue_depth.clone());
             state.max_queue_depth = 2;
             queue_depth.store(1, std::sync::atomic::Ordering::Relaxed);

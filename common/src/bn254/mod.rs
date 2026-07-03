@@ -860,14 +860,18 @@ mod tests {
     fn aggregate_sign_and_verify() {
         let signers: Vec<Bn254> = ["1", "2", "3", "4"].iter().map(|k| get_signer(k)).collect();
         let publics: Vec<PublicKey> = signers.iter().map(|s| s.public_key()).collect();
-        let signatures: Vec<Signature> =
-            signers.iter().map(|s| s.sign_digest(&digest())).collect();
+        let signatures: Vec<Signature> = signers.iter().map(|s| s.sign_digest(&digest())).collect();
 
         let aggregate = aggregate_signatures(&signatures).unwrap();
         assert!(aggregate_verify(&publics, None, &digest(), &aggregate));
 
         // Missing one signer's key fails the pairing check.
-        assert!(!aggregate_verify(&publics[..3], None, &digest(), &aggregate));
+        assert!(!aggregate_verify(
+            &publics[..3],
+            None,
+            &digest(),
+            &aggregate
+        ));
 
         // Aggregate of a subset does not verify against the full set.
         let partial = aggregate_signatures(&signatures[..3]).unwrap();
@@ -879,8 +883,7 @@ mod tests {
         let signers: Vec<Bn254> = ["11", "22", "33"].iter().map(|k| get_signer(k)).collect();
         let g1: Vec<G1PublicKey> = signers.iter().map(|s| s.public_g1()).collect();
         let g2: Vec<PublicKey> = signers.iter().map(|s| s.public_key()).collect();
-        let signatures: Vec<Signature> =
-            signers.iter().map(|s| s.sign_digest(&digest())).collect();
+        let signatures: Vec<Signature> = signers.iter().map(|s| s.sign_digest(&digest())).collect();
 
         let (_, _, agg_sig_point) = get_points(&g1, &g2, &signatures).unwrap();
         let aggregate = aggregate_signatures(&signatures).unwrap();
@@ -965,7 +968,9 @@ mod tests {
         // The identity element serializes to the "infinity flag" compressed
         // encoding; decoding it must fail for key types.
         let mut zero_g2 = [0u8; PUBLIC_KEY_LENGTH];
-        G2Affine::zero().serialize_compressed(&mut zero_g2[..]).unwrap();
+        G2Affine::zero()
+            .serialize_compressed(&mut zero_g2[..])
+            .unwrap();
         assert!(PublicKey::decode(&zero_g2[..]).is_err());
 
         let zero_scalar = [0u8; PRIVATE_KEY_LENGTH];
@@ -1013,14 +1018,8 @@ mod tests {
         // e(pk_G1, g2) == e(g1, pk_G2) iff both keys were derived from the same
         // scalar — the consistency the on-chain registration relies on.
         let signer = get_signer("2718281828");
-        let lhs = ark_bn254::Bn254::pairing(
-            signer.public_g1().get_point(),
-            G2Affine::generator(),
-        );
-        let rhs = ark_bn254::Bn254::pairing(
-            G1Affine::generator(),
-            signer.public_key().get_point(),
-        );
+        let lhs = ark_bn254::Bn254::pairing(signer.public_g1().get_point(), G2Affine::generator());
+        let rhs = ark_bn254::Bn254::pairing(G1Affine::generator(), signer.public_key().get_point());
         assert_eq!(lhs, rhs);
     }
 }
