@@ -37,6 +37,7 @@ commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-math = { workspace = true }
 commonware-parallel = { workspace = true }
+commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 
 # Config
@@ -51,6 +52,3 @@ tokio = { workspace = true }
 # Logging
 tracing = { workspace = true }
 url = { workspace = true }
-
-# Metrics
-prometheus-client = { workspace = true }

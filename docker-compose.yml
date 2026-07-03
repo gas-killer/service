@@ -183,7 +183,13 @@ services:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
+      # Aggregation-engine journal directory (write-ahead log of acks/certificates).
       - STORAGE_DIR=/app/data
+      # SQLite API-key store path (shares the router-data volume with the journal).
+      - DATA_DIR=/app/data
+      # Guards the /admin/keys endpoints used to mint the API keys that authenticate /trigger.
+      # Defaults to a fixed value for the local/e2e harness; override by exporting ADMIN_KEY.
+      - ADMIN_KEY=${ADMIN_KEY:-ci-admin-key}
     volumes:
       - ./config/.nodes:/app/.nodes:ro
       - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro

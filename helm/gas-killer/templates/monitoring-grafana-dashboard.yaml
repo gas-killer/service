@@ -101,6 +101,30 @@ data:
           }
         },
         {
+          "id": 5,
+          "type": "stat",
+          "title": "Database",
+          "description": "Router SQLite store liveness — gas_killer_db_up, set by the router's periodic SELECT 1 health check.",
+          "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
+          "targets": [{
+            "expr": "gas_killer_db_up",
+            "legendFormat": "db"
+          }],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "orientation": "auto",
+            "colorMode": "background",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+              ]
+            }
+          }
+        },
+        {
           "id": 10,
           "type": "text",
           "title": "Resource Usage",

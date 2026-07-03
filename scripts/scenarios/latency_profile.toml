@@ -9,7 +9,7 @@
 #
 # Requires:
 #   GNOSIS_RPC_URL    — Gnosis chain HTTP RPC endpoint
-#   INGRESS_PASSWORD  — Bearer token for /trigger (if enabled)
+#   GAS_KILLER_API_KEY  — API key sent as `Authorization: Bearer <key>` on /trigger (if the server requires auth)
 #
 # After running, pull metrics from Grafana:
 #   - gas_killer_p2p_round_trip_seconds        (router)
@@ -23,6 +23,7 @@
 
 router_url           = "https://testnet.gaskiller.xyz"
 http_rpc             = "$GNOSIS_RPC_URL"
+api_key              = "$GAS_KILLER_API_KEY"   # /trigger auth: set $GAS_KILLER_API_KEY in env, or paste a literal gk_ key
 ingress_timeout_secs = 120
 
 # ── 1. Baseline — single serial requests with 5 s breathing room between them ─
