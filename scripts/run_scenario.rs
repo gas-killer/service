@@ -19,7 +19,7 @@ struct Config {
     router_url: String,
     /// Required when any request uses `block_height = 0` or `verify = true`.
     http_rpc: Option<String>,
-    /// API key sent as `Authorization: Bearer <key>` on every `/trigger` request. Mint one with
+    /// API key sent as `Authorization: Bearer <key>` on every `/tasks` request. Mint one with
     /// the `create_api_key` tool. Falls back to the `GAS_KILLER_API_KEY` environment variable
     /// when unset; leave empty for a router that does not require auth.
     api_key: Option<String>,
@@ -118,7 +118,7 @@ struct RequestConfig {
     /// Set to 0 to auto-fetch the current block from `http_rpc`.
     #[serde(default)]
     block_height: u64,
-    /// When true, poll stateTransitionCount() after a 200 to confirm verifyAndUpdate ran.
+    /// When true, poll stateTransitionCount() after a 202 to confirm verifyAndUpdate ran.
     #[serde(default)]
     verify: bool,
     /// How long to wait for on-chain confirmation (seconds, default: 150).
@@ -152,10 +152,11 @@ struct ApiRequest {
     body: ApiRequestBody,
 }
 
+/// Body returned by `POST /tasks` when a task is accepted for aggregation.
 #[derive(Debug, Deserialize)]
-struct ApiResponse {
-    success: bool,
-    message: String,
+struct AcceptedResponse {
+    task_id: String,
+    status: String,
 }
 
 // ── Result types ──────────────────────────────────────────────────────────────
@@ -177,7 +178,7 @@ struct RequestResult {
 
 impl RequestResult {
     fn passed(&self) -> bool {
-        if !self.api_success || self.status != 200 {
+        if !self.api_success || self.status != 202 {
             return false;
         }
         match &self.on_chain {
@@ -333,7 +334,7 @@ async fn send_request(
         },
     };
 
-    let url = format!("{}/trigger", router_url.trim_end_matches('/'));
+    let url = format!("{}/tasks", router_url.trim_end_matches('/'));
     let start = Instant::now();
     let mut req = client.post(&url).json(&payload);
     if let Some(key) = api_key
@@ -344,30 +345,48 @@ async fn send_request(
     let resp = req.send().await;
     let elapsed = start.elapsed();
 
+    // The router acknowledges an accepted submission with `202 Accepted` and a
+    // `{ task_id, status }` body; any other status carries an error envelope, surfaced verbatim
+    // in the report.
     let (status, api_success, message) = match resp {
         Err(e) => (0u16, false, format!("connection error: {e}")),
         Ok(r) => {
             let status = r.status().as_u16();
             match r.text().await {
-                Ok(body_text) => match serde_json::from_str::<ApiResponse>(&body_text) {
-                    Ok(body) => (status, body.success, body.message),
-                    Err(e) => {
-                        let trimmed = body_text.trim();
-                        let msg = if trimmed.is_empty() {
-                            format!("non-ApiResponse body (HTTP {status}); parse error: {e}")
-                        } else {
-                            format!("{trimmed} (non-ApiResponse: {e})")
-                        };
-                        (status, false, msg)
+                Ok(body_text) if status == 202 => {
+                    match serde_json::from_str::<AcceptedResponse>(&body_text) {
+                        Ok(body) => (
+                            status,
+                            true,
+                            format!("{} (task {})", body.status, body.task_id),
+                        ),
+                        Err(e) => {
+                            let trimmed = body_text.trim();
+                            let msg = if trimmed.is_empty() {
+                                format!("202 with empty body; parse error: {e}")
+                            } else {
+                                format!("{trimmed} (unparseable 202: {e})")
+                            };
+                            (status, false, msg)
+                        }
                     }
-                },
+                }
+                Ok(body_text) => {
+                    let trimmed = body_text.trim();
+                    let msg = if trimmed.is_empty() {
+                        format!("HTTP {status} with empty body")
+                    } else {
+                        trimmed.to_string()
+                    };
+                    (status, false, msg)
+                }
                 Err(e) => (status, false, format!("failed to read response body: {e}")),
             }
         }
     };
 
     // Verify on-chain only if the API accepted the request
-    let on_chain = if cfg.verify && api_success && status == 200 {
+    let on_chain = if cfg.verify && api_success && status == 202 {
         if let (Some(p), Some(count), Ok(addr)) = (
             provider,
             on_chain_count,
