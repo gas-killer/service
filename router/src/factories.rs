@@ -12,6 +12,7 @@ use crate::sequencer::{
     DispatchTime, ResolutionSender, SharedAssignments, TaskQueueDepth, TaskReceiver, TaskSender,
     task_channel, task_queue_depth,
 };
+use crate::store::SqliteStore;
 use crate::submitter::Submitter;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_provider::{
@@ -29,8 +30,13 @@ use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BLSSigC
 use gas_killer_common::bn254::Bn254Scheme;
 use gas_killer_common::eigenlayer::AvsDeployment;
 use std::collections::HashMap;
+use std::time::Duration;
 use std::{env, str::FromStr, sync::Arc};
 use tracing::info;
+
+/// How often the background loop re-checks SQLite store liveness for the `gas_killer_db_up`
+/// metric. Aligned with a typical Prometheus scrape interval so the gauge stays fresh.
+const DB_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Wallet provider that uses SimpleNonceManager to always fetch the pending nonce from the
 /// chain rather than caching it locally. This prevents nonce corruption when a transaction
@@ -65,7 +71,7 @@ pub struct IngressHandles {
 /// server (`/trigger`, `/healthz`, `/avs-metadata`) on `INGRESS_ADDRESS`
 /// (default `0.0.0.0:8080`). Behavior, env knobs, and endpoint shapes are
 /// unchanged from the pre-migration router.
-pub fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHandles> {
+pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHandles> {
     let (sender, receiver) = task_channel();
     let queue_depth = task_queue_depth();
 
@@ -83,10 +89,10 @@ pub fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHandles> 
     info!(address = %addr, "starting GasKiller HTTP ingress");
 
     let providers = build_ingress_providers()?;
-    let ingress_password = env::var("INGRESS_PASSWORD").ok().filter(|p| !p.is_empty());
-    if ingress_password.is_none() {
+    let admin_key = env::var("ADMIN_KEY").ok().filter(|k| !k.is_empty());
+    if admin_key.is_none() {
         tracing::warn!(
-            "INGRESS_PASSWORD is not set — /trigger endpoint is unauthenticated; set INGRESS_PASSWORD in production"
+            "ADMIN_KEY is not set — /admin/keys endpoints are disabled; set ADMIN_KEY to manage API keys"
         );
     }
     let operator_sets = {
@@ -128,15 +134,36 @@ pub fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHandles> 
             .filter(|s| !s.is_empty()),
         operator_sets,
     };
+    // Open the durable store and apply migrations before serving traffic. A failure here
+    // aborts router startup rather than running against an unmigrated or unwritable store.
+    let store = SqliteStore::connect().await?;
+
+    // Publish store liveness as `gas_killer_db_up`. connect() already proved the store
+    // answers, so seed the gauge to 1; a background loop then re-checks so a later volume
+    // loss (detached PVC, full or read-only disk) surfaces as db_up=0 on the dashboard.
+    metrics.db_up.set(1);
+    {
+        let store = store.clone();
+        let metrics = Arc::clone(&metrics);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(DB_HEALTH_CHECK_INTERVAL);
+            loop {
+                ticker.tick().await;
+                metrics.db_up.set(store.health_check().await.is_ok() as i64);
+            }
+        });
+    }
+
     let ingress_state = IngressState::new(
         sender.clone(),
         queue_depth.clone(),
         gas_killer_common::p2p_message_backlog(),
         metrics,
         providers,
-        ingress_password,
         avs_metadata,
-    );
+    )
+    .with_store(store)
+    .with_admin_key(admin_key);
     // Plain tokio::spawn works: the commonware tokio runtime shares the ambient
     // reactor with axum.
     tokio::spawn(async move {

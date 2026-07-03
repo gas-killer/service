@@ -1,0 +1,18 @@
+{{- if .Values.router.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "gas-killer.routerdata.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  accessModes:
+    - {{ .Values.router.persistence.accessMode }}
+  {{- if .Values.router.persistence.storageClass }}
+  storageClassName: {{ .Values.router.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.router.persistence.size }}
+{{- end }}

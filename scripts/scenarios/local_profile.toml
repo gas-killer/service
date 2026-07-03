@@ -1,5 +1,6 @@
 router_url           = "http://localhost:8080"
 http_rpc             = "http://localhost:8545"
+api_key              = "$GAS_KILLER_API_KEY"   # /trigger auth: set $GAS_KILLER_API_KEY in env, or paste a literal gk_ key
 ingress_timeout_secs = 120
 
 [[scenarios]]

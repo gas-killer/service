@@ -51,6 +51,9 @@ pub enum ErrorCode {
     NotFound,
     /// The HTTP method is not supported for the requested path.
     MethodNotAllowed,
+    /// A required server-side feature or credential is not configured, so the endpoint cannot
+    /// serve the request (e.g. the admin API without `ADMIN_KEY`, or persistence disabled).
+    NotConfigured,
     /// An unexpected server-side error occurred.
     Internal,
 }
@@ -175,6 +178,7 @@ mod tests {
             (ErrorCode::InvalidRequest, "INVALID_REQUEST"),
             (ErrorCode::NotFound, "NOT_FOUND"),
             (ErrorCode::MethodNotAllowed, "METHOD_NOT_ALLOWED"),
+            (ErrorCode::NotConfigured, "NOT_CONFIGURED"),
             (ErrorCode::Internal, "INTERNAL"),
         ];
         for (code, wire) in cases {

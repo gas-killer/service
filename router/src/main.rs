@@ -438,7 +438,9 @@ fn main() {
         // HTTP ingress (env-gated, unchanged endpoints). The returned sender is
         // kept alive below so the task channel never closes while running
         // without the HTTP server.
-        let ingress = create_ingress(Arc::clone(&metrics)).expect("Failed to create ingress");
+        let ingress = create_ingress(Arc::clone(&metrics))
+            .await
+            .expect("Failed to create ingress");
         let _task_sender = ingress.sender;
 
         // On-chain submitter: consumes verified certificates, resolves heights.
