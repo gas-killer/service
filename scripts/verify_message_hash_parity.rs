@@ -139,16 +139,18 @@ fn test_vectors() -> Vec<TestVector> {
         Address::from([0x22; 20]),
         Address::from([0xca; 20]),
     ];
-    let calldata_lengths = [0usize, 4, 36, 33];
-    let update_lengths = [0usize, 1, 4, 31, 32, 33, 64, 100];
+    // Both dynamic tails sweep the same padding boundaries: 0 (empty), 1/4/31 (sub-word),
+    // 32 (exactly one word), 33 (word+1), 64/100 (multi-word). The calldata index is offset so
+    // the two tails usually have different lengths, exercising asymmetric two-tail layouts too.
+    let byte_lengths = [0usize, 1, 4, 31, 32, 33, 64, 100];
     let indices = [0u64, 1, 7, 1_000_000, u64::MAX];
 
     let mut vectors = Vec::new();
-    for (i, updates_len) in update_lengths.iter().enumerate() {
+    for (i, updates_len) in byte_lengths.iter().enumerate() {
         let anchor_hash = anchors[i % anchors.len()];
         let caller = callers[i % callers.len()];
         let transition_index = indices[i % indices.len()];
-        let calldata_len = calldata_lengths[i % calldata_lengths.len()];
+        let calldata_len = byte_lengths[(i + 3) % byte_lengths.len()];
         let contract_calldata = (0..calldata_len)
             .map(|b| (b as u8).wrapping_mul(13).wrapping_add(3))
             .collect();
