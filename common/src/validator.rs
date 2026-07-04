@@ -533,7 +533,10 @@ impl GasKillerValidator {
     /// Returns `(storage_updates, anchor_hash)` where `anchor_hash` is derived from the same
     /// execution — never trusted from the task — so it is the hash of the block the updates
     /// were computed against.
-    async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<(Vec<u8>, B256)> {
+    async fn compute_storage_updates(
+        &self,
+        task_data: &GasKillerTaskData,
+    ) -> Result<(Vec<u8>, B256)> {
         if task_data.block_height == 0 {
             return Err(anyhow::anyhow!("block_height is required for validation"));
         }

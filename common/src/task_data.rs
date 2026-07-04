@@ -2,7 +2,7 @@
 
 use alloy::primitives::FixedBytes;
 use alloy::sol_types::SolValue;
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
@@ -321,7 +321,9 @@ mod tests {
                 .parse()
                 .unwrap(),
             anchor_hash: B256::from([0x11u8; 32]),
-            from_address: "0x00000000000000000000000000000000000000CA".parse().unwrap(),
+            from_address: "0x00000000000000000000000000000000000000CA"
+                .parse()
+                .unwrap(),
             call_data: alloy_primitives::hex!(
                 "a9059cbb0000000000000000000000002222222222222222222222222222222222222222"
             )
@@ -331,9 +333,14 @@ mod tests {
         let storage_updates = alloy_primitives::hex!("deadbeef");
 
         let digest = task.build_payload_hash(&storage_updates);
-        let golden =
-            alloy_primitives::hex!("43691df1fbe6816bf3721f2765e47e74ad16a4832d68a8130b56a1c909d290e1");
-        assert_eq!(digest.as_ref(), &golden, "digest diverges from Solidity abi.encode");
+        let golden = alloy_primitives::hex!(
+            "43691df1fbe6816bf3721f2765e47e74ad16a4832d68a8130b56a1c909d290e1"
+        );
+        assert_eq!(
+            digest.as_ref(),
+            &golden,
+            "digest diverges from Solidity abi.encode"
+        );
     }
 
     #[test]

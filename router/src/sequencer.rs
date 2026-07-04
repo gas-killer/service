@@ -33,7 +33,7 @@ use gas_killer_common::task_data::GasKillerTaskData;
 use gas_killer_common::tasks::TaskDirective;
 use gas_killer_common::{rebroadcast_interval, round_timeout};
 
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{B256, Bytes};
 use anyhow::Result;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
@@ -694,7 +694,14 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
                         task.body.block_height,
                     )
                     .await
-                    .map(|r| (r.storage_updates, r.block_height, r.anchor_hash, start.elapsed()))
+                    .map(|r| {
+                        (
+                            r.storage_updates,
+                            r.block_height,
+                            r.anchor_hash,
+                            start.elapsed(),
+                        )
+                    })
             };
             // eth_chainId runs concurrently — completes in ~50ms, well before EVMSketch.
             let chain_id_fut = async move { chain_id_validator.get_chain_id_for(chain_role).await };
@@ -707,7 +714,14 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
                 count,
                 "Resolved auto transition_index from chain"
             );
-            (updates, height, anchor_hash, chain_id, count, storage_elapsed)
+            (
+                updates,
+                height,
+                anchor_hash,
+                chain_id,
+                count,
+                storage_elapsed,
+            )
         };
 
         if let Some(m) = &self.metrics {

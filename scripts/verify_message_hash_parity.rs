@@ -7,7 +7,7 @@
 //!
 //! Exits non-zero on any mismatch so the e2e workflow fails.
 
-use alloy::primitives::{Address, Bytes, FixedBytes, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use gas_killer_common::GasKillerTaskData;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
@@ -41,7 +41,8 @@ async fn main() -> Result<(), BoxError> {
     let mut checked = 0usize;
     let mut mismatches = 0usize;
 
-    for (transition_index, anchor_hash, caller, contract_calldata, storage_updates) in test_vectors()
+    for (transition_index, anchor_hash, caller, contract_calldata, storage_updates) in
+        test_vectors()
     {
         let onchain = contract
             .getMessageHash(
