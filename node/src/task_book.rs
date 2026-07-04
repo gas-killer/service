@@ -361,7 +361,7 @@ pub async fn ingest<R, S>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, U256};
+    use alloy::primitives::{Address, B256, U256};
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
 
     fn sample_task(transition_index: u64) -> GasKillerTaskData {
@@ -373,6 +373,7 @@ mod tests {
             from_address: Address::from([2u8; 20]),
             value: U256::from(7u64),
             block_height: 100,
+            anchor_hash: B256::from([6u8; 32]),
             chain_id: 31337,
         }
     }

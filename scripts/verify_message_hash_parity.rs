@@ -119,12 +119,15 @@ fn resolve_target_address() -> Result<Address, BoxError> {
     Ok(addr.parse()?)
 }
 
-/// `(transition_index, anchor_hash, caller, contract_calldata, storage_updates)` vectors.
+/// One parity vector: `(transition_index, anchor_hash, caller, contract_calldata, storage_updates)`.
+type TestVector = (u64, B256, Address, Vec<u8>, Vec<u8>);
+
+/// Parity vectors.
 ///
 /// Both dynamic fields (`contract_calldata` and `storage_updates`) are swept across the
 /// dynamic-bytes padding boundaries (0, sub-word, exactly one word, word+1, multi-word) so the
 /// two-tail ABI layout is exercised, along with anchor/caller/index edges.
-fn test_vectors() -> Vec<(u64, B256, Address, Vec<u8>, Vec<u8>)> {
+fn test_vectors() -> Vec<TestVector> {
     let anchors = [
         B256::ZERO,
         B256::from([0x11; 32]),
