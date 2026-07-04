@@ -364,9 +364,10 @@ fn parse_secs_env_duration(value: Option<&str>, default_secs: f64) -> std::time:
 /// Maximum age (in blocks) of a task's reference block, falling back to the default
 /// when `BLOCK_STALE_MEASURE` is unset or unparseable.
 ///
-/// An off-chain policy bound (the ECDSA `GasKillerSDK` no longer checks reference
-/// blocks on-chain): the service rejects gas-analysis requests whose `block_height`
-/// is older than this window (see ingress validation), and sizes the speculative
+/// Mirrors the `DEFAULT_BLOCK_STALE_MEASURE` in `GasKillerSDK.sol` (which enforces
+/// `FutureBlockNumber`/`StaleBlockNumber` on-chain). The service reuses it as an
+/// off-chain policy bound: it rejects gas-analysis requests whose `block_height` is
+/// older than this window (see ingress validation) and sizes the speculative
 /// executor cache to cover it.
 pub const DEFAULT_BLOCK_STALE_MEASURE: u64 = 300;
 

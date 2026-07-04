@@ -52,7 +52,7 @@ library StateChangeHandlerLib {
             } else if (stateUpdateType == StateUpdateType.CALL) {
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
                 bool success;
-                // TOOD: might need better gas handling
+                // TODO: might need better gas handling
                 uint256 callgas = gasleft();
                 assembly {
                     success := call(callgas, target, value, add(callargs, 0x20), mload(callargs), 0, 0)
