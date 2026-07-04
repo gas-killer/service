@@ -77,7 +77,7 @@ impl Automaton for RouterAutomaton {
 mod tests {
     use super::*;
     use crate::sequencer::{Assignment, shared_assignments};
-    use alloy_primitives::{Address, U256};
+    use alloy_primitives::{Address, B256, U256};
     use gas_killer_common::GasKillerTaskData;
 
     fn sample_task() -> GasKillerTaskData {
@@ -89,6 +89,7 @@ mod tests {
             from_address: Address::from([2u8; 20]),
             value: U256::ZERO,
             block_height: 10,
+            anchor_hash: B256::from([3u8; 32]),
             chain_id: 31337,
         }
     }

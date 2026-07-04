@@ -186,14 +186,18 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         // Extract task data parameters - use pre-computed storage_updates from task data
         let storage_updates = task_data.storage_updates.clone();
         let transition_index = U256::from(task_data.transition_index);
-        let target_function = task_data.function_selector();
+        let anchor_hash = task_data.anchor_hash;
+        let caller_address = task_data.from_address;
+        let contract_calldata = Bytes::copy_from_slice(&task_data.call_data);
         let target_addr = task_data.target_address;
 
         // Debug: Log exact inputs for hash comparison
         debug!(
             transition_index = %transition_index,
             target_address = %target_addr,
-            target_function = %target_function,
+            anchor_hash = %anchor_hash,
+            caller_address = %caller_address,
+            call_data_len = task_data.call_data.len(),
             storage_updates_len = storage_updates.len(),
             storage_updates_first_32 = %hex::encode(&task_data.storage_updates[..std::cmp::min(32, task_data.storage_updates.len())]),
             detected_chain = %chain_id,
@@ -226,7 +230,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 local_expected_hash = %expected_hash,
                 transition_index = %transition_index,
                 target_address = %target_addr,
-                target_function = %target_function,
+                anchor_hash = %anchor_hash,
+                caller_address = %caller_address,
                 storage_updates_len = storage_updates.len(),
                 "Message hash mismatch between aggregation and local computation"
             );
@@ -268,7 +273,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 current_block_number.saturating_sub(1),
                 storage_updates,
                 transition_index,
-                target_function,
+                anchor_hash,
+                caller_address,
+                contract_calldata,
                 operators,
                 signatures,
             )

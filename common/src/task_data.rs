@@ -2,7 +2,7 @@
 
 use alloy::primitives::FixedBytes;
 use alloy::sol_types::SolValue;
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use anyhow::Result;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
@@ -31,6 +31,13 @@ pub struct GasKillerTaskData {
     pub value: U256,
     /// Block height at which storage_updates were computed (for deterministic validation)
     pub block_height: u64,
+    /// Hash of the block the execution is anchored to (the block at `block_height`).
+    ///
+    /// Bound into the signed message so a challenger can reproduce the exact execution
+    /// against the same Ethereum state and prove incorrect storage updates (slashing).
+    /// The validator derives this from the same EVMSketch execution that produces
+    /// `storage_updates`, so it always matches the block the updates were computed at.
+    pub anchor_hash: B256,
     /// Actual EVM chain ID (e.g. 1 = Ethereum mainnet, 100 = Gnosis, 31337 = Anvil local)
     pub chain_id: u64,
 }
@@ -80,14 +87,19 @@ impl GasKillerTaskData {
     /// `getMessageHash`):
     ///
     /// ```solidity
-    /// sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))
+    /// sha256(abi.encode(
+    ///     transitionIndex, address(this), anchorHash, callerAddress, contractCalldata, storageUpdates
+    /// ))
     /// ```
     ///
+    /// This *slashable* message binds the full execution context — the anchor block hash,
+    /// the caller (`from_address`), and the full calldata — so a challenger can reproduce the
+    /// exact execution and prove the signed `storageUpdates` wrong (see `GasKillerSlasher`).
+    ///
     /// `storage_updates` is a separate argument because the validator hashes the storage updates
-    /// it recomputes via EVMSketch.
+    /// it recomputes via EVMSketch. `self.anchor_hash` must be the hash of the block
+    /// (`self.block_height`) the updates were computed against; the validator enforces this.
     pub fn build_payload_hash(&self, storage_updates: &[u8]) -> Digest {
-        let selector = self.function_selector();
-
         if tracing::enabled!(tracing::Level::DEBUG) {
             // Debug: hash the full storage_updates so divergent inputs are detectable from logs.
             let mut storage_hasher = Sha256::new();
@@ -102,38 +114,28 @@ impl GasKillerTaskData {
             debug!(
                 transition_index = self.transition_index,
                 target_address = %self.target_address,
-                target_function = %selector,
+                anchor_hash = %self.anchor_hash,
+                caller_address = %self.from_address,
+                call_data_len = self.call_data.len(),
                 storage_updates_len = storage_updates.len(),
                 storage_updates_hash = %storage_hash_hex,
                 "build_payload_hash inputs"
             );
         }
 
-        // Build flattened ABI encoding matching
-        // abi.encode(transitionIndex, address(this), selector, storageUpdates).
-        // Heads (32 bytes each)
-        let head_transition = U256::from(self.transition_index).abi_encode();
-        let head_address = self.target_address.abi_encode();
-        let head_selector = selector.abi_encode();
-        // Offset to the dynamic bytes tail: 4 words (3 static + 1 offset) = 0x80
-        let head_offset = U256::from(32u64 * 4u64).abi_encode();
-
-        // Tail for dynamic bytes: length (u256) + data + padding
-        let mut tail = Vec::with_capacity(32 + storage_updates.len() + 31);
-        tail.extend_from_slice(&U256::from(storage_updates.len()).abi_encode());
-        tail.extend_from_slice(storage_updates);
-        let pad_len = (32 - (storage_updates.len() % 32)) % 32;
-        if pad_len > 0 {
-            tail.extend(std::iter::repeat_n(0u8, pad_len));
-        }
-
-        // Concatenate head and tail into final payload
-        let mut payload = Vec::with_capacity(32 * 4 + tail.len());
-        payload.extend_from_slice(&head_transition);
-        payload.extend_from_slice(&head_address);
-        payload.extend_from_slice(&head_selector);
-        payload.extend_from_slice(&head_offset);
-        payload.extend_from_slice(&tail);
+        // ABI-encode the tuple exactly as Solidity's
+        // abi.encode(uint256, address, bytes32, address, bytes, bytes) — `abi_encode_params`
+        // lays out the parameter list (heads + tails, no outer tuple offset), matching
+        // `abi.encode(...)`.
+        let payload = (
+            U256::from(self.transition_index),
+            self.target_address,
+            self.anchor_hash,
+            self.from_address,
+            Bytes::copy_from_slice(&self.call_data),
+            Bytes::copy_from_slice(storage_updates),
+        )
+            .abi_encode_params();
 
         let mut hasher = Sha256::new();
         hasher.update(&payload);
@@ -154,6 +156,7 @@ impl Default for GasKillerTaskData {
             from_address: Address::ZERO,
             value: U256::ZERO,
             block_height: 0,
+            anchor_hash: B256::ZERO,
             chain_id: 0,
         }
     }
@@ -192,6 +195,9 @@ impl Write for GasKillerTaskData {
 
         // Write block height as u64
         self.block_height.write(buf);
+
+        // Write anchor hash as 32 bytes
+        buf.put_slice(self.anchor_hash.as_slice());
 
         // Write chain_id as u64 (actual EVM chain ID, e.g. 1, 100, 31337)
         self.chain_id.write(buf);
@@ -248,6 +254,14 @@ impl Read for GasKillerTaskData {
         // Read block height (u64)
         let block_height = u64::read(buf)?;
 
+        // Read anchor hash (32 bytes)
+        if buf.remaining() < 32 {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+        let mut anchor_hash_bytes = [0u8; 32];
+        buf.copy_to_slice(&mut anchor_hash_bytes);
+        let anchor_hash = B256::from(anchor_hash_bytes);
+
         // Read chain_id as u64 (actual EVM chain ID)
         let chain_id = u64::read(buf)?;
 
@@ -259,6 +273,7 @@ impl Read for GasKillerTaskData {
             from_address,
             value,
             block_height,
+            anchor_hash,
             chain_id,
         })
     }
@@ -271,6 +286,7 @@ impl EncodeSize for GasKillerTaskData {
         const U64_SIZE: usize = std::mem::size_of::<u64>(); // transition_index, block_height, chain_id
         const ADDRESS_SIZE: usize = 20; // target_address and from_address (Ethereum addresses)
         const U256_SIZE: usize = 32; // value (U256)
+        const B256_SIZE: usize = 32; // anchor_hash (block hash)
 
         U32_SIZE
             + self.storage_updates.len()
@@ -281,6 +297,7 @@ impl EncodeSize for GasKillerTaskData {
             + U32_SIZE
             + self.call_data.len()
             + U64_SIZE // block_height
+            + B256_SIZE // anchor_hash
             + U64_SIZE // chain_id
     }
 }
@@ -289,6 +306,35 @@ impl EncodeSize for GasKillerTaskData {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
+
+    /// `build_payload_hash` must equal `sha256(abi.encode(uint256, address, bytes32, address,
+    /// bytes, bytes))` — the exact preimage the on-chain `getMessageHash` hashes.
+    ///
+    /// The golden digest is computed independently of this code path with
+    /// `cast abi-encode "f(uint256,address,bytes32,address,bytes,bytes)" ... | sha256`, so this
+    /// pins the Rust encoding to the Solidity ABI rather than to itself.
+    #[test]
+    fn build_payload_hash_matches_solidity_abi_encode_golden() {
+        let task = GasKillerTaskData {
+            transition_index: 7,
+            target_address: "0x000000000000000000000000000000000000dEaD"
+                .parse()
+                .unwrap(),
+            anchor_hash: B256::from([0x11u8; 32]),
+            from_address: "0x00000000000000000000000000000000000000CA".parse().unwrap(),
+            call_data: alloy_primitives::hex!(
+                "a9059cbb0000000000000000000000002222222222222222222222222222222222222222"
+            )
+            .to_vec(),
+            ..Default::default()
+        };
+        let storage_updates = alloy_primitives::hex!("deadbeef");
+
+        let digest = task.build_payload_hash(&storage_updates);
+        let golden =
+            alloy_primitives::hex!("43691df1fbe6816bf3721f2765e47e74ad16a4832d68a8130b56a1c909d290e1");
+        assert_eq!(digest.as_ref(), &golden, "digest diverges from Solidity abi.encode");
+    }
 
     #[test]
     fn test_validate_success() {

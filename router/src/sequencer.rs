@@ -33,7 +33,7 @@ use gas_killer_common::task_data::GasKillerTaskData;
 use gas_killer_common::tasks::TaskDirective;
 use gas_killer_common::{rebroadcast_interval, round_timeout};
 
-use alloy_primitives::Bytes;
+use alloy_primitives::{Bytes, B256};
 use anyhow::Result;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::sha256::Digest;
@@ -154,6 +154,8 @@ struct EnrichedTask {
     task: GasKillerTaskRequest,
     storage_updates: Bytes,
     block_height: u64,
+    /// Hash of the anchor block (`block_height`) the storage updates were computed against.
+    anchor_hash: B256,
     /// Resolved transition index (sentinel `None` → concrete count from chain).
     transition_index: u64,
     /// Actual EVM chain ID (e.g. 1 = Ethereum mainnet, 100 = Gnosis, 31337 = Anvil).
@@ -170,6 +172,7 @@ impl EnrichedTask {
             from_address: self.task.body.from_address,
             value: self.task.body.value,
             block_height: self.block_height,
+            anchor_hash: self.anchor_hash,
             chain_id: self.chain_id,
         }
     }
@@ -632,6 +635,7 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
         let (
             storage_updates,
             block_height,
+            anchor_hash,
             numeric_chain_id,
             resolved_transition_index,
             storage_elapsed,
@@ -639,7 +643,7 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
             let start = Instant::now();
             // compute_storage_updates_for_tx detects the chain, runs EVMSketch, and also
             // calls eth_chainId on the same RPC — returns the numeric chain ID directly.
-            let (updates, height, chain_id) = self
+            let (updates, height, anchor_hash, chain_id) = self
                 .validator
                 .compute_storage_updates_for_tx(
                     task.body.target_address,
@@ -650,7 +654,7 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
-            (updates, height, chain_id, idx, start.elapsed())
+            (updates, height, anchor_hash, chain_id, idx, start.elapsed())
         } else {
             // Detect chain once so all concurrent futures skip redundant eth_getCode probes.
             let chain_role = self
@@ -690,11 +694,11 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
                         task.body.block_height,
                     )
                     .await
-                    .map(|r| (r.storage_updates, r.block_height, start.elapsed()))
+                    .map(|r| (r.storage_updates, r.block_height, r.anchor_hash, start.elapsed()))
             };
             // eth_chainId runs concurrently — completes in ~50ms, well before EVMSketch.
             let chain_id_fut = async move { chain_id_validator.get_chain_id_for(chain_role).await };
-            let (count, (updates, height, storage_elapsed), chain_id) =
+            let (count, (updates, height, anchor_hash, storage_elapsed), chain_id) =
                 tokio::try_join!(count_fut, storage_fut, chain_id_fut)?;
 
             info!(
@@ -703,7 +707,7 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
                 count,
                 "Resolved auto transition_index from chain"
             );
-            (updates, height, chain_id, count, storage_elapsed)
+            (updates, height, anchor_hash, chain_id, count, storage_elapsed)
         };
 
         if let Some(m) = &self.metrics {
@@ -731,6 +735,7 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
             task,
             storage_updates: storage_updates.into(),
             block_height,
+            anchor_hash,
             transition_index: resolved_transition_index,
             chain_id: numeric_chain_id,
         })
@@ -805,6 +810,7 @@ mod tests {
             task,
             storage_updates: vec![0x01, 0x02, 0x03, 0x04].into(), // computed by GasAnalyzer
             block_height: 12345,
+            anchor_hash: B256::from([7u8; 32]),
             transition_index: 42,
             chain_id: 1u64,
         };
@@ -812,6 +818,7 @@ mod tests {
 
         assert_eq!(task_data.transition_index, 42);
         assert_eq!(task_data.target_address, Address::from([1u8; 20]));
+        assert_eq!(task_data.anchor_hash, B256::from([7u8; 32]));
         assert_eq!(task_data.chain_id, 1);
     }
 
@@ -826,6 +833,7 @@ mod tests {
             from_address: Address::from([8u8; 20]),
             value: U256::ZERO,
             block_height: 77,
+            anchor_hash: B256::from([5u8; 32]),
             chain_id: 31337,
         };
         let digest = task.build_payload_hash(&task.storage_updates);

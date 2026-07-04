@@ -42,12 +42,17 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     uint256 private constant DEFAULT_BLOCK_STALE_MEASURE = 300;
 
     /// @notice Verify the operators' ECDSA quorum signatures and apply the encoded state updates
+    /// @dev The signed message binds the full execution context (anchor block, caller, calldata)
+    ///      so that incorrect storage updates are provable — and slashable — after the fact via
+    ///      an SP1 execution proof (see `GasKillerSlasher`).
     /// @param msgHash The hash of the message to verify
     /// @param referenceBlockNumber The block number at which operator signing keys and
     ///        stake weights are evaluated by the stake registry
     /// @param storageUpdates The storage updates to verify and apply
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param operators Operator addresses that signed, in strictly ascending order
     /// @param signatures 65-byte `r || s || v` ECDSA signatures over `msgHash`,
     ///        index-aligned with `operators`
@@ -56,7 +61,9 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         address[] calldata operators,
         bytes[] calldata signatures
     ) external trackState {
@@ -66,8 +73,11 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
 
         // Verify transition index and message hash
         require(transitionIndex + 1 == stateTransitionCount(), InvalidTransitionIndex());
-        bytes32 expectedHash = sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
-        require(expectedHash == msgHash, InvalidSignature());
+        require(
+            _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates)
+                == msgHash,
+            InvalidSignature()
+        );
 
         // Verify the quorum signatures via EigenLayer's ECDSAStakeRegistry
         _verifyQuorum(msgHash, referenceBlockNumber, operators, signatures);
@@ -102,17 +112,40 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         return interfaceId == type(IERC165).interfaceId || interfaceId == type(IGasKillerSDK).interfaceId;
     }
 
-    /// @notice Compute the expected message hash for a given transition, function, and storage updates
+    /// @notice Compute the expected message hash for a transition and its execution context
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param storageUpdates The ABI-encoded storage updates
     /// @return The expected SHA-256 hash
-    function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
-        external
-        view
-        returns (bytes32)
-    {
-        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
+    function getMessageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) external view returns (bytes32) {
+        return _computeMessageHash(transitionIndex, anchorHash, callerAddress, contractCalldata, storageUpdates);
+    }
+
+    /// @notice Compute the signed message hash for a transition and its execution context
+    /// @param transitionIndex The transition index
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The expected SHA-256 hash
+    function _computeMessageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
+        bytes calldata storageUpdates
+    ) internal view returns (bytes32) {
+        return sha256(
+            abi.encode(transitionIndex, address(this), anchorHash, callerAddress, contractCalldata, storageUpdates)
+        );
     }
 
     /// @notice Return the configured AVS service manager address

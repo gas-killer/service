@@ -26,6 +26,10 @@ interface Vm {
     function addr(uint256 privateKey) external pure returns (address);
     function prank(address sender) external;
     function roll(uint256 newHeight) external;
+    /// @dev Reads the current block number through the cheatcode. Unlike `block.number`,
+    ///      this is an external call the IR optimizer cannot cache across `vm.roll`, so
+    ///      relative rolls (`vm.roll(getBlockNumber() + 1)`) advance correctly under via-IR.
+    function getBlockNumber() external view returns (uint256);
     function expectRevert(bytes4 revertData) external;
     function expectRevert(bytes calldata revertData) external;
 }
@@ -72,6 +76,10 @@ contract GasKillerSDKTest {
     uint256 internal constant OPERATOR_SHARES = 100 ether;
     /// @dev 2-of-3 equal-weight quorum: threshold equals two operators' weight
     uint256 internal constant THRESHOLD_WEIGHT = 200 ether;
+
+    /// @dev Execution-context fields the operators sign over alongside the storage updates.
+    bytes32 internal constant ANCHOR_HASH = keccak256("anchor");
+    address internal constant CALLER = address(0xCA11);
 
     MockDelegationManager internal delegation;
     MockAVSDirectory internal avsDirectory;
@@ -170,12 +178,23 @@ contract GasKillerSDKTest {
         return abi.encode(types, args);
     }
 
-    function messageHash(uint256 transitionIndex, bytes4 targetFunction, bytes memory storageUpdates)
-        internal
-        view
-        returns (bytes32)
-    {
-        return sha256(abi.encode(transitionIndex, address(target), targetFunction, storageUpdates));
+    /// @dev The full ABI-encoded calldata for a `sum(uint256[])` call, used as the
+    ///      execution context bound into every signed message.
+    function sumCalldata() internal pure returns (bytes memory) {
+        uint256[] memory indexes = new uint256[](0);
+        return abi.encodeCall(ArraySummation.sum, (indexes));
+    }
+
+    function messageHash(
+        uint256 transitionIndex,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes memory contractCalldata,
+        bytes memory storageUpdates
+    ) internal view returns (bytes32) {
+        return sha256(
+            abi.encode(transitionIndex, address(target), anchorHash, callerAddress, contractCalldata, storageUpdates)
+        );
     }
 
     /// @dev Signs `digest` with the first `count` operators (already address-ascending)
@@ -200,7 +219,7 @@ contract GasKillerSDKTest {
         returns (bytes memory updates, bytes32 digest)
     {
         updates = storeUpdate(bytes32(uint256(0)), bytes32(newSum));
-        digest = messageHash(transitionIndex, ArraySummation.sum.selector, updates);
+        digest = messageHash(transitionIndex, ANCHOR_HASH, CALLER, sumCalldata(), updates);
     }
 
     // ------------------------------------------------------------------ tests
@@ -210,7 +229,7 @@ contract GasKillerSDKTest {
         (address[] memory signers, bytes[] memory sigs) = signQuorum(digest, 3);
 
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
 
         require(target.currentSum() == 1352, "currentSum not updated");
@@ -223,7 +242,7 @@ contract GasKillerSDKTest {
         (address[] memory signers, bytes[] memory sigs) = signQuorum(digest, 2);
 
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
         require(target.currentSum() == 7, "currentSum not updated");
     }
@@ -234,7 +253,7 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IECDSAStakeRegistryErrors.InsufficientSignedStake.selector);
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
     }
 
@@ -246,7 +265,7 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IECDSAStakeRegistryErrors.NotSorted.selector);
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
     }
 
@@ -262,7 +281,7 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IECDSAStakeRegistryErrors.NotSorted.selector);
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
     }
 
@@ -291,7 +310,7 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IECDSAStakeRegistryErrors.InvalidSignature.selector);
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
     }
 
@@ -301,7 +320,7 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IGasKillerSDK.InvalidTransitionIndex.selector);
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 5, ArraySummation.sum.selector, signers, sigs
+            digest, referenceBlock(), updates, 5, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
     }
 
@@ -312,7 +331,7 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IGasKillerSDK.InvalidSignature.selector);
         target.verifyAndUpdate(
-            wrong, referenceBlock(), updates, 0, ArraySummation.sum.selector, signers, sigs
+            wrong, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
     }
 
@@ -329,7 +348,7 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IECDSAStakeRegistryErrors.InvalidSignature.selector);
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
     }
 
@@ -339,7 +358,7 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IGasKillerSDK.FutureBlockNumber.selector);
         target.verifyAndUpdate(
-            digest, uint32(block.number), updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, uint32(block.number), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
     }
 
@@ -352,7 +371,7 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IGasKillerSDK.StaleBlockNumber.selector);
         target.verifyAndUpdate(
-            digest, stale, updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, stale, updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
     }
 
@@ -361,7 +380,7 @@ contract GasKillerSDKTest {
             (bytes memory updates, bytes32 digest) = currentSumPayload(100 + i, i);
             (address[] memory signers, bytes[] memory sigs) = signQuorum(digest, 3);
             target.verifyAndUpdate(
-                digest, referenceBlock(), updates, i, ArraySummation.sum.selector, signers, sigs
+                digest, referenceBlock(), updates, i, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
             );
             require(target.currentSum() == 100 + i, "currentSum not updated");
         }
@@ -379,12 +398,12 @@ contract GasKillerSDKTest {
 
         vm.expectRevert(IECDSAStakeRegistryErrors.InsufficientSignedStake.selector);
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), signers, sigs
         );
 
         (address[] memory allSigners, bytes[] memory allSigs) = signQuorum(digest, 3);
         target.verifyAndUpdate(
-            digest, referenceBlock(), updates, 0, ArraySummation.sum.selector, allSigners, allSigs
+            digest, referenceBlock(), updates, 0, ANCHOR_HASH, CALLER, sumCalldata(), allSigners, allSigs
         );
         require(target.currentSum() == 7, "currentSum not updated");
     }
@@ -457,31 +476,35 @@ contract GasKillerSDKTest {
             vm.prank(operators[i]);
             freshRegistry.registerOperatorWithSignature(emptyOperatorSignature(), operators[i]);
         }
-        vm.roll(block.number + 1);
-        uint32 windowBlock = uint32(block.number - 1); // threshold still max here
+        // Read block numbers through the cheatcode (not `block.number`) so via-IR does not
+        // cache a stale value across `vm.roll`, which would leave windowBlock == afterFinalize.
+        vm.roll(vm.getBlockNumber() + 1);
+        uint32 windowBlock = uint32(vm.getBlockNumber() - 1); // threshold still max here
 
         ArraySummation windowTarget =
             new ArraySummation(address(freshSm), address(freshRegistry), 10, 1000, 42);
-        vm.roll(block.number + 1);
+        vm.roll(vm.getBlockNumber() + 1);
 
         bytes memory updates = storeUpdate(bytes32(uint256(0)), bytes32(uint256(7)));
-        bytes32 digest =
-            sha256(abi.encode(uint256(0), address(windowTarget), ArraySummation.sum.selector, updates));
+        bytes memory contractCalldata = sumCalldata();
+        bytes32 digest = sha256(
+            abi.encode(uint256(0), address(windowTarget), ANCHOR_HASH, CALLER, contractCalldata, updates)
+        );
         (address[] memory signers, bytes[] memory sigs) = signQuorum(digest, 3);
 
         // A full 3-of-3 quorum at the pre-finalize reference block is rejected: the
         // threshold checkpoint there is type(uint224).max.
         vm.expectRevert(IECDSAStakeRegistryErrors.InsufficientSignedStake.selector);
         windowTarget.verifyAndUpdate(
-            digest, windowBlock, updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, windowBlock, updates, 0, ANCHOR_HASH, CALLER, contractCalldata, signers, sigs
         );
 
         // Phase 2: finalize to the real threshold; a recent reference block now works.
         freshRegistry.updateStakeThreshold(THRESHOLD_WEIGHT);
-        vm.roll(block.number + 1);
-        uint32 afterFinalize = uint32(block.number - 1);
+        vm.roll(vm.getBlockNumber() + 1);
+        uint32 afterFinalize = uint32(vm.getBlockNumber() - 1);
         windowTarget.verifyAndUpdate(
-            digest, afterFinalize, updates, 0, ArraySummation.sum.selector, signers, sigs
+            digest, afterFinalize, updates, 0, ANCHOR_HASH, CALLER, contractCalldata, signers, sigs
         );
         require(windowTarget.currentSum() == 7, "post-finalize submission should succeed");
     }
@@ -494,9 +517,12 @@ contract GasKillerSDKTest {
 
     function test_getMessageHash_parity() public view {
         bytes memory updates = storeUpdate(bytes32(uint256(0)), bytes32(uint256(99)));
-        bytes32 expected = sha256(abi.encode(uint256(0), address(target), ArraySummation.sum.selector, updates));
+        bytes memory contractCalldata = sumCalldata();
+        bytes32 expected = sha256(
+            abi.encode(uint256(0), address(target), ANCHOR_HASH, CALLER, contractCalldata, updates)
+        );
         require(
-            target.getMessageHash(0, ArraySummation.sum.selector, updates) == expected,
+            target.getMessageHash(0, ANCHOR_HASH, CALLER, contractCalldata, updates) == expected,
             "getMessageHash parity broken"
         );
     }

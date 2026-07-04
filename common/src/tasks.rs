@@ -131,7 +131,7 @@ pub fn skip_digest(height: u64) -> Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, U256};
+    use alloy_primitives::{Address, B256, U256};
     use commonware_codec::{DecodeExt, Encode};
 
     fn sample_task() -> GasKillerTaskData {
@@ -143,6 +143,7 @@ mod tests {
             from_address: Address::from([2u8; 20]),
             value: U256::from(42u64),
             block_height: 123_456,
+            anchor_hash: B256::from([9u8; 32]),
             chain_id: 31337,
         }
     }

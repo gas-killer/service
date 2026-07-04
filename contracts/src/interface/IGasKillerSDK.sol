@@ -40,7 +40,9 @@ interface IGasKillerSDK is IERC165 {
     ///        stake weights are evaluated by the stake registry
     /// @param storageUpdates The storage updates to verify and apply
     /// @param transitionIndex The transition index
-    /// @param targetFunction The target function selector
+    /// @param anchorHash The hash of the block the off-chain execution was anchored to
+    /// @param callerAddress The msg.sender of the original call
+    /// @param contractCalldata The full calldata of the original call
     /// @param operators Operator addresses that signed, in strictly ascending order
     /// @param signatures 65-byte `r || s || v` ECDSA signatures over `msgHash`,
     ///        index-aligned with `operators`
@@ -49,7 +51,9 @@ interface IGasKillerSDK is IERC165 {
         uint32 referenceBlockNumber,
         bytes calldata storageUpdates,
         uint256 transitionIndex,
-        bytes4 targetFunction,
+        bytes32 anchorHash,
+        address callerAddress,
+        bytes calldata contractCalldata,
         address[] calldata operators,
         bytes[] calldata signatures
     ) external;

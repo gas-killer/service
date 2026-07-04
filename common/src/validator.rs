@@ -10,7 +10,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
@@ -87,6 +87,12 @@ pub struct AnalysisResult {
     pub gas_estimate: u64,
     /// The block height at which the analysis was performed
     pub block_height: u64,
+    /// The hash of the anchor block (`block_height`) the execution ran against.
+    ///
+    /// Read from the same EVMSketch executor that produced `storage_updates`, so it is
+    /// guaranteed to be the hash of the block the updates were computed at. Bound into the
+    /// signed message to anchor slashing challenges.
+    pub anchor_hash: B256,
 }
 
 /// Extra executor-cache slots per chain beyond the staleness window.
@@ -304,7 +310,8 @@ impl GasKillerValidator {
     /// Computes storage updates for a transaction using gas-analyzer.
     ///
     /// Automatically detects which chain the contract is on, then computes storage updates.
-    /// Returns the storage updates, block height, and the actual EVM chain ID (u64).
+    /// Returns the storage updates, block height, the anchor block hash, and the actual EVM
+    /// chain ID (u64).
     pub async fn compute_storage_updates_for_tx(
         &self,
         contract_address: alloy::primitives::Address,
@@ -312,7 +319,7 @@ impl GasKillerValidator {
         from_address: Option<alloy::primitives::Address>,
         value: Option<alloy::primitives::U256>,
         block_height: u64,
-    ) -> Result<(Vec<u8>, u64, u64)> {
+    ) -> Result<(Vec<u8>, u64, B256, u64)> {
         let chain_role = self.detect_chain_for_address(contract_address).await?;
 
         debug!(
@@ -341,6 +348,7 @@ impl GasKillerValidator {
         Ok((
             result.storage_updates,
             result.block_height,
+            result.anchor_hash,
             numeric_chain_id,
         ))
     }
@@ -409,17 +417,31 @@ impl GasKillerValidator {
             .await
             .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
 
+        // Read the anchor block hash from the same executor that produced the storage
+        // updates. `call_to_encoded_state_updates_with_evmsketch` just populated the cache
+        // for (rpc_url, block_height), so this is a cache hit (no extra RPC). Deriving the
+        // hash here — rather than trusting a task field — guarantees it is the hash of the
+        // exact block the updates were computed against, which slashing challenges anchor to.
+        let anchor_hash = self
+            .executor_cache
+            .get_or_build(rpc_url, block_height)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to resolve anchor block hash: {}", e))?
+            .anchor_block_hash();
+
         debug!(
-            "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
+            "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}, anchor_hash={}",
             storage_updates.len(),
             gas_estimate,
-            block_height
+            block_height,
+            anchor_hash
         );
 
         Ok(AnalysisResult {
             storage_updates: storage_updates.to_vec(),
             gas_estimate,
             block_height,
+            anchor_hash,
         })
     }
 
@@ -506,7 +528,12 @@ impl GasKillerValidator {
     /// Computes storage updates by running local analysis.
     /// Automatically detects which chain the target address is on.
     /// Uses the block_height from task_data to ensure deterministic results matching the router.
-    async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
+    /// Recompute the storage updates and anchor block hash for a task via EVMSketch.
+    ///
+    /// Returns `(storage_updates, anchor_hash)` where `anchor_hash` is derived from the same
+    /// execution — never trusted from the task — so it is the hash of the block the updates
+    /// were computed against.
+    async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<(Vec<u8>, B256)> {
         if task_data.block_height == 0 {
             return Err(anyhow::anyhow!("block_height is required for validation"));
         }
@@ -542,7 +569,7 @@ impl GasKillerValidator {
             m.evmsketch_duration_seconds
                 .observe(evmsketch_start.elapsed().as_secs_f64());
         }
-        Ok(result.storage_updates)
+        Ok((result.storage_updates, result.anchor_hash))
     }
 
     /// Validates a task and returns the digest a correct node is expected to sign for it.
@@ -577,7 +604,20 @@ impl GasKillerValidator {
         }
 
         // Not cached — compute storage updates (the expensive EVMSketch path)
-        let storage_updates = self.compute_storage_updates(task_data).await?;
+        let (storage_updates, anchor_hash) = self.compute_storage_updates(task_data).await?;
+
+        // Soundness guard: the anchor hash the task claims must be the hash of the block the
+        // updates were actually computed against. If a task creator announces a mismatched
+        // anchor, honest validators would sign a commitment a challenger could not reproduce
+        // (and could be slashed for). Reject such a task so it never reaches quorum.
+        if task_data.anchor_hash != anchor_hash {
+            return Err(anyhow::anyhow!(
+                "anchor hash mismatch for block {}: task claims {}, derived {}",
+                task_data.block_height,
+                task_data.anchor_hash,
+                anchor_hash
+            ));
+        }
 
         // Build expected payload hash using computed storage updates
         let payload_hash = task_data.build_payload_hash(&storage_updates);
@@ -607,6 +647,7 @@ mod tests {
             from_address: Address::from([2u8; 20]),
             value: U256::from(1000),
             block_height: 12345,
+            anchor_hash: B256::from([4u8; 32]),
             chain_id: 1u64,
         }
     }
