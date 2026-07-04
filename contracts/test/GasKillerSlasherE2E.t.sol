@@ -140,7 +140,11 @@ contract GasKillerSlasherE2ETest is Test {
         bytes proof;
     }
 
-    string internal constant FIXTURE_PATH = "test/fixtures/gas-killer-fixture.json";
+    /// @dev Path to the proof fixture; overridden by subclasses to run the same end-to-end
+    ///      slashing flow against a different challenger proof (e.g. the ArraySummation demo).
+    function _fixturePath() internal pure virtual returns (string memory) {
+        return "test/fixtures/gas-killer-fixture.json";
+    }
 
     uint256 internal constant OPERATOR_SHARES = 100 ether;
     /// @dev 2-of-3 equal-weight quorum threshold
@@ -165,7 +169,7 @@ contract GasKillerSlasherE2ETest is Test {
 
     function setUp() public {
         string memory json;
-        try vm.readFile(FIXTURE_PATH) returns (string memory contents) {
+        try vm.readFile(_fixturePath()) returns (string memory contents) {
             json = contents;
         } catch {
             vm.skip(true, "missing test/fixtures/gas-killer-fixture.json (or fs_permissions denies it)");
@@ -383,5 +387,17 @@ contract GasKillerSlasherE2ETest is Test {
             salt: bytes32(0),
             expiry: block.timestamp + 1 days
         });
+    }
+}
+
+/// @title GasKillerSlasherArraySummationE2ETest
+/// @notice Runs the exact same end-to-end slashing flow, but against a REAL SP1 proof of the
+///         actual `ArraySummation` demo contract's `sum([])` execution — deployed on a local
+///         anvil chain and proved with the challenger host's `--dev-genesis` mode. This is the
+///         Gas Killer demo app end-to-end: a fraudulent `sum` state transition, a real proof of
+///         the correct one, and the signing operators slashed.
+contract GasKillerSlasherArraySummationE2ETest is GasKillerSlasherE2ETest {
+    function _fixturePath() internal pure override returns (string memory) {
+        return "test/fixtures/arraysummation-fixture.json";
     }
 }
