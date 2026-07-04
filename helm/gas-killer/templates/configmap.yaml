@@ -35,10 +35,7 @@ data:
   # Omitted when secretManager is enabled — nodes fetch the router public key from GCP instead.
   public_orchestrator.json: |
     {
-      "g2_x1": {{ .Values.orchestrator.publicConfig.g2_x1 | quote }},
-      "g2_x2": {{ .Values.orchestrator.publicConfig.g2_x2 | quote }},
-      "g2_y1": {{ .Values.orchestrator.publicConfig.g2_y1 | quote }},
-      "g2_y2": {{ .Values.orchestrator.publicConfig.g2_y2 | quote }},
+      "publicKey": {{ .Values.orchestrator.publicConfig.publicKey | quote }},
       "port": {{ .Values.orchestrator.publicConfig.port | quote }},
       "address": {{ include "gas-killer.router.fullname" . | quote }}
     }
