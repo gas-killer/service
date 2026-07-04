@@ -14,8 +14,11 @@ struct AvsDeploymentJson {
 
 #[derive(Debug, Deserialize)]
 struct AvsAddresses {
+    /// Legacy BLS-middleware service-manager wrapper; retained as a fallback AVS
+    /// reference. Optional so an ECDSA-only deployment JSON (only
+    /// `gasKillerServiceManager`) still parses.
     #[serde(rename = "avsServiceManagerWrapper")]
-    avs_service_manager_wrapper: String,
+    avs_service_manager_wrapper: Option<String>,
     /// The Gas Killer ECDSA service manager (the AVS operators registered to via
     /// the AVSDirectory), deployed by the eigenlayer setup container.
     #[serde(rename = "gasKillerServiceManager")]
@@ -77,15 +80,23 @@ async fn main() -> Result<(), DynError> {
     // The target contract's AVS reference: prefer the Gas Killer ECDSA service
     // manager (the AVS the operators actually registered to), fall back to the
     // legacy wrapper.
-    let avs_address: Address = match &avs_deployment.addresses.gas_killer_service_manager {
-        Some(addr) => addr
+    let avs_address: Address = match (
+        &avs_deployment.addresses.gas_killer_service_manager,
+        &avs_deployment.addresses.avs_service_manager_wrapper,
+    ) {
+        (Some(addr), _) => addr
             .parse()
             .map_err(|_| "Invalid gasKillerServiceManager address in deployment JSON")?,
-        None => avs_deployment
-            .addresses
-            .avs_service_manager_wrapper
+        (None, Some(addr)) => addr
             .parse()
             .map_err(|_| "Invalid avsServiceManagerWrapper address format in deployment JSON")?,
+        (None, None) => {
+            return Err(
+                "neither gasKillerServiceManager nor avsServiceManagerWrapper found in \
+                 the deployment JSON — the eigenlayer setup container must deploy the ECDSA stack"
+                    .into(),
+            );
+        }
     };
 
     // The ECDSA stake registry verifying operator quorums: env override first,

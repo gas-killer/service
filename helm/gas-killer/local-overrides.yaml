@@ -9,9 +9,16 @@
 #     ...
 
 eigenlayer:
+  # TODO(BreadchainCoop/eigenlayer-bls-local#38): use the ECDSA-stack build until #38
+  # merges the stack into `:latest`, then drop this image block.
+  image:
+    tag: pr-ron-gas-killer-ecdsa-stack
   contracts:
     delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
     strategyManager: "0x2E3D6c0744b10eb0A4e6F679F71554a39Ec47a5D"
     lstContract: "0x00c71b0fcadE911B2feeE9912De4Fe19eB04ca56"
     lstStrategy: "0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574"
     allocationManager: "0x42583067658071247ec8CE0A516A58f682002d07"
+    # AVSDirectory (Sepolia) — the setup job registers operators with the
+    # ECDSAStakeRegistry through it.
+    avsDirectory: "0xa789c91ECDdae96865913130B786140Ee17aF545"

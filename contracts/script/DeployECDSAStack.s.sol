@@ -18,8 +18,9 @@ import {GasKillerServiceManager} from "../src/GasKillerServiceManager.sol";
 ///         strategy the operators deposited into).
 /// @dev Run by the eigenlayer setup container (BreadchainCoop/eigenlayer-bls-local
 ///      `main.sh`) after the middleware deployment. The stake threshold is
-///      initialised to 0 and raised by `FinalizeECDSAStack` once all operators
-///      are registered and the total weight is known.
+///      initialised fail-closed (`type(uint224).max`) and lowered by
+///      `FinalizeECDSAStack` once all operators are registered and the total
+///      weight is known.
 ///
 ///      Required env: PRIVATE_KEY, DELEGATION_MANAGER_ADDRESS,
 ///      AVS_DIRECTORY_ADDRESS, LST_STRATEGY_ADDRESS.
@@ -56,9 +57,17 @@ contract DeployECDSAStack is Script {
             strategy: IStrategy(strategy),
             multiplier: 10_000
         });
-        // Threshold starts at 0; FinalizeECDSAStack raises it to the configured
-        // fraction of total weight after operator registration.
-        registry.initialize(address(serviceManager), 0, quorum);
+        // Initialize FAIL-CLOSED: the threshold is checkpointed per block and the
+        // real value cannot be computed until operators register (total weight is
+        // 0 here), so `FinalizeECDSAStack` sets it afterward. Starting at 0 would
+        // instead be fail-OPEN — `ECDSAStakeRegistry` reads the threshold at the
+        // caller-chosen reference block, and `GasKillerSDK.verifyAndUpdate` accepts
+        // reference blocks up to `blockStaleMeasure` (~300) old, so a reference
+        // block in the [firstRegistration, finalize) window would let a single
+        // operator satisfy the quorum. `type(uint224).max` (the registry checkpoints weights as uint224) makes every such block
+        // reject (InsufficientSignedStake) until finalize installs the real
+        // threshold; legitimate submissions always reference a recent block.
+        registry.initialize(address(serviceManager), type(uint224).max, quorum);
 
         vm.stopBroadcast();
 

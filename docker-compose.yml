@@ -17,9 +17,11 @@ services:
   eigenlayer:
     platform: linux/amd64
     # The setup image also deploys the Gas Killer ECDSA stack (ECDSAStakeRegistry +
-    # GasKillerServiceManager) and registers the operators with it. Override to pin
-    # a specific build (e.g. a pr- tag) or a locally built image.
-    image: ${EIGENLAYER_IMAGE:-ghcr.io/breadchaincoop/eigenlayer:latest}
+    # GasKillerServiceManager) and registers the operators with it.
+    # TODO(BreadchainCoop/eigenlayer-bls-local#38): the ECDSA stack lives only in the
+    # companion PR build until #38 merges into `:latest`; default to that build so
+    # local runs don't pull the BLS-era `:latest`. Revert to `:latest` after #38 merges.
+    image: ${EIGENLAYER_IMAGE:-ghcr.io/breadchaincoop/eigenlayer:pr-ron-gas-killer-ecdsa-stack}
     depends_on:
       ethereum:
         condition: service_started

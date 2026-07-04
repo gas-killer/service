@@ -143,10 +143,21 @@ their compiled artifacts feed the alloy bindings in `common/src/bindings/` and
   order), pins a reference block (one L1 `eth_blockNumber`), and calls
   `GasKillerSDK.verifyAndUpdate`, which forwards to
   `ECDSAStakeRegistry.isValidSignature`.
-- **Operator registration** (deploy-time): `scripts/deploy_array_summation.rs`
-  deploys the `ECDSAStakeRegistry` + `GasKillerServiceManager` pair, registers each
-  operator with an AVSDirectory registration signature (signing key = operator
-  address), and sets the stake threshold to 66% of total registered weight.
+- **AVS bootstrap** (deploy-time): the EigenLayer setup image
+  (`BreadchainCoop/eigenlayer-bls-local`, `main.sh`) runs the forge scripts in
+  `contracts/script/` — `DeployECDSAStack` (registry + `GasKillerServiceManager`,
+  quorum init fail-closed), `RegisterOperatorECDSA` per operator (AVSDirectory
+  registration signature, signing key = operator address), and `FinalizeECDSAStack`
+  (stake threshold = 66% of total registered weight). The addresses land in
+  `avs_deploy.json`; `scripts/deploy_array_summation.rs` then only reads
+  `ecdsaStakeRegistry` from it and deploys the example target.
+- **Quorum vs stake** (operational note): the aggregation engine forms a
+  certificate at `n − ⌊(n−1)/3⌋` *signers* (a count), while `ECDSAStakeRegistry`
+  enforces a *stake-weight* threshold on-chain. These agree when operator stake is
+  roughly even (the assumption the local/testnet deployments run under); with
+  highly uneven stake a count-quorum certificate can fall below the weight
+  threshold and be rejected on-chain (the height is released as a failed
+  execution, not silently lost). Stake-aware quorum formation is a follow-up.
 - **Validator** (`common/`): EVM gas analysis (EVMSketch) computing the storage
   updates and the expected task digest on both router and nodes.
 

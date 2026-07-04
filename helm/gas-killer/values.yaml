@@ -144,6 +144,9 @@ l1:
 eigenlayer:
   image:
     repository: ghcr.io/breadchaincoop/eigenlayer
+    # Until BreadchainCoop/eigenlayer-bls-local#38 merges the ECDSA stack into
+    # `:latest`, pin the tag per environment (CI and local-overrides.yaml use the
+    # `pr-ron-gas-killer-ecdsa-stack` build; testnet/mainnet must override explicitly).
     tag: latest
     pullPolicy: IfNotPresent
   # L1 contract addresses — required in all modes. In LOCAL mode these must match the

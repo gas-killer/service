@@ -431,6 +431,61 @@ contract GasKillerSDKTest {
         require(magic == bytes4(0x1626ba7e), "Rust signature must verify via ECDSAStakeRegistry");
     }
 
+    /// @dev FAIL-CLOSED BOOTSTRAP. Mirrors the deploy-script sequence
+    ///      (DeployECDSAStack initializes the registry with type(uint224).max,
+    ///      operators register, FinalizeECDSAStack lowers the threshold). A
+    ///      reference block in the [firstRegistration, finalize) window must
+    ///      reject even a full-quorum submission (threshold still max), proving an
+    ///      attacker cannot exploit a threshold-0 window right after bootstrap.
+    function test_bootstrapThresholdWindowIsFailClosed() public {
+        ECDSAStakeRegistry freshRegistry =
+            new ECDSAStakeRegistry(IDelegationManager(address(delegation)));
+        GasKillerServiceManager freshSm = new GasKillerServiceManager(
+            address(avsDirectory),
+            address(freshRegistry),
+            address(0),
+            address(delegation),
+            address(0),
+            address(this)
+        );
+        // Phase 1: initialize fail-closed (threshold = max), as DeployECDSAStack does.
+        freshRegistry.initialize(address(freshSm), type(uint224).max, singleStrategyQuorum());
+
+        // Operators register.
+        for (uint256 i = 0; i < operators.length; i++) {
+            delegation.setShares(operators[i], OPERATOR_SHARES);
+            vm.prank(operators[i]);
+            freshRegistry.registerOperatorWithSignature(emptyOperatorSignature(), operators[i]);
+        }
+        vm.roll(block.number + 1);
+        uint32 windowBlock = uint32(block.number - 1); // threshold still max here
+
+        ArraySummation windowTarget =
+            new ArraySummation(address(freshSm), address(freshRegistry), 10, 1000, 42);
+        vm.roll(block.number + 1);
+
+        bytes memory updates = storeUpdate(bytes32(uint256(0)), bytes32(uint256(7)));
+        bytes32 digest =
+            sha256(abi.encode(uint256(0), address(windowTarget), ArraySummation.sum.selector, updates));
+        (address[] memory signers, bytes[] memory sigs) = signQuorum(digest, 3);
+
+        // A full 3-of-3 quorum at the pre-finalize reference block is rejected: the
+        // threshold checkpoint there is type(uint224).max.
+        vm.expectRevert(IECDSAStakeRegistryErrors.InsufficientSignedStake.selector);
+        windowTarget.verifyAndUpdate(
+            digest, windowBlock, updates, 0, ArraySummation.sum.selector, signers, sigs
+        );
+
+        // Phase 2: finalize to the real threshold; a recent reference block now works.
+        freshRegistry.updateStakeThreshold(THRESHOLD_WEIGHT);
+        vm.roll(block.number + 1);
+        uint32 afterFinalize = uint32(block.number - 1);
+        windowTarget.verifyAndUpdate(
+            digest, afterFinalize, updates, 0, ArraySummation.sum.selector, signers, sigs
+        );
+        require(windowTarget.currentSum() == 7, "post-finalize submission should succeed");
+    }
+
     function test_supportsInterface() public view {
         require(target.supportsInterface(type(IERC165).interfaceId), "IERC165 not supported");
         require(target.supportsInterface(type(IGasKillerSDK).interfaceId), "IGasKillerSDK not supported");
