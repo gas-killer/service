@@ -6,11 +6,13 @@ on:
       - main
       - dev
       - staging
+      - RonTuretzky/pr299-ecdsa-signatures
   pull_request:
     branches:
       - main
       - dev
       - staging
+      - RonTuretzky/pr299-ecdsa-signatures
   workflow_dispatch:
 
 jobs:

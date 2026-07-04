@@ -46,6 +46,10 @@ contract DeployGasKillerSlasher is Script {
         address sp1Verifier = vm.envOr("SP1_VERIFIER_ADDRESS", address(0));
         uint32 operatorSetId = uint32(vm.envOr("OPERATOR_SET_ID", uint256(0)));
         address slasherOwner = vm.envOr("SLASHER_OWNER", deployer);
+        // Oldest accepted reference block, in blocks. Default ~30 days at 12s/block; keep it
+        // >= the AllocationManager's DEALLOCATION_DELAY so a deregistering fraudster stays
+        // challengeable for as long as its stake remains burnable.
+        uint32 maxReferenceBlockAge = uint32(vm.envOr("MAX_REFERENCE_BLOCK_AGE", uint256(216_000)));
 
         vm.startBroadcast(deployerKey);
 
@@ -62,7 +66,8 @@ contract DeployGasKillerSlasher is Script {
             operatorSetId,
             programVKey,
             chainConfigHash,
-            slasherOwner
+            slasherOwner,
+            maxReferenceBlockAge
         );
 
         // Grant the slasher `AllocationManager.slashOperator` on the AVS's

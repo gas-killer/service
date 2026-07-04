@@ -59,7 +59,8 @@ interface IGasKillerSlasher {
     /// @notice Emitted when slashing is executed
     /// @param commitmentHash Hash of the slashed commitment
     /// @param challenger Address of the challenger who submitted the proof
-    /// @param slashedOperators Operators who were slashed
+    /// @param slashedOperators Operators newly slashed by this call (already-slashed signers of
+    ///        the same commitment are skipped, not re-emitted)
     /// @param slashWad Slash proportion per strategy, in WAD (1e18 = 100%)
     event SlashingExecuted(
         bytes32 indexed commitmentHash, address indexed challenger, address[] slashedOperators, uint256 slashWad
@@ -78,6 +79,7 @@ interface IGasKillerSlasher {
     error AlreadySlashed();
     error InvalidQuorumSignature();
     error NoOperators();
+    error StaleReferenceBlock();
 
     // ============ External Functions ============
 
@@ -86,7 +88,11 @@ interface IGasKillerSlasher {
     ///      (via the AVS's `ECDSAStakeRegistry.isValidSignature`), (2) the SP1 proof of the correct
     ///      execution, (3) the anchor block hash, and (4) that the proven storage updates differ
     ///      from the signed ones. On success, each signing operator is slashed through EigenLayer's
-    ///      `AllocationManager`.
+    ///      `AllocationManager`. Slashing is tracked per (commitment, operator): a challenge
+    ///      attributing a quorum subset does not immunize the remaining signers — they can be
+    ///      slashed by a later call with their signatures. `referenceBlockNumber` must be no older
+    ///      than `MAX_REFERENCE_BLOCK_AGE` blocks, bounding both the challenge window and the
+    ///      exposure of rotated-away signing keys.
     /// @param commitment The signed commitment being challenged
     /// @param referenceBlockNumber The reference block the quorum signature was produced against
     /// @param operators The operators that signed, in strictly ascending address order
@@ -108,8 +114,14 @@ interface IGasKillerSlasher {
     /// @notice Whether proofs carrying `chainConfigHash` are accepted
     function acceptedChainConfigHash(bytes32 chainConfigHash) external view returns (bool);
 
-    /// @notice Check if a commitment has been slashed
+    /// @notice Check if a commitment has been slashed (at least one signer burned)
     function isSlashed(bytes32 commitmentHash) external view returns (bool);
+
+    /// @notice Check if a specific operator has been slashed for a commitment
+    function isOperatorSlashed(bytes32 commitmentHash, address operator) external view returns (bool);
+
+    /// @notice Oldest accepted `referenceBlockNumber` age, in blocks
+    function MAX_REFERENCE_BLOCK_AGE() external view returns (uint32);
 
     /// @notice Get the SP1 program verification key of the challenger program
     function programVKey() external view returns (bytes32);

@@ -97,6 +97,9 @@ contract GasKillerSlasherE2ETest is Test {
     /// @dev Small delays so the test doesn't roll through mainnet-scale block ranges
     uint32 internal constant ALLOCATION_CONFIGURATION_DELAY = 25;
     uint32 internal constant DEALLOCATION_DELAY = 50;
+    /// @dev Max reference-block age accepted by the slasher; generous here since the tests always
+    ///      challenge with a reference block one behind head (>= DEALLOCATION_DELAY in production).
+    uint32 internal constant MAX_REFERENCE_BLOCK_AGE = 100_000;
     /// @dev Where the AllocationManager sends slashed stake of non-redistributing operator sets
     address internal constant EIGENLAYER_BURN_ADDRESS = 0x00000000000000000000000000000000000E16E4;
 
@@ -291,7 +294,8 @@ contract GasKillerSlasherE2ETest is Test {
             OPERATOR_SET_ID,
             fixture.vkey,
             fixture.chainConfigHash,
-            address(this)
+            address(this),
+            MAX_REFERENCE_BLOCK_AGE
         );
 
         serviceManager.setAppointee(

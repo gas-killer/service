@@ -265,8 +265,9 @@ to `GasKillerSlasher.slash`.
   4. `EnrollOperatorSlashing` per operator — allocates magnitude to the operator set
      and registers for it. Must run after the operator's allocation delay is
      effective: the AllocationManager activates it `ALLOCATION_CONFIGURATION_DELAY + 1`
-     blocks after `DelegationManager.registerAsOperator` (local devnet:
-     `cast rpc anvil_mine <n>`; Sepolia: ~75 blocks).
+     blocks after `DelegationManager.registerAsOperator` (read the delay with
+     `cast call $ALLOCATION_MANAGER_ADDRESS "ALLOCATION_CONFIGURATION_DELAY()(uint32)"`;
+     on a local anvil devnet mine past it with `cast rpc anvil_mine <n>`).
   5. `FinalizeECDSAStack` — unchanged.
 - **End-to-end validation**: `contracts/test/GasKillerSlasherE2E.t.sol` runs the
   whole path with real crypto against a real EigenLayer deployment — a real
