@@ -225,6 +225,59 @@ while this one has none) — never on a bare timer.
   processes with different participant sets reject (and eventually disconnect) each
   other's acks.
 
+### Slashing
+
+A Gas Killer commitment is fraudulent when the quorum signed storage updates that
+differ from the ones produced by actually executing the committed call. Slashing is a
+fraud proof: anyone can re-execute the call inside the Gas Killer challenger SP1
+program (`BreadchainCoop/sp1-contract-call`, `examples/gas-killer` — the same
+`gas-analyzer-core` pipeline the operators run) and submit the resulting Groth16 proof
+to `GasKillerSlasher.slash`.
+
+- **Signed message**: operators sign `sha256(abi.encode(transitionIndex, target,
+  anchorHash, caller, contractCalldata, storageUpdates))` — enough context to
+  re-execute the exact call. `anchorHash` is the hash of the block the updates were
+  computed at; nodes derive it themselves and refuse to sign a task whose claimed
+  anchor differs (`common/src/validator.rs`), so honest operators can't be tricked
+  into a slashable signature.
+- **`GasKillerSlasher.slash`** (`contracts/src/GasKillerSlasher.sol`): verifies the
+  operators ECDSA-signed the commitment for a valid quorum via the same
+  `ECDSAStakeRegistry.isValidSignature` that `verifyAndUpdate` trusts (so the
+  attributed signer set is exactly the quorum that authorized the update), verifies
+  the SP1 proof and the anchor block hash (Helios light client), requires the proven
+  storage updates to differ from the signed ones, then slashes every signer through
+  EigenLayer's `AllocationManager.slashOperator` — burning their allocated stake.
+- **Operator-set integration**: `GasKillerServiceManager` is the AVS identity on the
+  `AllocationManager`. It creates the slashable operator set (`createOperatorSet`),
+  serves as the AVS's `IAVSRegistrar` (operators may only join the slashable set
+  after registering an ECDSA signing key with the `ECDSAStakeRegistry`), and forwards
+  its default PermissionController admin rights (`setAppointee` grants the slasher
+  `slashOperator`).
+- **Deployment order** (forge scripts in `contracts/script/`):
+  1. `DeployECDSAStack` — with `ALLOCATION_MANAGER_ADDRESS` set, also registers AVS
+     metadata with the AllocationManager and creates operator set 0 on the LST
+     strategy.
+  2. `RegisterOperatorECDSA` per operator — ECDSA signing key + AVSDirectory
+     registration (unchanged).
+  3. `DeployGasKillerSlasher` — deploys the slasher (+ vendored SP1 verifier if
+     needed) and appoints it for `AllocationManager.slashOperator`. Needs
+     `HELIOS_ADDRESS`, `PROGRAM_VKEY`, `CHAIN_CONFIG_HASH` (see `example.env`).
+  4. `EnrollOperatorSlashing` per operator — allocates magnitude to the operator set
+     and registers for it. Must run after the operator's allocation delay is
+     effective: the AllocationManager activates it `ALLOCATION_CONFIGURATION_DELAY + 1`
+     blocks after `DelegationManager.registerAsOperator` (local devnet:
+     `cast rpc anvil_mine <n>`; Sepolia: ~75 blocks).
+  5. `FinalizeECDSAStack` — unchanged.
+- **End-to-end validation**: `contracts/test/GasKillerSlasherE2E.t.sol` runs the
+  whole path with real crypto against a real EigenLayer deployment — a real
+  3-operator ECDSA quorum with deposited-and-allocated stake signs a fraudulent
+  commitment, a real Groth16 proof of the correct execution is verified on-chain, and
+  the test asserts every signer's magnitude, delegated shares, and quorum weight drop
+  to zero with the staked tokens transferred to EigenLayer's burn address. Only the
+  Helios light client is a test double. Hardfork governance: the accepted
+  chain-config hash is an owner-managed allowlist on the slasher
+  (`setChainConfigHashAccepted`).
+
 ## Configuration
 
 ### Environment Variables

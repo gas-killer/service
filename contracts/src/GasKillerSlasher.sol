@@ -210,10 +210,12 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
     /// @notice Slash each operator via EigenLayer's AllocationManager
     /// @dev The signer list is exactly the quorum the ECDSA registry validated, so every entry is
     ///      an operator that authorized the fraudulent commitment. `getStrategiesInOperatorSet`
-    ///      returns the strategies whose allocated magnitude backs the operator set.
+    ///      returns the strategies whose allocated magnitude backs the operator set, in insertion
+    ///      order; `slashOperator` requires them ascending, so they are sorted first.
     function _executeSlashing(address[] calldata operators, bytes32 commitmentHash) internal {
         OperatorSet memory operatorSet = OperatorSet({avs: AVS, id: OPERATOR_SET_ID});
         IStrategy[] memory strategies = ALLOCATION_MANAGER.getStrategiesInOperatorSet(operatorSet);
+        _sortAscending(strategies);
 
         uint256[] memory wadsToSlash = new uint256[](strategies.length);
         for (uint256 i = 0; i < strategies.length; i++) {
@@ -234,6 +236,19 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
                 });
                 ALLOCATION_MANAGER.slashOperator(AVS, params);
             }
+        }
+    }
+
+    /// @dev Insertion sort by strategy address; operator sets hold a handful of strategies.
+    function _sortAscending(IStrategy[] memory strategies) internal pure {
+        for (uint256 i = 1; i < strategies.length; i++) {
+            IStrategy current = strategies[i];
+            uint256 j = i;
+            while (j > 0 && address(strategies[j - 1]) > address(current)) {
+                strategies[j] = strategies[j - 1];
+                j--;
+            }
+            strategies[j] = current;
         }
     }
 
