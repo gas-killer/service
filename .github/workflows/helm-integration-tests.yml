@@ -167,10 +167,15 @@ jobs:
             --set router.image.tag=router-local \
             --set router.image.pullPolicy=Never \
             --set sharedData.storageClass="" \
-            --set l2.enabled=true \
-            --set bridge.enabled=true \
-            --set bridge.waitForBridge=true \
-            --set yieldDistribution.enabled=true
+            --set l2.enabled=false \
+            --set bridge.enabled=false \
+            --set bridge.waitForBridge=false \
+            --set yieldDistribution.enabled=false
+          # NOTE: L2 / bridge / yieldDistribution are disabled on the ECDSA branch.
+          # They exercise the BLS-era L2 mimic + YieldDistributor from the separate
+          # target-contracts repo, which this PR does not migrate (see PR #309 scope).
+          # This job validates the L1 ECDSA path: setup deploys the ECDSAStakeRegistry,
+          # the target below wires to it, and the trigger asserts on-chain execution.
 
       - name: Check deployment status
         run: |
@@ -466,7 +471,11 @@ jobs:
           export WS_RPC=ws://localhost:8545
           export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-          export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
+          # No ARRAY_SUMMATION_FACTORY_ADDRESS: the pre-migration BLS factory on the
+          # Sepolia fork shares deployArraySummation's selector but produces a BLS
+          # ArraySummation, so deploy a fresh ECDSA factory + target instead. The
+          # ecdsaStakeRegistry the target wires to comes from avs_deploy.json (written
+          # by the setup container).
           export ARRAY_SUMMATION_ARRAY_SIZE=100
           export ARRAY_SUMMATION_MAX_VALUE=1000
           export ARRAY_SUMMATION_SEED=42
@@ -551,6 +560,14 @@ jobs:
       - name: Trigger Yield Distribution via router
         run: |
           echo "=== Triggering Yield Distribution through router ==="
+
+          # Yield distribution runs on the BLS-era L2 YieldDistributor (target-contracts
+          # repo), which the ECDSA migration does not cover — skip when disabled.
+          YIELD_ENABLED=$(helm get values gas-killer --all -o json | jq -r '.yieldDistribution.enabled')
+          if [ "$YIELD_ENABLED" != "true" ]; then
+            echo "yieldDistribution disabled on this branch (out-of-scope BLS/L2 path); skipping."
+            exit 0
+          fi
 
           YIELD_DISTRIBUTOR=$(helm get values gas-killer --all -o json | jq -r '.yieldDistribution.contractAddress')
           if [ -z "$YIELD_DISTRIBUTOR" ] || [ "$YIELD_DISTRIBUTOR" = "null" ]; then
