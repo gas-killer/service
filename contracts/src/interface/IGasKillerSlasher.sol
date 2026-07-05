@@ -80,6 +80,7 @@ interface IGasKillerSlasher {
     error InvalidQuorumSignature();
     error NoOperators();
     error StaleReferenceBlock();
+    error InvalidMaxReferenceBlockAge();
 
     // ============ External Functions ============
 

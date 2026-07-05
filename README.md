@@ -255,20 +255,29 @@ to `GasKillerSlasher.slash`.
   `slashOperator`).
 - **Deployment order** (forge scripts in `contracts/script/`):
   1. `DeployECDSAStack` — with `ALLOCATION_MANAGER_ADDRESS` set, also registers AVS
-     metadata with the AllocationManager and creates operator set 0 on the LST
-     strategy.
+     metadata with the AllocationManager and creates the slashable operator set
+     (`OPERATOR_SET_ID`, default 0) on the LST strategy.
   2. `RegisterOperatorECDSA` per operator — ECDSA signing key + AVSDirectory
      registration (unchanged).
   3. `DeployGasKillerSlasher` — deploys the slasher (+ vendored SP1 verifier if
      needed) and appoints it for `AllocationManager.slashOperator`. Needs
      `HELIOS_ADDRESS`, `PROGRAM_VKEY`, `CHAIN_CONFIG_HASH` (see `example.env`).
-  4. `EnrollOperatorSlashing` per operator — allocates magnitude to the operator set
-     and registers for it. Must run after the operator's allocation delay is
+  4. `EnrollOperatorSlashing` per operator — allocates magnitude to the operator set,
+     then registers for it (the registrar hook rejects allocation-less operators, so
+     this order is mandatory). Must run after the operator's allocation delay is
      effective: the AllocationManager activates it `ALLOCATION_CONFIGURATION_DELAY + 1`
      blocks after `DelegationManager.registerAsOperator` (read the delay with
      `cast call $ALLOCATION_MANAGER_ADDRESS "ALLOCATION_CONFIGURATION_DELAY()(uint32)"`;
      on a local anvil devnet mine past it with `cast rpc anvil_mine <n>`).
   5. `FinalizeECDSAStack` — unchanged.
+
+  > **Devnet caveat**: in the docker-compose/helm flows, steps 1, 2 and 5 run inside
+  > the pinned EigenLayer setup image (`BreadchainCoop/eigenlayer-bls-local`), which
+  > bakes in the script versions it was built with. Until that image is rebuilt
+  > against this repo revision, the image's `DeployECDSAStack` will not create the
+  > operator set — run steps 1's operator-set part (or all of 3–4) manually from
+  > `contracts/` against the running devnet, and mine the allocation delay with
+  > `cast rpc anvil_mine`.
 - **End-to-end validation**: `contracts/test/GasKillerSlasherE2E.t.sol` runs the
   whole path with real crypto against a real EigenLayer deployment — a real
   3-operator ECDSA quorum with deposited-and-allocated stake signs a fraudulent

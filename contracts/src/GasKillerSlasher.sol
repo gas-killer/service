@@ -4,8 +4,7 @@ pragma solidity ^0.8.27;
 import {IGasKillerSlasher} from "./interface/IGasKillerSlasher.sol";
 import {ISP1Verifier} from "./interface/ISP1Verifier.sol";
 import {IHeliosLightClient} from "./interface/IHeliosLightClient.sol";
-import {IERC1271Upgradeable} from
-    "@openzeppelin-upgrades/contracts/interfaces/IERC1271Upgradeable.sol";
+import {IERC1271Upgradeable} from "@openzeppelin-upgrades/contracts/interfaces/IERC1271Upgradeable.sol";
 import {
     IAllocationManager,
     IAllocationManagerTypes
@@ -26,14 +25,18 @@ import {OwnableUpgradeable} from "@openzeppelin-upgrades/contracts/access/Ownabl
 ///      `slash()`:
 ///      1. checks the operators actually ECDSA-signed the commitment for a valid quorum, using the
 ///         same `ECDSAStakeRegistry.isValidSignature` the AVS's `verifyAndUpdate` trusts — so the
-///         attributed signer set is exactly the one that authorized the (fraudulent) update;
+///         attributed signer set is exactly the one that authorized the (fraudulent) update; the
+///         reference block must be within `MAX_REFERENCE_BLOCK_AGE` (the challenge window);
 ///      2. verifies the SP1 proof and the anchor block hash;
 ///      3. requires the proven storage updates to differ from the signed ones (fraud);
-///      4. slashes every signing operator through `AllocationManager.slashOperator`.
+///      4. slashes every signing operator through `AllocationManager.slashOperator`, tracked per
+///         (commitment, operator) so a partial (quorum-subset) challenge never immunizes the
+///         commitment's remaining signers.
 ///
 ///      This contract must be authorized (via the AVS's PermissionController appointee) to call
-///      `AllocationManager.slashOperator` on behalf of `AVS`, and the operators must be registered
-///      to the AVS's operator set with allocated magnitude for the slash to reduce stake.
+///      `AllocationManager.slashOperator` on behalf of `AVS`. `GasKillerServiceManager`'s
+///      registrar hook guarantees operator-set members registered with an ECDSA signing key and
+///      allocated magnitude, so an attributed signer has stake for the slash to burn.
 contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
     // ============ Constants ============
 
@@ -108,6 +111,9 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
         AVS = _avs;
         OPERATOR_SET_ID = _operatorSetId;
         PROGRAM_V_KEY = _programVKey;
+        // A zero age would reject every reference block (the registry also requires it strictly
+        // in the past), permanently bricking slash().
+        require(_maxReferenceBlockAge != 0, InvalidMaxReferenceBlockAge());
         MAX_REFERENCE_BLOCK_AGE = _maxReferenceBlockAge;
         _transferOwnership(_owner);
         acceptedChainConfigHash[_chainConfigHash] = true;
@@ -128,10 +134,7 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
         require(operators.length != 0, NoOperators());
         // Bound the lookback: an arbitrarily old reference block would let leaked, long-rotated
         // signing keys (checkpointed at that height) attribute a fresh fraudulent commitment.
-        require(
-            uint256(referenceBlockNumber) + MAX_REFERENCE_BLOCK_AGE >= block.number,
-            StaleReferenceBlock()
-        );
+        require(uint256(referenceBlockNumber) + MAX_REFERENCE_BLOCK_AGE >= block.number, StaleReferenceBlock());
 
         bytes32 commitmentHash = computeCommitmentHash(commitment);
         require(_hasFreshOperator(commitmentHash, operators), AlreadySlashed());
@@ -156,9 +159,7 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
         _verifyAnchorHash(proven.anchorHash);
 
         // 5. Fraud iff the proven storage updates differ from the signed ones.
-        require(
-            keccak256(proven.storageUpdates) != keccak256(commitment.storageUpdates), NoFraudDetected()
-        );
+        require(keccak256(proven.storageUpdates) != keccak256(commitment.storageUpdates), NoFraudDetected());
 
         // 6. Slash every not-yet-slashed operator that signed the fraudulent commitment.
         address[] memory freshOperators = _executeSlashing(operators, commitmentHash);
@@ -215,18 +216,13 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
         }
     }
 
-    function _checkInputs(SignedCommitment calldata commitment, GasKillerPublicValues memory proven)
-        internal
-        view
-    {
+    function _checkInputs(SignedCommitment calldata commitment, GasKillerPublicValues memory proven) internal view {
         require(acceptedChainConfigHash[proven.chainConfigHash], InvalidChainConfig());
         require(proven.anchorType == ANCHOR_TYPE_BLOCK_HASH, InputMismatch());
         require(proven.anchorHash == commitment.anchorHash, InputMismatch());
         require(proven.callerAddress == commitment.callerAddress, InputMismatch());
         require(proven.contractAddress == commitment.contractAddress, InputMismatch());
-        require(
-            keccak256(proven.contractCalldata) == keccak256(commitment.contractCalldata), InputMismatch()
-        );
+        require(keccak256(proven.contractCalldata) == keccak256(commitment.contractCalldata), InputMismatch());
     }
 
     function _verifyAnchorHash(bytes32 anchorHash) internal view {
@@ -241,11 +237,7 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
     /// @dev A call naming only already-slashed operators is a redundant no-op and reverts
     ///      `AlreadySlashed`; per-operator tracking lets a later challenge burn a signer a
     ///      previous quorum-subset challenge left untouched.
-    function _hasFreshOperator(bytes32 commitmentHash, address[] calldata operators)
-        internal
-        view
-        returns (bool)
-    {
+    function _hasFreshOperator(bytes32 commitmentHash, address[] calldata operators) internal view returns (bool) {
         for (uint256 i = 0; i < operators.length; i++) {
             if (!_operatorSlashed[commitmentHash][operators[i]]) {
                 return true;
@@ -260,7 +252,10 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
     ///      returns the strategies whose allocated magnitude backs the operator set, in insertion
     ///      order; `slashOperator` requires them ascending, so they are sorted first. Operators
     ///      already burned for this commitment (a prior partial challenge) are skipped; the
-    ///      per-operator flag is set before the external call (checks-effects-interactions).
+    ///      per-operator flag is set only after a burn that actually reduced stake. Setting it
+    ///      after the call is reentrancy-safe: `slashOperator` only updates burn accounting
+    ///      (`increaseBurnOrRedistributableShares`) — no token transfer or strategy callout
+    ///      happens until the separate permissionless `clearBurnOrRedistributableShares`.
     /// @return freshOperators The operators newly slashed by this call.
     function _executeSlashing(address[] calldata operators, bytes32 commitmentHash)
         internal
@@ -275,8 +270,7 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
             wadsToSlash[i] = FULL_SLASH_WAD;
         }
 
-        string memory description =
-            string(abi.encodePacked("Gas Killer fraud: ", _bytes32ToHexString(commitmentHash)));
+        string memory description = string(abi.encodePacked("Gas Killer fraud: ", _bytes32ToHexString(commitmentHash)));
 
         address[] memory slashedBuf = new address[](operators.length);
         uint256 count = 0;
@@ -291,9 +285,6 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
                 continue;
             }
 
-            _operatorSlashed[commitmentHash][operator] = true;
-            slashedBuf[count++] = operator;
-
             IAllocationManagerTypes.SlashingParams memory params = IAllocationManagerTypes.SlashingParams({
                 operator: operator,
                 operatorSetId: OPERATOR_SET_ID,
@@ -301,13 +292,32 @@ contract GasKillerSlasher is IGasKillerSlasher, OwnableUpgradeable {
                 wadsToSlash: wadsToSlash,
                 description: description
             });
-            ALLOCATION_MANAGER.slashOperator(AVS, params);
+            (, uint256[] memory shares) = ALLOCATION_MANAGER.slashOperator(AVS, params);
+
+            // Only record the operator as slashed if stake was actually burned. An operator
+            // registered but with zero current magnitude (a pending/deallocated allocation)
+            // is `isOperatorSlashable` yet burns nothing — marking it here would immunize it
+            // against a later challenge once its magnitude becomes effective.
+            if (_anyNonzero(shares)) {
+                _operatorSlashed[commitmentHash][operator] = true;
+                slashedBuf[count++] = operator;
+            }
         }
 
         freshOperators = new address[](count);
         for (uint256 i = 0; i < count; i++) {
             freshOperators[i] = slashedBuf[i];
         }
+    }
+
+    /// @dev True iff any element is nonzero.
+    function _anyNonzero(uint256[] memory values) internal pure returns (bool) {
+        for (uint256 i = 0; i < values.length; i++) {
+            if (values[i] != 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// @dev Insertion sort by strategy address; operator sets hold a handful of strategies.

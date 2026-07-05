@@ -11,21 +11,22 @@ import {GasKillerServiceManager} from "../src/GasKillerServiceManager.sol";
 import {SP1Verifier} from "../src/vendor/sp1/SP1VerifierGroth16.sol";
 
 import {ECDSAStakeRegistry} from "@eigenlayer-middleware/unaudited/ECDSAStakeRegistry.sol";
-import {IECDSAStakeRegistryTypes} from "@eigenlayer-middleware/interfaces/IECDSAStakeRegistry.sol";
+import {
+    IECDSAStakeRegistryErrors,
+    IECDSAStakeRegistryTypes
+} from "@eigenlayer-middleware/interfaces/IECDSAStakeRegistry.sol";
 import {CoreDeployLib} from "@eigenlayer-middleware-test/utils/CoreDeployLib.sol";
 
 import {IStrategy} from "eigenlayer-contracts/src/contracts/interfaces/IStrategy.sol";
 import {IStrategyManager} from "eigenlayer-contracts/src/contracts/interfaces/IStrategyManager.sol";
-import {IDelegationManager} from
-    "eigenlayer-contracts/src/contracts/interfaces/IDelegationManager.sol";
+import {IDelegationManager} from "eigenlayer-contracts/src/contracts/interfaces/IDelegationManager.sol";
 import {
     IAllocationManager,
     IAllocationManagerTypes
 } from "eigenlayer-contracts/src/contracts/interfaces/IAllocationManager.sol";
 import {IAVSDirectory} from "eigenlayer-contracts/src/contracts/interfaces/IAVSDirectory.sol";
 import {OperatorSet} from "eigenlayer-contracts/src/contracts/libraries/OperatorSetLib.sol";
-import {ISignatureUtilsMixinTypes} from
-    "eigenlayer-contracts/src/contracts/interfaces/ISignatureUtilsMixin.sol";
+import {ISignatureUtilsMixinTypes} from "eigenlayer-contracts/src/contracts/interfaces/ISignatureUtilsMixin.sol";
 import {StrategyFactory} from "eigenlayer-contracts/src/contracts/strategies/StrategyFactory.sol";
 
 import {ProxyAdmin} from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
@@ -54,6 +55,21 @@ contract MockHeliosLightClient is IHeliosLightClient {
 
     function getBlockHash(uint256) external pure returns (bytes32) {
         return bytes32(0);
+    }
+}
+
+/// @notice Exposes the slasher's internal strategy sort (the `slashOperator` ascending-order
+///         requirement) for direct unit coverage; the E2E flow only exercises one strategy.
+contract SlasherSortHarness is GasKillerSlasher {
+    constructor()
+        GasKillerSlasher(
+            address(1), address(1), address(1), address(1), address(1), 0, bytes32(0), bytes32(0), address(1), 300
+        )
+    {}
+
+    function exposedSortAscending(IStrategy[] memory strategies) external pure returns (IStrategy[] memory) {
+        _sortAscending(strategies);
+        return strategies;
     }
 }
 
@@ -97,9 +113,9 @@ contract GasKillerSlasherE2ETest is Test {
     /// @dev Small delays so the test doesn't roll through mainnet-scale block ranges
     uint32 internal constant ALLOCATION_CONFIGURATION_DELAY = 25;
     uint32 internal constant DEALLOCATION_DELAY = 50;
-    /// @dev Max reference-block age accepted by the slasher; generous here since the tests always
+    /// @dev Oldest reference block the slasher accepts (the challenge window); the tests
     ///      challenge with a reference block one behind head (>= DEALLOCATION_DELAY in production).
-    uint32 internal constant MAX_REFERENCE_BLOCK_AGE = 100_000;
+    uint32 internal constant MAX_REFERENCE_BLOCK_AGE = 300;
     /// @dev Where the AllocationManager sends slashed stake of non-redistributing operator sets
     address internal constant EIGENLAYER_BURN_ADDRESS = 0x00000000000000000000000000000000000E16E4;
 
@@ -228,9 +244,7 @@ contract GasKillerSlasherE2ETest is Test {
             // delay for the operator's first delay-set has elapsed.
             IDelegationManager(core.delegationManager).registerAsOperator(address(0), 0, "");
             token.approve(core.strategyManager, OPERATOR_STAKE);
-            IStrategyManager(core.strategyManager).depositIntoStrategy(
-                strategy, IERC20(address(token)), OPERATOR_STAKE
-            );
+            IStrategyManager(core.strategyManager).depositIntoStrategy(strategy, IERC20(address(token)), OPERATOR_STAKE);
             registry.registerOperatorWithSignature(_operatorSignature(i), operator);
             vm.stopPrank();
         }
@@ -254,8 +268,7 @@ contract GasKillerSlasherE2ETest is Test {
         uint64[] memory magnitudes = new uint64[](1);
         magnitudes[0] = FULL_MAGNITUDE;
 
-        IAllocationManagerTypes.AllocateParams[] memory allocParams =
-            new IAllocationManagerTypes.AllocateParams[](1);
+        IAllocationManagerTypes.AllocateParams[] memory allocParams = new IAllocationManagerTypes.AllocateParams[](1);
         allocParams[0] = IAllocationManagerTypes.AllocateParams({
             operatorSet: OperatorSet({avs: address(serviceManager), id: OPERATOR_SET_ID}),
             strategies: strategies,
@@ -265,14 +278,13 @@ contract GasKillerSlasherE2ETest is Test {
         for (uint256 i = 0; i < operators.length; i++) {
             vm.startPrank(operators[i]);
             IAllocationManager(core.allocationManager).modifyAllocations(operators[i], allocParams);
-            IAllocationManager(core.allocationManager).registerForOperatorSets(
-                operators[i],
-                IAllocationManagerTypes.RegisterParams({
-                    avs: address(serviceManager),
-                    operatorSetIds: operatorSetIds,
-                    data: ""
+            IAllocationManager(core.allocationManager)
+                .registerForOperatorSets(
+                    operators[i],
+                    IAllocationManagerTypes.RegisterParams({
+                    avs: address(serviceManager), operatorSetIds: operatorSetIds, data: ""
                 })
-            );
+                );
             vm.stopPrank();
         }
         vm.roll(block.number + 1);
@@ -298,9 +310,7 @@ contract GasKillerSlasherE2ETest is Test {
             MAX_REFERENCE_BLOCK_AGE
         );
 
-        serviceManager.setAppointee(
-            address(slasher), core.allocationManager, IAllocationManager.slashOperator.selector
-        );
+        serviceManager.setAppointee(address(slasher), core.allocationManager, IAllocationManager.slashOperator.selector);
     }
 
     // ============ Tests ============
@@ -318,9 +328,7 @@ contract GasKillerSlasherE2ETest is Test {
                 "expected full magnitude before slash"
             );
             assertEq(
-                IDelegationManager(core.delegationManager).getOperatorShares(
-                    operators[i], strategies
-                )[0],
+                IDelegationManager(core.delegationManager).getOperatorShares(operators[i], strategies)[0],
                 OPERATOR_STAKE,
                 "expected full delegated stake before slash"
             );
@@ -347,9 +355,7 @@ contract GasKillerSlasherE2ETest is Test {
                 "operator magnitude not fully slashed"
             );
             assertEq(
-                IDelegationManager(core.delegationManager).getOperatorShares(
-                    operators[i], strategies
-                )[0],
+                IDelegationManager(core.delegationManager).getOperatorShares(operators[i], strategies)[0],
                 0,
                 "operator stake not fully slashed"
             );
@@ -359,17 +365,12 @@ contract GasKillerSlasherE2ETest is Test {
         // The slashed stake is actually burned: sweeping the per-slash accounting (slash ids are
         // sequential per operator set, one per slashed operator) sends every staked token to
         // EigenLayer's burn address.
-        OperatorSet memory operatorSet =
-            OperatorSet({avs: address(serviceManager), id: OPERATOR_SET_ID});
+        OperatorSet memory operatorSet = OperatorSet({avs: address(serviceManager), id: OPERATOR_SET_ID});
         for (uint256 slashId = 1; slashId <= operators.length; slashId++) {
-            IStrategyManager(core.strategyManager).clearBurnOrRedistributableShares(
-                operatorSet, slashId
-            );
+            IStrategyManager(core.strategyManager).clearBurnOrRedistributableShares(operatorSet, slashId);
         }
         assertEq(
-            token.balanceOf(EIGENLAYER_BURN_ADDRESS),
-            OPERATOR_STAKE * operators.length,
-            "slashed stake not burned"
+            token.balanceOf(EIGENLAYER_BURN_ADDRESS), OPERATOR_STAKE * operators.length, "slashed stake not burned"
         );
     }
 
@@ -393,7 +394,7 @@ contract GasKillerSlasherE2ETest is Test {
         (address[] memory signers, bytes[] memory sigs) = _signQuorum(commitmentHash, 1); // 100 < 200
 
         vm.prank(challenger);
-        vm.expectRevert(); // ECDSAStakeRegistry: InsufficientSignedStake
+        vm.expectRevert(IECDSAStakeRegistryErrors.InsufficientSignedStake.selector);
         slasher.slash(commitment, _referenceBlock(), signers, sigs, fixture.proof, fixture.publicValues);
     }
 
@@ -440,24 +441,202 @@ contract GasKillerSlasherE2ETest is Test {
     /// @notice Operators without an ECDSAStakeRegistry signing key are rejected from the
     ///         slashable operator set by the service manager's registrar hook.
     function test_e2e_operatorSetRequiresStakeRegistryRegistration() public {
-        (address stranger, uint256 strangerKey) = makeAddrAndKey("stranger");
-        strangerKey; // silence unused warning; the stranger never signs anything
+        (address stranger,) = makeAddrAndKey("stranger");
 
         vm.startPrank(stranger);
         IDelegationManager(core.delegationManager).registerAsOperator(address(0), 0, "");
 
         uint32[] memory operatorSetIds = new uint32[](1);
         operatorSetIds[0] = OPERATOR_SET_ID;
-        vm.expectRevert();
-        IAllocationManager(core.allocationManager).registerForOperatorSets(
-            stranger,
-            IAllocationManagerTypes.RegisterParams({
-                avs: address(serviceManager),
-                operatorSetIds: operatorSetIds,
-                data: ""
+        vm.expectRevert(GasKillerServiceManager.OperatorNotRegisteredWithStakeRegistry.selector);
+        IAllocationManager(core.allocationManager)
+            .registerForOperatorSets(
+                stranger,
+                IAllocationManagerTypes.RegisterParams({
+                avs: address(serviceManager), operatorSetIds: operatorSetIds, data: ""
             })
-        );
+            );
         vm.stopPrank();
+    }
+
+    /// @notice Operators with a signing key but no allocated magnitude are rejected from the
+    ///         slashable operator set: their quorum weight (delegated shares) would otherwise
+    ///         back fraudulent signatures with nothing at stake to burn.
+    function test_e2e_operatorSetRequiresAllocation() public {
+        (address stranger, uint256 strangerKey) = makeAddrAndKey("stranger");
+
+        vm.startPrank(stranger);
+        IDelegationManager(core.delegationManager).registerAsOperator(address(0), 0, "");
+        registry.registerOperatorWithSignature(_avsDirectorySignature(stranger, strangerKey), stranger);
+
+        // Past the allocation-configuration delay, so a real allocation WOULD be possible —
+        // the operator simply never makes one.
+        vm.roll(block.number + ALLOCATION_CONFIGURATION_DELAY + 1);
+
+        uint32[] memory operatorSetIds = new uint32[](1);
+        operatorSetIds[0] = OPERATOR_SET_ID;
+        vm.expectRevert(GasKillerServiceManager.OperatorNotAllocated.selector);
+        IAllocationManager(core.allocationManager)
+            .registerForOperatorSets(
+                stranger,
+                IAllocationManagerTypes.RegisterParams({
+                avs: address(serviceManager), operatorSetIds: operatorSetIds, data: ""
+            })
+            );
+        vm.stopPrank();
+    }
+
+    /// @notice An operator with only a PENDING (not-yet-effective) allocation is rejected from
+    ///         the operator set: a long allocation delay must not let it sign fraud with stake
+    ///         that isn't slashable yet.
+    function test_e2e_operatorSetRejectsPendingAllocation() public {
+        (address late, uint256 lateKey) = makeAddrAndKey("late-allocator");
+        // An allocation delay far larger than the slasher's challenge window.
+        uint32 longDelay = MAX_REFERENCE_BLOCK_AGE + 100;
+
+        token.mint(late, OPERATOR_STAKE);
+        vm.startPrank(late);
+        IDelegationManager(core.delegationManager).registerAsOperator(address(0), longDelay, "");
+        token.approve(core.strategyManager, OPERATOR_STAKE);
+        IStrategyManager(core.strategyManager).depositIntoStrategy(strategy, IERC20(address(token)), OPERATOR_STAKE);
+        registry.registerOperatorWithSignature(_avsDirectorySignature(late, lateKey), late);
+        vm.stopPrank();
+
+        // Wait for the allocation-delay configuration to activate, then allocate — the allocation
+        // itself is now pending for `longDelay` blocks (currentMagnitude stays 0).
+        vm.roll(block.number + ALLOCATION_CONFIGURATION_DELAY + 1);
+
+        IStrategy[] memory strategies = new IStrategy[](1);
+        strategies[0] = strategy;
+        uint64[] memory magnitudes = new uint64[](1);
+        magnitudes[0] = FULL_MAGNITUDE;
+        IAllocationManagerTypes.AllocateParams[] memory allocParams = new IAllocationManagerTypes.AllocateParams[](1);
+        allocParams[0] = IAllocationManagerTypes.AllocateParams({
+            operatorSet: OperatorSet({avs: address(serviceManager), id: OPERATOR_SET_ID}),
+            strategies: strategies,
+            newMagnitudes: magnitudes
+        });
+
+        uint32[] memory operatorSetIds = new uint32[](1);
+        operatorSetIds[0] = OPERATOR_SET_ID;
+
+        vm.startPrank(late);
+        IAllocationManager(core.allocationManager).modifyAllocations(late, allocParams);
+        // Magnitude is pending, not effective → the registrar hook rejects the operator.
+        assertEq(IAllocationManager(core.allocationManager).getMaxMagnitude(late, strategy), FULL_MAGNITUDE);
+        assertEq(
+            IAllocationManager(core.allocationManager)
+            .getAllocation(late, OperatorSet({avs: address(serviceManager), id: OPERATOR_SET_ID}), strategy)
+            .currentMagnitude,
+            0,
+            "allocation should still be pending"
+        );
+        vm.expectRevert(GasKillerServiceManager.OperatorNotAllocated.selector);
+        IAllocationManager(core.allocationManager)
+            .registerForOperatorSets(
+                late,
+                IAllocationManagerTypes.RegisterParams({
+                avs: address(serviceManager), operatorSetIds: operatorSetIds, data: ""
+            })
+            );
+        vm.stopPrank();
+    }
+
+    /// @notice A challenge that attributes only a quorum subset slashes exactly those signers —
+    ///         and does NOT immunize the remaining signer: a later challenge with its signature
+    ///         still burns it.
+    function test_e2e_partialSignerSlashLeavesCoSignersSlashable() public {
+        IStrategy[] memory strategies = new IStrategy[](1);
+        strategies[0] = strategy;
+
+        IGasKillerSlasher.SignedCommitment memory commitment = _fraudCommitment();
+        bytes32 commitmentHash = slasher.computeCommitmentHash(commitment);
+
+        // First challenge: only the first two signers (weight 200 >= threshold 200).
+        (address[] memory subset, bytes[] memory subsetSigs) = _signQuorum(commitmentHash, 2);
+        vm.prank(challenger);
+        slasher.slash(commitment, _referenceBlock(), subset, subsetSigs, fixture.proof, fixture.publicValues);
+
+        // Exactly the attributed signers are burned; the third operator is untouched.
+        for (uint256 i = 0; i < 2; i++) {
+            assertTrue(slasher.isOperatorSlashed(commitmentHash, operators[i]));
+            assertEq(IAllocationManager(core.allocationManager).getMaxMagnitude(operators[i], strategy), 0);
+        }
+        assertFalse(slasher.isOperatorSlashed(commitmentHash, operators[2]));
+        assertEq(
+            IAllocationManager(core.allocationManager).getMaxMagnitude(operators[2], strategy),
+            FULL_MAGNITUDE,
+            "unattributed operator must keep its stake"
+        );
+        assertEq(
+            IDelegationManager(core.delegationManager).getOperatorShares(operators[2], strategies)[0], OPERATOR_STAKE
+        );
+
+        // Second challenge with all three signatures burns the remaining signer.
+        (address[] memory all, bytes[] memory allSigs) = _signQuorum(commitmentHash, 3);
+        vm.prank(challenger);
+        slasher.slash(commitment, _referenceBlock(), all, allSigs, fixture.proof, fixture.publicValues);
+
+        assertTrue(slasher.isOperatorSlashed(commitmentHash, operators[2]));
+        assertEq(IAllocationManager(core.allocationManager).getMaxMagnitude(operators[2], strategy), 0);
+
+        // With every signer burned, a further challenge is a redundant no-op.
+        vm.prank(challenger);
+        vm.expectRevert(IGasKillerSlasher.AlreadySlashed.selector);
+        slasher.slash(commitment, _referenceBlock(), all, allSigs, fixture.proof, fixture.publicValues);
+
+        // All three slashes (ids 1..3) burn the full 300 ether of stake.
+        OperatorSet memory operatorSet = OperatorSet({avs: address(serviceManager), id: OPERATOR_SET_ID});
+        for (uint256 slashId = 1; slashId <= operators.length; slashId++) {
+            IStrategyManager(core.strategyManager).clearBurnOrRedistributableShares(operatorSet, slashId);
+        }
+        assertEq(token.balanceOf(EIGENLAYER_BURN_ADDRESS), OPERATOR_STAKE * operators.length);
+    }
+
+    /// @notice An anchor hash the light client does not recognize is rejected — without it, a
+    ///         challenger could "prove" an execution against a fabricated pre-state.
+    function test_e2e_unverifiedAnchorRejected() public {
+        helios.setValid(fixture.anchorHash, false);
+
+        IGasKillerSlasher.SignedCommitment memory commitment = _fraudCommitment();
+        bytes32 commitmentHash = slasher.computeCommitmentHash(commitment);
+        (address[] memory signers, bytes[] memory sigs) = _signQuorum(commitmentHash, 3);
+
+        vm.prank(challenger);
+        vm.expectRevert(IGasKillerSlasher.UnverifiedBlock.selector);
+        slasher.slash(commitment, _referenceBlock(), signers, sigs, fixture.proof, fixture.publicValues);
+    }
+
+    /// @notice A reference block older than the challenge window is rejected, bounding the
+    ///         slash exposure of rotated-away signing keys.
+    function test_e2e_staleReferenceBlockRejected() public {
+        IGasKillerSlasher.SignedCommitment memory commitment = _fraudCommitment();
+        bytes32 commitmentHash = slasher.computeCommitmentHash(commitment);
+        (address[] memory signers, bytes[] memory sigs) = _signQuorum(commitmentHash, 3);
+        uint32 referenceBlock = _referenceBlock();
+
+        vm.roll(block.number + MAX_REFERENCE_BLOCK_AGE + 1);
+
+        vm.prank(challenger);
+        vm.expectRevert(IGasKillerSlasher.StaleReferenceBlock.selector);
+        slasher.slash(commitment, referenceBlock, signers, sigs, fixture.proof, fixture.publicValues);
+    }
+
+    /// @notice The slasher sorts operator-set strategies into the ascending order
+    ///         `AllocationManager.slashOperator` requires, whatever order the set returns them in.
+    function test_sortAscendingOrdersStrategies() public {
+        SlasherSortHarness harness = new SlasherSortHarness();
+
+        IStrategy[] memory shuffled = new IStrategy[](4);
+        shuffled[0] = IStrategy(address(0xCC));
+        shuffled[1] = IStrategy(address(0x11));
+        shuffled[2] = IStrategy(address(0xEE));
+        shuffled[3] = IStrategy(address(0x22));
+
+        IStrategy[] memory sorted = harness.exposedSortAscending(shuffled);
+        for (uint256 i = 1; i < sorted.length; i++) {
+            assertLt(uint160(address(sorted[i - 1])), uint160(address(sorted[i])), "strategies not ascending");
+        }
     }
 
     // ============ Helpers ============
@@ -503,14 +682,9 @@ contract GasKillerSlasherE2ETest is Test {
         }
     }
 
-    function _singleStrategyQuorum()
-        internal
-        view
-        returns (IECDSAStakeRegistryTypes.Quorum memory q)
-    {
+    function _singleStrategyQuorum() internal view returns (IECDSAStakeRegistryTypes.Quorum memory q) {
         q.strategies = new IECDSAStakeRegistryTypes.StrategyParams[](1);
-        q.strategies[0] =
-            IECDSAStakeRegistryTypes.StrategyParams({strategy: strategy, multiplier: 10_000});
+        q.strategies[0] = IECDSAStakeRegistryTypes.StrategyParams({strategy: strategy, multiplier: 10_000});
     }
 
     /// @dev A real AVSDirectory registration signature: the operator signs the directory's
@@ -520,16 +694,21 @@ contract GasKillerSlasherE2ETest is Test {
         view
         returns (ISignatureUtilsMixinTypes.SignatureWithSaltAndExpiry memory)
     {
-        bytes32 salt = keccak256(abi.encodePacked("gas-killer-e2e", operators[operatorIndex]));
+        return _avsDirectorySignature(operators[operatorIndex], operatorKeys[operatorIndex]);
+    }
+
+    function _avsDirectorySignature(address operator, uint256 privateKey)
+        internal
+        view
+        returns (ISignatureUtilsMixinTypes.SignatureWithSaltAndExpiry memory)
+    {
+        bytes32 salt = keccak256(abi.encodePacked("gas-killer-e2e", operator));
         uint256 expiry = block.timestamp + 1 days;
-        bytes32 digest = IAVSDirectory(core.avsDirectory).calculateOperatorAVSRegistrationDigestHash(
-            operators[operatorIndex], address(serviceManager), salt, expiry
-        );
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(operatorKeys[operatorIndex], digest);
+        bytes32 digest = IAVSDirectory(core.avsDirectory)
+            .calculateOperatorAVSRegistrationDigestHash(operator, address(serviceManager), salt, expiry);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
         return ISignatureUtilsMixinTypes.SignatureWithSaltAndExpiry({
-            signature: abi.encodePacked(r, s, v),
-            salt: salt,
-            expiry: expiry
+            signature: abi.encodePacked(r, s, v), salt: salt, expiry: expiry
         });
     }
 }
