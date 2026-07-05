@@ -50,19 +50,33 @@ contract CachedECDSAStakeRegistry is ECDSAStakeRegistry {
     uint256 internal _snapThreshold;
     // signingKey => weight + 1 (0 = not a current signer)
     mapping(address => uint256) internal _snapWeightBySigningKey;
+    // signing keys currently populated in the map, so a re-sync can evict prior entries
+    address[] internal _snapKeys;
 
     constructor(IDelegationManager dm) ECDSAStakeRegistry(dm) {}
 
     /// @dev PROTOTYPE ONLY. Production would maintain this incrementally inside the
     ///      checkpoint-push hooks (register/deregister/updateSigningKey/updateOperators/
     ///      updateStakeThreshold/updateQuorum). Here we rebuild from a supplied list to
-    ///      isolate the read-path gas being measured.
+    ///      isolate the read-path gas being measured. A full rebuild first evicts the
+    ///      prior snapshot's keys — otherwise a re-sync with a shrunk/rotated operator set
+    ///      would leave stale signing keys marked registered and the fast path would accept
+    ///      non-current signers. This eviction runs off the measured read path (setUp only),
+    ///      so it does not affect the reported gas. Production maintains the map
+    ///      incrementally, so it has no equivalent full-rebuild step.
     function syncSnapshot(address[] calldata operators) external {
+        uint256 stale = _snapKeys.length;
+        for (uint256 i; i < stale; i++) {
+            delete _snapWeightBySigningKey[_snapKeys[i]];
+        }
+        delete _snapKeys;
+
         uint256 total;
         for (uint256 i; i < operators.length; i++) {
             address key = this.getLatestOperatorSigningKey(operators[i]);
             uint256 w = this.getLastCheckpointOperatorWeight(operators[i]);
             _snapWeightBySigningKey[key] = w + 1;
+            _snapKeys.push(key);
             total += w;
         }
         _snap = Snap({effectiveBlock: uint64(block.number), totalWeight: uint192(total)});
