@@ -23,15 +23,20 @@ import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.so
 ///      threshold at that block.
 abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     /// @custom:storage-location erc7201:gaskiller.GasKillerSDKECDSA.storage
+    /// @dev Field order is gas-tuned: `ecdsaStakeRegistry` (20 bytes) and
+    ///      `blockStaleMeasure` (12 bytes) are declared adjacently so they share one
+    ///      32-byte slot — `verifyAndUpdate` reads both, so the second is a warm
+    ///      (~100 gas) access after the first cold SLOAD. `namespace` is derived on
+    ///      read (not stored), removing a dynamic-bytes SSTORE at configuration time.
     struct GasKillerSDKStorage {
-        /// @notice Namespace derived from the AVS address; used to scope this contract within the AVS
-        bytes namespace;
         /// @notice The AVS service manager address
         address avsAddress;
         /// @notice The EigenLayer ECDSA stake registry used to verify operator quorum signatures
         IERC1271Upgradeable ecdsaStakeRegistry;
-        /// @notice Maximum number of blocks a reference block may lag behind the current block
-        uint256 blockStaleMeasure;
+        /// @notice Maximum number of blocks a reference block may lag behind the current block.
+        ///         `uint96` holds ~7.9e28 — far above any realistic block height — and packs
+        ///         into the same slot as `ecdsaStakeRegistry`.
+        uint96 blockStaleMeasure;
     }
 
     // keccak256(abi.encode(uint256(keccak256("gaskiller.GasKillerSDKECDSA.storage")) - 1)) & ~bytes32(uint256(0xff));
@@ -128,9 +133,11 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     }
 
     /// @notice Return the namespace bytes derived from the AVS address
+    /// @dev Derived on read (`abi.encodePacked(avsAddress, "gaskiller")`) rather than
+    ///      stored, so configuration never pays a dynamic-bytes SSTORE.
     /// @return The namespace
     function namespace() external view returns (bytes memory) {
-        return _getGasKillerSDKStorage().namespace;
+        return abi.encodePacked(_getGasKillerSDKStorage().avsAddress, "gaskiller");
     }
 
     /// @notice Return the configured block stale measure (or the default if unset)
@@ -146,13 +153,10 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
         StateChangeHandlerLib._runStateUpdates(types, args);
     }
 
-    /// @notice Set the AVS address and derive the namespace from it
-    /// @dev The namespace is `abi.encodePacked(avsAddress, "gaskiller")`
+    /// @notice Set the AVS address (the namespace is derived from it on read)
     /// @param _avsAddress The new AVS service manager address
     function _setAvsAddress(address _avsAddress) internal {
-        GasKillerSDKStorage storage $ = _getGasKillerSDKStorage();
-        $.avsAddress = _avsAddress;
-        $.namespace = abi.encodePacked($.avsAddress, "gaskiller");
+        _getGasKillerSDKStorage().avsAddress = _avsAddress;
     }
 
     /// @notice Set the EigenLayer ECDSA stake registry contract
@@ -162,9 +166,10 @@ abstract contract GasKillerSDK is StateTracker, IGasKillerSDK {
     }
 
     /// @notice Set the maximum number of blocks a reference block may lag behind the current block
-    /// @param _blockStaleMeasure The new block stale measure value
+    /// @param _blockStaleMeasure The new block stale measure value (must fit in uint96)
     function _setBlockStaleMeasure(uint256 _blockStaleMeasure) internal {
-        _getGasKillerSDKStorage().blockStaleMeasure = _blockStaleMeasure;
+        require(_blockStaleMeasure <= type(uint96).max, InvalidBlockStaleMeasure());
+        _getGasKillerSDKStorage().blockStaleMeasure = uint96(_blockStaleMeasure);
     }
 
     /// @notice Return the block stale measure, falling back to the default when unset

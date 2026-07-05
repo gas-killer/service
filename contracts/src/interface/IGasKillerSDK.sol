@@ -34,6 +34,9 @@ interface IGasKillerSDK is IERC165 {
     /// @notice Thrown when `referenceBlockNumber` is greater than or equal to the current block number
     error FutureBlockNumber();
 
+    /// @notice Thrown when a configured block-stale-measure exceeds the packed `uint96` field width
+    error InvalidBlockStaleMeasure();
+
     /// @notice Verify the operators' ECDSA quorum signatures and apply the encoded state updates
     /// @param msgHash The hash of the message to verify (sha256 of the encoded task)
     /// @param referenceBlockNumber The block number at which operator signing keys and

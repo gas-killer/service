@@ -39,8 +39,9 @@ library StateChangeHandlerLib {
     /// @param args Array of ABI-encoded arguments corresponding to each operation type
     /// @dev types and args arrays must be equal length, with args[i] containing the encoded parameters for types[i]
     function _runStateUpdates(StateUpdateType[] memory types, bytes[] memory args) internal {
-        require(types.length == args.length, InvalidArguments());
-        for (uint256 i = 0; i < types.length; i++) {
+        uint256 len = types.length;
+        require(len == args.length, InvalidArguments());
+        for (uint256 i = 0; i < len;) {
             StateUpdateType stateUpdateType = types[i];
             bytes memory arg = args[i];
 
@@ -53,9 +54,8 @@ library StateChangeHandlerLib {
                 (address target, uint256 value, bytes memory callargs) = abi.decode(arg, (address, uint256, bytes));
                 bool success;
                 // TODO: might need better gas handling
-                uint256 callgas = gasleft();
                 assembly {
-                    success := call(callgas, target, value, add(callargs, 0x20), mload(callargs), 0, 0)
+                    success := call(gas(), target, value, add(callargs, 0x20), mload(callargs), 0, 0)
                 }
                 // TODO: this section needs heavy testing
                 if (!success) {
@@ -111,6 +111,9 @@ library StateChangeHandlerLib {
                     deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
                 }
                 require(deployed != address(0), DeploymentFailed());
+            }
+            unchecked {
+                ++i;
             }
         }
     }
