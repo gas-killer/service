@@ -30,6 +30,23 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           submodules: recursive
 
+      - name: Free up disk space
+        run: |
+          # The hosted runner ships with ~14GB free. This job builds two Rust-based Docker
+          # images, restores a multi-GB Rust cache, and loads three large external images into
+          # kind — which overruns the disk and makes kind's `docker save` fail with
+          # "no space left on device" during "Pre-pull external images into kind". Reclaim the
+          # preinstalled toolchains this job never uses (~20GB) to leave comfortable headroom.
+          echo "=== Disk before cleanup ==="; df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /usr/lib/jvm || true
+          echo "=== Disk after cleanup ==="; df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -79,6 +96,15 @@ jobs:
 
           echo "Building node image..."
           docker build -f ./node/Dockerfile -t service:node-local .
+
+      - name: Reclaim Docker build cache
+        run: |
+          # The two image builds above leave a large Rust build cache that is not needed to load
+          # or run the images. Prune it before pulling the external images so the kind image
+          # loads (which `docker save` to a temp tar) have room.
+          echo "=== Docker disk usage before prune ==="; docker system df || true
+          docker builder prune --all --force || true
+          echo "=== Disk after prune ==="; df -h /
 
       - name: Load images into kind cluster
         run: |
