@@ -4,6 +4,7 @@ pub mod consensus;
 pub mod ecdsa;
 pub mod eigenlayer;
 pub mod providers;
+pub mod schnorr;
 pub mod task_data;
 pub mod tasks;
 pub mod validator;

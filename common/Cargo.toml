@@ -31,6 +31,10 @@ rand = { workspace = true }
 rand_core = { workspace = true }
 thiserror = "2"
 
+# secp256k1 curve arithmetic for aggregate Schnorr (same version alloy-signer pins,
+# so no duplicate in the tree). Point add/sub + scalar ops for MuSig2 aggregation.
+k256 = { version = "0.13", features = ["arithmetic"] }
+
 # Commonware
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true }
