@@ -324,6 +324,80 @@ pub fn rebroadcast_interval() -> std::time::Duration {
     )
 }
 
+/// Which quorum-signature scheme the node/router binaries run.
+///
+/// `Ecdsa` is the engine-driven one-round path (commonware aggregation engine, N
+/// individually-verified signatures on-chain). `Schnorr` is the interactive two-round
+/// MuSig2 aggregate path (coordinator/participant actors on p2p channel 2, a single
+/// constant-gas signature on-chain). The two paths never mix inside one deployment:
+/// every binary in a stack must run the same scheme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignatureScheme {
+    Ecdsa,
+    Schnorr,
+}
+
+/// Reads the signature scheme from `SIGNATURE_SCHEME` (case-insensitive `ecdsa` |
+/// `schnorr`), defaulting to [`SignatureScheme::Ecdsa`]. Panics on an unrecognized
+/// value rather than silently running the wrong protocol.
+pub fn signature_scheme() -> SignatureScheme {
+    match env::var("SIGNATURE_SCHEME") {
+        Err(_) => SignatureScheme::Ecdsa,
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "ecdsa" => SignatureScheme::Ecdsa,
+            "schnorr" => SignatureScheme::Schnorr,
+            other => panic!("SIGNATURE_SCHEME must be 'ecdsa' or 'schnorr', got '{other}'"),
+        },
+    }
+}
+
+/// The quorum threshold fraction `num/den` (e.g. 2/3) from `QUORUM_THRESHOLD` /
+/// `THRESHOLD_DENOMINATOR`, defaulting to 2/3.
+///
+/// The Schnorr coordinator uses this as its LOCAL participation floor before it
+/// bothers running a signing round — the authoritative stake-weighted check is the
+/// on-chain `SchnorrStakeRegistry` threshold fixed at deployment (from the same env
+/// vars, see `deploy_array_summation`). Malformed or inconsistent values fall back
+/// to the default.
+pub fn quorum_threshold_fraction() -> (u64, u64) {
+    let num = env::var("QUORUM_THRESHOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let den = env::var("THRESHOLD_DENOMINATOR")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    match (num, den) {
+        (Some(n), Some(d)) if d > 0 && n <= d => (n, d),
+        _ => (2, 3),
+    }
+}
+
+/// Default per-stage timeout for the Schnorr coordinator's two protocol rounds
+/// (nonce collection, partial-signature collection): `min(5s, ROUND_TIMEOUT / 6)`,
+/// so several attempts fit inside one sequencer round.
+///
+/// Override with `SCHNORR_STAGE_TIMEOUT_SECS` (seconds, fractional allowed).
+pub fn schnorr_stage_timeout() -> std::time::Duration {
+    if let Ok(raw) = env::var("SCHNORR_STAGE_TIMEOUT_SECS") {
+        return parse_secs_env_duration(Some(raw.as_str()), 5.0);
+    }
+    std::cmp::min(std::time::Duration::from_secs(5), round_timeout() / 6)
+}
+
+/// Per-peer message rate for the Schnorr protocol channel (channel 2), from
+/// `P2P_SCHNORR_MESSAGES_PER_SECOND`, default 64.
+///
+/// Sized generously: the p2p send-side limiter SILENTLY DROPS messages to
+/// rate-limited peers (same failure mode as the ack channel below), and a dropped
+/// round-2 message costs a whole retry attempt.
+pub fn schnorr_messages_per_second() -> std::num::NonZeroU32 {
+    env::var("P2P_SCHNORR_MESSAGES_PER_SECOND")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .and_then(std::num::NonZeroU32::new)
+        .unwrap_or_else(|| std::num::NonZeroU32::new(64).expect("nonzero"))
+}
+
 /// Per-peer send/receive rate for the aggregation-engine TipAck channel (channel 0),
 /// in messages per second.
 ///

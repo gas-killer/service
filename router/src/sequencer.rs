@@ -27,7 +27,7 @@
 
 use crate::ingress::GasKillerTaskRequest;
 use crate::metrics::MetricsCollector;
-use crate::reporter::CertReporterMailbox;
+use crate::reporter::CertIndex;
 use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
 use gas_killer_common::tasks::TaskDirective;
@@ -277,7 +277,7 @@ pub async fn ingest_tip_reports<R>(
 }
 
 /// Owns the ingress task queue and drives one aggregation height at a time.
-pub struct Sequencer<S: NetworkSender<PublicKey = PublicKey>> {
+pub struct Sequencer<S: NetworkSender<PublicKey = PublicKey>, R: CertIndex> {
     receiver: TaskReceiver,
     queue_depth: TaskQueueDepth,
     validator: Arc<GasKillerValidator>,
@@ -286,8 +286,9 @@ pub struct Sequencer<S: NetworkSender<PublicKey = PublicKey>> {
     dispatch_time: DispatchTime,
     /// Shared with the automaton and submitter.
     assignments: SharedAssignments,
-    /// Certificate observations (tip + per-height digests) from the engine.
-    reporter: CertReporterMailbox,
+    /// Certificate observations (tip + per-height digests): the engine's
+    /// reporter in ECDSA mode, the schnorr coordinator's mailbox in schnorr mode.
+    reporter: R,
     /// Final dispositions from the submitter.
     resolutions: ResolutionReceiver,
     /// Broadcasts [`TaskDirective`]s to the nodes on p2p channel 1.
@@ -309,7 +310,7 @@ pub struct Sequencer<S: NetworkSender<PublicKey = PublicKey>> {
     rebroadcast_interval: Duration,
 }
 
-impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
+impl<S: NetworkSender<PublicKey = PublicKey>, R: CertIndex> Sequencer<S, R> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         receiver: TaskReceiver,
@@ -318,7 +319,7 @@ impl<S: NetworkSender<PublicKey = PublicKey>> Sequencer<S> {
         metrics: Option<Arc<MetricsCollector>>,
         dispatch_time: DispatchTime,
         assignments: SharedAssignments,
-        reporter: CertReporterMailbox,
+        reporter: R,
         resolutions: ResolutionReceiver,
         directive_sender: S,
         recipients: Vec<PublicKey>,

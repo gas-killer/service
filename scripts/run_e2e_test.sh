@@ -10,6 +10,14 @@ export ROUTER_INGRESS_PORT
 export GAS_KILLER_ROUTER_URL="http://localhost:${ROUTER_INGRESS_PORT}"
 export GAS_KILLER_TRIGGER_URL="http://localhost:${ROUTER_INGRESS_PORT}/trigger"
 
+# Quorum signature scheme for the whole stack: ecdsa (engine path, default) or
+# schnorr (aggregate path). Exported before docker compose up so the node/router
+# containers pick it up, and re-exported after .env is sourced so the host-side
+# deploy/send binaries agree with the stack. Captured here because `source .env`
+# below could otherwise override an explicitly chosen mode.
+SIGNATURE_SCHEME_CHOICE="${SIGNATURE_SCHEME:-ecdsa}"
+export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -84,6 +92,7 @@ fi
 echo -e "${GREEN}Starting Gas Killer E2E Test${NC}"
 echo "Project root: $PROJECT_ROOT"
 echo "Logs directory: $LOG_DIR"
+echo "Signature scheme: $SIGNATURE_SCHEME_CHOICE"
 
 # Step 1: Build scripts
 echo -e "${YELLOW}Step 1: Building scripts...${NC}"
@@ -160,6 +169,9 @@ source ../.env
 # .env carries GAS_KILLER_ROUTER_URL=...:8080; re-pin it to the chosen ingress port.
 export GAS_KILLER_ROUTER_URL="http://localhost:${ROUTER_INGRESS_PORT}"
 export GAS_KILLER_TRIGGER_URL="http://localhost:${ROUTER_INGRESS_PORT}/trigger"
+# Re-pin the scheme chosen at the top (a stray .env entry must not diverge from
+# what the running containers were started with).
+export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then

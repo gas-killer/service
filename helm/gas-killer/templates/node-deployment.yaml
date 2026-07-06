@@ -246,6 +246,9 @@ spec:
               value: {{ $root.Values.router.rebroadcastInterval | quote }}
             - name: STORAGE_DIR
               value: {{ $root.Values.node.storageDir | quote }}
+            # Quorum signature scheme (ecdsa | schnorr); must match the router's.
+            - name: SIGNATURE_SCHEME
+              value: {{ $root.Values.global.signatureScheme | quote }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}

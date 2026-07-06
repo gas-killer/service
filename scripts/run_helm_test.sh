@@ -41,6 +41,8 @@ FUNDED_KEY="${FUNDED_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae78
 # Guards the /admin/keys endpoints used to mint the API keys that authenticate /trigger. A fixed
 # dev value for the local harness; override by exporting ADMIN_KEY.
 ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
+# Quorum signature scheme for the whole stack: ecdsa (default) or schnorr.
+SIGNATURE_SCHEME="${SIGNATURE_SCHEME:-ecdsa}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 SKIP_CLEANUP="${SKIP_CLEANUP:-false}"
 
@@ -65,6 +67,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fork-url)
             FORK_URL="$2"
+            shift 2
+            ;;
+        --signature-scheme)
+            SIGNATURE_SCHEME="$2"
             shift 2
             ;;
         *)
@@ -99,6 +105,7 @@ echo "Project root: $PROJECT_ROOT"
 echo "Cluster name: $CLUSTER_NAME"
 echo "Node count: $NODE_COUNT"
 echo "Fork URL: $FORK_URL"
+echo "Signature scheme: $SIGNATURE_SCHEME"
 
 # Step 1: Check prerequisites
 echo -e "${YELLOW}Step 1: Checking prerequisites...${NC}"
@@ -165,20 +172,30 @@ if helm list -q | grep -q "^${HELM_RELEASE}$"; then
     sleep 10
 fi
 
+# Image repository/tags must match the `service:{node,router}-local` images built
+# and kind-loaded above (the CI workflow uses the same names). Bridge/L2/yield are
+# BLS-era subsystems, disabled here exactly as in CI — with bridge.enabled left at
+# its default (true), nodes and the router would block on a `.bridge_complete`
+# marker from a job that cannot run locally.
 helm install "$HELM_RELEASE" ./helm/gas-killer \
     -f ./helm/gas-killer/local-overrides.yaml \
     --set global.environment=LOCAL \
     --set global.nodeCount="$NODE_COUNT" \
+    --set global.signatureScheme="$SIGNATURE_SCHEME" \
     --set secrets.forkUrl="$FORK_URL" \
     --set secrets.privateKey="$PRIVATE_KEY" \
     --set secrets.fundedKey="$FUNDED_KEY" \
     --set secrets.adminKey="$ADMIN_KEY" \
-    --set node.image.repository=avs \
+    --set node.image.repository=service \
     --set node.image.tag=node-local \
     --set node.image.pullPolicy=Never \
-    --set router.image.repository=avs \
+    --set router.image.repository=service \
     --set router.image.tag=router-local \
     --set router.image.pullPolicy=Never \
+    --set l2.enabled=false \
+    --set bridge.enabled=false \
+    --set bridge.waitForBridge=false \
+    --set yieldDistribution.enabled=false \
     --set sharedData.storageClass=""
 
 echo -e "${GREEN}Helm chart installed successfully${NC}"
@@ -258,6 +275,18 @@ fi
 echo -e "${GREEN}AVS deployment file retrieved${NC}"
 cat ./config/.nodes/avs_deploy.json
 
+# Schnorr mode: the deploy binary registers each operator's key in the
+# SchnorrStakeRegistry with a proof of possession, which requires the operator
+# key files the setup job wrote to the shared PVC.
+if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
+    echo "Retrieving operator key files for Schnorr PoP registration..."
+    kubectl cp $ROUTER_POD:/app/.nodes/operator_keys ./config/.nodes/operator_keys
+    if ! ls ./config/.nodes/operator_keys/*.private.ecdsa.key.json >/dev/null 2>&1; then
+        echo -e "${RED}Operator key files not found on the shared PVC${NC}"
+        exit 1
+    fi
+fi
+
 # Step 10: Build and run test scripts
 echo -e "${YELLOW}Step 10: Building test scripts...${NC}"
 
@@ -281,6 +310,9 @@ export ARRAY_SUMMATION_ARRAY_SIZE=100
 export ARRAY_SUMMATION_MAX_VALUE=1000
 export ARRAY_SUMMATION_SEED=42
 export PRIVATE_KEY="$PRIVATE_KEY"
+# schnorr mode additionally deploys SchnorrStakeRegistry + PoP-registers the
+# operators (keys copied from the shared PVC in step 9) before the target.
+export SIGNATURE_SCHEME="$SIGNATURE_SCHEME"
 
 cargo run --release -p scripts --bin deploy_array_summation
 cd "$PROJECT_ROOT"

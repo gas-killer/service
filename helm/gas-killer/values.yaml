@@ -23,6 +23,13 @@ global:
   # Number of operator nodes to deploy
   nodeCount: 3
 
+  # Quorum signature scheme for the whole stack: ecdsa (engine path) or schnorr
+  # (interactive aggregate path). Every node and the router must run the same
+  # scheme; the test harness also passes it to the host-side deploy binary,
+  # which in schnorr mode deploys SchnorrStakeRegistry + registers operators
+  # with proofs of possession before deploying the target contract.
+  signatureScheme: "ecdsa"
+
   # Timeout for init containers waiting for dependencies (in seconds)
   initTimeout: 300
 

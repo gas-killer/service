@@ -2,6 +2,7 @@
 pragma solidity ^0.8.27;
 
 import {IERC165} from "./interface/IERC165.sol";
+import {ISchnorrGasKillerSDK} from "./interface/ISchnorrGasKillerSDK.sol";
 import {StateTracker} from "./StateTracker.sol";
 import {StateChangeHandlerLib, StateUpdateType} from "./StateChangeHandlerLib.sol";
 import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
@@ -17,7 +18,7 @@ import {ISchnorrStakeRegistry} from "./interface/ISchnorrStakeRegistry.sol";
 ///      address(this), targetFunction, storageUpdates))` — so the off-chain digest and the
 ///      slashing/fraud-proof machinery are scheme-agnostic. The calldata swaps
 ///      `(operators[], signatures[])` for `(s, Raddr, nonSigners[])`.
-abstract contract SchnorrGasKillerSDK is StateTracker {
+abstract contract SchnorrGasKillerSDK is StateTracker, ISchnorrGasKillerSDK {
     struct SchnorrSDKStorage {
         address avsAddress;
         ISchnorrStakeRegistry registry;
@@ -86,8 +87,29 @@ abstract contract SchnorrGasKillerSDK is StateTracker {
         StateChangeHandlerLib._runStateUpdates(types, args);
     }
 
-    function supportsInterface(bytes4 interfaceId) public view virtual returns (bool) {
-        return interfaceId == type(IERC165).interfaceId;
+    /// @notice Query if a contract implements an interface
+    /// @dev Supports ERC-165 and ISchnorrGasKillerSDK interface detection (the router's
+    ///      preflight probes the schnorr `verifyAndUpdate` selector before submitting)
+    /// @param interfaceId The interface identifier, as specified in ERC-165
+    /// @return `true` if the contract implements `interfaceId` and `false` otherwise
+    function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
+        return interfaceId == type(IERC165).interfaceId
+            || interfaceId == type(ISchnorrGasKillerSDK).interfaceId;
+    }
+
+    /// @notice Compute the expected message hash for a given transition, function, and storage updates
+    /// @dev Exact mirror of the ECDSA `GasKillerSDK.getMessageHash` — the digest is
+    ///      scheme-agnostic, so off-chain parity checks work unchanged.
+    /// @param transitionIndex The transition index
+    /// @param targetFunction The target function selector
+    /// @param storageUpdates The ABI-encoded storage updates
+    /// @return The expected SHA-256 hash
+    function getMessageHash(uint256 transitionIndex, bytes4 targetFunction, bytes calldata storageUpdates)
+        external
+        view
+        returns (bytes32)
+    {
+        return sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates));
     }
 
     function schnorrRegistry() external view returns (address) {

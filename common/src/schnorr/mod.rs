@@ -36,6 +36,7 @@
 //! binaries is a separate integration step (see `DESIGN.md`).
 
 pub mod musig;
+pub mod wire;
 
 use alloy_primitives::{Address, U256 as AlloyU256, keccak256};
 use k256::elliptic_curve::PrimeField;
@@ -158,6 +159,56 @@ impl PrivateKey {
     }
 }
 
+/// Parses a private key from the operator key-file formats `get_signer` accepts for
+/// ECDSA: `0x`-prefixed hex, bare 64-char hex, or a legacy decimal scalar.
+///
+/// The Schnorr key IS the operator's existing secp256k1 key — same scalar, same
+/// public-key point, and (because the registry identity is `keccak256(x ‖ y)[12..]`)
+/// the same Ethereum address as the operator's p2p/EigenLayer identity. Returns
+/// `None` on malformed input, a zero scalar, or a value ≥ the group order.
+pub fn private_key_from_hex(key: &str) -> Option<PrivateKey> {
+    let key = key.trim();
+    let bytes: [u8; 32] = if let Some(hex) = key
+        .strip_prefix("0x")
+        .or_else(|| (key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit())).then_some(key))
+    {
+        let mut out = [0u8; 32];
+        if hex.len() != 64 {
+            return None;
+        }
+        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+            let s = std::str::from_utf8(chunk).ok()?;
+            out[i] = u8::from_str_radix(s, 16).ok()?;
+        }
+        out
+    } else {
+        // Legacy decimal scalar.
+        let v: AlloyU256 = key.parse().ok()?;
+        v.to_be_bytes()
+    };
+    let scalar = Option::<Scalar>::from(Scalar::from_repr(bytes.into()))?;
+    PrivateKey::new(scalar)
+}
+
+/// Compresses an affine point to the 33-byte SEC1 form used on the wire.
+pub(crate) fn compress_point(point: &AffinePoint) -> [u8; 33] {
+    point
+        .to_encoded_point(true)
+        .as_bytes()
+        .try_into()
+        .expect("compressed SEC1 point is 33 bytes")
+}
+
+/// Decompresses a 33-byte SEC1 point, rejecting invalid encodings and the identity.
+pub(crate) fn decompress_point(bytes: &[u8; 33]) -> Option<AffinePoint> {
+    let encoded = k256::EncodedPoint::from_bytes(bytes).ok()?;
+    let point = Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&encoded))?;
+    if bool::from(point.is_identity()) {
+        return None;
+    }
+    Some(point)
+}
+
 /// A public key: an affine secp256k1 point.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PublicKey(AffinePoint);
@@ -200,6 +251,16 @@ impl PublicKey {
     /// The Ethereum address of this point (`keccak256(x ‖ y)[12..]`).
     pub fn eth_address(&self) -> Address {
         eth_address_of_point(&self.0)
+    }
+
+    /// The 33-byte compressed SEC1 encoding (wire form).
+    pub fn to_compressed(&self) -> [u8; 33] {
+        compress_point(&self.0)
+    }
+
+    /// Decodes a 33-byte compressed SEC1 encoding (rejects invalid points and identity).
+    pub fn from_compressed(bytes: &[u8; 33]) -> Option<Self> {
+        decompress_point(bytes).and_then(Self::from_affine)
     }
 
     /// Sums a set of public keys into their plain aggregate (`Σ X_i`).

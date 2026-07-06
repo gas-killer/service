@@ -7,7 +7,9 @@
 //! ECDSA key, and gossips TipAcks on channel 0 until the height certifies.
 
 mod automaton;
+mod digest;
 mod reporter;
+mod schnorr_participant;
 mod task_book;
 
 use ::tokio::net::TcpListener;
@@ -29,11 +31,13 @@ use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::ecdsa::{Ecdsa, PublicKey, get_signer};
 use gas_killer_common::{
-    EcdsaScheme, GasKillerValidator, OrchestratorConfig, SpeculativePrebuildConfig,
-    StaticEpochMonitor, ValidatorMetrics, ack_messages_per_second, agg_activity_timeout,
-    agg_window, get_operator_states, load_key_from_file, load_orchestrator_config,
-    p2p_message_backlog, p2p_quota_period, rebroadcast_interval, round_timeout, storage_directory,
+    EcdsaScheme, GasKillerValidator, OrchestratorConfig, SignatureScheme,
+    SpeculativePrebuildConfig, StaticEpochMonitor, ValidatorMetrics, ack_messages_per_second,
+    agg_activity_timeout, agg_window, get_operator_states, load_key_from_file,
+    load_orchestrator_config, p2p_message_backlog, p2p_quota_period, rebroadcast_interval,
+    round_timeout, schnorr_messages_per_second, signature_scheme, storage_directory,
 };
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -41,6 +45,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::automaton::GasKillerAutomaton;
+use crate::digest::DigestResolver;
 use crate::reporter::NodeReporter;
 use crate::task_book::TaskBook;
 
@@ -53,6 +58,10 @@ const ENGINE_CHANNEL: u64 = 0;
 /// P2P channel carrying the router's `TaskDirective` broadcasts (nodes only
 /// receive; the sender half is registered but never used).
 const TASK_DIRECTIVE_CHANNEL: u64 = 1;
+
+/// P2P channel carrying the interactive Schnorr signing rounds
+/// (`SIGNATURE_SCHEME=schnorr` mode only; never registered in ECDSA mode).
+const SCHNORR_CHANNEL: u64 = 2;
 
 #[derive(Clone)]
 struct HealthState {
@@ -186,6 +195,22 @@ fn main() {
     // Configure my identity
     let (signer, port) = configure_identity(&matches);
     let orchestrator_config = configure_orchestrator(&matches);
+
+    // In schnorr mode the SAME operator key doubles as the Schnorr signing key
+    // (same secp256k1 scalar; the registry identity keccak256(x ‖ y)[12..] equals
+    // the operator's Ethereum address). Loaded here so the async closure below
+    // does not capture the CLI matches.
+    let schnorr_key = match signature_scheme() {
+        SignatureScheme::Schnorr => Some(
+            gas_killer_common::schnorr::private_key_from_hex(&load_key_from_file(
+                matches
+                    .get_one::<String>("key-file")
+                    .expect("Please provide key file"),
+            ))
+            .expect("operator key is not a valid secp256k1 scalar"),
+        ),
+        SignatureScheme::Ecdsa => None,
+    };
 
     // Start runtime
     runner.start(|context: tokio::Context| async move {
@@ -397,47 +422,18 @@ fn main() {
             tracing::info!(key = ?key, "registered participant");
         }
 
-        // The engine's quorum is fixed at N3f1 (n - (n-1)/3); the contract-derived
-        // threshold is informational only (the authoritative operator-count check
-        // runs on-chain in GasKillerSDK.verifyAndUpdate).
-        tracing::info!(
-            participants = participants.len(),
-            quorum = participants.quorum::<N3f1>(),
-            contract_threshold = quorum_infos[quorum_number].threshold,
-            "aggregation quorum (engine-fixed N3f1)"
-        );
-
-        // Signing scheme over the participant set; our own participant index is
-        // derived from our address's position in the sorted set.
-        let scheme = EcdsaScheme::signer(participants, signer.private_key()).unwrap_or_else(|| {
-            panic!(
-                "own operator address {:?} is not in the quorum-{quorum_number} operator set; \
-                     register the operator on-chain before starting the node",
-                signer.public_key()
-            )
-        });
+        let scheme_mode = signature_scheme();
+        tracing::info!(?scheme_mode, "signature scheme");
 
         // Create network channels (must all be registered BEFORE network.start()):
-        // channel 0 carries the engine's TipAck gossip, channel 1 the router's
-        // task directives (nodes receive; the sender is only used for rate-limited
-        // TipReport replies to stale directives).
-        //
-        // The engine channel needs its own, much larger quota: the engine keeps
-        // rebroadcasting each signed height's TipAck until it falls
-        // activity_timeout below the tip (even after certification), and the p2p
-        // send-side limiter SILENTLY DROPS messages to rate-limited peers — the
-        // legacy 1 msg/s default would starve fresh acks and stall certification.
+        // channel 1 carries the router's task directives in both modes (nodes
+        // receive; the sender is only used for rate-limited TipReport replies to
+        // stale directives). The mode-specific signing channel — 0 for the ECDSA
+        // engine's TipAck gossip, 2 for the interactive Schnorr rounds — is
+        // registered in the mode branch below, still before network.start().
         let p2p_backlog = p2p_message_backlog();
         let p2p_quota = Quota::with_period(p2p_quota_period())
             .expect("p2p_quota_period always returns a non-zero duration");
-        let ack_rate = ack_messages_per_second();
-        let ack_quota = Quota::per_second(ack_rate);
-        tracing::info!(
-            ack_messages_per_second = ack_rate.get(),
-            "engine channel quota"
-        );
-        let (engine_sender, engine_receiver) =
-            network.register(ENGINE_CHANNEL, ack_quota, p2p_backlog);
         let (directive_sender, directive_receiver) =
             network.register(TASK_DIRECTIVE_CHANNEL, p2p_quota, p2p_backlog);
 
@@ -490,72 +486,182 @@ fn main() {
             });
         }
 
-        // Reporter actor: certificate/tip accounting + TaskBook pruning.
-        let (node_reporter, reporter_mailbox) = NodeReporter::new(
-            context.child("reporter"),
-            task_book_mailbox.clone(),
-            Arc::clone(&engine_tip),
-        );
-        context
-            .child("reporter_actor")
-            .spawn(move |_| node_reporter.run());
+        // Mode-specific signing path. ECDSA runs the commonware aggregation engine
+        // (one-round: nodes sign TipAcks unilaterally, the engine assembles
+        // certificates); Schnorr runs the interactive two-round MuSig2 participant
+        // actor on channel 2 (see schnorr_participant.rs). The engine's epoch
+        // monitor must outlive the engine, so the ECDSA arm hands its guard out to
+        // the root future.
+        let monitor_guard = match scheme_mode {
+            SignatureScheme::Ecdsa => {
+                // The engine's quorum is fixed at N3f1 (n - (n-1)/3); the
+                // contract-derived threshold is informational only (the
+                // authoritative operator-count check runs on-chain in
+                // GasKillerSDK.verifyAndUpdate).
+                tracing::info!(
+                    participants = participants.len(),
+                    quorum = participants.quorum::<N3f1>(),
+                    contract_threshold = quorum_infos[quorum_number].threshold,
+                    "aggregation quorum (engine-fixed N3f1)"
+                );
 
-        // Automaton: resolves each proposed height to the expected task digest
-        // (validated via EVMSketch) or the skip digest, per the TaskBook.
-        let automaton = GasKillerAutomaton::new(
-            context.child("automaton"),
-            task_book_mailbox,
-            Arc::clone(&validator),
-            // Retry transient validation errors up to the router's round timeout:
-            // past that the router is broadcasting Skip{h} anyway.
-            round_timeout(),
-        );
+                // Signing scheme over the participant set; our own participant
+                // index is derived from our address's position in the sorted set.
+                let scheme = EcdsaScheme::signer(participants, signer.private_key())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "own operator address {:?} is not in the quorum-{quorum_number} operator set; \
+                             register the operator on-chain before starting the node",
+                            signer.public_key()
+                        )
+                    });
 
-        // Static single-epoch supervision: ConstantProvider serves the same scheme
-        // for every epoch and the monitor never fires. Keep a clone of the monitor
-        // in the root future — it must outlive the engine or the engine exits.
-        let provider = ConstantProvider::<EcdsaScheme, Epoch>::new(scheme);
-        let monitor = StaticEpochMonitor::new();
-        let monitor_guard = monitor.clone();
+                // The engine channel needs its own, much larger quota: the engine
+                // keeps rebroadcasting each signed height's TipAck until it falls
+                // activity_timeout below the tip (even after certification), and
+                // the p2p send-side limiter SILENTLY DROPS messages to
+                // rate-limited peers — the legacy 1 msg/s default would starve
+                // fresh acks and stall certification.
+                let ack_rate = ack_messages_per_second();
+                let ack_quota = Quota::per_second(ack_rate);
+                tracing::info!(
+                    ack_messages_per_second = ack_rate.get(),
+                    "engine channel quota"
+                );
+                let (engine_sender, engine_receiver) =
+                    network.register(ENGINE_CHANNEL, ack_quota, p2p_backlog);
 
-        // Aggregation engine (journal knobs follow the upstream test defaults).
-        tracing::info!(
-            window = agg_window().get(),
-            activity_timeout = agg_activity_timeout(),
-            rebroadcast_secs = rebroadcast_interval().as_secs_f64(),
-            round_timeout_secs = round_timeout().as_secs_f64(),
-            "aggregation engine tuning"
-        );
-        let engine = Engine::new(
-            context.child("engine"),
-            AggregationConfig {
-                monitor,
-                provider,
-                automaton,
-                reporter: reporter_mailbox,
-                // The oracle disconnects peers on blockable offenses (bad ack
-                // signatures / signer mismatches).
-                blocker: oracle.clone(),
-                priority_acks: false,
-                // Re-send our own ack until quorum; reuse the router's directive
-                // rebroadcast cadence.
-                rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_interval()),
-                // Single static epoch: only epoch 0 acks are valid.
-                epoch_bounds: (EpochDelta::new(0), EpochDelta::new(0)),
-                window: agg_window(),
-                activity_timeout: HeightDelta::new(agg_activity_timeout()),
-                // Per-identity partition: two nodes sharing a storage directory
-                // (e.g. the local $TMPDIR fallback) must not share a journal.
-                journal_partition: format!("aggregation-node-{}", signer.public_key()),
-                journal_write_buffer: NZUsize!(4096),
-                journal_replay_buffer: NZUsize!(4096),
-                journal_heights_per_section: NZU64!(6),
-                journal_compression: Some(3),
-                journal_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                strategy: Sequential,
-            },
-        );
-        engine.start((engine_sender, engine_receiver));
+                // Reporter actor: certificate/tip accounting + TaskBook pruning.
+                let (node_reporter, reporter_mailbox) = NodeReporter::new(
+                    context.child("reporter"),
+                    task_book_mailbox.clone(),
+                    Arc::clone(&engine_tip),
+                );
+                context
+                    .child("reporter_actor")
+                    .spawn(move |_| node_reporter.run());
+
+                // Automaton: resolves each proposed height to the expected task
+                // digest (validated via EVMSketch) or the skip digest, per the
+                // TaskBook.
+                let automaton = GasKillerAutomaton::new(
+                    context.child("automaton"),
+                    task_book_mailbox.clone(),
+                    Arc::clone(&validator),
+                    // Retry transient validation errors up to the router's round
+                    // timeout: past that the router is broadcasting Skip{h} anyway.
+                    round_timeout(),
+                );
+
+                // Static single-epoch supervision: ConstantProvider serves the
+                // same scheme for every epoch and the monitor never fires. Keep a
+                // clone of the monitor in the root future — it must outlive the
+                // engine or the engine exits.
+                let provider = ConstantProvider::<EcdsaScheme, Epoch>::new(scheme);
+                let monitor = StaticEpochMonitor::new();
+                let monitor_guard = monitor.clone();
+
+                // Aggregation engine (journal knobs follow the upstream test defaults).
+                tracing::info!(
+                    window = agg_window().get(),
+                    activity_timeout = agg_activity_timeout(),
+                    rebroadcast_secs = rebroadcast_interval().as_secs_f64(),
+                    round_timeout_secs = round_timeout().as_secs_f64(),
+                    "aggregation engine tuning"
+                );
+                let engine = Engine::new(
+                    context.child("engine"),
+                    AggregationConfig {
+                        monitor,
+                        provider,
+                        automaton,
+                        reporter: reporter_mailbox,
+                        // The oracle disconnects peers on blockable offenses (bad
+                        // ack signatures / signer mismatches).
+                        blocker: oracle.clone(),
+                        priority_acks: false,
+                        // Re-send our own ack until quorum; reuse the router's
+                        // directive rebroadcast cadence.
+                        rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_interval()),
+                        // Single static epoch: only epoch 0 acks are valid.
+                        epoch_bounds: (EpochDelta::new(0), EpochDelta::new(0)),
+                        window: agg_window(),
+                        activity_timeout: HeightDelta::new(agg_activity_timeout()),
+                        // Per-identity partition: two nodes sharing a storage
+                        // directory (e.g. the local $TMPDIR fallback) must not
+                        // share a journal.
+                        journal_partition: format!("aggregation-node-{}", signer.public_key()),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_heights_per_section: NZU64!(6),
+                        journal_compression: Some(3),
+                        journal_page_cache: CacheRef::from_pooler(
+                            &context,
+                            NZU16!(1024),
+                            NZUsize!(10),
+                        ),
+                        strategy: Sequential,
+                    },
+                );
+                engine.start((engine_sender, engine_receiver));
+                Some(monitor_guard)
+            }
+            SignatureScheme::Schnorr => {
+                let schnorr_key = schnorr_key.expect("schnorr key loaded before runtime start");
+                // The Schnorr key IS the operator key, so its point address must
+                // equal our p2p identity — and that identity must be a registered
+                // operator (EcdsaScheme::signer performs this check in ECDSA mode).
+                let own_address = schnorr_key.public_key().eth_address();
+                assert_eq!(
+                    own_address,
+                    signer.public_key().address(),
+                    "schnorr key/point address diverges from the operator identity"
+                );
+                if !operators.iter().any(|o| o.address == own_address) {
+                    panic!(
+                        "own operator address {own_address:?} is not in the \
+                         quorum-{quorum_number} operator set; register the operator \
+                         on-chain before starting the node"
+                    );
+                }
+
+                // The Schnorr rounds are request/response (no steady-state
+                // rebroadcast like TipAcks), but a dropped message costs a whole
+                // retry attempt, so the quota is generous.
+                let schnorr_quota = Quota::per_second(schnorr_messages_per_second());
+                let (schnorr_sender, schnorr_receiver) =
+                    network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
+
+                // Same announce-vs-skip + validation logic the ECDSA automaton
+                // uses — the two paths must vouch for identical digests.
+                let resolver = DigestResolver::new(
+                    task_book_mailbox.clone(),
+                    Arc::clone(&validator),
+                    round_timeout(),
+                );
+                let operator_addresses: HashSet<_> =
+                    operators.iter().map(|o| o.address).collect();
+                let router_key = orchestrator_pub_key.clone();
+                let participant_tip = Arc::clone(&engine_tip);
+                let participant_ctx = context.child("schnorr_participant");
+                context
+                    .child("schnorr_participant_actor")
+                    .spawn(move |_| async move {
+                        schnorr_participant::run(
+                            participant_ctx,
+                            schnorr_key,
+                            router_key,
+                            operator_addresses,
+                            resolver,
+                            participant_tip,
+                            schnorr_receiver,
+                            schnorr_sender,
+                        )
+                        .await;
+                    });
+                None
+            }
+        };
 
         // Readiness flag: set to true after the engine is spawned and network is starting
         let ready = Arc::new(AtomicBool::new(false));

@@ -18,6 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
+    strategy:
+      fail-fast: false
+      matrix:
+        # Run the full stack once per quorum-signature scheme: the engine-driven
+        # ECDSA path and the interactive aggregate-Schnorr path.
+        signature_scheme: [ecdsa, schnorr]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -67,8 +74,10 @@ jobs:
         env:
           # The ECDSA AVS stack is deployed by the eigenlayer setup image. Pinned to
           # the companion PR build of BreadchainCoop/eigenlayer-bls-local; repin to
-          # "latest" once that PR merges.
+          # "latest" once that PR merges. (The schnorr stack additionally deploys
+          # SchnorrStakeRegistry from this repo's deploy binary — same setup image.)
           EIGENLAYER_IMAGE: ghcr.io/breadchaincoop/eigenlayer:pr-ron-gas-killer-ecdsa-stack
+          SIGNATURE_SCHEME: ${{ matrix.signature_scheme }}
         run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log; exit ${PIPESTATUS[0]}
 
       - name: Show router logs
@@ -81,6 +90,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-output
+          name: e2e-test-output-${{ matrix.signature_scheme }}
           path: e2e-test-output.log
           retention-days: 1

@@ -25,6 +25,7 @@ use commonware_utils::NZUsize;
 use commonware_utils::channel::oneshot;
 use gas_killer_common::ecdsa::{EcdsaCertificate, EcdsaScheme};
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
 use tracing::{debug, error, info, trace, warn};
 
 /// A certificate observation handed to the submitter.
@@ -100,6 +101,27 @@ impl Reporter for CertReporterMailbox {
             // verifier-only scheme never signs — tolerate and ignore.
             Activity::Ack(_) => Feedback::Ok,
         }
+    }
+}
+
+/// Certificate observations the sequencer needs to drive heights: the resume tip
+/// and the certified digest per height. Implemented by the engine-backed
+/// [`CertReporterMailbox`] (ECDSA mode) and by the Schnorr coordinator's mailbox
+/// (`crate::schnorr_coordinator`, schnorr mode).
+pub trait CertIndex: Clone + Send + 'static {
+    /// The next height needing a certificate (`0` until anything certifies).
+    fn get_tip(&self) -> impl Future<Output = u64> + Send;
+    /// The certified digest for `height`, if observed (and not pruned).
+    fn get(&self, height: u64) -> impl Future<Output = Option<Digest>> + Send;
+}
+
+impl CertIndex for CertReporterMailbox {
+    async fn get_tip(&self) -> u64 {
+        CertReporterMailbox::get_tip(self).await
+    }
+
+    async fn get(&self, height: u64) -> Option<Digest> {
+        CertReporterMailbox::get(self, height).await
     }
 }
 

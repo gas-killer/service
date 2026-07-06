@@ -351,6 +351,9 @@ spec:
             # SQLite store (DATA_DIR), so it points at the same mount path.
             - name: STORAGE_DIR
               value: {{ .Values.router.persistence.mountPath | quote }}
+            # Quorum signature scheme (ecdsa | schnorr); must match the nodes'.
+            - name: SIGNATURE_SCHEME
+              value: {{ .Values.global.signatureScheme | quote }}
             - name: PRIVATE_KEY
               valueFrom:
                 secretKeyRef:

@@ -29,6 +29,7 @@ dotenv = { workspace = true }
 gas-analyzer = { workspace = true }
 gas-killer-common = { workspace = true }
 gas-killer-router = { path = "../router" }
+rand = { workspace = true }
 reqwest = { workspace = true }
 toml = "0.8"
 serde = { workspace = true }

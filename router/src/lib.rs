@@ -7,6 +7,8 @@ pub mod factories;
 pub mod ingress;
 pub mod metrics;
 pub mod reporter;
+pub mod schnorr_coordinator;
+pub mod schnorr_submitter;
 pub mod sequencer;
 pub mod store;
 pub mod submitter;

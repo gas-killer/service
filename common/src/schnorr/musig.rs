@@ -38,6 +38,23 @@ pub struct PubNonce {
     r2: AffinePoint,
 }
 
+impl PubNonce {
+    /// 66-byte wire encoding: compressed `R1 ‖ R2`.
+    pub fn to_bytes(&self) -> [u8; 66] {
+        let mut out = [0u8; 66];
+        out[..33].copy_from_slice(&super::compress_point(&self.r1));
+        out[33..].copy_from_slice(&super::compress_point(&self.r2));
+        out
+    }
+
+    /// Decodes the 66-byte wire encoding (rejects invalid points and identity).
+    pub fn from_bytes(bytes: &[u8; 66]) -> Option<Self> {
+        let r1 = super::decompress_point(&bytes[..33].try_into().unwrap())?;
+        let r2 = super::decompress_point(&bytes[33..].try_into().unwrap())?;
+        Some(Self { r1, r2 })
+    }
+}
+
 /// Generates a fresh secret/public nonce pair.
 pub fn gen_nonce(fill: &mut impl Entropy) -> (SecNonce, PubNonce) {
     loop {
@@ -123,6 +140,36 @@ pub struct SigningContext {
     pub message: [u8; MESSAGE_LEN],
 }
 
+impl SigningContext {
+    /// The aggregate nonce pair `(R1_agg, R2_agg)` as a [`PubNonce`] (wire form).
+    pub fn agg_nonces(&self) -> PubNonce {
+        PubNonce {
+            r1: self.r1_agg,
+            r2: self.r2_agg,
+        }
+    }
+
+    /// Rebuilds a context from wire parts (node side).
+    ///
+    /// SECURITY: the caller MUST have computed `x_agg` itself from an authenticated
+    /// signer set (never trust a coordinator-supplied aggregate key); `partial_sign`
+    /// then re-derives `b`/`e`/`R` from these parts and cross-checks `r_addr`.
+    pub fn from_wire(
+        x_agg: PublicKey,
+        agg_nonces: &PubNonce,
+        r_addr: alloy_primitives::Address,
+        message: [u8; MESSAGE_LEN],
+    ) -> Self {
+        Self {
+            x_agg,
+            r1_agg: agg_nonces.r1,
+            r2_agg: agg_nonces.r2,
+            r_addr,
+            message,
+        }
+    }
+}
+
 /// Produces a signer's partial signature `s_i = k1 + b·k2 − e·x_i (mod n)`.
 ///
 /// `b` and `e` are **recomputed locally** from the context's public aggregate nonces and
@@ -188,6 +235,26 @@ impl Coordinator {
             r_addr,
             message: *message,
         })
+    }
+
+    /// Verifies a single signer's partial signature against its nonce commitment:
+    /// `s_i·G == R1_i + b·R2_i − e·X_i`.
+    ///
+    /// Lets the coordinator attribute a bad partial to the exact signer (and drop
+    /// it from the next attempt) instead of only discovering that the aggregate
+    /// fails to verify in [`Coordinator::assemble`].
+    pub fn verify_partial(
+        ctx: &SigningContext,
+        signer: &PublicKey,
+        nonce: &PubNonce,
+        partial: &Scalar,
+    ) -> bool {
+        let b = nonce_coefficient(&ctx.r1_agg, &ctx.r2_agg, &ctx.x_agg, &ctx.message);
+        let e = challenge(&ctx.x_agg, &ctx.message, ctx.r_addr);
+        let lhs = ProjectivePoint::GENERATOR * *partial;
+        let rhs = ProjectivePoint::from(nonce.r1) + ProjectivePoint::from(nonce.r2) * b
+            - ProjectivePoint::from(signer.point()) * e;
+        lhs.to_affine() == rhs.to_affine()
     }
 
     /// Aggregates the partial signatures into the final signature. The caller is responsible
@@ -338,6 +405,40 @@ mod tests {
         let (x_agg, sig) = run_session(&participants, &[0, 1, 2], &msg, &mut fill);
         let other = keccak256(b"forged task").0;
         assert!(!verify_aggregate(&x_agg, &other, &sig));
+    }
+
+    #[test]
+    fn partial_verification_attributes_bad_partials() {
+        let mut fill = seeded(21);
+        let participants: Vec<Participant> = (0..3)
+            .map(|i| Participant::new(PrivateKey::from_seed(700 + i)))
+            .collect();
+        let msg = keccak256(b"attributable partials").0;
+
+        let mut secnonces = Vec::new();
+        let mut contributions = Vec::new();
+        for p in &participants {
+            let (sec, pubn) = p.new_nonce(&mut fill);
+            contributions.push((p.public_key(), pubn));
+            secnonces.push(sec);
+        }
+        let ctx = Coordinator::build_context(&contributions, &msg).unwrap();
+        for (i, sec) in secnonces.into_iter().enumerate() {
+            let partial = participants[i].sign(sec, &ctx).expect("participant signs");
+            let (pk, pubn) = &contributions[i];
+            assert!(Coordinator::verify_partial(&ctx, pk, pubn, &partial));
+            // The same partial must NOT verify against another signer's identity.
+            let (other_pk, other_nonce) = &contributions[(i + 1) % contributions.len()];
+            assert!(!Coordinator::verify_partial(
+                &ctx,
+                other_pk,
+                other_nonce,
+                &partial
+            ));
+            // A tampered partial is rejected for the right signer.
+            let tampered = partial + Scalar::ONE;
+            assert!(!Coordinator::verify_partial(&ctx, pk, pubn, &tampered));
+        }
     }
 
     #[test]

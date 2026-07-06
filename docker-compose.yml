@@ -81,6 +81,9 @@ services:
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       - STORAGE_DIR=/app/data
+      # Quorum signature scheme: ecdsa (engine path) or schnorr (aggregate path).
+      # Every binary in the stack must run the same scheme.
+      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-ecdsa}
     volumes:
       - ./config/.nodes/operator_keys/testacc1.private.ecdsa.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
@@ -119,6 +122,9 @@ services:
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       - STORAGE_DIR=/app/data
+      # Quorum signature scheme: ecdsa (engine path) or schnorr (aggregate path).
+      # Every binary in the stack must run the same scheme.
+      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-ecdsa}
     volumes:
       - ./config/.nodes/operator_keys/testacc2.private.ecdsa.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
@@ -151,6 +157,9 @@ services:
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       - STORAGE_DIR=/app/data
+      # Quorum signature scheme: ecdsa (engine path) or schnorr (aggregate path).
+      # Every binary in the stack must run the same scheme.
+      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-ecdsa}
     volumes:
       - ./config/.nodes/operator_keys/testacc3.private.ecdsa.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
@@ -195,6 +204,8 @@ services:
       # Guards the /admin/keys endpoints used to mint the API keys that authenticate /trigger.
       # Defaults to a fixed value for the local/e2e harness; override by exporting ADMIN_KEY.
       - ADMIN_KEY=${ADMIN_KEY:-ci-admin-key}
+      # Quorum signature scheme: must match the nodes' setting above.
+      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-ecdsa}
     volumes:
       - ./config/.nodes:/app/.nodes:ro
       - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro

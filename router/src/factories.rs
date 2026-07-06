@@ -8,6 +8,8 @@ use crate::ingress::{
 };
 use crate::metrics::MetricsCollector;
 use crate::reporter::CertifiedReceiver;
+use crate::schnorr_coordinator::SchnorrCertifiedReceiver;
+use crate::schnorr_submitter::SchnorrSubmitter;
 use crate::sequencer::{
     DispatchTime, ResolutionSender, SharedAssignments, TaskQueueDepth, TaskReceiver, TaskSender,
     task_channel, task_queue_depth,
@@ -222,22 +224,19 @@ async fn create_wallet_provider_for_chain(
     Ok(provider)
 }
 
-/// Creates the [`Submitter`] configured for Gas Killer operations with multi-chain support.
-///
-/// The submitter's read side (a single `eth_blockNumber` per submission, anchoring
-/// the stake registry's checkpoint lookups) always points at L1 via `HTTP_RPC` —
-/// the `ECDSAStakeRegistry` lives on L1.
+/// Shared submitter plumbing for both scheme modes: the L1 read-side provider
+/// (one `eth_blockNumber` per submission, anchoring the registry's reference
+/// block — operator state lives on L1 only) and the multi-chain write handler.
 ///
 /// `L2_HTTP_RPC` is used for the write side: submitting `verifyAndUpdate`
 /// transactions on L2 when the target contract lives there.
-pub async fn create_submitter(
-    scheme: EcdsaScheme,
-    assignments: SharedAssignments,
-    certified: CertifiedReceiver,
-    resolutions: ResolutionSender,
+async fn create_handler_parts(
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
-) -> Result<Submitter> {
+) -> Result<(
+    gas_killer_common::bindings::ReadOnlyProvider,
+    GasKillerHandler<SimpleWalletProvider>,
+)> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
@@ -322,8 +321,44 @@ pub async fn create_submitter(
         .with_dispatch_time(dispatch_time)
         .with_receipt_timeout(receipt_timeout_override);
 
+    Ok((view_only_provider, gas_killer_handler))
+}
+
+/// Creates the [`Submitter`] configured for Gas Killer operations with
+/// multi-chain support (ECDSA mode).
+pub async fn create_submitter(
+    scheme: EcdsaScheme,
+    assignments: SharedAssignments,
+    certified: CertifiedReceiver,
+    resolutions: ResolutionSender,
+    metrics: Arc<MetricsCollector>,
+    dispatch_time: DispatchTime,
+) -> Result<Submitter> {
+    let (view_only_provider, gas_killer_handler) =
+        create_handler_parts(metrics, dispatch_time).await?;
     Ok(Submitter::new(
         scheme,
+        view_only_provider,
+        gas_killer_handler,
+        assignments,
+        certified,
+        resolutions,
+    ))
+}
+
+/// Creates the [`SchnorrSubmitter`] (schnorr mode). Same environment surface as
+/// [`create_submitter`]; only the certified-observation source and the on-chain
+/// calling convention differ.
+pub async fn create_schnorr_submitter(
+    assignments: SharedAssignments,
+    certified: SchnorrCertifiedReceiver,
+    resolutions: ResolutionSender,
+    metrics: Arc<MetricsCollector>,
+    dispatch_time: DispatchTime,
+) -> Result<SchnorrSubmitter> {
+    let (view_only_provider, gas_killer_handler) =
+        create_handler_parts(metrics, dispatch_time).await?;
+    Ok(SchnorrSubmitter::new(
         view_only_provider,
         gas_killer_handler,
         assignments,

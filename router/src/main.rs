@@ -17,7 +17,7 @@ use clap::{Arg, Command};
 use commonware_consensus::aggregation::{Config as AggregationConfig, Engine};
 use commonware_consensus::types::{Epoch, EpochDelta, HeightDelta};
 use commonware_cryptography::Signer as _;
-use commonware_cryptography::certificate::{ConstantProvider, Scheme as _};
+use commonware_cryptography::certificate::ConstantProvider;
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_p2p::{Address, AddressableManager as _};
 use commonware_parallel::Sequential;
@@ -32,14 +32,17 @@ use eigen_logging::log_level::LogLevel;
 use gas_killer_common::ecdsa::{EcdsaScheme, PublicKey};
 use gas_killer_common::get_operator_states;
 use gas_killer_common::{
-    GasKillerValidator, SpeculativePrebuildConfig, StaticEpochMonitor, ack_messages_per_second,
-    agg_activity_timeout, agg_window, get_signer, load_key_from_file, p2p_message_backlog,
-    p2p_quota_period, rebroadcast_interval, storage_directory,
+    GasKillerValidator, SignatureScheme, SpeculativePrebuildConfig, StaticEpochMonitor,
+    ack_messages_per_second, agg_activity_timeout, agg_window, get_signer, load_key_from_file,
+    p2p_message_backlog, p2p_quota_period, quorum_threshold_fraction, rebroadcast_interval,
+    round_timeout, schnorr_messages_per_second, schnorr_stage_timeout, signature_scheme,
+    storage_directory,
 };
 use gas_killer_router::automaton::RouterAutomaton;
-use gas_killer_router::factories::{create_ingress, create_submitter};
+use gas_killer_router::factories::{create_ingress, create_schnorr_submitter, create_submitter};
 use gas_killer_router::metrics::MetricsCollector;
 use gas_killer_router::reporter::{CertReporter, certified_channel};
+use gas_killer_router::schnorr_coordinator::{SchnorrCoordinator, schnorr_certified_channel};
 use gas_killer_router::sequencer::{
     DispatchTime, Sequencer, TipReports, ingest_tip_reports, resolution_channel, shared_assignments,
 };
@@ -62,6 +65,10 @@ const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
 const ACK_CHANNEL: u64 = 0;
 /// P2p channel on which the router broadcasts `TaskDirective`s to the nodes.
 const DIRECTIVE_CHANNEL: u64 = 1;
+
+/// P2P channel carrying the interactive Schnorr signing rounds
+/// (`SIGNATURE_SCHEME=schnorr` mode only; never registered in ECDSA mode).
+const SCHNORR_CHANNEL: u64 = 2;
 
 /// Journal partition for the router's verifier-only engine (a subdirectory of
 /// the runtime storage directory).
@@ -329,39 +336,28 @@ fn main() {
             key
         }));
 
-        // Verifier-only scheme: the router validates acks and assembles
-        // certificates but never signs (its key is not in the participant set).
-        let scheme = EcdsaScheme::verifier(participants);
-        // The contract-derived threshold is informational only: the engine's
-        // quorum is fixed at N3f1 (n - (n-1)/3) and the authoritative
-        // operator-count check runs on-chain in GasKillerSDK.verifyAndUpdate.
+        let scheme_mode = signature_scheme();
+        // The contract-derived threshold is informational only: the ECDSA
+        // engine's quorum is fixed at N3f1 (n - (n-1)/3), the schnorr
+        // coordinator uses the QUORUM_THRESHOLD fraction as its participation
+        // floor, and the authoritative check runs on-chain either way.
         tracing::info!(
-            participants = scheme.participants().len(),
-            engine_quorum = scheme.participants().quorum::<N3f1>(),
+            ?scheme_mode,
+            participants = participants.len(),
+            engine_quorum = participants.quorum::<N3f1>(),
             contract_threshold = quorum_infos[quorum_number].threshold,
             "operator set loaded"
         );
 
-        // Register channels (must precede network.start()).
-        //
-        // The ack channel needs its own, much larger quota: node engines keep
-        // rebroadcasting each signed height's TipAck until it falls
-        // activity_timeout below the tip (even after certification), and the p2p
-        // limiter silently drops messages beyond the per-peer rate — an undersized
-        // quota here starves the router of fresh acks and stalls certification.
+        // Register the shared directive channel (must precede network.start()):
+        // the router SENDS directives on channel 1 and receives the nodes'
+        // rate-limited TipReport replies (journal-loss recovery) on the same
+        // channel. The mode-specific signing channel — 0 for the ECDSA engine's
+        // TipAck traffic, 2 for the interactive Schnorr rounds — is registered in
+        // the mode branch below, still before network.start().
         let p2p_backlog = p2p_message_backlog();
         let p2p_quota = Quota::with_period(p2p_quota_period())
             .expect("p2p_quota_period always returns a non-zero duration");
-        let ack_rate = ack_messages_per_second();
-        let ack_quota = Quota::per_second(ack_rate);
-        tracing::info!(
-            ack_messages_per_second = ack_rate.get(),
-            "engine channel quota"
-        );
-        let (ack_sender, ack_receiver) = network.register(ACK_CHANNEL, ack_quota, p2p_backlog);
-        // The router SENDS directives on channel 1 and receives the nodes'
-        // rate-limited TipReport replies (journal-loss recovery) on the same
-        // channel.
         let (directive_sender, directive_receiver) =
             network.register(DIRECTIVE_CHANNEL, p2p_quota, p2p_backlog);
 
@@ -382,47 +378,10 @@ fn main() {
             });
         }
 
-        // State shared across sequencer / automaton / submitter.
+        // State shared across sequencer / signing path / submitter.
         let assignments = shared_assignments();
         let dispatch_time: DispatchTime = Arc::new(Mutex::new(HashMap::new()));
-        let (certified_sender, certified_receiver) = certified_channel();
         let (resolution_sender, resolution_receiver) = resolution_channel();
-
-        // Certificate reporter actor (the engine's Reporter).
-        let (cert_reporter, reporter_mailbox) = CertReporter::new(
-            context.child("cert_reporter"),
-            scheme.clone(),
-            certified_sender,
-        );
-        context
-            .child("cert_reporter_actor")
-            .spawn(move |_| cert_reporter.run());
-
-        // Verifier-only aggregation engine on channel 0.
-        let engine = Engine::new(
-            context.child("engine"),
-            AggregationConfig {
-                monitor: StaticEpochMonitor::new(),
-                provider: ConstantProvider::<EcdsaScheme, Epoch>::new(scheme.clone()),
-                automaton: RouterAutomaton::new(assignments.clone()),
-                reporter: reporter_mailbox.clone(),
-                blocker: oracle.clone(),
-                priority_acks: false,
-                rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_interval()),
-                // Single static epoch: nothing to keep or accept beyond it.
-                epoch_bounds: (EpochDelta::new(0), EpochDelta::new(0)),
-                window: agg_window(),
-                activity_timeout: HeightDelta::new(agg_activity_timeout()),
-                journal_partition: JOURNAL_PARTITION.to_string(),
-                journal_write_buffer: NZUsize!(4096),
-                journal_replay_buffer: NZUsize!(4096),
-                journal_heights_per_section: NZU64!(64),
-                journal_compression: None,
-                journal_page_cache: CacheRef::from_pooler(&context, NZU16!(4096), NZUsize!(128)),
-                strategy: Sequential,
-            },
-        );
-        engine.start((ack_sender, ack_receiver));
 
         // HTTP ingress (env-gated, unchanged endpoints). The returned sender is
         // kept alive below so the task channel never closes while running
@@ -432,49 +391,178 @@ fn main() {
             .expect("Failed to create ingress");
         let _task_sender = ingress.sender;
 
-        // On-chain submitter: consumes verified certificates, resolves heights.
-        let submitter = create_submitter(
-            scheme.clone(),
-            assignments.clone(),
-            certified_receiver,
-            resolution_sender,
-            Arc::clone(&metrics),
-            Arc::clone(&dispatch_time),
-        )
-        .await
-        .expect("Failed to create submitter");
-        context.child("submitter").spawn(move |_| submitter.run());
-
         // Node tip reports (channel 1, node → router): if this router lost its
         // journal and assigns heights the nodes are already past, their reports
         // fast-forward the sequencer instead of wedging on a dead height.
-        let tip_reports = TipReports::new(scheme.participants().len());
+        let tip_reports = TipReports::new(participants.len());
         {
-            let participant_keys: HashSet<PublicKey> =
-                scheme.participants().iter().cloned().collect();
+            let participant_keys: HashSet<PublicKey> = participants.iter().cloned().collect();
             let tip_reports = tip_reports.clone();
             context.child("tip_reports").spawn(move |_| async move {
                 ingest_tip_reports(directive_receiver, participant_keys, tip_reports).await;
             });
         }
 
-        // Sequencer: dequeues tasks, assigns heights, broadcasts directives to the
-        // operator set (explicit keys — see Sequencer::broadcast).
-        let directive_recipients: Vec<PublicKey> = scheme.participants().iter().cloned().collect();
-        let sequencer = Sequencer::new(
-            ingress.receiver,
-            ingress.queue_depth,
-            validator,
-            Some(Arc::clone(&metrics)),
-            dispatch_time,
-            assignments,
-            reporter_mailbox,
-            resolution_receiver,
-            directive_sender,
-            directive_recipients,
-            tip_reports,
-        );
-        context.child("sequencer").spawn(move |_| sequencer.run());
+        // Directive recipients: the explicit operator keys (see Sequencer::broadcast).
+        let directive_recipients: Vec<PublicKey> = participants.iter().cloned().collect();
+
+        // Mode-specific signing path. ECDSA runs the verifier-only aggregation
+        // engine + certificate reporter; Schnorr runs the interactive two-round
+        // MuSig2 coordinator on channel 2 (see schnorr_coordinator.rs). The
+        // sequencer is shared — only its certificate-observation source differs.
+        match scheme_mode {
+            SignatureScheme::Ecdsa => {
+                // Verifier-only scheme: the router validates acks and assembles
+                // certificates but never signs (its key is not in the participant
+                // set).
+                let scheme = EcdsaScheme::verifier(participants);
+
+                // The ack channel needs its own, much larger quota: node engines
+                // keep rebroadcasting each signed height's TipAck until it falls
+                // activity_timeout below the tip (even after certification), and
+                // the p2p limiter silently drops messages beyond the per-peer
+                // rate — an undersized quota here starves the router of fresh
+                // acks and stalls certification.
+                let ack_rate = ack_messages_per_second();
+                let ack_quota = Quota::per_second(ack_rate);
+                tracing::info!(
+                    ack_messages_per_second = ack_rate.get(),
+                    "engine channel quota"
+                );
+                let (ack_sender, ack_receiver) =
+                    network.register(ACK_CHANNEL, ack_quota, p2p_backlog);
+
+                let (certified_sender, certified_receiver) = certified_channel();
+
+                // Certificate reporter actor (the engine's Reporter).
+                let (cert_reporter, reporter_mailbox) = CertReporter::new(
+                    context.child("cert_reporter"),
+                    scheme.clone(),
+                    certified_sender,
+                );
+                context
+                    .child("cert_reporter_actor")
+                    .spawn(move |_| cert_reporter.run());
+
+                // Verifier-only aggregation engine on channel 0.
+                let engine = Engine::new(
+                    context.child("engine"),
+                    AggregationConfig {
+                        monitor: StaticEpochMonitor::new(),
+                        provider: ConstantProvider::<EcdsaScheme, Epoch>::new(scheme.clone()),
+                        automaton: RouterAutomaton::new(assignments.clone()),
+                        reporter: reporter_mailbox.clone(),
+                        blocker: oracle.clone(),
+                        priority_acks: false,
+                        rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_interval()),
+                        // Single static epoch: nothing to keep or accept beyond it.
+                        epoch_bounds: (EpochDelta::new(0), EpochDelta::new(0)),
+                        window: agg_window(),
+                        activity_timeout: HeightDelta::new(agg_activity_timeout()),
+                        journal_partition: JOURNAL_PARTITION.to_string(),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_heights_per_section: NZU64!(64),
+                        journal_compression: None,
+                        journal_page_cache: CacheRef::from_pooler(
+                            &context,
+                            NZU16!(4096),
+                            NZUsize!(128),
+                        ),
+                        strategy: Sequential,
+                    },
+                );
+                engine.start((ack_sender, ack_receiver));
+
+                // On-chain submitter: consumes verified certificates, resolves heights.
+                let submitter = create_submitter(
+                    scheme.clone(),
+                    assignments.clone(),
+                    certified_receiver,
+                    resolution_sender,
+                    Arc::clone(&metrics),
+                    Arc::clone(&dispatch_time),
+                )
+                .await
+                .expect("Failed to create submitter");
+                context.child("submitter").spawn(move |_| submitter.run());
+
+                // Sequencer: dequeues tasks, assigns heights, broadcasts
+                // directives to the operator set.
+                let sequencer = Sequencer::new(
+                    ingress.receiver,
+                    ingress.queue_depth,
+                    validator,
+                    Some(Arc::clone(&metrics)),
+                    dispatch_time,
+                    assignments,
+                    reporter_mailbox,
+                    resolution_receiver,
+                    directive_sender,
+                    directive_recipients,
+                    tip_reports,
+                );
+                context.child("sequencer").spawn(move |_| sequencer.run());
+            }
+            SignatureScheme::Schnorr => {
+                // The Schnorr rounds are request/response (no steady-state
+                // rebroadcast like TipAcks), but a dropped message costs a whole
+                // retry attempt, so the quota is generous.
+                let schnorr_quota = Quota::per_second(schnorr_messages_per_second());
+                let (schnorr_sender, schnorr_receiver) =
+                    network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
+
+                let (certified_sender, certified_receiver) = schnorr_certified_channel();
+
+                // Coordinator: drives the two-round signing sessions per assigned
+                // height and doubles as the sequencer's certificate index.
+                let operator_keys: Vec<PublicKey> = participants.iter().cloned().collect();
+                let (coordinator, coordinator_mailbox) = SchnorrCoordinator::new(
+                    assignments.clone(),
+                    certified_sender,
+                    schnorr_sender,
+                    schnorr_receiver,
+                    operator_keys,
+                    quorum_threshold_fraction(),
+                    schnorr_stage_timeout(),
+                    round_timeout(),
+                );
+                context
+                    .child("schnorr_coordinator")
+                    .spawn(move |_| coordinator.run());
+
+                // On-chain submitter: consumes aggregate signatures, resolves heights.
+                let submitter = create_schnorr_submitter(
+                    assignments.clone(),
+                    certified_receiver,
+                    resolution_sender,
+                    Arc::clone(&metrics),
+                    Arc::clone(&dispatch_time),
+                )
+                .await
+                .expect("Failed to create schnorr submitter");
+                context
+                    .child("schnorr_submitter")
+                    .spawn(move |_| submitter.run());
+
+                // Sequencer: unchanged behavior; its certificate observations come
+                // from the coordinator's mailbox instead of the engine reporter.
+                let sequencer = Sequencer::new(
+                    ingress.receiver,
+                    ingress.queue_depth,
+                    validator,
+                    Some(Arc::clone(&metrics)),
+                    dispatch_time,
+                    assignments,
+                    coordinator_mailbox,
+                    resolution_receiver,
+                    directive_sender,
+                    directive_recipients,
+                    tip_reports,
+                );
+                context.child("sequencer").spawn(move |_| sequencer.run());
+            }
+        }
 
         // Readiness flag: set to true after everything is spawned and the network is starting
         let ready = Arc::new(AtomicBool::new(false));
