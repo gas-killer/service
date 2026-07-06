@@ -95,6 +95,11 @@ contract CachedECDSAStakeRegistry is ECDSAStakeRegistry {
         Snap memory s = _snap;
         require(referenceBlock < block.number, "future");
         require(referenceBlock >= s.effectiveBlock, "stale-snapshot"); // caller falls back to base path
+        // Mirror the base registry's _validateSignaturesLength: an empty signer set is
+        // rejected unconditionally, before the threshold gate. Without this, a zero-length
+        // signatures[] skips the loop and clears a threshold of 0 with the magic value —
+        // an accept the base always rejects.
+        require(signatures.length != 0, "empty");
         uint256 signed;
         address last;
         for (uint256 i; i < signatures.length; i++) {
