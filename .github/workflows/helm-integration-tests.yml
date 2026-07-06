@@ -11,6 +11,9 @@ on:
       - main
       - dev
       - staging
+      # Stacked-PR chain for the Schnorr work — see e2e-test.yml for the rationale.
+      # Remove once the stack lands on a mainline branch.
+      - RonTuretzky/pr299-ecdsa-signatures
   workflow_dispatch:
 
 jobs:

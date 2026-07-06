@@ -11,6 +11,12 @@ on:
       - main
       - dev
       - staging
+      # Stacked-PR chain for the Schnorr work: this branch is the base of the
+      # Schnorr PR, so PRs targeting it (i.e. the Schnorr PR itself) must run the
+      # full e2e matrix — otherwise the live aggregate-signing path is never
+      # demonstrated as a gating check. Remove once the stack lands on a mainline
+      # branch.
+      - RonTuretzky/pr299-ecdsa-signatures
   workflow_dispatch:
 
 jobs:
