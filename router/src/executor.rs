@@ -1,5 +1,8 @@
-use crate::creator::{DispatchTime, take_dispatch_time};
+use crate::creator::{
+    DispatchTime, TaskRounds, set_task_failed, set_task_ready, take_dispatch_time, take_task_id,
+};
 use crate::metrics::MetricsCollector;
+use crate::store::SqliteStore;
 use gas_killer_common::ChainRole;
 use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
@@ -42,6 +45,12 @@ pub struct GasKillerHandler<P> {
     /// applied to every chain. When unset, per-chain defaults apply. Sourced from
     /// `EXECUTOR_RECEIPT_TIMEOUT_SECS`.
     receipt_timeout_override: Option<u64>,
+    /// Durable store used to settle a task's terminal status once its round executes. `None` in
+    /// store-less test/dev harnesses, where the transition is skipped.
+    store: Option<SqliteStore>,
+    /// Shared with the creator: maps a round to the task being aggregated in it, so a settled round
+    /// can be marked ready/failed against the right task.
+    task_rounds: TaskRounds,
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
@@ -56,6 +65,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
             receipt_timeout_override: None,
+            store: None,
+            task_rounds: TaskRounds::default(),
         }
     }
 
@@ -68,6 +79,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
             receipt_timeout_override: None,
+            store: None,
+            task_rounds: TaskRounds::default(),
         }
     }
 
@@ -85,6 +98,19 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 
     pub fn with_dispatch_time(mut self, dispatch_time: DispatchTime) -> Self {
         self.dispatch_time = dispatch_time;
+        self
+    }
+
+    /// Attaches the durable store so a settled round advances its task's terminal status.
+    pub fn with_store(mut self, store: SqliteStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Shares the round→task correlation map with the creator. Must be the same handle the creator
+    /// is built with, or a settled round won't map back to its task.
+    pub fn with_task_rounds(mut self, task_rounds: TaskRounds) -> Self {
+        self.task_rounds = task_rounds;
         self
     }
 
@@ -405,6 +431,21 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
                 }
                 Err(_) => {
                     m.aggregation_rounds_failed.inc();
+                }
+            }
+        }
+
+        // Settle the task this round was aggregating: ready on a confirmed on-chain update, failed
+        // otherwise. The creator recorded round→task on dispatch; consuming it here both drives the
+        // transition and removes the entry so the creator does not later treat the round as
+        // abandoned.
+        if let Some(store) = &self.store
+            && let Some(task_id) = take_task_id(&self.task_rounds, round)
+        {
+            match &result {
+                Ok(_) => set_task_ready(store, &task_id).await,
+                Err(e) => {
+                    set_task_failed(store, &task_id, &format!("verification failed: {e}")).await
                 }
             }
         }

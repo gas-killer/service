@@ -1,8 +1,9 @@
-use crate::creator::DispatchTime;
+use crate::creator::{DispatchTime, TaskRounds};
 use crate::factories::{
     create_creator, create_gas_killer_executor, create_listening_creator_with_server,
 };
 use crate::metrics::MetricsCollector;
+use crate::store::SqliteStore;
 use crate::{GasKillerCreatorType, GasKillerOrchestrator, GasKillerValidator};
 use commonware_avs_router::executor::bls::BlsVerificationData;
 use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
@@ -48,25 +49,34 @@ impl GasKillerOrchestratorBuilder {
         // timestamp keyed by round, the executor removes it when threshold sigs arrive.
         let dispatch_time: DispatchTime = Arc::new(Mutex::new(HashMap::new()));
 
-        // Create gas-killer-specific dependencies
+        // Per-round task correlation for status transitions: the creator records which task each
+        // round is aggregating, the executor settles that task ready/failed when the round resolves.
+        let task_rounds: TaskRounds = Arc::new(Mutex::new(HashMap::new()));
+
+        // Create gas-killer-specific dependencies. The ingress path opens the durable store and
+        // hands it back so the executor can share the same handle for status transitions; the
+        // no-ingress path has no store (no task lifecycle to drive).
         let use_ingress = std::env::var("INGRESS").unwrap_or_default().to_lowercase() == "true";
-        let task_creator: GasKillerCreatorType = if use_ingress {
+        let (task_creator, store): (GasKillerCreatorType, Option<SqliteStore>) = if use_ingress {
             let addr =
                 std::env::var("INGRESS_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
             info!(address = %addr, "Using GasKiller creator with HTTP server");
-            create_listening_creator_with_server(
+            let (creator, store) = create_listening_creator_with_server(
                 addr,
                 Arc::clone(&validator),
                 Arc::clone(&metrics),
                 Arc::clone(&dispatch_time),
+                Arc::clone(&task_rounds),
             )
-            .await?
+            .await?;
+            (creator, Some(store))
         } else {
             info!("Using GasKiller creator without ingress");
-            create_creator().await?
+            (create_creator().await?, None)
         };
 
-        let executor = create_gas_killer_executor(metrics, dispatch_time, context).await?;
+        let executor =
+            create_gas_killer_executor(metrics, dispatch_time, context, store, task_rounds).await?;
 
         // Unwrap the Arc to get the validator for the orchestrator
         // This is safe because we control all references

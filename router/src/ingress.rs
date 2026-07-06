@@ -1,4 +1,4 @@
-use crate::creator::{TaskQueueDepth, TaskSender};
+use crate::creator::{QueuedTask, TaskQueueDepth, TaskSender};
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ApiQuery, ErrorCode};
 use crate::metrics::MetricsCollector;
 use crate::store::{ApiKeyMetadata, CreatedApiKey, SqliteStore, Task, TaskStatus};
@@ -640,7 +640,11 @@ pub async fn submit_task_handler(
         "Task accepted"
     );
     let depth = state.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
-    if state.sender.send(request).is_err() {
+    let queued = QueuedTask {
+        task_id: task.id.clone(),
+        request,
+    };
+    if state.sender.send(queued).is_err() {
         state.queue_depth.fetch_sub(1, Ordering::Relaxed);
         tracing::error!(task_id = %task.id, "task channel closed, dropping request");
         return Err(ApiError::internal("Internal error: task queue unavailable"));

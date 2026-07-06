@@ -1,5 +1,6 @@
 use crate::ingress::GasKillerTaskRequest;
 use crate::metrics::MetricsCollector;
+use crate::store::{SqliteStore, TaskStatus};
 use commonware_avs_router::creator::Creator;
 use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
@@ -45,13 +46,79 @@ pub(crate) fn take_dispatch_time(times: &DispatchTime, round: u64) -> Option<Ins
     times.lock().ok().and_then(|mut times| times.remove(&round))
 }
 
-pub type TaskSender = UnboundedSender<GasKillerTaskRequest>;
-pub type TaskReceiver = UnboundedReceiver<GasKillerTaskRequest>;
+/// A task handed to the aggregation pipeline: the persistent task id — so the creator and executor
+/// can drive its stored status through the lifecycle — alongside the original request.
+#[derive(Debug, Clone)]
+pub struct QueuedTask {
+    pub task_id: String,
+    pub request: GasKillerTaskRequest,
+}
+
+pub type TaskSender = UnboundedSender<QueuedTask>;
+pub type TaskReceiver = UnboundedReceiver<QueuedTask>;
 /// Shared atomic counter tracking tasks in flight between the ingress sender and creator receiver.
 pub type TaskQueueDepth = Arc<AtomicUsize>;
 
 pub fn task_channel() -> (TaskSender, TaskReceiver) {
     mpsc::unbounded_channel()
+}
+
+/// Maps a dispatched consensus round to the id of the task being aggregated in it, letting the
+/// executor mark that task ready or failed by round — the same round-keyed correlation as
+/// [`DispatchTime`]. The creator inserts on dispatch; the executor removes the entry when the round
+/// settles.
+pub type TaskRounds = Arc<Mutex<HashMap<u64, String>>>;
+
+/// Records `task_id` as the task dispatched in `round`. Rounds are processed one at a time, so any
+/// entry left from an earlier round belongs to a round abandoned without settling (e.g. aggregation
+/// timed out); those are evicted here and their task ids returned so the caller can mark them
+/// failed. This both keeps the map bounded and gives every task a terminal state.
+pub(crate) fn record_task_round(rounds: &TaskRounds, round: u64, task_id: String) -> Vec<String> {
+    let mut abandoned = Vec::new();
+    if let Ok(mut map) = rounds.lock() {
+        map.retain(|&r, id| {
+            let keep = r >= round;
+            if !keep {
+                abandoned.push(id.clone());
+            }
+            keep
+        });
+        map.insert(round, task_id);
+    }
+    abandoned
+}
+
+/// Removes and returns the id of the task dispatched in `round`, if one was recorded.
+pub(crate) fn take_task_id(rounds: &TaskRounds, round: u64) -> Option<String> {
+    rounds.lock().ok().and_then(|mut map| map.remove(&round))
+}
+
+/// Best-effort task status bookkeeping shared by the creator and executor. A store error is logged
+/// rather than propagated: failing to record a status transition must never derail aggregation,
+/// which is the real work — a missed transition is recoverable (e.g. by the startup re-queue),
+/// whereas aborting the round is not.
+pub(crate) async fn set_task_processing(store: &SqliteStore, task_id: &str) {
+    if let Err(e) = store
+        .update_task_status(task_id, TaskStatus::Processing)
+        .await
+    {
+        error!(task_id, error = %e, "failed to mark task processing");
+    }
+}
+
+/// Records a task's successful completion. The interactive tier submits `verifyAndUpdate` on-chain
+/// itself, so a completed task carries no user-executable payload yet (that arrives with the
+/// payload-delivery work); the status is recorded now so polling reflects the terminal success.
+pub(crate) async fn set_task_ready(store: &SqliteStore, task_id: &str) {
+    if let Err(e) = store.update_task_status(task_id, TaskStatus::Ready).await {
+        error!(task_id, error = %e, "failed to mark task ready");
+    }
+}
+
+pub(crate) async fn set_task_failed(store: &SqliteStore, task_id: &str, reason: &str) {
+    if let Err(e) = store.mark_task_failed(task_id, reason).await {
+        error!(task_id, error = %e, "failed to mark task failed");
+    }
 }
 
 pub fn task_queue_depth() -> TaskQueueDepth {
@@ -154,6 +221,12 @@ pub struct ListeningGasKillerCreator {
     metrics: Option<Arc<MetricsCollector>>,
     /// Shared with the executor to measure P2P round-trip duration.
     dispatch_time: DispatchTime,
+    /// Durable store used to advance task status as work progresses. `None` in store-less
+    /// test/dev harnesses, where status transitions are simply skipped.
+    store: Option<SqliteStore>,
+    /// Shared with the executor: records which task each dispatched round is aggregating, so the
+    /// executor can settle it (ready/failed) by round.
+    task_rounds: TaskRounds,
 }
 
 impl ListeningGasKillerCreator {
@@ -173,6 +246,8 @@ impl ListeningGasKillerCreator {
             round_counter: AtomicU64::new(initial_round_seed()),
             metrics: None,
             dispatch_time,
+            store: None,
+            task_rounds: TaskRounds::default(),
         }
     }
 
@@ -181,7 +256,21 @@ impl ListeningGasKillerCreator {
         self
     }
 
-    async fn wait_for_task(&self) -> Result<GasKillerTaskRequest> {
+    /// Attaches the durable store so the creator advances task status (`processing`, and `failed`
+    /// on a compute error) as it works each task.
+    pub fn with_store(mut self, store: SqliteStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Shares the round→task correlation map with the executor. Must be the same handle the
+    /// executor is built with, or settled rounds won't map back to their task.
+    pub fn with_task_rounds(mut self, task_rounds: TaskRounds) -> Self {
+        self.task_rounds = task_rounds;
+        self
+    }
+
+    async fn wait_for_task(&self) -> Result<QueuedTask> {
         let mut rx = self.receiver.lock().await;
         let task = if self.config.timeout_ms == 0 {
             rx.recv()
@@ -208,6 +297,11 @@ impl ListeningGasKillerCreator {
         if let Some(m) = &self.metrics {
             m.task_queue_depth.set(depth as i64);
         }
+        // A dequeued task has left the queue and is now being worked; record that transition
+        // before any (potentially slow) computation so a client polling sees `processing` promptly.
+        if let Some(store) = &self.store {
+            set_task_processing(store, &task.task_id).await;
+        }
         Ok(task)
     }
 }
@@ -226,8 +320,77 @@ impl Creator for ListeningGasKillerCreator {
     }
 
     async fn get_payload_and_round(&self) -> Result<(Vec<u8>, u64)> {
-        let task = self.wait_for_task().await?;
+        let QueuedTask { task_id, request } = self.wait_for_task().await?;
 
+        match self.compute_and_stage(request).await {
+            Ok((payload, round)) => {
+                // Correlate this round with its task so the executor can settle it by round, and
+                // fail any task from an earlier round the executor never settled (an abandoned
+                // round, e.g. one that timed out short of quorum) so it doesn't linger in
+                // `processing`.
+                let abandoned = record_task_round(&self.task_rounds, round, task_id);
+                if let Some(store) = &self.store {
+                    for id in abandoned {
+                        set_task_failed(
+                            store,
+                            &id,
+                            "aggregation round abandoned before completion",
+                        )
+                        .await;
+                    }
+                }
+                Ok((payload, round))
+            }
+            Err(e) => {
+                if let Some(store) = &self.store {
+                    set_task_failed(store, &task_id, &format!("task processing failed: {e}")).await;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn get_task_metadata(&self) -> Self::TaskData {
+        // Try to get metadata from the current task, fall back to defaults if not available
+        match self.current_task.lock() {
+            Ok(current_task) => {
+                if let Some(ref enriched) = *current_task {
+                    // Extract metadata from the enriched task
+                    info!("Building task metadata from current task");
+
+                    return GasKillerTaskData {
+                        storage_updates: enriched.storage_updates.clone(),
+                        transition_index: enriched.transition_index,
+                        target_address: enriched.task.body.target_address,
+                        call_data: enriched.task.body.call_data.clone(),
+                        from_address: enriched.task.body.from_address,
+                        value: enriched.task.body.value,
+                        block_height: enriched.block_height,
+                        chain_id: enriched.chain_id,
+                    };
+                }
+                warn!(
+                    "get_task_metadata called but no current task set - returning default (zeroed) data. This may indicate get_payload_and_round was not called first."
+                );
+            }
+            Err(e) => {
+                error!(
+                    "Failed to acquire current_task lock: {} - returning default (zeroed) data",
+                    e
+                );
+            }
+        }
+
+        GasKillerTaskData::default()
+    }
+}
+
+impl ListeningGasKillerCreator {
+    /// Computes storage updates for `task`, stages it as the current task, primes the validator
+    /// cache, and assigns a fresh consensus round — returning the encoded payload and round for
+    /// dispatch. Split out from [`Self::get_payload_and_round`] so the caller can record the
+    /// round→task mapping on success and mark the task failed on error.
+    async fn compute_and_stage(&self, task: GasKillerTaskRequest) -> Result<(Vec<u8>, u64)> {
         info!(
             target = format!("{:?}", task.body.target_address),
             from = format!("{:?}", task.body.from_address),
@@ -381,40 +544,6 @@ impl Creator for ListeningGasKillerCreator {
         stamp_dispatch_time(&self.dispatch_time, round);
 
         Ok((payload, round))
-    }
-
-    fn get_task_metadata(&self) -> Self::TaskData {
-        // Try to get metadata from the current task, fall back to defaults if not available
-        match self.current_task.lock() {
-            Ok(current_task) => {
-                if let Some(ref enriched) = *current_task {
-                    // Extract metadata from the enriched task
-                    info!("Building task metadata from current task");
-
-                    return GasKillerTaskData {
-                        storage_updates: enriched.storage_updates.clone(),
-                        transition_index: enriched.transition_index,
-                        target_address: enriched.task.body.target_address,
-                        call_data: enriched.task.body.call_data.clone(),
-                        from_address: enriched.task.body.from_address,
-                        value: enriched.task.body.value,
-                        block_height: enriched.block_height,
-                        chain_id: enriched.chain_id,
-                    };
-                }
-                warn!(
-                    "get_task_metadata called but no current task set - returning default (zeroed) data. This may indicate get_payload_and_round was not called first."
-                );
-            }
-            Err(e) => {
-                error!(
-                    "Failed to acquire current_task lock: {} - returning default (zeroed) data",
-                    e
-                );
-            }
-        }
-
-        GasKillerTaskData::default()
     }
 }
 
@@ -572,21 +701,113 @@ mod tests {
     #[tokio::test]
     async fn test_channel_send_recv() {
         let (sender, mut receiver) = task_channel();
-        let task = GasKillerTaskRequest {
-            body: crate::ingress::GasKillerTaskRequestBody {
-                target_address: Address::from([1u8; 20]),
-                call_data: vec![0x12, 0x34, 0x56, 0x78],
-                transition_index: Some(1),
-                from_address: Address::from([2u8; 20]),
-                value: U256::from(1000),
-                block_height: 12345,
+        let task = QueuedTask {
+            task_id: "task-1".to_string(),
+            request: GasKillerTaskRequest {
+                body: crate::ingress::GasKillerTaskRequestBody {
+                    target_address: Address::from([1u8; 20]),
+                    call_data: vec![0x12, 0x34, 0x56, 0x78],
+                    transition_index: Some(1),
+                    from_address: Address::from([2u8; 20]),
+                    value: U256::from(1000),
+                    block_height: 12345,
+                },
             },
         };
 
         sender.send(task.clone()).unwrap();
         let received = receiver.try_recv().unwrap();
-        assert_eq!(received.body.transition_index, Some(1));
+        assert_eq!(received.task_id, "task-1");
+        assert_eq!(received.request.body.transition_index, Some(1));
         assert!(receiver.try_recv().is_err());
+    }
+
+    // -- task lifecycle transition tests --
+
+    fn sample_body() -> crate::ingress::GasKillerTaskRequestBody {
+        crate::ingress::GasKillerTaskRequestBody {
+            target_address: Address::from([0x11; 20]),
+            call_data: vec![0x12, 0x34, 0x56, 0x78],
+            transition_index: Some(0),
+            from_address: Address::from([0x22; 20]),
+            value: U256::ZERO,
+            block_height: 1,
+        }
+    }
+
+    #[test]
+    fn record_task_round_evicts_abandoned_and_take_consumes() {
+        let rounds: TaskRounds = TaskRounds::default();
+        // The first round has nothing earlier to evict.
+        assert!(record_task_round(&rounds, 1, "a".to_string()).is_empty());
+        // Rounds run one at a time, so recording a later round means the earlier one settled
+        // without the executor consuming it — it's abandoned and returned for failing.
+        assert_eq!(
+            record_task_round(&rounds, 2, "b".to_string()),
+            vec!["a".to_string()]
+        );
+        // The current round's task is taken exactly once (the executor consuming it on settle).
+        assert_eq!(take_task_id(&rounds, 2), Some("b".to_string()));
+        assert_eq!(take_task_id(&rounds, 2), None);
+    }
+
+    #[tokio::test]
+    async fn set_helpers_persist_status_transitions() {
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        let key = store.create_api_key(None, None).await.unwrap();
+        let done = store.create_task(&key.id, &sample_body()).await.unwrap();
+        let doomed = store.create_task(&key.id, &sample_body()).await.unwrap();
+
+        set_task_processing(&store, &done.id).await;
+        assert_eq!(
+            store.get_task(&done.id).await.unwrap().unwrap().status,
+            TaskStatus::Processing
+        );
+
+        set_task_ready(&store, &done.id).await;
+        assert_eq!(
+            store.get_task(&done.id).await.unwrap().unwrap().status,
+            TaskStatus::Ready
+        );
+
+        set_task_failed(&store, &doomed.id, "boom").await;
+        let failed = store.get_task(&doomed.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn dequeue_marks_task_processing() {
+        let store = SqliteStore::connect_in_memory().await.unwrap();
+        let key = store.create_api_key(None, None).await.unwrap();
+        let body = sample_body();
+        let task = store.create_task(&key.id, &body).await.unwrap();
+
+        let (sender, receiver) = task_channel();
+        let validator = Arc::new(GasKillerValidator::with_rpc_url("http://localhost:8545"));
+        let creator = ListeningGasKillerCreator::new(
+            receiver,
+            task_queue_depth(),
+            GasKillerConfig::default(),
+            validator,
+            DispatchTime::default(),
+        )
+        .with_store(store.clone());
+
+        sender
+            .send(QueuedTask {
+                task_id: task.id.clone(),
+                request: GasKillerTaskRequest { body },
+            })
+            .unwrap();
+
+        let dequeued = creator.wait_for_task().await.unwrap();
+        assert_eq!(dequeued.task_id, task.id);
+        assert_eq!(
+            store.get_task(&task.id).await.unwrap().unwrap().status,
+            TaskStatus::Processing,
+            "dequeuing a task should move it to processing"
+        );
     }
 
     #[test]

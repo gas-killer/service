@@ -1,7 +1,7 @@
 use crate::GasKillerHandler;
 use crate::creator::{
     DispatchTime, GasKillerConfig, GasKillerCreator, GasKillerCreatorType,
-    ListeningGasKillerCreator, task_channel, task_queue_depth,
+    ListeningGasKillerCreator, TaskRounds, task_channel, task_queue_depth,
 };
 use crate::ingress::{
     AvsMetadata, AvsOperatorSetMetadata, AvsOperatorSetSoftware, IngressState,
@@ -65,10 +65,17 @@ pub async fn create_listening_creator_with_server(
     validator: Arc<GasKillerValidator>,
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
-) -> anyhow::Result<GasKillerCreatorType> {
+    task_rounds: TaskRounds,
+) -> anyhow::Result<(GasKillerCreatorType, SqliteStore)> {
     let (sender, receiver) = task_channel();
     let queue_depth = task_queue_depth();
     let config = GasKillerConfig::default();
+
+    // Open the durable store and apply migrations before serving traffic. A failure here aborts
+    // router startup rather than running against an unmigrated or unwritable store. This one handle
+    // is shared across the creator, executor, ingress, and the liveness probe below.
+    let store = SqliteStore::connect().await?;
+
     let creator = ListeningGasKillerCreator::new(
         receiver,
         queue_depth.clone(),
@@ -76,7 +83,9 @@ pub async fn create_listening_creator_with_server(
         validator,
         dispatch_time,
     )
-    .with_metrics(Arc::clone(&metrics));
+    .with_metrics(Arc::clone(&metrics))
+    .with_store(store.clone())
+    .with_task_rounds(task_rounds);
     let providers = build_ingress_providers()?;
     let admin_key = env::var("ADMIN_KEY").ok().filter(|k| !k.is_empty());
     if admin_key.is_none() {
@@ -123,10 +132,6 @@ pub async fn create_listening_creator_with_server(
             .filter(|s| !s.is_empty()),
         operator_sets,
     };
-    // Open the durable store and apply migrations before serving traffic. A failure here
-    // aborts router startup rather than running against an unmigrated or unwritable store.
-    let store = SqliteStore::connect().await?;
-
     // Publish store liveness as `gas_killer_db_up`. connect() already proved the store
     // answers, so seed the gauge to 1; a background loop then re-checks so a later volume
     // loss (detached PVC, full or read-only disk) surfaces as db_up=0 on the dashboard.
@@ -151,12 +156,12 @@ pub async fn create_listening_creator_with_server(
         providers,
         avs_metadata,
     )
-    .with_store(store)
+    .with_store(store.clone())
     .with_admin_key(admin_key);
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });
-    Ok(GasKillerCreatorType::Listening(Box::new(creator)))
+    Ok((GasKillerCreatorType::Listening(Box::new(creator)), store))
 }
 
 fn build_ingress_providers()
@@ -219,6 +224,8 @@ pub async fn create_gas_killer_executor(
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
     context: &impl Metrics,
+    store: Option<SqliteStore>,
+    task_rounds: TaskRounds,
 ) -> Result<BlsEigenlayerExecutor<GasKillerHandler<SimpleWalletProvider>>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
@@ -320,12 +327,17 @@ pub async fn create_gas_killer_executor(
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
 
-    // Create handler with multi-chain providers
-    let gas_killer_handler = GasKillerHandler::with_providers(providers)
+    // Create handler with multi-chain providers. The store and round→task map let a settled round
+    // advance its task's terminal status; both are shared with the creator.
+    let mut gas_killer_handler = GasKillerHandler::with_providers(providers)
         .with_chain_roles(chain_roles)
         .with_metrics(metrics)
         .with_dispatch_time(dispatch_time)
-        .with_receipt_timeout(receipt_timeout_override);
+        .with_receipt_timeout(receipt_timeout_override)
+        .with_task_rounds(task_rounds);
+    if let Some(store) = store {
+        gas_killer_handler = gas_killer_handler.with_store(store);
+    }
 
     Ok(BlsEigenlayerExecutor::new(
         view_only_provider,
