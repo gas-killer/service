@@ -24,6 +24,10 @@ contract MockSchnorrRegistry is ISchnorrStakeRegistry {
     {
         return verdict;
     }
+
+    function operators(address) external pure returns (uint256, uint256, uint256, bool) {
+        return (0, 0, 0, false);
+    }
 }
 
 /// Concrete SDK: stores a `value` at slot 0; `verifyAndUpdate` is expected to STORE into it.

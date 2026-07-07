@@ -28,6 +28,10 @@ contract MockSchnorrRegistry is ISchnorrStakeRegistry {
     {
         return verdict;
     }
+
+    function operators(address) external pure returns (uint256, uint256, uint256, bool) {
+        return (0, 0, 0, false);
+    }
 }
 
 contract SchnorrArraySummationTest is Test {

@@ -35,7 +35,10 @@
 //! of the `ecdsa` module. Wiring the interactive protocol into the live node/router p2p
 //! binaries is a separate integration step (see `DESIGN.md`).
 
+pub mod journal;
 pub mod musig;
+pub mod precommit;
+pub mod scheme;
 pub mod wire;
 
 use alloy_primitives::{Address, U256 as AlloyU256, keccak256};
@@ -131,13 +134,15 @@ impl PrivateKey {
         PublicKey((ProjectivePoint::GENERATOR * self.0).to_affine())
     }
 
-    /// Produces a proof of possession binding this key to its own public key.
-    ///
-    /// The PoP is itself a single-key Schnorr signature (same convention) over the message
-    /// `keccak256(POP_TAG ‖ eth_address(X))`, verifiable on-chain against `X`.
-    pub fn prove_possession(&self, fill: &mut impl Entropy) -> Pop {
+    /// Produces a single-key Schnorr signature over `message` (the aggregate convention
+    /// with one signer), verifiable on-chain via `SchnorrVerify.verify` against this key.
+    /// Used for proofs of possession and nonce-batch registrations.
+    pub fn sign_single(
+        &self,
+        message: &[u8; MESSAGE_LEN],
+        fill: &mut impl Entropy,
+    ) -> AggregateSignature {
         let x = self.public_key();
-        let msg = pop_message(&x);
         // Single-signer Schnorr: k·G = R, s = k − e·x.
         loop {
             let k = random_scalar(fill);
@@ -149,13 +154,22 @@ impl PrivateKey {
             if r_addr == Address::ZERO {
                 continue;
             }
-            let e = challenge(&x, &msg, r_addr);
+            let e = challenge(&x, message, r_addr);
             let s = k - e * self.0;
             if bool::from(s.is_zero()) {
                 continue;
             }
-            return Pop(AggregateSignature { s, r_addr });
+            return AggregateSignature { s, r_addr };
         }
+    }
+
+    /// Produces a proof of possession binding this key to its own public key.
+    ///
+    /// The PoP is itself a single-key Schnorr signature (same convention) over the message
+    /// `keccak256(POP_TAG ‖ eth_address(X))`, verifiable on-chain against `X`.
+    pub fn prove_possession(&self, fill: &mut impl Entropy) -> Pop {
+        let msg = pop_message(&self.public_key());
+        Pop(self.sign_single(&msg, fill))
     }
 }
 

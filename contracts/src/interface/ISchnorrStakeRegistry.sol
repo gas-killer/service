@@ -19,4 +19,11 @@ interface ISchnorrStakeRegistry {
         address[] calldata nonSigners,
         uint256 refBlock
     ) external view returns (bool);
+
+    /// @notice The registered operator record for an identity address (the public
+    ///         `operators` mapping getter). `registered` is false for unknown identities.
+    function operators(address operatorId)
+        external
+        view
+        returns (uint256 x, uint256 y, uint256 weight, bool registered);
 }

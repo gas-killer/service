@@ -129,6 +129,219 @@ impl SchnorrMsg {
     }
 }
 
+/// Wire tag for [`PrecommitMsg::BatchAnnounce`].
+const TAG_BATCH_ANNOUNCE: u8 = 0;
+/// Wire tag for [`PrecommitMsg::BatchRequest`].
+const TAG_BATCH_REQUEST: u8 = 1;
+/// Wire tag for [`PrecommitMsg::CompletionPartial`].
+const TAG_COMPLETION_PARTIAL: u8 = 2;
+
+/// Maximum nonce pairs per [`PrecommitMsg::BatchAnnounce`] chunk
+/// (512 × 66 B ≈ 33 KB, well inside the 1 MB channel limit).
+pub const MAX_CHUNK_NONCES: usize = 512;
+
+/// Messages for the pre-committed-nonce mode (`docs/schnorr-nonce-registry.md`): batch
+/// distribution plus the completion round for `Attested` certificates. Session traffic
+/// (attempt-0 partials) rides the aggregation engine's own channel, not this one.
+///
+/// Authentication model: as with [`SchnorrMsg`], the p2p layer authenticates peers;
+/// `BatchAnnounce` is additionally self-authenticating — receivers verify the batch's
+/// recomputed Merkle root against the on-chain `SchnorrNonceRegistry` registration for
+/// `eth_address(pubkey)` (and may check `signature` even before on-chain confirmation).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum PrecommitMsg {
+    /// Operator → peers: one chunk of a registered nonce batch.
+    BatchAnnounce {
+        /// The operator's Schnorr public key (identity = its Ethereum address).
+        pubkey: PublicKey,
+        /// The batch's position in the operator's on-chain list.
+        batch_index: u64,
+        /// First absolute slot the batch covers.
+        start_slot: u64,
+        /// Total slots in the batch (all chunks).
+        total: u64,
+        /// The batch registration signature (over the Rust/Solidity `batch_message`).
+        signature: crate::schnorr::AggregateSignature,
+        /// Offset of this chunk's first nonce within the batch.
+        chunk_offset: u64,
+        /// This chunk's nonce pairs (`≤ MAX_CHUNK_NONCES`).
+        nonces: Vec<PubNonce>,
+    },
+    /// Peer → operator (or any holder): request a missing chunk.
+    BatchRequest {
+        /// Operator identity address whose batch is requested.
+        operator: Address,
+        batch_index: u64,
+        chunk_offset: u64,
+    },
+    /// Completion round for an `Attested` certificate: the sender's partial for the
+    /// certified signer set at `(height, attempt)` — no request message precedes this;
+    /// the set is read from the engine certificate everyone holds.
+    CompletionPartial {
+        height: u64,
+        attempt: u32,
+        /// The sender's view of `address(R)` for the completion context (cross-check).
+        r_addr: Address,
+        partial: Scalar,
+    },
+}
+
+impl Write for PrecommitMsg {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            PrecommitMsg::BatchAnnounce {
+                pubkey,
+                batch_index,
+                start_slot,
+                total,
+                signature,
+                chunk_offset,
+                nonces,
+            } => {
+                TAG_BATCH_ANNOUNCE.write(buf);
+                buf.put_slice(&pubkey.to_compressed());
+                UInt(*batch_index).write(buf);
+                UInt(*start_slot).write(buf);
+                UInt(*total).write(buf);
+                buf.put_slice(&signature.to_bytes());
+                UInt(*chunk_offset).write(buf);
+                (nonces.len() as u32).write(buf);
+                for nonce in nonces {
+                    buf.put_slice(&nonce.to_bytes());
+                }
+            }
+            PrecommitMsg::BatchRequest {
+                operator,
+                batch_index,
+                chunk_offset,
+            } => {
+                TAG_BATCH_REQUEST.write(buf);
+                buf.put_slice(operator.as_slice());
+                UInt(*batch_index).write(buf);
+                UInt(*chunk_offset).write(buf);
+            }
+            PrecommitMsg::CompletionPartial {
+                height,
+                attempt,
+                r_addr,
+                partial,
+            } => {
+                TAG_COMPLETION_PARTIAL.write(buf);
+                UInt(*height).write(buf);
+                attempt.write(buf);
+                buf.put_slice(r_addr.as_slice());
+                buf.put_slice(&partial_to_bytes(partial));
+            }
+        }
+    }
+}
+
+impl Read for PrecommitMsg {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let tag = u8::read(buf)?;
+        match tag {
+            TAG_BATCH_ANNOUNCE => {
+                let pubkey = read_pubkey(buf)?;
+                let batch_index: u64 = UInt::read(buf)?.into();
+                let start_slot: u64 = UInt::read(buf)?.into();
+                let total: u64 = UInt::read(buf)?.into();
+                let sig_bytes: [u8; 52] = read_array(buf)?;
+                let signature = crate::schnorr::AggregateSignature::from_bytes(&sig_bytes)
+                    .ok_or(Error::Invalid("PrecommitMsg", "invalid batch signature"))?;
+                let chunk_offset: u64 = UInt::read(buf)?.into();
+                let count = u32::read(buf)? as usize;
+                if count == 0 || count > MAX_CHUNK_NONCES {
+                    return Err(Error::InvalidLength(count));
+                }
+                if buf.remaining() < count * 66 {
+                    return Err(Error::EndOfBuffer);
+                }
+                let mut nonces = Vec::with_capacity(count);
+                for _ in 0..count {
+                    nonces.push(read_pubnonce(buf)?);
+                }
+                // Chunk must lie inside the declared batch.
+                let end = chunk_offset
+                    .checked_add(count as u64)
+                    .ok_or(Error::Invalid("PrecommitMsg", "chunk overflow"))?;
+                if end > total {
+                    return Err(Error::Invalid("PrecommitMsg", "chunk beyond batch"));
+                }
+                Ok(PrecommitMsg::BatchAnnounce {
+                    pubkey,
+                    batch_index,
+                    start_slot,
+                    total,
+                    signature,
+                    chunk_offset,
+                    nonces,
+                })
+            }
+            TAG_BATCH_REQUEST => {
+                let operator = Address::from(read_array::<20>(buf)?);
+                let batch_index: u64 = UInt::read(buf)?.into();
+                let chunk_offset: u64 = UInt::read(buf)?.into();
+                Ok(PrecommitMsg::BatchRequest {
+                    operator,
+                    batch_index,
+                    chunk_offset,
+                })
+            }
+            TAG_COMPLETION_PARTIAL => {
+                let height: u64 = UInt::read(buf)?.into();
+                let attempt = u32::read(buf)?;
+                let r_addr = Address::from(read_array::<20>(buf)?);
+                let bytes: [u8; 32] = read_array(buf)?;
+                let partial = partial_from_bytes(&bytes).ok_or(Error::Invalid(
+                    "PrecommitMsg",
+                    "partial scalar out of range",
+                ))?;
+                Ok(PrecommitMsg::CompletionPartial {
+                    height,
+                    attempt,
+                    r_addr,
+                    partial,
+                })
+            }
+            other => Err(Error::InvalidEnum(other)),
+        }
+    }
+}
+
+impl EncodeSize for PrecommitMsg {
+    fn encode_size(&self) -> usize {
+        match self {
+            PrecommitMsg::BatchAnnounce {
+                batch_index,
+                start_slot,
+                total,
+                chunk_offset,
+                nonces,
+                ..
+            } => {
+                1 + 33
+                    + UInt(*batch_index).encode_size()
+                    + UInt(*start_slot).encode_size()
+                    + UInt(*total).encode_size()
+                    + 52
+                    + UInt(*chunk_offset).encode_size()
+                    + 4
+                    + nonces.len() * 66
+            }
+            PrecommitMsg::BatchRequest {
+                batch_index,
+                chunk_offset,
+                ..
+            } => 1 + 20 + UInt(*batch_index).encode_size() + UInt(*chunk_offset).encode_size(),
+            PrecommitMsg::CompletionPartial {
+                height, attempt, ..
+            } => 1 + UInt(*height).encode_size() + attempt.encode_size() + 20 + 32,
+        }
+    }
+}
+
 /// Serializes a partial-signature scalar (32-byte big-endian).
 pub fn partial_to_bytes(partial: &Scalar) -> [u8; 32] {
     partial.to_bytes().into()
@@ -424,5 +637,100 @@ mod tests {
         // Group order itself must be rejected (≥ n).
         let n_bytes: [u8; 32] = crate::schnorr::CURVE_ORDER.to_be_bytes();
         assert!(partial_from_bytes(&n_bytes).is_none());
+    }
+
+    // ---- PrecommitMsg (batch gossip + completion round) ----
+
+    fn announce_fixture() -> PrecommitMsg {
+        let mut fill = seeded(21);
+        let key = PrivateKey::from_seed(21);
+        let batch = crate::schnorr::precommit::NonceBatch::generate(
+            crate::schnorr::precommit::BatchDomain {
+                chain_id: 31337,
+                registry: Address::repeat_byte(0x42),
+                operator: key.public_key().eth_address(),
+            },
+            &[3u8; 32],
+            0,
+            0,
+            8,
+        )
+        .unwrap();
+        let signature = batch.sign_registration(&key, &mut fill).unwrap();
+        PrecommitMsg::BatchAnnounce {
+            pubkey: key.public_key(),
+            batch_index: 0,
+            start_slot: 0,
+            total: batch.count(),
+            signature,
+            chunk_offset: 2,
+            nonces: batch.nonces[2..6].to_vec(),
+        }
+    }
+
+    #[test]
+    fn batch_announce_roundtrip() {
+        let original = announce_fixture();
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.encode_size());
+        assert_eq!(PrecommitMsg::decode(encoded).unwrap(), original);
+    }
+
+    #[test]
+    fn batch_announce_rejects_out_of_batch_chunk() {
+        let PrecommitMsg::BatchAnnounce {
+            pubkey,
+            batch_index,
+            start_slot,
+            signature,
+            chunk_offset,
+            nonces,
+            ..
+        } = announce_fixture()
+        else {
+            unreachable!()
+        };
+        // Declared total smaller than chunk end → decode rejects.
+        let bad = PrecommitMsg::BatchAnnounce {
+            pubkey,
+            batch_index,
+            start_slot,
+            total: 3,
+            signature,
+            chunk_offset,
+            nonces,
+        };
+        assert!(PrecommitMsg::decode(bad.encode()).is_err());
+    }
+
+    #[test]
+    fn batch_request_roundtrip() {
+        let original = PrecommitMsg::BatchRequest {
+            operator: Address::repeat_byte(0x77),
+            batch_index: u64::MAX,
+            chunk_offset: 12345,
+        };
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.encode_size());
+        assert_eq!(PrecommitMsg::decode(encoded).unwrap(), original);
+    }
+
+    #[test]
+    fn completion_partial_roundtrip() {
+        let original = PrecommitMsg::CompletionPartial {
+            height: 99,
+            attempt: 2,
+            r_addr: Address::repeat_byte(0x11),
+            partial: PrivateKey::from_seed(13).scalar(),
+        };
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.encode_size());
+        assert_eq!(PrecommitMsg::decode(encoded).unwrap(), original);
+
+        // Out-of-range scalar rejected at decode.
+        let mut bytes = original.encode_mut();
+        let len = bytes.len();
+        bytes[len - 32..].fill(0xff);
+        assert!(PrecommitMsg::decode(bytes.freeze()).is_err());
     }
 }
