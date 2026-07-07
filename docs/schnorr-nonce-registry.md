@@ -47,16 +47,21 @@ peers:    verify batch against on-chain root; persist
 task for height h proliferates (channel 1, unchanged)
 every node:  idx = slot(h, attempt=0); S₀ = operators with coverage at idx
              reconstruct R1agg/R2agg from everyone's committed points at idx
-             b, e, partial s_i  → broadcast PartialSig{h,0,s_i}
-router:      verify each partial against the sender's committed nonce; assemble; submit
+             b, e, partial s_i  → the partial IS the node's aggregation-engine
+             ack for (h, digest) — TipAck gossip on channel 0, engine-native
+everyone:    engine collects/verifies acks; at S₀ complete, `assemble` emits the
+             final aggregate certificate (s, Raddr) locally; router submits
 
-── fallback (some operator down): one directed round, still no nonce round ────
-router → SignRequest{h, a≥1, digest, signers=S_a} → S_a
-nodes  → PartialSig{h, a, s_i}   (fresh slot idx = slot(h, a) — never reuse)
+── fallback (some operator down): one deterministic completion round ──────────
+engine certifies a quorum bitmap S₁ ⊊ S₀ (partial-bundle certificate)
+members of S₁: re-sign for exactly S₁ at slot(h, a=1) → gossip channel 2
+(no coordinator message needed — S₁ is read from the certificate everyone holds)
 ```
 
 The signing-time shape recovers the ECDSA mode's "node unilaterally signs on task
-resolution" latency while keeping constant-gas on-chain verification.
+resolution" latency while keeping constant-gas on-chain verification — and certificate
+formation rides the same commonware aggregation engine PR #299 migrated to (§7), instead
+of the custom channel-2 session actors.
 
 ## 3. Cryptography (unchanged core, preprocessed round 1)
 
@@ -99,8 +104,8 @@ idx(h, a) = h · MAX_ATTEMPTS + a        a ∈ [0, MAX_ATTEMPTS)
 
 * `h` is the sequencer height — already globally agreed and strictly increasing; the
   session key `(height, attempt)` maps 1:1 onto a slot, so the participant's existing
-  `Session` state machine (issued → signing → signed/refused, fingerprint idempotency)
-  transfers wholesale.
+  `Session` invariants (signed/refused terminality, fingerprint idempotency) transfer
+  directly into the `SchnorrScheme` and completion actor (§7).
 * Injective by construction: no collisions, no abstain-on-collision liveness loss.
 * Slots for attempts that never run are simply burned — never used is always safe. Worst
   case provisioning is `MAX_ATTEMPTS ×` the height rate; at 66 bytes/slot this is noise.
@@ -189,31 +194,110 @@ read-the-registry pattern as stakes). Verified batches are persisted locally (th
 public data; loss is repairable by re-fetch). Every operator needs every other operator's
 points to compute `b` — batch distribution is a prerequisite of signing, not an
 optimization. `PartialSig` can carry `(R1, R2, merkle path)` (~480 bytes at depth 12) so
-the coordinator can verify a partial even before holding the sender's full batch.
+any verifier can check a partial even before holding the sender's full batch.
 
 ### 6.3 Wire protocol changes
 
-* **Delete** `NonceRequest` / `NonceCommit` from the signing path.
-* **Attempt 0 is implicit**: on resolving height `h`'s digest locally (existing
-  TaskBook/DigestResolver path), a node computes `S₀` = operators with on-chain coverage
-  at `idx(h,0)` (over the operator set it already tracks), reconstructs the context, and
-  unilaterally broadcasts `PartialSig{h, 0, s_i}`. No router message needed beyond the
-  existing task announcement.
-* **Attempts ≥ 1 keep `SignRequest`** (router picks `S_a` = attempt-`a−1` responders,
-  minus attributed-bad partials, as today) — but with committed nonces there is nothing to
-  collect first; `agg_nonces`/`r_addr` in the request become a redundant cross-check that
-  signers still recompute locally (keep them: they preserve today's "lying coordinator"
-  refusal test shape). Partials are bound to `(h, a)` and never mix across attempts
-  (different `e`).
-* Coordinator: `verify_partial` against the sender's *committed* slot points instead of a
-  session `NonceCommit`; `build_context`/`assemble` unchanged.
+* **Delete** `NonceRequest` / `NonceCommit` — and with them the entire custom signing
+  session protocol. The attempt-0 partial becomes the node's aggregation-engine ack (§7);
+  the only remaining channel-2 traffic is batch gossip (§6.2) and the deterministic
+  completion round (§7.3).
+* Partials are bound to `(h, a)` and never mix across attempts (different `e`).
 * Set-consistency note: if nodes briefly disagree on `S₀` (e.g. right after a batch
-  registration lands), their partials disagree, attempt 0 fails to assemble, and attempt 1
-  with an explicit signer list self-heals — same failure mode and remedy as an offline
-  operator. Mismatch between the signing-time set and the `refBlock` the submitter later
-  picks fails closed on-chain (`StaleSnapshot`), exactly as today.
+  registration lands), their attempt-0 partials disagree, no full-set aggregate forms, and
+  the completion round over the engine-certified bitmap self-heals — same failure mode and
+  remedy as an offline operator. Mismatch between the signing-time set and the `refBlock`
+  the submitter later picks fails closed on-chain (`StaleSnapshot`), exactly as today.
 
-## 7. Security analysis
+## 7. Riding the commonware aggregation engine
+
+The interactive protocol could not use the engine — a nonce round-trip does not fit the
+one-shot ack model, which is why the current Schnorr mode ships custom channel-2 actors
+that re-implement sessions, retries, pruning, and restart semantics by hand. Pre-committed
+nonces remove that blocker: signing becomes a deterministic one-shot per height, i.e.
+exactly ack-shaped. This plan therefore brings Schnorr mode back onto
+`commonware_consensus::aggregation::Engine` (2026.5.0, scheme-generic), following the
+architecture PR #299 established for the BN254→engine migration and the `EcdsaScheme`
+precedent (`common/src/ecdsa/scheme.rs`): nodes run signing engine instances on channel 0,
+the router runs a verifier-only instance (`me() == None`), the TaskBook/automaton derives
+each height's digest locally, and the engine provides TipAck gossip, rebroadcast,
+journaling/restart recovery, epochs, tip skip-ahead, and attribution — all of which the
+custom actors currently hand-roll.
+
+### 7.1 The trait mismatch, stated precisely
+
+`certificate::Scheme::assemble` must form a certificate from **any** quorum-sized subset
+of verified attestations. MuSig2 partials are set-bound: each bakes `X_agg(S₀)` and
+`R_agg(S₀)` into `e`/`b`, so only *exactly-S₀* sums to a valid signature. One offline
+operator invalidates every collected partial for that item, and acks have no attempt axis.
+A naive "partial = attestation, aggregate = certificate" scheme is unsound under the trait
+contract.
+
+### 7.2 Resolution: `SchnorrScheme` with a two-form certificate
+
+```rust
+type Signature   = SchnorrPartial;          // s_i for context (h, a=0, S₀) — 32 bytes
+enum SchnorrCertificate {
+    /// subset == S₀: the final aggregate, on-chain-submittable as-is.
+    Aggregate { s: Scalar, r_addr: Address, signers: Signers },
+    /// quorum ⊊ S₀: attributable partial bundle — certifies WHICH set signed,
+    /// pending completion (§7.3). Attestations are individually verifiable.
+    Attested  { partials: Vec<(Participant, Scalar)>, signers: Signers },
+}
+```
+
+* `sign(subject)` derives `idx(h, 0)`, consults the fsync'd watermark (N1), computes the
+  partial against the deterministic full committed set `S₀`, persists `(slot, partial)`,
+  and returns it. Re-asked for an already-signed item it returns the **cached** partial
+  (idempotent — same slot, same context; this is today's participant re-send rule moved
+  into the scheme). Verifier-only instances return `None`, as `EcdsaScheme` does.
+* `verify_attestation` checks `s_i·G == R1_i + b·R2_i − e·X_i` from the sender's
+  *committed* slot points — pure public data held by the scheme (today's
+  `Coordinator::verify_partial`, verbatim). Bad partials are attributed and blocked by the
+  engine per participant, replacing the coordinator's exclusion bookkeeping.
+* `assemble` sums iff the attestation set covers `S₀` exactly (common case: emits the
+  final `Aggregate`, self-verified against the on-chain identity); otherwise it emits
+  `Attested` at engine quorum. Both are honest certificates for "this set attested to this
+  digest"; `verify_certificate` verifies the aggregate identity resp. each partial.
+* Scheme instances are built per epoch from on-chain reads (stake-registry operator set +
+  nonce-registry coverage) via the engine's provider hook — the same place `EcdsaScheme`
+  gets its ordered participant set; participant indices are positions in the ordered
+  operator-address set, exactly as in ECDSA mode.
+
+### 7.3 Completion round (only when the certificate is `Attested`)
+
+An `Attested{signers: S₁}` certificate is the **set agreement** the interactive protocol
+needed a coordinator for: everyone locally recovers the same `S₁` from the engine. Each
+member of `S₁` then emits one follow-up partial for context `(h, a=1, S₁)` at slot
+`idx(h,1)` on channel 2 — no request message, no coordinator; a tiny completion actor
+collects them (verifying with the same committed-nonce check) and assembles the final
+aggregate for the submitter. If an `S₁` member dies between acking and completing (rare —
+it just acked), bounded idempotent re-requests, then the height falls to the deadline/skip
+path as today. `MAX_ATTEMPTS` bounds the shrink-and-retry (`S₂ ⊂ S₁`, slot `idx(h,2)`, …).
+
+### 7.4 Consequences and integration risks
+
+* **Deleted**: `router/src/schnorr_coordinator.rs` and `node/src/schnorr_participant.rs`
+  session machinery (≈700 lines of hand-rolled retry/prune/restart logic) — replaced by
+  the engine + `SchnorrScheme` + the small completion actor. The router regains full
+  symmetry with ECDSA mode (verifier-only engine, sequencer, submitter).
+* **Quorum semantics**: the engine's threshold is its fixed N3f1 participant count (PR
+  #299 note); the *stake-weighted* threshold stays authoritative on-chain and is
+  re-checked by the submitter before submission — unchanged from today, but now an
+  `Attested`/`Aggregate` certificate can exist whose stake weight is insufficient; the
+  submitter must treat that as "keep waiting for a bigger set", not submit-and-revert.
+* **Journal replay vs the watermark** (verify during implementation): on restart the
+  engine replays journaled activities and may re-request signatures. The scheme's
+  cached-partial rule makes replay idempotent, and the watermark gate refuses any
+  *different* context for a consumed slot — restart must never re-derive a partial for a
+  new context on an old slot. This interplay is the one place engine semantics touch
+  invariant N1 and needs a dedicated chaos test.
+* **Digest disagreement across nodes** (task-validity dispute): conflicting acks for a
+  height simply never reach quorum on either digest — no certificate, deadline/skip path,
+  same as ECDSA mode. The watermark burns slot `idx(h,0)` on first sign regardless
+  (signing a different digest for `h` later is exactly what N1 forbids).
+
+## 8. Security analysis
 
 | Threat | Defense |
 |---|---|
@@ -223,13 +307,13 @@ the coordinator can verify a partial even before holding the sender's full batch
 | Adaptive batch registration (nonces chosen after seeing honest batches) | Covered by MuSig2 adversary model; `b`, `e` bind message + sums |
 | Copying another operator's points into own batch | Can't produce a valid partial without `k` ⇒ self-DoS only |
 | Same points in two own slots | Self-harm only (leaks own key if both signed); honest derivation never does it |
-| Coordinator equivocation (many attempts / conflicting sets for one height) | Each slot signs once (N1); equivocation only burns the victim's slots — bounded by `MAX_ATTEMPTS` per height |
+| Malicious completion requests (conflicting sets/attempts for one height) | Completion sets derive from the engine certificate, not a request message; each slot signs once (N1) — worst case burns ≤ `MAX_ATTEMPTS` slots per height |
 | Restart replay | WAL watermark consulted before every partial; journal fsync precedes send |
 | Cross-deployment / cross-chain replay of batches or registrations | `chainid` + registry address in seed derivation, leaf tag, and `batchMsg` |
 | Batch withholding / unavailability | Withholder simply can't be included (peers lack its points) ⇒ it is a non-signer; threshold absorbs; no safety impact |
 | Stale registry view | Stake-registry `effectiveBlock` fail-close unchanged; nonce registry is append-only so covered slots are immutable |
 
-## 8. Liveness & operations
+## 9. Liveness & operations
 
 * **Exhaustion**: an operator whose coverage ends before `idx(h,a)` abstains (deterministic,
   visible to everyone) until it registers the next batch. No interactive fallback — one
@@ -238,11 +322,11 @@ the coordinator can verify a partial even before holding the sender's full batch
   batch `k` (parameter). With `N = 2^16` slots and `MAX_ATTEMPTS = 4`, one batch covers
   ≥ 16k heights (~22h at 1 height/5s worst case) for a ~4.3 MB one-time gossip.
 * **Parameters** (initial proposals): `N = 65536` slots/batch, `MAX_ATTEMPTS = 4`
-  (coordinator already deadline-bounds attempts via `ROUND_TIMEOUT`), re-register at 50%.
+  (the deadline/skip path bounds attempts via `ROUND_TIMEOUT`), re-register at 50%.
 * **Metrics**: slots remaining per operator, attempt-0 assembly rate, abstention causes
   (no-coverage vs offline vs refused), watermark lag.
 
-## 9. Implementation plan
+## 10. Implementation plan
 
 1. **Contract + parity fixtures.** `SchnorrNonceRegistry.sol` (registration with key-sig
    auth via `SchnorrVerify`, contiguity, views, events) + `ISchnorrStakeRegistry`
@@ -252,31 +336,37 @@ the coordinator can verify a partial even before holding the sender's full batch
 2. **Batch lifecycle.** Node-side batch generation + registration tooling (extend
    `generate_key`/deploy scripts), gossip messages + persistence + root verification on
    both node and router, spent-slot WAL with fsync-before-send and restart tests.
-3. **Signing path swap.** Participant: implicit attempt-0 partial on digest resolution;
-   slot-derived nonces replace `Session::Issued`; coordinator: collect-first flow for
-   attempt 0, committed-nonce `verify_partial`, explicit-set `SignRequest` for attempts ≥ 1;
-   delete `NonceRequest`/`NonceCommit`; adapt e2e + Helm flows (keep the interactive mode
+3. **`SchnorrScheme` for the aggregation engine** (§7). Implement
+   `certificate::Scheme` in `common/src/schnorr/scheme.rs` mirroring `EcdsaScheme`
+   (partial = attestation; two-form `Aggregate`/`Attested` certificate; committed-nonce
+   `verify_attestation`; cached-partial idempotent `sign` gated by the watermark).
+   Unit tests at the scheme level (quorum boundaries, subset ≠ S₀ ⇒ `Attested`, replay
+   idempotency), mirroring the `EcdsaScheme` test suite.
+4. **Engine wiring + completion actor.** Schnorr mode instantiates the engine on
+   channel 0 (nodes signing, router verifier-only) per the PR #299 architecture;
+   epoch provider reads stake + nonce registries; completion actor on channel 2 for
+   `Attested` certificates; submitter consumes `Aggregate` certificates (stake-threshold
+   gate before submission); **delete** `NonceRequest`/`NonceCommit` and the custom
+   coordinator/participant actors; adapt e2e + Helm flows (keep the interactive mode
    selectable via `SIGNATURE_SCHEME` until e2e parity, then remove).
-4. **Hardening.** Chaos tests (restart mid-sign ⇒ WAL refusal; batch withholding;
-   equivocating coordinator burns ≤ MAX_ATTEMPTS slots), re-provisioning automation,
-   metrics, gas + latency snapshots vs the interactive baseline.
+5. **Hardening.** Chaos tests (restart mid-sign / journal replay ⇒ WAL refusal, §7.4;
+   batch withholding; completion-round death ⇒ shrink-and-retry burns ≤ MAX_ATTEMPTS
+   slots), re-provisioning automation, metrics, gas + latency snapshots vs the
+   interactive baseline.
 
-## 10. Alternatives considered
+## 11. Alternatives considered
 
 * **FROST / threshold Schnorr** — fixed group key, any t-of-n, no subtraction; rejected:
   requires DKG + resharing on churn, changes the trust model, and the registry's
   non-signer-subtraction design already fits EigenLayer-style dynamic operator sets.
-* **Riding the commonware aggregation engine as a custom `certificate::Scheme`** — with
-  signing now non-interactive, attempt-0 partials are ack-shaped, but the engine's trait
-  contract doesn't fit MuSig2: `Scheme::assemble` must form a certificate from *any*
-  threshold-sized subset of attestations, while MuSig2 partials are set-bound (each bakes
-  `X_agg(S)`/`R_agg(S)` into `e`/`b`, so only exactly-`S` assembles and one offline
-  operator invalidates all collected partials); acks are keyed `(height, digest)` with no
-  attempt axis for reduced-set retries; `sign(&self, …)` is stateless while our signing
-  consumes watermark-gated nonce state; and partial verification needs committed nonce
-  points, not just participant keys. The engine's fixed N3f1 quorum also mismatches the
-  stake-weighted threshold. Schnorr mode therefore keeps the custom channel-2 actors
-  (engine remains ECDSA-mode-only, sequencer shared — same split as today).
+* **Keeping the custom channel-2 session actors (engine stays ECDSA-only)** — the
+  original shape of this plan, rejected once the trait mismatch was resolved: a naive
+  "partial = attestation, aggregate = certificate" scheme is unsound because
+  `Scheme::assemble` may receive *any* quorum subset while MuSig2 partials only sum over
+  exactly-`S₀`, but the two-form certificate (§7.2) makes every assemble outcome an honest
+  certificate and moves reduced-set handling to a deterministic completion round (§7.3).
+  Given that, keeping ~700 lines of hand-rolled session/retry/restart machinery instead of
+  the engine's journaled, epoch-aware, attributing implementation is strictly worse.
 * **Single-point precommitted nonces** — broken (ROS/Wagner); the two-point `b` scheme is
   non-negotiable.
 * **Storing nonce points on-chain** — 66 B × operators × slots of calldata/storage;
@@ -285,7 +375,7 @@ the coordinator can verify a partial even before holding the sender's full batch
   future fraud proofs; Merkle costs nothing extra here.
 * **`H(request)`-indexed slots** — birthday collisions ⇒ abstentions/reuse pressure (§4).
 
-## 11. Open questions
+## 12. Open questions
 
 1. `MAX_ATTEMPTS` and batch size defaults (gossip size vs re-registration cadence).
 2. Should skip heights consume/burn slots implicitly (currently no skip signing session
