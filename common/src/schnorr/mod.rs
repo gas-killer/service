@@ -35,8 +35,10 @@
 //! of the `ecdsa` module. Wiring the interactive protocol into the live node/router p2p
 //! binaries is a separate integration step (see `DESIGN.md`).
 
+pub mod batches;
 pub mod journal;
 pub mod musig;
+pub mod onchain;
 pub mod precommit;
 pub mod scheme;
 pub mod wire;
@@ -275,6 +277,14 @@ impl PublicKey {
     /// Decodes a 33-byte compressed SEC1 encoding (rejects invalid points and identity).
     pub fn from_compressed(bytes: &[u8; 33]) -> Option<Self> {
         decompress_point(bytes).and_then(Self::from_affine)
+    }
+
+    /// Builds a key from affine big-endian coordinates (as stored by the on-chain
+    /// registries), rejecting off-curve points and the identity.
+    pub fn from_coordinates(x: &[u8; 32], y: &[u8; 32]) -> Option<Self> {
+        let encoded = k256::EncodedPoint::from_affine_coordinates(x.into(), y.into(), false);
+        let point = Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&encoded))?;
+        Self::from_affine(point)
     }
 
     /// Sums a set of public keys into their plain aggregate (`Σ X_i`).

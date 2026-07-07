@@ -17,23 +17,37 @@ Done (all tested; `cargo test --workspace` + `forge test` green):
 | Durable spend journal (invariant N1, fsync write-ahead, torn-tail recovery) | `common/src/schnorr/journal.rs` |
 | Batch gossip + completion wire messages (§6.2–6.3) | `common/src/schnorr/wire.rs` (`PrecommitMsg`) |
 | Deploy tooling: registry deploy + per-operator batch-0 commitment | `scripts/deploy_array_summation.rs` (`SCHNORR_NONCE_REGISTRY_ADDRESS`, `SCHNORR_NONCE_BATCH_SLOTS`), `scripts/bindings/schnorrnonceregistry.rs` |
+| Batch gossip store (chunk reassembly, self-authenticating verification, serve/re-announce) | `common/src/schnorr/batches.rs` (`BatchStore`) |
+| Completion round: context/sign/verify on the scheme + router-side collector | `scheme.rs` (`completion_context`/`sign_completion`), `batches.rs` (`CompletionCollector`) — end-to-end tested through the production API |
+| On-chain startup reads (operator points, batch metadata) | `common/src/schnorr/onchain.rs` (`load_operator_keys`, `load_batches`) |
 
 Note: batch seeds derive from the operator key (`precommit::derive_batch_seed`), so the
 node recomputes its secrets from the key file + on-chain batch metadata — no second
 secret to distribute (seed ≡ key exposure either way, §6.1).
 
-Remaining (phase 4 §10.4 + phase 5):
+Remaining (phase 4 §10.4 + phase 5) — the actor/binary shell around the tested layer;
+all protocol logic already lives in `common` so these are thin I/O adapters:
 
-* Node/router mode wiring: instantiate the aggregation engine with `SchnorrScheme` in
-  `node/src/main.rs` / `router/src/main.rs` (schnorr mode currently runs the interactive
-  channel-2 actors); scheme construction reads the stake + nonce registries.
-* Batch gossip actor feeding a persisted `NonceDirectory` (verify roots against
-  `NonceBatchRegistered` events; serve `BatchRequest`s), and own-batch auto
-  re-registration at the consumption threshold.
-* Completion actor for `Attested` certificates (`PrecommitMsg::CompletionPartial`).
-* Submitter: consume `Aggregate` certificates (stake-threshold gate before submission);
-  delete `NonceRequest`/`NonceCommit` + the interactive coordinator/participant actors.
-* e2e/Helm flow updates; chaos tests (§10.5).
+* Mode wiring (`SIGNATURE_SCHEME=schnorr-precommit`): in `node/src/main.rs` /
+  `router/src/main.rs`, build the scheme from `onchain::load_operator_keys` +
+  `load_batches` (envs: `SCHNORR_STAKE_REGISTRY_ADDRESS`, `SCHNORR_NONCE_REGISTRY_ADDRESS`;
+  chain id via `eth_chainId`), `SeedSecrets` from `derive_batch_seed(key, i)` per on-chain
+  batch, `FileSpendJournal` under `STORAGE_DIR`, and instantiate the aggregation engine
+  exactly as the ECDSA arm does (`ConstantProvider` + `StaticEpochMonitor` are
+  scheme-generic; reporters only touch `certificate.item`, so genericizing them is
+  mechanical).
+* Precommit actor on channel 2 (both binaries): broadcast own `BatchStore::chunk_batch`
+  chunks at startup, `BatchStore::ingest` announces / `serve` requests; node side answers
+  `Attested` certificates (tapped from the reporter) with
+  `SchnorrScheme::sign_completion` → `CompletionPartial`; router side runs one
+  `CompletionCollector` per `Attested` certificate and emits `SchnorrCertified` to the
+  existing schnorr submitter (stake-threshold gate before submission). Optional
+  hardening: pin gossiped roots against `onchain::load_batches` (closes the
+  equivocation-liveness nuisance documented in `batches.rs`).
+* Own-batch auto re-registration at the consumption threshold (`registerBatch` from the
+  node, batch index `i` seeded by `derive_batch_seed(key, i)`).
+* Delete `NonceRequest`/`NonceCommit` + the interactive coordinator/participant actors
+  once e2e parity holds; e2e/Helm flow updates; chaos tests (§10.5).
 
 ## 1. Motivation
 

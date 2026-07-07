@@ -391,6 +391,94 @@ impl SchnorrScheme {
             ctx,
         })
     }
+
+    /// Builds the signing context for a **completion attempt** (`attempt ≥ 1`): the
+    /// signer set is the engine-certified bitmap (not coverage-derived), evaluated at
+    /// that attempt's slot. Returns `None` if any bitmap member lacks committed
+    /// coverage at the slot, the bitmap is empty/oversized, or the attempt is out of
+    /// range.
+    pub fn completion_context(
+        &self,
+        height: u64,
+        attempt: u32,
+        digest: &[u8; MESSAGE_LEN],
+        signers: &Signers,
+    ) -> Option<CompletionContext> {
+        if attempt == 0 || signers.len() != self.participants.len() {
+            return None;
+        }
+        let slot = slot_index(height, attempt, self.attempts_per_height)?;
+        let members: Vec<Participant> = signers.iter().collect();
+        if members.is_empty() {
+            return None;
+        }
+        let mut nonces = Vec::with_capacity(members.len());
+        for participant in &members {
+            let key = self.schnorr_key(*participant)?;
+            nonces.push(self.directory.pub_nonce(key.eth_address(), slot)?);
+        }
+        let x_agg = self.aggregate_key(signers)?;
+        let ctx = SigningContext::derive(x_agg, nonces.iter(), digest)?;
+        Some(CompletionContext {
+            slot,
+            members,
+            nonces,
+            ctx,
+        })
+    }
+
+    /// Produces this operator's completion-round partial for a certified signer set.
+    ///
+    /// Same rules as [`Scheme::sign`]: `None` when verifier-only, not a member of the
+    /// set, missing coverage/secrets — or the invariant-N1 refusal when the attempt's
+    /// slot is already bound to a different context. Idempotent for the same context.
+    pub fn sign_completion(
+        &self,
+        height: u64,
+        attempt: u32,
+        digest: &[u8; MESSAGE_LEN],
+        signers: &Signers,
+    ) -> Option<(Address, Scalar)> {
+        let signer = self.signer.as_ref()?;
+        let cc = self.completion_context(height, attempt, digest, signers)?;
+        cc.members.binary_search(&signer.index).ok()?;
+        let fingerprint = context_fingerprint(cc.slot, &cc.ctx);
+        if !signer.journal.bind(cc.slot, &fingerprint) {
+            return None;
+        }
+        let sec = signer.secrets.sec_nonce(cc.slot)?;
+        let partial = partial_sign(sec, &signer.key, &cc.ctx)?;
+        Some((cc.ctx.r_addr, partial))
+    }
+
+    /// Verifies one completion partial against a member's committed slot nonce.
+    pub fn verify_completion_partial(
+        &self,
+        cc: &CompletionContext,
+        participant: Participant,
+        partial: &Scalar,
+    ) -> bool {
+        let Some(key) = self.schnorr_key(participant) else {
+            return false;
+        };
+        let Ok(position) = cc.members.binary_search(&participant) else {
+            return false;
+        };
+        Coordinator::verify_partial(&cc.ctx, key, &cc.nonces[position], partial)
+    }
+}
+
+/// A completion attempt's derived signing context (see
+/// [`SchnorrScheme::completion_context`]).
+pub struct CompletionContext {
+    /// Absolute slot `idx(height, attempt)`.
+    pub slot: u64,
+    /// The certified signer set, ascending by participant index.
+    pub members: Vec<Participant>,
+    /// Committed nonce pairs, index-aligned with `members`.
+    nonces: Vec<PubNonce>,
+    /// The derived MuSig2 context (exposes `r_addr`, aggregates, message).
+    pub ctx: SigningContext,
 }
 
 impl Scheme for SchnorrScheme {
