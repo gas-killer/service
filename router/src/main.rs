@@ -41,6 +41,7 @@ use gas_killer_common::{
 use gas_killer_router::automaton::RouterAutomaton;
 use gas_killer_router::factories::{create_ingress, create_schnorr_submitter, create_submitter};
 use gas_killer_router::metrics::MetricsCollector;
+use gas_killer_router::precommit::SchnorrPrecommitRouter;
 use gas_killer_router::reporter::{CertReporter, certified_channel};
 use gas_killer_router::schnorr_coordinator::{SchnorrCoordinator, schnorr_certified_channel};
 use gas_killer_router::sequencer::{
@@ -555,6 +556,147 @@ fn main() {
                     dispatch_time,
                     assignments,
                     coordinator_mailbox,
+                    resolution_receiver,
+                    directive_sender,
+                    directive_recipients,
+                    tip_reports,
+                );
+                context.child("sequencer").spawn(move |_| sequencer.run());
+            }
+            SignatureScheme::SchnorrPrecommit => {
+                // On-chain reads: operator key points (verifier scheme construction).
+                let http_rpc = std::env::var("HTTP_RPC")
+                    .expect("HTTP_RPC environment variable must be set for schnorr-precommit");
+                let stake_registry: alloy::primitives::Address =
+                    std::env::var("SCHNORR_STAKE_REGISTRY_ADDRESS")
+                        .expect("SCHNORR_STAKE_REGISTRY_ADDRESS must be set for schnorr-precommit")
+                        .trim()
+                        .parse()
+                        .expect("SCHNORR_STAKE_REGISTRY_ADDRESS is not a valid address");
+                let nonce_registry: alloy::primitives::Address =
+                    std::env::var("SCHNORR_NONCE_REGISTRY_ADDRESS")
+                        .expect("SCHNORR_NONCE_REGISTRY_ADDRESS must be set for schnorr-precommit")
+                        .trim()
+                        .parse()
+                        .expect("SCHNORR_NONCE_REGISTRY_ADDRESS is not a valid address");
+                let rpc_provider = alloy::providers::ProviderBuilder::new()
+                    .connect_http(http_rpc.parse().expect("HTTP_RPC is not a valid URL"));
+                let chain_id = alloy::providers::Provider::get_chain_id(&rpc_provider)
+                    .await
+                    .expect("failed to read chain id from HTTP_RPC");
+                let operator_addresses: Vec<alloy::primitives::Address> =
+                    participants.iter().map(|k| k.address()).collect();
+                let operator_points = gas_killer_common::schnorr::onchain::load_operator_keys(
+                    rpc_provider.clone(),
+                    stake_registry,
+                    &operator_addresses,
+                )
+                .await
+                .expect("failed to load operator keys from the SchnorrStakeRegistry");
+
+                // Gossip-fed nonce directory + verifier scheme (`me() == None`).
+                let directory =
+                    Arc::new(gas_killer_common::schnorr::scheme::MemoryNonceDirectory::default());
+                let store = Arc::new(gas_killer_common::schnorr::batches::BatchStore::new(
+                    chain_id,
+                    nonce_registry,
+                    Arc::clone(&directory),
+                ));
+                let scheme = gas_killer_common::schnorr::scheme::SchnorrScheme::verifier(
+                    operator_points,
+                    directory,
+                    gas_killer_common::schnorr::scheme::DEFAULT_ATTEMPTS_PER_HEIGHT,
+                )
+                .expect("operator key set contains duplicates");
+
+                // Engine ack channel (same quota rationale as the ECDSA arm) and
+                // the channel-2 gossip/completion channel.
+                let ack_rate = ack_messages_per_second();
+                let ack_quota = Quota::per_second(ack_rate);
+                tracing::info!(
+                    ack_messages_per_second = ack_rate.get(),
+                    "engine channel quota"
+                );
+                let (ack_sender, ack_receiver) =
+                    network.register(ACK_CHANNEL, ack_quota, p2p_backlog);
+                let schnorr_quota = Quota::per_second(schnorr_messages_per_second());
+                let (pc_sender, pc_receiver) =
+                    network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
+
+                let (certified_sender, certified_receiver) = schnorr_certified_channel();
+
+                // The combined reporter / batch-gossip / completion actor; its
+                // mailbox is both the engine's Reporter and the sequencer's
+                // certificate index.
+                let (actor, actor_mailbox) = SchnorrPrecommitRouter::new(
+                    context.child("schnorr_precommit"),
+                    scheme.clone(),
+                    store,
+                    operator_addresses,
+                    certified_sender,
+                    pc_receiver,
+                    pc_sender,
+                    rebroadcast_interval(),
+                );
+                context
+                    .child("schnorr_precommit_actor")
+                    .spawn(move |_| actor.run());
+
+                // Verifier-only aggregation engine on channel 0.
+                let engine = Engine::new(
+                    context.child("engine"),
+                    AggregationConfig {
+                        monitor: StaticEpochMonitor::new(),
+                        provider: ConstantProvider::<
+                            gas_killer_common::schnorr::scheme::SchnorrScheme,
+                            Epoch,
+                        >::new(scheme.clone()),
+                        automaton: RouterAutomaton::new(assignments.clone()),
+                        reporter: actor_mailbox.clone(),
+                        blocker: oracle.clone(),
+                        priority_acks: false,
+                        rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_interval()),
+                        epoch_bounds: (EpochDelta::new(0), EpochDelta::new(0)),
+                        window: agg_window(),
+                        activity_timeout: HeightDelta::new(agg_activity_timeout()),
+                        journal_partition: JOURNAL_PARTITION.to_string(),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_heights_per_section: NZU64!(64),
+                        journal_compression: None,
+                        journal_page_cache: CacheRef::from_pooler(
+                            &context,
+                            NZU16!(4096),
+                            NZUsize!(128),
+                        ),
+                        strategy: Sequential,
+                    },
+                );
+                engine.start((ack_sender, ack_receiver));
+
+                // On-chain submitter: consumes final aggregate observations.
+                let submitter = create_schnorr_submitter(
+                    assignments.clone(),
+                    certified_receiver,
+                    resolution_sender,
+                    Arc::clone(&metrics),
+                    Arc::clone(&dispatch_time),
+                )
+                .await
+                .expect("Failed to create schnorr submitter");
+                context
+                    .child("schnorr_submitter")
+                    .spawn(move |_| submitter.run());
+
+                // Sequencer: certificate observations come from the precommit actor.
+                let sequencer = Sequencer::new(
+                    ingress.receiver,
+                    ingress.queue_depth,
+                    validator,
+                    Some(Arc::clone(&metrics)),
+                    dispatch_time,
+                    assignments,
+                    actor_mailbox,
                     resolution_receiver,
                     directive_sender,
                     directive_recipients,

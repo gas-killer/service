@@ -151,6 +151,14 @@ impl SecretNonces for SeedSecrets {
     }
 }
 
+/// Multi-batch secrets: the first batch covering the slot answers (batches never
+/// overlap — the registry enforces contiguity).
+impl SecretNonces for Vec<SeedSecrets> {
+    fn sec_nonce(&self, slot: u64) -> Option<SecNonce> {
+        self.iter().find_map(|secrets| secrets.sec_nonce(slot))
+    }
+}
+
 /// In-memory [`SpendJournal`] — NOT restart-safe; tests and harnesses only.
 #[derive(Debug, Default)]
 pub struct MemorySpendJournal {

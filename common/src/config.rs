@@ -335,6 +335,9 @@ pub fn rebroadcast_interval() -> std::time::Duration {
 pub enum SignatureScheme {
     Ecdsa,
     Schnorr,
+    /// Pre-committed-nonce aggregate Schnorr riding the aggregation engine
+    /// (non-interactive; see `docs/schnorr-nonce-registry.md`).
+    SchnorrPrecommit,
 }
 
 /// Reads the signature scheme from `SIGNATURE_SCHEME` (case-insensitive `ecdsa` |
@@ -346,7 +349,10 @@ pub fn signature_scheme() -> SignatureScheme {
         Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "" | "ecdsa" => SignatureScheme::Ecdsa,
             "schnorr" => SignatureScheme::Schnorr,
-            other => panic!("SIGNATURE_SCHEME must be 'ecdsa' or 'schnorr', got '{other}'"),
+            "schnorr-precommit" => SignatureScheme::SchnorrPrecommit,
+            other => panic!(
+                "SIGNATURE_SCHEME must be 'ecdsa', 'schnorr', or 'schnorr-precommit', got '{other}'"
+            ),
         },
     }
 }

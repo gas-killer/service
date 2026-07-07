@@ -99,7 +99,7 @@ async fn main() -> Result<(), DynError> {
     // Schnorr keys (with proofs of possession) before deploying the target.
     match signature_scheme() {
         SignatureScheme::Ecdsa => deploy_ecdsa().await,
-        SignatureScheme::Schnorr => deploy_schnorr().await,
+        SignatureScheme::Schnorr | SignatureScheme::SchnorrPrecommit => deploy_schnorr().await,
     }
 }
 

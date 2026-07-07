@@ -3,9 +3,69 @@
 
 use commonware_consensus::Monitor;
 use commonware_consensus::types::Epoch;
+use commonware_cryptography::certificate::Signers;
+use commonware_cryptography::sha256::Digest;
 use commonware_utils::channel::{mpsc, oneshot};
 use commonware_utils::sync::Mutex;
 use std::sync::Arc;
+
+/// Scheme-agnostic read surface over an aggregation certificate, so the node/router
+/// reporters can stay generic across [`crate::EcdsaScheme`] and
+/// [`crate::schnorr::scheme::SchnorrScheme`].
+pub trait CertificateInspect {
+    /// The signer bitmap.
+    fn signer_bitmap(&self) -> &Signers;
+
+    /// The final constant-size aggregate Schnorr signature, when this certificate is
+    /// directly on-chain-submittable as one (`None` for ECDSA certificates and for
+    /// `Attested` Schnorr certificates awaiting their completion round).
+    fn schnorr_aggregate(&self) -> Option<crate::schnorr::AggregateSignature> {
+        None
+    }
+
+    /// Whether a completion round is required to finalize (Schnorr `Attested`).
+    fn needs_completion(&self) -> bool {
+        false
+    }
+}
+
+impl CertificateInspect for crate::EcdsaCertificate {
+    fn signer_bitmap(&self) -> &Signers {
+        &self.signers
+    }
+}
+
+impl CertificateInspect for crate::schnorr::scheme::SchnorrCertificate {
+    fn signer_bitmap(&self) -> &Signers {
+        self.signers()
+    }
+
+    fn schnorr_aggregate(&self) -> Option<crate::schnorr::AggregateSignature> {
+        self.aggregate_signature()
+    }
+
+    fn needs_completion(&self) -> bool {
+        matches!(
+            self,
+            crate::schnorr::scheme::SchnorrCertificate::Attested { .. }
+        )
+    }
+}
+
+/// A certificate observation forwarded by the reporters to a scheme-specific
+/// consumer (the precommit actors): everything needed to trigger a completion round
+/// (node) or submit/collect (router) without holding the generic certificate type.
+#[derive(Debug, Clone)]
+pub struct CertifiedSummary {
+    pub height: u64,
+    pub digest: Digest,
+    pub signers: Signers,
+    /// `Some` when directly submittable (Schnorr `Aggregate`); `None` for ECDSA
+    /// certificates and Schnorr `Attested` ones.
+    pub signature: Option<crate::schnorr::AggregateSignature>,
+    /// Whether the certificate awaits a completion round.
+    pub needs_completion: bool,
+}
 
 /// Heights this far below the engine tip are pruned from the node's directive log
 /// and dedupe sets, and drive the router's certificate bookkeeping.

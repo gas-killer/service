@@ -14,12 +14,15 @@
 
 use commonware_actor::{Feedback, mailbox};
 use commonware_consensus::Reporter;
+use commonware_consensus::aggregation::scheme::Scheme as AggScheme;
 use commonware_consensus::aggregation::types::Activity;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::Metrics;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge, GaugeExt as _, raw};
 use commonware_utils::NZUsize;
-use gas_killer_common::{EcdsaScheme, skip_digest};
+use commonware_utils::channel::mpsc;
+use gas_killer_common::consensus::{CertificateInspect, CertifiedSummary};
+use gas_killer_common::skip_digest;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,9 +36,9 @@ const MAILBOX_CAPACITY: usize = 1024;
 /// Activities reported by the engine, wrapped so the overflow policy can be
 /// implemented locally (never drop: a lost `Certified` would undercount and a
 /// lost `Tip` could stall TaskBook pruning until the next fast-forward).
-struct Report(Activity<EcdsaScheme, Digest>);
+struct Report<S: AggScheme<Digest>>(Activity<S, Digest>);
 
-impl mailbox::Policy for Report {
+impl<S: AggScheme<Digest>> mailbox::Policy for Report<S> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) {
@@ -44,13 +47,20 @@ impl mailbox::Policy for Report {
 }
 
 /// Handle given to the engine (`Config::reporter`). Cheap to clone.
-#[derive(Clone)]
-pub struct ReporterMailbox {
-    sender: mailbox::Sender<Report>,
+pub struct ReporterMailbox<S: AggScheme<Digest>> {
+    sender: mailbox::Sender<Report<S>>,
 }
 
-impl Reporter for ReporterMailbox {
-    type Activity = Activity<EcdsaScheme, Digest>;
+impl<S: AggScheme<Digest>> Clone for ReporterMailbox<S> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl<S: AggScheme<Digest>> Reporter for ReporterMailbox<S> {
+    type Activity = Activity<S, Digest>;
 
     /// Enqueues the activity for the actor; never blocks (the engine calls this
     /// inline from its event loop and during journal replay).
@@ -60,8 +70,16 @@ impl Reporter for ReporterMailbox {
 }
 
 /// Actor that consumes reported activities.
-pub struct NodeReporter {
-    mailbox: mailbox::Receiver<Report>,
+pub struct NodeReporter<S: AggScheme<Digest>>
+where
+    S::Certificate: CertificateInspect,
+{
+    mailbox: mailbox::Receiver<Report<S>>,
+    /// Forwards a [`CertifiedSummary`] per certificate observation to a
+    /// scheme-specific consumer (the schnorr-precommit actor triggers completion
+    /// rounds off this). Restart replay re-fires summaries — consumers must be
+    /// idempotent (the completion path is, via the spend journal).
+    tap: Option<mpsc::Sender<CertifiedSummary>>,
     /// Prunes resolved directives as the engine's tip advances.
     task_book: TaskBookMailbox,
     /// Highest height observed via `Certified` or `Tip`, shared with the directive
@@ -83,17 +101,22 @@ pub struct NodeReporter {
     skipped_counter: Counter,
 }
 
-impl NodeReporter {
+impl<S: AggScheme<Digest>> NodeReporter<S>
+where
+    S::Certificate: CertificateInspect,
+{
     /// Creates the actor and the mailbox handle to wire into the engine config.
     ///
     /// `context` labels the mailbox and metrics in the runtime registry;
     /// `tip_handle` mirrors the highest observed height for the directive ingest
-    /// loop's stale-directive tip reports.
+    /// loop's stale-directive tip reports; `tap` (optional) receives a
+    /// [`CertifiedSummary`] per observed certificate.
     pub fn new(
         context: impl Metrics,
         task_book: TaskBookMailbox,
         tip_handle: Arc<AtomicU64>,
-    ) -> (Self, ReporterMailbox) {
+        tap: Option<mpsc::Sender<CertifiedSummary>>,
+    ) -> (Self, ReporterMailbox<S>) {
         let height_gauge = context.register(
             "height",
             "highest aggregation height observed via certificate or tip",
@@ -113,6 +136,7 @@ impl NodeReporter {
         (
             Self {
                 mailbox: receiver,
+                tap,
                 task_book,
                 tip_handle,
                 certified: BTreeSet::new(),
@@ -145,9 +169,21 @@ impl NodeReporter {
                         info!(
                             height,
                             digest = ?certificate.item.digest,
-                            signers = certificate.certificate.signers.count(),
+                            signers = certificate.certificate.signer_bitmap().count(),
                             "height certified"
                         );
+                    }
+                    if let Some(tap) = &self.tap {
+                        let summary = CertifiedSummary {
+                            height,
+                            digest: certificate.item.digest,
+                            signers: certificate.certificate.signer_bitmap().clone(),
+                            signature: certificate.certificate.schnorr_aggregate(),
+                            needs_completion: certificate.certificate.needs_completion(),
+                        };
+                        if tap.send(summary).await.is_err() {
+                            debug!(height, "certificate tap closed");
+                        }
                     }
                     self.advance(height);
                 }

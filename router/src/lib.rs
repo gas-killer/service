@@ -6,6 +6,7 @@ pub mod executor;
 pub mod factories;
 pub mod ingress;
 pub mod metrics;
+pub mod precommit;
 pub mod reporter;
 pub mod schnorr_coordinator;
 pub mod schnorr_submitter;
