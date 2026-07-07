@@ -12,7 +12,7 @@ services:
         anvil --fork-url $FORK_URL --host 0.0.0.0 --port 8545 --code-size-limit 65536 \
           --timeout 120000 \
           --retries 5 \
-          --compute-units-per-second 300
+          --compute-units-per-second 300 ${ANVIL_EXTRA_ARGS:-}
 
   eigenlayer:
     platform: linux/amd64
@@ -59,6 +59,8 @@ services:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
+      # Simulation profile for tracked-function analysis; router and all nodes must agree.
+      - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
       - ./config/.nodes/operator_keys/testacc1.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
@@ -93,6 +95,8 @@ services:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
+      # Simulation profile for tracked-function analysis; router and all nodes must agree.
+      - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
       - ./config/.nodes/operator_keys/testacc2.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
@@ -121,6 +125,8 @@ services:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
+      # Simulation profile for tracked-function analysis; router and all nodes must agree.
+      - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
       - ./config/.nodes/operator_keys/testacc3.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
@@ -155,6 +161,8 @@ services:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
+      # Simulation profile for tracked-function analysis; router and all nodes must agree.
+      - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
       # /app is owned by the non-root container user; /data is reserved for the Kubernetes
       # PVC mount and is not writable here.
       - DATA_DIR=/app/data

@@ -186,6 +186,27 @@ else
     export GAS_KILLER_TARGET_ADDRESS="$ARRAY_SUMMATION_ADDRESS"
 fi
 
+# Step 7a (unbounded mode only): prove the tracked function is *unexecutable* in a
+# real block — direct sum() must cost more than the mainnet block gas limit. The
+# Gas Killer pipeline then lands the same state transition in one small
+# verifyAndUpdate tx (asserted after step 10). Requires the anvil service to run
+# with --disable-block-gas-limit (ANVIL_EXTRA_ARGS) so the estimate can complete.
+MAINNET_BLOCK_GAS_LIMIT=30000000
+if [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ] && [ -n "$ARRAY_SUMMATION_ADDRESS" ]; then
+    echo -e "${YELLOW}Step 7a: Asserting direct sum() execution exceeds the block gas limit...${NC}"
+    if ! command -v cast >/dev/null 2>&1; then
+        echo -e "${RED}cast (foundry) is required for the unbounded e2e assertions${NC}"
+        exit 1
+    fi
+    DIRECT_GAS=$(cast estimate "$ARRAY_SUMMATION_ADDRESS" "sum(uint256[])" "[]" --rpc-url http://localhost:8545)
+    echo "Direct sum([]) execution needs $DIRECT_GAS gas (mainnet block limit: $MAINNET_BLOCK_GAS_LIMIT)"
+    if [ -z "$DIRECT_GAS" ] || [ "$DIRECT_GAS" -le "$MAINNET_BLOCK_GAS_LIMIT" ]; then
+        echo -e "${RED}Expected direct execution above the block gas limit; increase ARRAY_SUMMATION_ARRAY_SIZE${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Direct execution cannot fit in a real block ($DIRECT_GAS > $MAINNET_BLOCK_GAS_LIMIT gas)${NC}"
+fi
+
 cd "$PROJECT_ROOT"
 
 # Step 7b: Verify the router's local payload hash matches the contract's getMessageHash
@@ -276,6 +297,27 @@ fi
 # Show recent router logs for confirmation
 echo -e "${YELLOW}Recent router logs:${NC}"
 docker compose logs --tail=50 router || true
+
+# Step 10b (unbounded mode only): the same transition that could not fit in a real
+# block must have landed on-chain as one small verifyAndUpdate tx. This is the
+# unbounded-mode claim in one comparison: unbounded compute, O(1) on-chain state.
+if [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ]; then
+    echo -e "${YELLOW}Step 10b: Asserting verifyAndUpdate landed far below the block gas limit...${NC}"
+    VU_TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -o "transaction_hash=0x[a-fA-F0-9]*" | sed 's/transaction_hash=//' | tail -1)
+    if [ -z "$VU_TX_HASH" ]; then
+        echo -e "${RED}Could not find the verifyAndUpdate transaction hash in router logs${NC}"
+        exit 1
+    fi
+    VU_GAS=$(cast receipt "$VU_TX_HASH" gasUsed --rpc-url http://localhost:8545)
+    VU_GAS=$((VU_GAS))  # normalize possible hex to decimal
+    echo "verifyAndUpdate used $VU_GAS gas vs $DIRECT_GAS gas for direct execution"
+    if [ "$VU_GAS" -ge "$MAINNET_BLOCK_GAS_LIMIT" ]; then
+        echo -e "${RED}verifyAndUpdate unexpectedly used a full block's gas${NC}"
+        exit 1
+    fi
+    RATIO=$((DIRECT_GAS / VU_GAS))
+    echo -e "${GREEN}✅ Unbounded transition applied on-chain: ${VU_GAS} gas (direct execution: ${DIRECT_GAS} gas, ~${RATIO}x more) — above-block-limit compute, one small on-chain tx${NC}"
+fi
 
 # Print the execution trace of the successful verifyAndUpdate for inspection.
 # debug_traceTransaction reflects the real mined execution, not a re-simulation.
