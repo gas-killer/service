@@ -98,6 +98,24 @@ pub fn derive_secnonce(domain: &BatchDomain, batch_seed: &[u8; 32], slot: u64) -
     SecNonce::from_scalars(k1, k2).expect("derive_scalar never returns zero")
 }
 
+/// Domain tag for [`derive_batch_seed`].
+const BATCH_SEED_TAG: &[u8] = b"gas-killer/schnorr/batch-seed/v1";
+
+/// Derives a batch seed **from the operator key itself**:
+/// `keccak256(BATCH_SEED_TAG ‖ key_scalar ‖ batch_index)`.
+///
+/// A seed is key-equivalent material either way (leaked seed + one published partial ⇒
+/// private key), so deriving from the key adds no exposure — and it means the node can
+/// recompute every batch's secrets from just its key file plus on-chain batch metadata:
+/// no second secret to distribute between the deploy tooling and the runtime.
+pub fn derive_batch_seed(key: &PrivateKey, batch_index: u64) -> [u8; 32] {
+    let mut pre = Vec::with_capacity(BATCH_SEED_TAG.len() + 32 + 8);
+    pre.extend_from_slice(BATCH_SEED_TAG);
+    pre.extend_from_slice(&key.scalar().to_bytes());
+    pre.extend_from_slice(&batch_index.to_be_bytes());
+    keccak256(pre).0
+}
+
 /// Merkle leaf binding `(operator, absolute slot, R1, R2)`.
 pub fn leaf_hash(operator: Address, slot: u64, nonce: &PubNonce) -> [u8; 32] {
     let points = nonce.to_bytes();
@@ -473,6 +491,17 @@ mod tests {
         let next = NonceBatch::generate(domain, &[10u8; 32], 1, batch.end_slot(), 12).unwrap();
         assert_eq!(next.start_slot, 12);
         assert_ne!(next.nonces[0], batch.nonces[0]);
+    }
+
+    #[test]
+    fn batch_seed_is_deterministic_per_key_and_index() {
+        let key = PrivateKey::from_seed(6);
+        assert_eq!(derive_batch_seed(&key, 0), derive_batch_seed(&key, 0));
+        assert_ne!(derive_batch_seed(&key, 0), derive_batch_seed(&key, 1));
+        assert_ne!(
+            derive_batch_seed(&key, 0),
+            derive_batch_seed(&PrivateKey::from_seed(7), 0)
+        );
     }
 
     #[test]

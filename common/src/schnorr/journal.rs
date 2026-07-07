@@ -72,10 +72,10 @@ impl FileSpendJournal {
     /// not a crash artifact — refuse to sign rather than risk reuse).
     pub fn open(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let mut file = OpenOptions::new()
             .read(true)
@@ -210,7 +210,10 @@ mod tests {
         let journal = FileSpendJournal::open(&path).unwrap();
         assert_eq!(journal.len(), 2, "valid prefix retained");
         assert!(!journal.bind(1, &[0x99; 32]));
-        assert!(journal.bind(3, &[0x33; 32]), "appends realign after truncation");
+        assert!(
+            journal.bind(3, &[0x33; 32]),
+            "appends realign after truncation"
+        );
 
         // And the realigned file replays cleanly again.
         drop(journal);

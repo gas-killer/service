@@ -1,7 +1,39 @@
 # Schnorr Nonce-Commitment Registry — non-interactive aggregate signing
 
-Status: **plan** (no implementation yet). Branch: `Rubydusa/schnorr-nonce-registry`,
-building on `RonTuretzky/schnorr-aggregate-signatures`.
+Status: **phases 1–3 implemented + phase-4 groundwork**; live node/router wiring pending.
+Branch: `Rubydusa/schnorr-nonce-registry`, building on
+`RonTuretzky/schnorr-aggregate-signatures`.
+
+## Implementation status
+
+Done (all tested; `cargo test --workspace` + `forge test` green):
+
+| Piece | Where |
+|---|---|
+| `SchnorrNonceRegistry` contract (§5) + interfaces | `contracts/src/SchnorrNonceRegistry.sol`, `interface/ISchnorrNonceRegistry.sol`, `ISchnorrStakeRegistry.operators` |
+| Foundry suite w/ in-Solidity Schnorr signer + Rust parity vector | `contracts/test/SchnorrNonceRegistry.t.sol` |
+| Slot mapping, seed→nonce derivation, Merkle batches, batch message (§4, §6.1) | `common/src/schnorr/precommit.rs` |
+| `SchnorrScheme` (`certificate::Scheme`, two-form certificate) (§7) | `common/src/schnorr/scheme.rs` (incl. engine smoke test + completion-round crypto proof) |
+| Durable spend journal (invariant N1, fsync write-ahead, torn-tail recovery) | `common/src/schnorr/journal.rs` |
+| Batch gossip + completion wire messages (§6.2–6.3) | `common/src/schnorr/wire.rs` (`PrecommitMsg`) |
+| Deploy tooling: registry deploy + per-operator batch-0 commitment | `scripts/deploy_array_summation.rs` (`SCHNORR_NONCE_REGISTRY_ADDRESS`, `SCHNORR_NONCE_BATCH_SLOTS`), `scripts/bindings/schnorrnonceregistry.rs` |
+
+Note: batch seeds derive from the operator key (`precommit::derive_batch_seed`), so the
+node recomputes its secrets from the key file + on-chain batch metadata — no second
+secret to distribute (seed ≡ key exposure either way, §6.1).
+
+Remaining (phase 4 §10.4 + phase 5):
+
+* Node/router mode wiring: instantiate the aggregation engine with `SchnorrScheme` in
+  `node/src/main.rs` / `router/src/main.rs` (schnorr mode currently runs the interactive
+  channel-2 actors); scheme construction reads the stake + nonce registries.
+* Batch gossip actor feeding a persisted `NonceDirectory` (verify roots against
+  `NonceBatchRegistered` events; serve `BatchRequest`s), and own-batch auto
+  re-registration at the consumption threshold.
+* Completion actor for `Attested` certificates (`PrecommitMsg::CompletionPartial`).
+* Submitter: consume `Aggregate` certificates (stake-threshold gate before submission);
+  delete `NonceRequest`/`NonceCommit` + the interactive coordinator/participant actors.
+* e2e/Helm flow updates; chaos tests (§10.5).
 
 ## 1. Motivation
 
