@@ -10,8 +10,10 @@ export ROUTER_INGRESS_PORT
 export GAS_KILLER_ROUTER_URL="http://localhost:${ROUTER_INGRESS_PORT}"
 export GAS_KILLER_TRIGGER_URL="http://localhost:${ROUTER_INGRESS_PORT}/trigger"
 
-# Quorum signature scheme for the whole stack: ecdsa (engine path, default) or
-# schnorr (aggregate path). Exported before docker compose up so the node/router
+# Quorum signature scheme for the whole stack: ecdsa (engine path, default),
+# schnorr (interactive aggregate path), or schnorr-precommit (non-interactive
+# aggregate path via pre-committed nonces — docs/schnorr-nonce-registry.md).
+# Exported before docker compose up so the node/router
 # containers pick it up, and re-exported after .env is sourced so the host-side
 # deploy/send binaries agree with the stack. Captured here because `source .env`
 # below could otherwise override an explicitly chosen mode.

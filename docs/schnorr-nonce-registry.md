@@ -25,29 +25,32 @@ Note: batch seeds derive from the operator key (`precommit::derive_batch_seed`),
 node recomputes its secrets from the key file + on-chain batch metadata — no second
 secret to distribute (seed ≡ key exposure either way, §6.1).
 
-Remaining (phase 4 §10.4 + phase 5) — the actor/binary shell around the tested layer;
-all protocol logic already lives in `common` so these are thin I/O adapters:
+Also done — the live `SIGNATURE_SCHEME=schnorr-precommit` mode (compile- and
+unit-verified; docker e2e pending):
 
-* Mode wiring (`SIGNATURE_SCHEME=schnorr-precommit`): in `node/src/main.rs` /
-  `router/src/main.rs`, build the scheme from `onchain::load_operator_keys` +
-  `load_batches` (envs: `SCHNORR_STAKE_REGISTRY_ADDRESS`, `SCHNORR_NONCE_REGISTRY_ADDRESS`;
-  chain id via `eth_chainId`), `SeedSecrets` from `derive_batch_seed(key, i)` per on-chain
-  batch, `FileSpendJournal` under `STORAGE_DIR`, and instantiate the aggregation engine
-  exactly as the ECDSA arm does (`ConstantProvider` + `StaticEpochMonitor` are
-  scheme-generic; reporters only touch `certificate.item`, so genericizing them is
-  mechanical).
-* Precommit actor on channel 2 (both binaries): broadcast own `BatchStore::chunk_batch`
-  chunks at startup, `BatchStore::ingest` announces / `serve` requests; node side answers
-  `Attested` certificates (tapped from the reporter) with
-  `SchnorrScheme::sign_completion` → `CompletionPartial`; router side runs one
-  `CompletionCollector` per `Attested` certificate and emits `SchnorrCertified` to the
-  existing schnorr submitter (stake-threshold gate before submission). Optional
-  hardening: pin gossiped roots against `onchain::load_batches` (closes the
-  equivocation-liveness nuisance documented in `batches.rs`).
+| Piece | Where |
+|---|---|
+| Node arm: scheme from on-chain reads, key-rederived batches (root-checked), fsync spend journal, engine with the ECDSA arm's knobs | `node/src/main.rs` |
+| Node channel-2 actor: announce/ingest/serve/pull batches; `Attested`-tap → journal-gated completion partial to the router | `node/src/precommit.rs` |
+| Scheme-generic node reporter with `CertifiedSummary` tap (ECDSA arm unchanged) | `node/src/reporter.rs`, `common/src/consensus.rs` (`CertificateInspect`) |
+| Router arm: verifier engine + combined reporter/CertIndex/gossip/completion actor; `Aggregate` (and skips) → `SchnorrCertified` to the existing submitter; `Attested` → `CompletionCollector` | `router/src/main.rs`, `router/src/precommit.rs` |
+| Config + address resolution (`schnorr-precommit`; env override or deployment-JSON fallback via `AVS_DEPLOYMENT_PATH`) | `common/src/config.rs` (`resolve_deployed_address`) |
+
+`SIGNATURE_SCHEME=schnorr-precommit ./scripts/run_e2e_test.sh` is expected to work
+end-to-end with no compose changes (the deploy flow writes `schnorrNonceRegistry`
+into the deployment JSON both binaries already mount) — running it is the next step.
+
+Remaining (phase 5 hardening):
+
+* Run + green the docker e2e and Helm flows in precommit mode; then delete
+  `NonceRequest`/`NonceCommit` + the interactive coordinator/participant actors.
 * Own-batch auto re-registration at the consumption threshold (`registerBatch` from the
-  node, batch index `i` seeded by `derive_batch_seed(key, i)`).
-* Delete `NonceRequest`/`NonceCommit` + the interactive coordinator/participant actors
-  once e2e parity holds; e2e/Helm flow updates; chaos tests (§10.5).
+  node, batch index `i` seeded by `derive_batch_seed(key, i)`); until then a deployment
+  is bounded by batch-0 coverage (`SCHNORR_NONCE_BATCH_SLOTS`/`MAX_ATTEMPTS` heights).
+* Optional: pin gossiped roots against `onchain::load_batches` (closes the
+  equivocation-liveness nuisance documented in `batches.rs`); shrink-and-retry
+  completion attempts ≥ 2 (today one completion attempt, then the deadline/skip path).
+* Chaos tests (§10.5): restart mid-sign / journal replay, batch withholding, metrics.
 
 ## 1. Motivation
 

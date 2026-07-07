@@ -678,18 +678,16 @@ fn main() {
                 // built from chain state; see docs/schnorr-nonce-registry.md §7.2).
                 let http_rpc = std::env::var("HTTP_RPC")
                     .expect("HTTP_RPC environment variable must be set for schnorr-precommit");
-                let stake_registry: alloy::primitives::Address =
-                    std::env::var("SCHNORR_STAKE_REGISTRY_ADDRESS")
-                        .expect("SCHNORR_STAKE_REGISTRY_ADDRESS must be set for schnorr-precommit")
-                        .trim()
-                        .parse()
-                        .expect("SCHNORR_STAKE_REGISTRY_ADDRESS is not a valid address");
-                let nonce_registry: alloy::primitives::Address =
-                    std::env::var("SCHNORR_NONCE_REGISTRY_ADDRESS")
-                        .expect("SCHNORR_NONCE_REGISTRY_ADDRESS must be set for schnorr-precommit")
-                        .trim()
-                        .parse()
-                        .expect("SCHNORR_NONCE_REGISTRY_ADDRESS is not a valid address");
+                let stake_registry = gas_killer_common::resolve_deployed_address(
+                    "SCHNORR_STAKE_REGISTRY_ADDRESS",
+                    "schnorrStakeRegistry",
+                )
+                .expect("failed to resolve the SchnorrStakeRegistry address");
+                let nonce_registry = gas_killer_common::resolve_deployed_address(
+                    "SCHNORR_NONCE_REGISTRY_ADDRESS",
+                    "schnorrNonceRegistry",
+                )
+                .expect("failed to resolve the SchnorrNonceRegistry address");
                 let provider = alloy::providers::ProviderBuilder::new()
                     .connect_http(http_rpc.parse().expect("HTTP_RPC is not a valid URL"));
                 let chain_id = alloy::providers::Provider::get_chain_id(&provider)

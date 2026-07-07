@@ -169,6 +169,34 @@ pub async fn get_operator_states() -> Result<Vec<QuorumInfo>, Box<dyn std::error
     client.get_operator_states().await
 }
 
+/// Resolves a deployed contract address for the schnorr-precommit mode: the
+/// explicit env var wins; otherwise fall back to `addresses[json_key]` in the
+/// deployment JSON at `AVS_DEPLOYMENT_PATH` (which the deploy flow writes and
+/// every container already mounts).
+pub fn resolve_deployed_address(
+    env_var: &str,
+    json_key: &str,
+) -> Result<alloy_primitives::Address, String> {
+    if let Ok(value) = env::var(env_var) {
+        return value
+            .trim()
+            .parse()
+            .map_err(|_| format!("{env_var} is not a valid address"));
+    }
+    let path = env::var("AVS_DEPLOYMENT_PATH")
+        .map_err(|_| format!("{env_var} is unset and AVS_DEPLOYMENT_PATH is unavailable"))?;
+    let contents = fs::read_to_string(&path).map_err(|e| format!("failed to read {path}: {e}"))?;
+    let deployment: serde_json::Value =
+        serde_json::from_str(&contents).map_err(|e| format!("failed to parse {path}: {e}"))?;
+    let address = deployment["addresses"][json_key]
+        .as_str()
+        .ok_or_else(|| format!("addresses.{json_key} missing from {path}"))?;
+    address
+        .trim()
+        .parse()
+        .map_err(|_| format!("addresses.{json_key} in {path} is not a valid address"))
+}
+
 /// Default P2P channel message backlog depth.
 ///
 /// The backlog bounds how many queued messages the channel will hold before the sender
