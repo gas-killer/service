@@ -4,9 +4,12 @@
 //! [`BatchStore`] ingests [`PrecommitMsg::BatchAnnounce`] chunks, reassembles and
 //! verifies whole batches, feeds the shared [`MemoryNonceDirectory`] the scheme reads,
 //! and re-serves chunks to peers. Verification of a completed batch is
-//! **self-authenticating**: the sender's p2p identity must equal the announced key's
-//! address, and the recomputed Merkle root must carry a valid registration signature by
-//! that key (the exact statement `SchnorrNonceRegistry.registerBatch` verified on-chain).
+//! **self-authenticating**: the recomputed Merkle root must carry a valid registration
+//! signature by the announced operator key (the exact statement
+//! `SchnorrNonceRegistry.registerBatch` verified on-chain) — so ANY peer may relay any
+//! operator's batch (a node that missed the original announce pulls it from whoever
+//! holds it). In-flight reassemblies are keyed **per relaying sender**: a malicious
+//! relayer feeding bad chunks only poisons its own stream, never an honest relayer's.
 //! Pinning the root against the on-chain registration additionally (an RPC read) closes
 //! a per-operator equivocation-liveness nuisance and can be layered on the actor.
 //!
@@ -31,13 +34,10 @@ use std::sync::{Arc, Mutex};
 /// Why an announce chunk (or the batch it completed) was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
-    /// `eth_address(pubkey) != sender` — the p2p identity binding failed.
-    SenderMismatch,
-    /// The operator announced a different key than previously seen.
-    KeyMismatch,
-    /// total = 0 or above `MAX_BATCH_SLOTS`, or metadata conflicts across chunks.
+    /// total = 0 or above `MAX_BATCH_SLOTS`, or metadata conflicts across chunks
+    /// from the same relayer.
     BadMetadata,
-    /// The same chunk offset arrived with different points.
+    /// The same chunk offset arrived with different points from the same relayer.
     ConflictingChunk,
     /// The assembled batch's registration signature failed to verify.
     BadRegistration,
@@ -91,7 +91,9 @@ impl PendingBatch {
 #[derive(Default)]
 struct OperatorBatches {
     pubkey: Option<SchnorrPublicKey>,
-    pending: HashMap<u64, PendingBatch>,
+    /// In-flight reassemblies keyed by `(relaying sender, batch_index)` — isolated
+    /// per relayer so a bad stream cannot poison a good one.
+    pending: HashMap<(Address, u64), PendingBatch>,
     complete: BTreeMap<u64, StoredBatch>,
 }
 
@@ -159,26 +161,24 @@ impl BatchStore {
         chunk_offset: u64,
         nonces: Vec<PubNonce>,
     ) -> Ingest {
-        if pubkey.eth_address() != sender {
-            return Ingest::Rejected(Rejection::SenderMismatch);
-        }
         if total == 0 || total > MAX_BATCH_SLOTS {
             return Ingest::Rejected(Rejection::BadMetadata);
         }
+        // The operator identity derives from the announced key itself; the batch is
+        // authenticated by its registration signature at completion, so `sender` is
+        // only the relayer — used to isolate reassembly streams, never trusted.
+        let operator = pubkey.eth_address();
 
         let mut inner = self.inner.lock().expect("batch store lock");
-        let entry = inner.entry(sender).or_default();
-        match entry.pubkey {
-            Some(known) if known != pubkey => return Ingest::Rejected(Rejection::KeyMismatch),
-            _ => entry.pubkey = Some(pubkey),
-        }
+        let entry = inner.entry(operator).or_default();
+        entry.pubkey = Some(pubkey);
         if entry.complete.contains_key(&batch_index) {
             return Ingest::Completed; // idempotent re-announce of a verified batch
         }
 
         let pending = entry
             .pending
-            .entry(batch_index)
+            .entry((sender, batch_index))
             .or_insert_with(|| PendingBatch {
                 start_slot,
                 total,
@@ -207,23 +207,28 @@ impl BatchStore {
         // Assemble and verify the whole batch against the registration signature.
         let pending = entry
             .pending
-            .remove(&batch_index)
+            .remove(&(sender, batch_index))
             .expect("pending batch just inserted");
         let batch = NonceBatch {
             domain: BatchDomain {
                 chain_id: self.chain_id,
                 registry: self.registry,
-                operator: sender,
+                operator,
             },
             batch_index,
             start_slot: pending.start_slot,
             nonces: pending.chunks.into_values().flatten().collect(),
         };
         if !batch.verify_registration(&pubkey, &pending.signature) {
-            // Poisoned reassembly (a bad chunk slipped in, or a forged announce):
-            // drop it entirely so an honest re-announce can start clean.
+            // Poisoned stream (a bad chunk or forged announce from THIS relayer):
+            // drop only this relayer's reassembly; other relayers' streams and a
+            // fresh re-announce are unaffected.
             return Ingest::Rejected(Rejection::BadRegistration);
         }
+        // Verified: retire every relayer's pending stream for this batch.
+        entry
+            .pending
+            .retain(|(_, pending_index), _| *pending_index != batch_index);
         entry.complete.insert(
             batch_index,
             StoredBatch {
@@ -519,7 +524,9 @@ mod tests {
             Arc::new(MemoryNonceDirectory::default()),
         );
 
-        // Sender/key binding.
+        // Third-party relay: a DIFFERENT peer serving this operator's batch is
+        // accepted — the batch authenticates via its registration signature, not
+        // the transport sender.
         assert_eq!(
             store.ingest(
                 Address::repeat_byte(0x99),
@@ -531,7 +538,15 @@ mod tests {
                 0,
                 batch.nonces.clone(),
             ),
-            Ingest::Rejected(Rejection::SenderMismatch)
+            Ingest::Completed
+        );
+        assert!(store.has(operator, 0));
+
+        // Rebuild a fresh store for the rejection cases below.
+        let store = BatchStore::new(
+            CHAIN_ID,
+            registry(),
+            Arc::new(MemoryNonceDirectory::default()),
         );
 
         // Oversized / zero totals.
@@ -570,6 +585,62 @@ mod tests {
             ),
             Ingest::Completed
         );
+
+        // Per-relayer isolation: a malicious relayer's half-poisoned stream must not
+        // block an honest relayer delivering the same batch concurrently.
+        let key3 = PrivateKey::from_seed(4);
+        let (batch3, sig3) = signed_batch(&key3, 32);
+        let op3 = key3.public_key().eth_address();
+        let evil = Address::repeat_byte(0xEE);
+        let honest = Address::repeat_byte(0x88);
+        let mut poisoned = batch3.nonces[..16].to_vec();
+        poisoned.swap(0, 1);
+        assert_eq!(
+            store.ingest(evil, key3.public_key(), 0, 0, 32, sig3, 0, poisoned),
+            Ingest::Pending
+        );
+        assert_eq!(
+            store.ingest(
+                honest,
+                key3.public_key(),
+                0,
+                0,
+                32,
+                sig3,
+                0,
+                batch3.nonces[..16].to_vec()
+            ),
+            Ingest::Pending
+        );
+        // The evil stream completes first and fails verification — dropped alone.
+        assert_eq!(
+            store.ingest(
+                evil,
+                key3.public_key(),
+                0,
+                0,
+                32,
+                sig3,
+                16,
+                batch3.nonces[16..].to_vec()
+            ),
+            Ingest::Rejected(Rejection::BadRegistration)
+        );
+        // The honest stream still completes and verifies.
+        assert_eq!(
+            store.ingest(
+                honest,
+                key3.public_key(),
+                0,
+                0,
+                32,
+                sig3,
+                16,
+                batch3.nonces[16..].to_vec()
+            ),
+            Ingest::Completed
+        );
+        assert!(store.has(op3, 0));
 
         // Conflicting duplicate chunk (second batch, partial delivery).
         let key2 = PrivateKey::from_seed(3);
