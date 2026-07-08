@@ -678,16 +678,6 @@ fn main() {
                 // built from chain state; see docs/schnorr-nonce-registry.md §7.2).
                 let http_rpc = std::env::var("HTTP_RPC")
                     .expect("HTTP_RPC environment variable must be set for schnorr-precommit");
-                let stake_registry = gas_killer_common::resolve_deployed_address(
-                    "SCHNORR_STAKE_REGISTRY_ADDRESS",
-                    "schnorrStakeRegistry",
-                )
-                .expect("failed to resolve the SchnorrStakeRegistry address");
-                let nonce_registry = gas_killer_common::resolve_deployed_address(
-                    "SCHNORR_NONCE_REGISTRY_ADDRESS",
-                    "schnorrNonceRegistry",
-                )
-                .expect("failed to resolve the SchnorrNonceRegistry address");
                 let provider = alloy::providers::ProviderBuilder::new()
                     .connect_http(http_rpc.parse().expect("HTTP_RPC is not a valid URL"));
                 let chain_id = alloy::providers::Provider::get_chain_id(&provider)
@@ -695,28 +685,71 @@ fn main() {
                     .expect("failed to read chain id from HTTP_RPC");
                 let operator_addresses: Vec<alloy::primitives::Address> =
                     operators.iter().map(|o| o.address).collect();
-                let operator_points = gas_killer_common::schnorr::onchain::load_operator_keys(
-                    provider.clone(),
-                    stake_registry,
-                    &operator_addresses,
-                )
-                .await
-                .expect("failed to load operator keys from the SchnorrStakeRegistry");
 
-                // Rebuild our own batches from the key + on-chain metadata (batch seeds
-                // derive from the key; a root mismatch means the registered batches were
-                // not produced by this key file — refuse to run rather than sign junk).
-                let batch_metas = gas_killer_common::schnorr::onchain::load_batches(
-                    provider.clone(),
-                    nonce_registry,
-                    own_address,
-                )
-                .await
-                .expect("failed to load batch metadata from the SchnorrNonceRegistry");
-                assert!(
-                    !batch_metas.is_empty(),
-                    "no nonce batches registered for {own_address}; run the deploy flow first"
-                );
+                // The deploy flow (deploy_array_summation) deploys both Schnorr
+                // registries and commits every operator's batch 0 *after* the nodes
+                // boot, writing the registry addresses into avs_deploy.json as its final
+                // step. On a cold start these reads therefore race the deploy, so wait
+                // for it to finish (registries resolvable + our batch committed) rather
+                // than crash-looping: a panic here trips docker's restart back-off and
+                // delays a clean start well past the first task, stalling the height-0
+                // round. Mirrors the router's DNS startup retries (resolve_with_retry).
+                let (nonce_registry, operator_points, batch_metas) = {
+                    let mut attempt = 1u32;
+                    let max_attempts = 90u32; // ~3 min at 2s; deploy lands seconds after boot
+                    loop {
+                        let loaded = async {
+                            let stake_registry = gas_killer_common::resolve_deployed_address(
+                                "SCHNORR_STAKE_REGISTRY_ADDRESS",
+                                "schnorrStakeRegistry",
+                            )?;
+                            let nonce_registry = gas_killer_common::resolve_deployed_address(
+                                "SCHNORR_NONCE_REGISTRY_ADDRESS",
+                                "schnorrNonceRegistry",
+                            )?;
+                            let operator_points =
+                                gas_killer_common::schnorr::onchain::load_operator_keys(
+                                    provider.clone(),
+                                    stake_registry,
+                                    &operator_addresses,
+                                )
+                                .await?;
+                            // Our own batches from the key + on-chain metadata (batch
+                            // seeds derive from the key; each root is re-checked below,
+                            // so a mismatch is caught rather than signing junk).
+                            let batch_metas = gas_killer_common::schnorr::onchain::load_batches(
+                                provider.clone(),
+                                nonce_registry,
+                                own_address,
+                            )
+                            .await?;
+                            if batch_metas.is_empty() {
+                                return Err(format!(
+                                    "no nonce batches registered yet for {own_address}"
+                                ));
+                            }
+                            Ok::<_, String>((nonce_registry, operator_points, batch_metas))
+                        }
+                        .await;
+                        match loaded {
+                            Ok(state) => break state,
+                            Err(e) if attempt >= max_attempts => panic!(
+                                "SchnorrPrecommit chain state not ready after {attempt} \
+                                 attempts: {e}. Was the deploy flow (deploy_array_summation) run?"
+                            ),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    attempt,
+                                    max_attempts,
+                                    "SchnorrPrecommit chain state not ready (deploy pending?), retrying..."
+                                );
+                                ::tokio::time::sleep(Duration::from_secs(2)).await;
+                                attempt += 1;
+                            }
+                        }
+                    }
+                };
                 let domain = gas_killer_common::schnorr::precommit::BatchDomain {
                     chain_id,
                     registry: nonce_registry,

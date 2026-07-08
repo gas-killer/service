@@ -567,16 +567,6 @@ fn main() {
                 // On-chain reads: operator key points (verifier scheme construction).
                 let http_rpc = std::env::var("HTTP_RPC")
                     .expect("HTTP_RPC environment variable must be set for schnorr-precommit");
-                let stake_registry = gas_killer_common::resolve_deployed_address(
-                    "SCHNORR_STAKE_REGISTRY_ADDRESS",
-                    "schnorrStakeRegistry",
-                )
-                .expect("failed to resolve the SchnorrStakeRegistry address");
-                let nonce_registry = gas_killer_common::resolve_deployed_address(
-                    "SCHNORR_NONCE_REGISTRY_ADDRESS",
-                    "schnorrNonceRegistry",
-                )
-                .expect("failed to resolve the SchnorrNonceRegistry address");
                 let rpc_provider = alloy::providers::ProviderBuilder::new()
                     .connect_http(http_rpc.parse().expect("HTTP_RPC is not a valid URL"));
                 let chain_id = alloy::providers::Provider::get_chain_id(&rpc_provider)
@@ -584,13 +574,55 @@ fn main() {
                     .expect("failed to read chain id from HTTP_RPC");
                 let operator_addresses: Vec<alloy::primitives::Address> =
                     participants.iter().map(|k| k.address()).collect();
-                let operator_points = gas_killer_common::schnorr::onchain::load_operator_keys(
-                    rpc_provider.clone(),
-                    stake_registry,
-                    &operator_addresses,
-                )
-                .await
-                .expect("failed to load operator keys from the SchnorrStakeRegistry");
+
+                // The deploy flow publishes the registry addresses and PoP-registers
+                // every operator in the SchnorrStakeRegistry *after* the router boots
+                // (avs_deploy.json is written as its final step), so on a cold start
+                // these reads race the deploy. Wait for it rather than crash-looping
+                // into docker restart back-off, which would delay a clean start past
+                // the first task. Mirrors resolve_with_retry / the node's arm.
+                let (nonce_registry, operator_points) = {
+                    let mut attempt = 1u32;
+                    let max_attempts = 90u32; // ~3 min at 2s; deploy lands seconds after boot
+                    loop {
+                        let loaded = async {
+                            let stake_registry = gas_killer_common::resolve_deployed_address(
+                                "SCHNORR_STAKE_REGISTRY_ADDRESS",
+                                "schnorrStakeRegistry",
+                            )?;
+                            let nonce_registry = gas_killer_common::resolve_deployed_address(
+                                "SCHNORR_NONCE_REGISTRY_ADDRESS",
+                                "schnorrNonceRegistry",
+                            )?;
+                            let operator_points =
+                                gas_killer_common::schnorr::onchain::load_operator_keys(
+                                    rpc_provider.clone(),
+                                    stake_registry,
+                                    &operator_addresses,
+                                )
+                                .await?;
+                            Ok::<_, String>((nonce_registry, operator_points))
+                        }
+                        .await;
+                        match loaded {
+                            Ok(state) => break state,
+                            Err(e) if attempt >= max_attempts => panic!(
+                                "SchnorrPrecommit chain state not ready after {attempt} \
+                                 attempts: {e}. Was the deploy flow (deploy_array_summation) run?"
+                            ),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    attempt,
+                                    max_attempts,
+                                    "SchnorrPrecommit chain state not ready (deploy pending?), retrying..."
+                                );
+                                ::tokio::time::sleep(Duration::from_secs(2)).await;
+                                attempt += 1;
+                            }
+                        }
+                    }
+                };
 
                 // Gossip-fed nonce directory + verifier scheme (`me() == None`).
                 let directory =
