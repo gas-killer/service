@@ -11,12 +11,14 @@ on:
       - main
       - dev
       - staging
-      # Stacked-PR chain for the Schnorr work: this branch is the base of the
-      # Schnorr PR, so PRs targeting it (i.e. the Schnorr PR itself) must run the
-      # full e2e matrix — otherwise the live aggregate-signing path is never
-      # demonstrated as a gating check. Remove once the stack lands on a mainline
-      # branch.
+      # Stacked-PR chain for the Schnorr work: each branch below is the base of
+      # the next PR up the stack, so PRs targeting them must run the full e2e
+      # matrix — otherwise the live aggregate-signing path is never demonstrated
+      # as a gating check. Remove once the stack lands on a mainline branch.
+      #   RonTuretzky/pr299-ecdsa-signatures          (base of aggregate-signatures)
+      #   RonTuretzky/schnorr-aggregate-signatures    (base of schnorr-nonce-registry)
       - RonTuretzky/pr299-ecdsa-signatures
+      - RonTuretzky/schnorr-aggregate-signatures
   workflow_dispatch:
 
 jobs:
@@ -28,8 +30,10 @@ jobs:
       fail-fast: false
       matrix:
         # Run the full stack once per quorum-signature scheme: the engine-driven
-        # ECDSA path and the interactive aggregate-Schnorr path.
-        signature_scheme: [ecdsa, schnorr]
+        # ECDSA path, the interactive aggregate-Schnorr path, and the
+        # non-interactive pre-committed-nonce Schnorr path this PR adds (deploys
+        # the SchnorrNonceRegistry — see docs/schnorr-nonce-registry.md).
+        signature_scheme: [ecdsa, schnorr, schnorr-precommit]
 
     steps:
       - name: Checkout code

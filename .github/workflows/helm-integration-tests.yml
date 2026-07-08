@@ -14,6 +14,7 @@ on:
       # Stacked-PR chain for the Schnorr work — see e2e-test.yml for the rationale.
       # Remove once the stack lands on a mainline branch.
       - RonTuretzky/pr299-ecdsa-signatures
+      - RonTuretzky/schnorr-aggregate-signatures
   workflow_dispatch:
 
 jobs:
@@ -25,8 +26,10 @@ jobs:
       fail-fast: false
       matrix:
         # Run the full cluster once per quorum-signature scheme: the engine-driven
-        # ECDSA path and the interactive aggregate-Schnorr path.
-        signature_scheme: [ecdsa, schnorr]
+        # ECDSA path, the interactive aggregate-Schnorr path, and the
+        # non-interactive pre-committed-nonce Schnorr path this PR adds (deploys
+        # the SchnorrNonceRegistry — see docs/schnorr-nonce-registry.md).
+        signature_scheme: [ecdsa, schnorr, schnorr-precommit]
     env:
       CI_ADMIN_KEY: ci-admin-key
       SIGNATURE_SCHEME: ${{ matrix.signature_scheme }}
@@ -474,10 +477,12 @@ jobs:
           echo "AVS deployment file contents:"
           cat ./config/.nodes/avs_deploy.json
 
-          # Schnorr mode: the deploy binary PoP-registers each operator in the
-          # SchnorrStakeRegistry, which requires the operator key files the setup
-          # job wrote to the shared PVC.
-          if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
+          # Schnorr modes: the deploy binary PoP-registers each operator in the
+          # SchnorrStakeRegistry (and, in schnorr-precommit mode, derives each
+          # operator's nonce-batch seed from the same key to commit batch 0),
+          # which requires the operator key files the setup job wrote to the
+          # shared PVC.
+          if [ "$SIGNATURE_SCHEME" = "schnorr" ] || [ "$SIGNATURE_SCHEME" = "schnorr-precommit" ]; then
             echo "Copying operator key files for Schnorr PoP registration..."
             kubectl cp $ROUTER_POD:/app/.nodes/operator_keys ./config/.nodes/operator_keys
             ls ./config/.nodes/operator_keys/
