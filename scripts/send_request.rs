@@ -130,14 +130,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .into());
     }
 
-    // Capture initial currentSum before posting task
-    // Each trigger uses different indexes, so currentSum will change each time
-    let initial_sum = array_contract
-        .currentSum()
-        .call()
-        .await
-        .map_err(|e| format!("Failed to read currentSum before trigger: {}", e))?
-        .to::<u64>();
+    // Verification metric: `currentSum` is ArraySummation-specific; with
+    // GK_VERIFY_MODE=transition-count we instead poll `stateTransitionCount()`,
+    // which every GasKillerSDK consumer exposes (the binding is reused — the
+    // selector is inherited from the SDK base), so any consumer (e.g. the
+    // on-chain LLM's GasKillerLLM) can be verified by the same harness.
+    let verify_transition_count = env::var("GK_VERIFY_MODE")
+        .map(|v| v == "transition-count")
+        .unwrap_or(false);
+
+    // Capture the initial metric before posting the task.
+    let initial_sum = if verify_transition_count {
+        array_contract
+            .stateTransitionCount()
+            .call()
+            .await
+            .map_err(|e| format!("Failed to read stateTransitionCount before trigger: {}", e))?
+            .to::<u64>()
+    } else {
+        array_contract
+            .currentSum()
+            .call()
+            .await
+            .map_err(|e| format!("Failed to read currentSum before trigger: {}", e))?
+            .to::<u64>()
+    };
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
         .unwrap_or_else(|_| "http://localhost:8080/trigger".to_string());
@@ -170,19 +187,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
         Err(format!("Trigger failed with status {}", status).into())
     } else {
-        // Poll currentSum until it changes or timeout
+        // Poll the verification metric until it changes or timeout. Heavier
+        // consumers (long unbounded simulations) need a longer window:
+        // GK_VERIFY_TIMEOUT_SECS overrides the default 150s.
         use tokio::time::{Duration, Instant, sleep};
-        let max_wait_time = Duration::from_secs(150);
+        let max_wait_time = Duration::from_secs(
+            env::var("GK_VERIFY_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(150),
+        );
         let check_interval = Duration::from_secs(10);
         let start_time = Instant::now();
 
         loop {
-            let current_sum = array_contract
-                .currentSum()
-                .call()
-                .await
-                .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
-                .to::<u64>();
+            let current_sum = if verify_transition_count {
+                array_contract
+                    .stateTransitionCount()
+                    .call()
+                    .await
+                    .map_err(|e| format!("Failed to read stateTransitionCount after trigger: {}", e))?
+                    .to::<u64>()
+            } else {
+                array_contract
+                    .currentSum()
+                    .call()
+                    .await
+                    .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
+                    .to::<u64>()
+            };
 
             println!(
                 "currentSum: {}, Initial: {}, Elapsed: {:.1}s",

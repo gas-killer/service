@@ -143,7 +143,23 @@ sudo chmod -R 777 config/.nodes || chmod -R 777 config/.nodes
 echo "Waiting for nodes to initialize..."
 sleep 30
 
-# Step 7: Deploy Gas Killer example contract (ArraySummation)
+# Step 7: Deploy the Gas Killer consumer under test (GK_E2E_CONSUMER:
+# array-summation [default] or onchain-llm — the solidity-sdk LLM example).
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
+    echo -e "${YELLOW}Step 7: Deploying Gas Killer on-chain LLM consumer (stories260K)...${NC}"
+    LLM_ADDRESS=$(bash "$PROJECT_ROOT/scripts/deploy_onchain_llm.sh" | tee /dev/stderr | grep '^LLM_TARGET=' | cut -d= -f2)
+    if [ -z "$LLM_ADDRESS" ]; then
+        echo -e "${RED}on-chain LLM deployment failed${NC}"
+        exit 1
+    fi
+    echo "Discovered GasKillerLLM address: $LLM_ADDRESS"
+    export GAS_KILLER_TARGET_ADDRESS="$LLM_ADDRESS"
+    export GAS_KILLER_CALL_DATA=$(cast calldata "tellStory(string,uint256)" "${GK_LLM_PROMPT:-Once upon a time}" "${GK_LLM_MAX_TOKENS:-32}")
+    export GAS_KILLER_FROM_ADDRESS=$(cast wallet address --private-key "$PRIVATE_KEY")
+    export GAS_KILLER_TRANSITION_INDEX=auto
+    export GK_VERIFY_MODE=transition-count
+    export GK_VERIFY_TIMEOUT_SECS="${GK_VERIFY_TIMEOUT_SECS:-300}"
+else
 echo -e "${YELLOW}Step 7: Deploying Gas Killer example contract (ArraySummation)...${NC}"
 cd "$PROJECT_ROOT/scripts"
 
@@ -186,13 +202,25 @@ else
     export GAS_KILLER_TARGET_ADDRESS="$ARRAY_SUMMATION_ADDRESS"
 fi
 
+fi
+
 # Step 7a (unbounded mode only): prove the tracked function is *unexecutable* in a
 # real block — direct sum() must cost more than the mainnet block gas limit. The
 # Gas Killer pipeline then lands the same state transition in one small
 # verifyAndUpdate tx (asserted after step 10). Requires the anvil service to run
 # with --disable-block-gas-limit (ANVIL_EXTRA_ARGS) so the estimate can complete.
 MAINNET_BLOCK_GAS_LIMIT=30000000
-if [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ] && [ -n "$ARRAY_SUMMATION_ADDRESS" ]; then
+if [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ] && [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
+    echo -e "${YELLOW}Step 7a: Asserting direct tellStory() execution exceeds the block gas limit...${NC}"
+    MAINNET_BLOCK_GAS_LIMIT=30000000
+    DIRECT_GAS=$(cast estimate "$GAS_KILLER_TARGET_ADDRESS" "tellStory(string,uint256)" "${GK_LLM_PROMPT:-Once upon a time}" "${GK_LLM_MAX_TOKENS:-32}" --rpc-url http://localhost:8545)
+    echo "Direct tellStory() estimate: $DIRECT_GAS gas (block limit: $MAINNET_BLOCK_GAS_LIMIT)"
+    if [ "$DIRECT_GAS" -le "$MAINNET_BLOCK_GAS_LIMIT" ]; then
+        echo -e "${RED}Expected direct LLM execution above the block gas limit${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Direct execution is unlandable on-chain (${DIRECT_GAS} gas) — proceeding with Gas Killer${NC}"
+elif [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ] && [ -n "$ARRAY_SUMMATION_ADDRESS" ]; then
     echo -e "${YELLOW}Step 7a: Asserting direct sum() execution exceeds the block gas limit...${NC}"
     if ! command -v cast >/dev/null 2>&1; then
         echo -e "${RED}cast (foundry) is required for the unbounded e2e assertions${NC}"
@@ -210,6 +238,10 @@ fi
 cd "$PROJECT_ROOT"
 
 # Step 7b: Verify the router's local payload hash matches the contract's getMessageHash
+# (builds an ArraySummation sum() payload; skipped for other consumers)
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
+    echo -e "${YELLOW}Step 7b: Skipped (ArraySummation-specific parity harness)${NC}"
+else
 echo -e "${YELLOW}Step 7b: Verifying message-hash parity (build_payload_hash vs on-chain getMessageHash)...${NC}"
 cd "$PROJECT_ROOT/scripts"
 if ! cargo run --release -p scripts --bin verify_message_hash_parity; then
@@ -220,6 +252,7 @@ if ! cargo run --release -p scripts --bin verify_message_hash_parity; then
 fi
 echo -e "${GREEN}✅ Message-hash parity verified${NC}"
 cd "$PROJECT_ROOT"
+fi
 
 # Step 8: Wait for router ingress to be reachable
 echo -e "${YELLOW}Step 8: Waiting for router ingress to be ready...${NC}"
@@ -327,6 +360,26 @@ if [ -n "$TX_HASH" ] && command -v cast >/dev/null 2>&1; then
     cast rpc debug_traceTransaction "$TX_HASH" '{"tracer":"callTracer"}' --rpc-url http://localhost:8545 | jq '.' || true
 fi
 
-echo -e "${GREEN}✅ Test passed - Stack is up and array summation completed successfully!${NC}"
+# Step 10c (on-chain LLM only): decode the StoryTold event from the applied
+# verifyAndUpdate receipt and print the story the quorum signed. The story text
+# was produced by transformer inference simulated off-chain by every operator.
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ] && [ -n "$TX_HASH" ]; then
+    echo -e "${YELLOW}Step 10c: Decoding the quorum-signed story...${NC}"
+    STORY_TOPIC=$(cast keccak "StoryTold(uint256,bytes32,string,string,uint16[])")
+    LOG_DATA=$(cast receipt "$TX_HASH" --json --rpc-url http://localhost:8545 | jq -r ".logs[] | select(.topics[0] == \"$STORY_TOPIC\") | .data")
+    if [ -z "$LOG_DATA" ] || [ "$LOG_DATA" = "null" ]; then
+        echo -e "${RED}StoryTold event not found in the verifyAndUpdate receipt${NC}"
+        exit 1
+    fi
+    STORY=$(cast abi-decode "x()(string,string,uint16[])" "$LOG_DATA" | sed -n 2p)
+    echo -e "${GREEN}📖 On-chain LLM story (prompt: ${GK_LLM_PROMPT:-Once upon a time}):${NC}"
+    echo "$STORY"
+    case "$STORY" in
+        *"${GK_LLM_EXPECT:-Lily}"*) echo -e "${GREEN}✅ Story matches the expected reference generation${NC}" ;;
+        *) echo -e "${RED}Story does not contain expected substring '${GK_LLM_EXPECT:-Lily}'${NC}"; exit 1 ;;
+    esac
+fi
+
+echo -e "${GREEN}✅ Test passed - Stack is up and the tracked transition completed successfully!${NC}"
 TEST_PASSED=true
 exit 0
