@@ -275,12 +275,12 @@ fi
 echo -e "${GREEN}AVS deployment file retrieved${NC}"
 cat ./config/.nodes/avs_deploy.json
 
-# Schnorr modes: the deploy binary registers each operator's key in the
-# SchnorrStakeRegistry with a proof of possession (and, in schnorr-precommit
-# mode, derives each operator's nonce-batch seed from the same key to commit
-# batch 0), which requires the operator key files the setup job wrote to the
-# shared PVC.
-if [ "$SIGNATURE_SCHEME" = "schnorr" ] || [ "$SIGNATURE_SCHEME" = "schnorr-precommit" ]; then
+# Schnorr mode: the deploy binary registers each operator's key in the
+# SchnorrStakeRegistry with a proof of possession, which requires the operator
+# key files the setup job wrote to the shared PVC. (schnorr-precommit is not
+# exercised via Helm — the pods can't resolve the registries the runner-side
+# deploy produces; use the docker-compose e2e path for precommit instead.)
+if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
     echo "Retrieving operator key files for Schnorr PoP registration..."
     kubectl cp $ROUTER_POD:/app/.nodes/operator_keys ./config/.nodes/operator_keys
     if ! ls ./config/.nodes/operator_keys/*.private.ecdsa.key.json >/dev/null 2>&1; then

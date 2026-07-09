@@ -26,10 +26,21 @@ jobs:
       fail-fast: false
       matrix:
         # Run the full cluster once per quorum-signature scheme: the engine-driven
-        # ECDSA path, the interactive aggregate-Schnorr path, and the
-        # non-interactive pre-committed-nonce Schnorr path this PR adds (deploys
-        # the SchnorrNonceRegistry — see docs/schnorr-nonce-registry.md).
-        signature_scheme: [ecdsa, schnorr, schnorr-precommit]
+        # ECDSA path and the interactive aggregate-Schnorr path.
+        #
+        # schnorr-precommit is intentionally NOT run here — it is covered by the
+        # e2e-test workflow instead. In precommit mode the node/router read the
+        # SchnorrStakeRegistry + SchnorrNonceRegistry on-chain at startup, but in
+        # this Helm harness those registries are deployed by deploy_array_summation
+        # *on the runner*, gated behind pod-readiness, and never written back to the
+        # pods' shared PVC — so the pods can never resolve the addresses and the
+        # readiness gate deadlocks. (docker-compose e2e shares the deploy volume
+        # with the containers, so it exercises precommit end-to-end there.) The
+        # interactive schnorr path is unaffected because it exchanges operator
+        # points over p2p rather than reading the registries at boot. Enabling
+        # precommit here needs a deploy-before-readiness + address-propagation
+        # rework of this workflow; see docs/schnorr-nonce-registry.md.
+        signature_scheme: [ecdsa, schnorr]
     env:
       CI_ADMIN_KEY: ci-admin-key
       SIGNATURE_SCHEME: ${{ matrix.signature_scheme }}
@@ -477,12 +488,11 @@ jobs:
           echo "AVS deployment file contents:"
           cat ./config/.nodes/avs_deploy.json
 
-          # Schnorr modes: the deploy binary PoP-registers each operator in the
-          # SchnorrStakeRegistry (and, in schnorr-precommit mode, derives each
-          # operator's nonce-batch seed from the same key to commit batch 0),
-          # which requires the operator key files the setup job wrote to the
-          # shared PVC.
-          if [ "$SIGNATURE_SCHEME" = "schnorr" ] || [ "$SIGNATURE_SCHEME" = "schnorr-precommit" ]; then
+          # Schnorr mode: the deploy binary PoP-registers each operator in the
+          # SchnorrStakeRegistry, which requires the operator key files the setup
+          # job wrote to the shared PVC. (schnorr-precommit is not run in this
+          # workflow — see the matrix comment above.)
+          if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
             echo "Copying operator key files for Schnorr PoP registration..."
             kubectl cp $ROUTER_POD:/app/.nodes/operator_keys ./config/.nodes/operator_keys
             ls ./config/.nodes/operator_keys/
