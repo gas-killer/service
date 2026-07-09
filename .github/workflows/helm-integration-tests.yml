@@ -565,9 +565,13 @@ jobs:
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
           # The unbounded claim: direct execution cannot fit in a real block.
-          DIRECT_GAS=$(cast estimate "$LLM_TARGET" "tellStory(string,uint256)" "Once upon a time" 32 --rpc-url http://localhost:8545)
-          echo "Direct tellStory() estimate: $DIRECT_GAS gas"
-          [ "$DIRECT_GAS" -gt 30000000 ] || { echo "expected direct LLM execution above the block gas limit"; exit 1; }
+          # (A full estimate would binary-search a ~1.4B-gas call past cast's client
+          # timeout; a 30M-gas-capped call that OOGs is the sharp, cheap assertion.)
+          if cast call "$LLM_TARGET" "tellStory(string,uint256)" "Once upon a time" 32 \
+              --gas-limit 30000000 --rpc-url http://localhost:8545 >/dev/null 2>&1; then
+            echo "direct LLM execution fit in a mainnet block — expected it to OOG"; exit 1
+          fi
+          echo "✅ Direct execution OOGs at the 30M block limit — unlandable on-chain"
 
           START_BLOCK=$(cast block-number --rpc-url http://localhost:8545)
           export GAS_KILLER_TARGET_ADDRESS="$LLM_TARGET"

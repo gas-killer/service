@@ -216,15 +216,18 @@ fi
 # with --disable-block-gas-limit (ANVIL_EXTRA_ARGS) so the estimate can complete.
 MAINNET_BLOCK_GAS_LIMIT=30000000
 if [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ] && [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
-    echo -e "${YELLOW}Step 7a: Asserting direct tellStory() execution exceeds the block gas limit...${NC}"
+    echo -e "${YELLOW}Step 7a: Asserting direct tellStory() cannot execute within a mainnet block...${NC}"
+    # A full estimate binary-searches a ~1.4B-gas call and exceeds cast's client
+    # timeout; the sharper, cheap assertion is that a 30M-gas-capped call OOGs.
     MAINNET_BLOCK_GAS_LIMIT=30000000
-    DIRECT_GAS=$(cast estimate "$GAS_KILLER_TARGET_ADDRESS" "tellStory(string,uint256)" "${GK_LLM_PROMPT:-Once upon a time}" "${GK_LLM_MAX_TOKENS:-32}" --rpc-url http://localhost:8545)
-    echo "Direct tellStory() estimate: $DIRECT_GAS gas (block limit: $MAINNET_BLOCK_GAS_LIMIT)"
-    if [ "$DIRECT_GAS" -le "$MAINNET_BLOCK_GAS_LIMIT" ]; then
-        echo -e "${RED}Expected direct LLM execution above the block gas limit${NC}"
+    DIRECT_GAS="> ${MAINNET_BLOCK_GAS_LIMIT}"
+    if cast call "$GAS_KILLER_TARGET_ADDRESS" "tellStory(string,uint256)" \
+        "${GK_LLM_PROMPT:-Once upon a time}" "${GK_LLM_MAX_TOKENS:-32}" \
+        --gas-limit "$MAINNET_BLOCK_GAS_LIMIT" --rpc-url http://localhost:8545 >/dev/null 2>&1; then
+        echo -e "${RED}Direct LLM execution fit in a mainnet block — expected it to OOG${NC}"
         exit 1
     fi
-    echo -e "${GREEN}✅ Direct execution is unlandable on-chain (${DIRECT_GAS} gas) — proceeding with Gas Killer${NC}"
+    echo -e "${GREEN}✅ Direct execution OOGs at the ${MAINNET_BLOCK_GAS_LIMIT}-gas block limit — unlandable on-chain, proceeding with Gas Killer${NC}"
 elif [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ] && [ -n "$ARRAY_SUMMATION_ADDRESS" ]; then
     echo -e "${YELLOW}Step 7a: Asserting direct sum() execution exceeds the block gas limit...${NC}"
     if ! command -v cast >/dev/null 2>&1; then
