@@ -33,6 +33,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: FORK_URL
+            {{- if .Values.l1.anvilExtraArgs }}
+            # Extra anvil flags; unbounded simulation requires the node's execution
+            # cap lifted (--disable-block-gas-limit), matching the compose harness.
+            - name: ANVIL_EXTRA_ARGS
+              value: {{ .Values.l1.anvilExtraArgs | quote }}
+            {{- end }}
           ports:
             - name: rpc
               containerPort: 8545

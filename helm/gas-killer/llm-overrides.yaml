@@ -17,6 +17,13 @@
 #   helm upgrade --install gas-killer ./helm/gas-killer \
 #     -f helm/gas-killer/local-overrides.yaml -f helm/gas-killer/llm-overrides.yaml
 
+global:
+  # Unbounded simulation is what makes LLM-scale tracked functions extractable.
+  simProfile: "unbounded-v1"
+
+l1:
+  anvilExtraArgs: "--disable-block-gas-limit"
+
 router:
   # Aggregation window: round broadcast -> quorum. Operators must finish the
   # tracked-function simulation inside it. stories260K needs seconds; the

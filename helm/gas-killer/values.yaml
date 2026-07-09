@@ -135,6 +135,10 @@ secrets:
 # L1 (Anvil) configuration - only used in LOCAL mode
 l1:
   enabled: true
+  # Extra flags appended to the anvil command (ANVIL_EXTRA_ARGS). Unbounded-mode
+  # deployments need "--disable-block-gas-limit" so debug_traceCall can execute
+  # multi-billion-gas tracked functions (see llm-overrides.yaml).
+  anvilExtraArgs: ""
   image:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: latest

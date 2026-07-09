@@ -11,6 +11,9 @@ on:
       - main
       - dev
       - staging
+      # TODO: drop once the unbounded/LLM stack (#313/#319) merges to main
+      - ron/unbounded-e2e
+      - ron/llm-e2e
   workflow_dispatch:
 
 jobs:
@@ -163,7 +166,9 @@ jobs:
             --set l2.enabled=true \
             --set bridge.enabled=true \
             --set bridge.waitForBridge=true \
-            --set yieldDistribution.enabled=true
+            --set yieldDistribution.enabled=true \
+            --set global.simProfile=unbounded-v1 \
+            --set l1.anvilExtraArgs=--disable-block-gas-limit
 
       - name: Check deployment status
         run: |
@@ -540,6 +545,50 @@ jobs:
           fi
 
           echo "✅ All $SUCCESSFUL triggers completed successfully!"
+
+
+      - name: Deploy on-chain LLM consumer (stories260K)
+        run: |
+          export HTTP_RPC=http://localhost:8545
+          export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+          export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
+          LLM_TARGET=$(bash scripts/deploy_onchain_llm.sh | grep '^LLM_TARGET=' | cut -d= -f2)
+          [ -n "$LLM_TARGET" ] || { echo "LLM deployment failed"; exit 1; }
+          echo "GasKillerLLM deployed at $LLM_TARGET"
+          echo "LLM_TARGET=$LLM_TARGET" >> $GITHUB_ENV
+
+      - name: Trigger the on-chain LLM through the quorum and verify the story
+        run: |
+          export HTTP_RPC=http://localhost:8545
+          export WS_RPC=ws://localhost:8545
+          export GAS_KILLER_TRIGGER_URL=http://localhost:8080/trigger
+          export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+
+          # The unbounded claim: direct execution cannot fit in a real block.
+          DIRECT_GAS=$(cast estimate "$LLM_TARGET" "tellStory(string,uint256)" "Once upon a time" 32 --rpc-url http://localhost:8545)
+          echo "Direct tellStory() estimate: $DIRECT_GAS gas"
+          [ "$DIRECT_GAS" -gt 30000000 ] || { echo "expected direct LLM execution above the block gas limit"; exit 1; }
+
+          START_BLOCK=$(cast block-number --rpc-url http://localhost:8545)
+          export GAS_KILLER_TARGET_ADDRESS="$LLM_TARGET"
+          export GAS_KILLER_CALL_DATA=$(cast calldata "tellStory(string,uint256)" "Once upon a time" 32)
+          export GAS_KILLER_FROM_ADDRESS=$(cast wallet address --private-key "$PRIVATE_KEY")
+          export GAS_KILLER_TRANSITION_INDEX=auto
+          export GK_VERIFY_MODE=transition-count
+          export GK_VERIFY_TIMEOUT_SECS=300
+          ./target/release/send_request || { echo "LLM task failed"; kubectl logs -l app.kubernetes.io/component=router --tail 100; exit 1; }
+
+          # Decode the StoryTold event the quorum signed and assert the reference text.
+          EVENT_TOPIC=$(cast keccak 'StoryTold(uint256,bytes32,string,string,uint16[])')
+          LOG_DATA=$(cast logs --from-block "$START_BLOCK" --address "$LLM_TARGET" "$EVENT_TOPIC" --rpc-url http://localhost:8545 --json | jq -r '.[0].data')
+          [ -n "$LOG_DATA" ] && [ "$LOG_DATA" != "null" ] || { echo "StoryTold event not found"; exit 1; }
+          STORY=$(cast abi-decode "x()(string,string,uint16[])" "$LOG_DATA" | sed -n 2p)
+          echo "📖 On-chain LLM story (signed by the operator quorum):"
+          echo "$STORY"
+          case "$STORY" in
+            *Lily*) echo "✅ Story matches the reference generation" ;;
+            *) echo "❌ Story does not match the reference generation"; exit 1 ;;
+          esac
 
       - name: Trigger Yield Distribution via router
         run: |
