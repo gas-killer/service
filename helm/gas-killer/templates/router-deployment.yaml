@@ -289,6 +289,10 @@ spec:
               value: "{{ .Values.router.ingressBindHost }}:{{ .Values.router.ingressPort }}"
             - name: RUST_BACKTRACE
               value: "1"
+            # Simulation profile for tracked-function analysis. Router and all nodes
+            # derive this from the same global value so their signed payloads agree.
+            - name: GK_SIM_PROFILE
+              value: {{ include "gas-killer.simProfile" . | quote }}
             - name: DATA_DIR
               value: {{ .Values.router.persistence.mountPath | quote }}
             - name: INGRESS_TIMEOUT_MS

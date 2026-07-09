@@ -49,6 +49,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Simulation profile (GK_SIM_PROFILE) shared by the router and every node.
+Validated here so a typo fails at `helm install` rather than crash-looping every
+pod on the binary's own panic. Both deployments read this single global value, so
+they cannot disagree — a divergence would fork the quorum's signed payloads.
+*/}}
+{{- define "gas-killer.simProfile" -}}
+{{- $profile := .Values.global.simProfile | default "chain" -}}
+{{- if not (has $profile (list "chain" "unbounded-v1")) -}}
+{{- fail (printf "global.simProfile must be \"chain\" or \"unbounded-v1\", got %q" $profile) -}}
+{{- end -}}
+{{- $profile -}}
+{{- end }}
+
+{{/*
 L1 service name
 */}}
 {{- define "gas-killer.l1.fullname" -}}

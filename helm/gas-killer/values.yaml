@@ -26,6 +26,20 @@ global:
   # Timeout for init containers waiting for dependencies (in seconds)
   initTimeout: 300
 
+  # Simulation profile for tracked-function analysis (GK_SIM_PROFILE), shared by the
+  # router and every node. It is a single global value on purpose: the router and all
+  # nodes MUST agree or their independently derived payloads — and thus signatures —
+  # diverge and fork the quorum.
+  #   chain         (default) simulate under the target chain's real gas limits.
+  #   unbounded-v1  lift the simulated gas limits to the pinned protocol constants so
+  #                 tracked functions whose direct execution exceeds the block gas
+  #                 limit can still be analyzed (see gas-analyzer docs/UNBOUNDED_MODE.md).
+  # LOCAL-mode note: exercising an above-block-limit target against the bundled Anvil L1
+  # also requires Anvil to start with --disable-block-gas-limit. That flag lives in the
+  # ethereum image's entrypoint, not here — the sim profile alone does not lift the L1's
+  # own block gas limit.
+  simProfile: "chain"
+
 # GCP Secret Manager configuration for TESTNET deployments
 # When enabled, operator BLS keys and avs_deploy.json are read from GCP Secret Manager
 # rather than the shared PVC. This makes keys durable across cluster recreations.
