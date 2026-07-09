@@ -147,6 +147,11 @@ sleep 30
 # array-summation [default] or onchain-llm — the solidity-sdk LLM example).
 if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
     echo -e "${YELLOW}Step 7: Deploying Gas Killer on-chain LLM consumer (stories260K)...${NC}"
+    # Load harness config for this branch (the Rust helpers read .env themselves)
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
     LLM_ADDRESS=$(bash "$PROJECT_ROOT/scripts/deploy_onchain_llm.sh" | tee /dev/stderr | grep '^LLM_TARGET=' | cut -d= -f2)
     if [ -z "$LLM_ADDRESS" ]; then
         echo -e "${RED}on-chain LLM deployment failed${NC}"

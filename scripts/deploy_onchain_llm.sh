@@ -13,6 +13,15 @@
 #   GK_SDK_DIR            checkout cache dir (default .gk-solidity-sdk)
 set -euo pipefail
 
+# The compose harness keeps its configuration in .env (the Rust helpers read it
+# via dotenv); load it the same way when invoked without explicit env.
+if [ -z "${PRIVATE_KEY:-}" ] && [ -f .env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
+fi
+
 HTTP_RPC="${HTTP_RPC:-http://localhost:8545}"
 SDK_REPO="${GK_SDK_REPO:-https://github.com/gas-killer/solidity-sdk}"
 SDK_REF="${GK_SDK_REF:-RonTuretzky/onchain-solidity-llm}"
