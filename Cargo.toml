@@ -8,7 +8,7 @@ version = "0.1.0"
 license = "PPL"
 
 [workspace.dependencies]
-alloy = "1.0"
+alloy = { version = "1.0", features = ["consensus", "eips", "k256", "network", "rlp"] }
 alloy-eips = "1.0"
 alloy-network = "1.0"
 alloy-primitives = "1.0"
@@ -54,7 +54,7 @@ prost = "0.13.5"
 rand = "0.9.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+serde_json = { version = "1.0.140", features = ["raw_value"] }
 serde_yaml = "0.9.34"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 tempfile = "3"

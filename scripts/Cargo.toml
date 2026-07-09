@@ -16,6 +16,10 @@ name = "send_request"
 path = "send_request.rs"
 
 [[bin]]
+name = "send_raw_tx_request"
+path = "send_raw_tx_request.rs"
+
+[[bin]]
 name = "run_scenario"
 path = "run_scenario.rs"
 

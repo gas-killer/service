@@ -19,8 +19,9 @@ use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 /// AVS identity metadata served at `GET /avs-metadata`.
@@ -78,6 +79,11 @@ pub struct IngressState {
     /// path ([`IngressState::new`], which always attaches a store) can never accidentally serve
     /// an open endpoint.
     pub allow_unauthenticated: bool,
+    /// Recently accepted raw-transaction hashes, used by the JSON-RPC ingress to make duplicate
+    /// `eth_sendRawTransaction` submissions idempotent. Best-effort and per-process.
+    pub rpc_seen_txs: Arc<Mutex<crate::rpc::SeenTxCache>>,
+    /// Memoized numeric EVM chain id per configured chain role, fetched once via `eth_chainId`.
+    pub chain_id_cache: Arc<Mutex<HashMap<ChainRole, u64>>>,
 }
 
 impl IngressState {
@@ -99,6 +105,10 @@ impl IngressState {
             avs_metadata,
             store: None,
             allow_unauthenticated: false,
+            rpc_seen_txs: Arc::new(Mutex::new(crate::rpc::SeenTxCache::new(
+                crate::rpc::rpc_tx_dedup_capacity(),
+            ))),
+            chain_id_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -118,6 +128,10 @@ impl IngressState {
             avs_metadata: AvsMetadata::default(),
             store: None,
             allow_unauthenticated: true,
+            rpc_seen_txs: Arc::new(Mutex::new(crate::rpc::SeenTxCache::new(
+                crate::rpc::rpc_tx_dedup_capacity(),
+            ))),
+            chain_id_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -165,7 +179,15 @@ fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
 /// in production — a valid, unrevoked API key is required. With no store, the request is rejected
 /// unless `allow_unauthenticated` is set (the test/dev bare constructor), so a missing store
 /// fails closed rather than silently opening the endpoint.
-async fn authorize_task_request(state: &IngressState, headers: &HeaderMap) -> Result<(), ApiError> {
+///
+/// The credential may arrive either as an `Authorization: Bearer` header or — for the JSON-RPC
+/// ingress, whose wallet clients cannot set headers — as a `path_key` extracted from the URL.
+/// The path key takes precedence when both are present.
+pub(crate) async fn resolve_task_token(
+    state: &IngressState,
+    headers: &HeaderMap,
+    path_key: Option<&str>,
+) -> Result<(), ApiError> {
     let Some(store) = &state.store else {
         return if state.allow_unauthenticated {
             Ok(())
@@ -174,7 +196,7 @@ async fn authorize_task_request(state: &IngressState, headers: &HeaderMap) -> Re
         };
     };
 
-    if let Some(token) = bearer_token(headers) {
+    if let Some(token) = path_key.or_else(|| bearer_token(headers)) {
         match store.verify_api_key(token).await {
             Ok(Some(_)) => return Ok(()),
             Ok(None) => {}
@@ -186,6 +208,10 @@ async fn authorize_task_request(state: &IngressState, headers: &HeaderMap) -> Re
     }
 
     Err(ApiError::unauthorized())
+}
+
+async fn authorize_task_request(state: &IngressState, headers: &HeaderMap) -> Result<(), ApiError> {
+    resolve_task_token(state, headers, None).await
 }
 
 /// Guards the `/admin/keys` endpoints with the `ADMIN_KEY` shared secret. Returns a 503 when
@@ -303,7 +329,7 @@ impl From<OnchainValidationError> for ApiError {
     }
 }
 
-async fn detect_contract_chain<P: Provider + Clone>(
+pub(crate) async fn detect_contract_chain<P: Provider + Clone>(
     providers: &HashMap<ChainRole, P>,
     address: Address,
 ) -> Result<ChainRole, OnchainValidationError> {
@@ -546,18 +572,9 @@ pub struct GasKillerTaskResponse {
     pub message: String,
 }
 
-// Handler for POST /trigger
-pub async fn trigger_task_handler(
-    State(state): State<IngressState>,
-    headers: HeaderMap,
-    ApiJson(request): ApiJson<GasKillerTaskRequest>,
-) -> Result<(StatusCode, Json<GasKillerTaskResponse>), ApiError> {
-    authorize_task_request(&state, &headers).await?;
-
-    // Load-shed before any validation work. Onchain validation costs multiple RPC
-    // round-trips, so rejecting at-capacity requests up front keeps an overloaded
-    // service from amplifying its own load; a request that would have failed
-    // validation gets a 503 instead of a 400 while the queue is full.
+/// Rejects the request when the task queue is at capacity, so an overloaded service sheds load
+/// before spending RPC round-trips on validation. Shared by `/trigger` and the JSON-RPC ingress.
+pub(crate) fn check_queue_capacity(state: &IngressState) -> Result<(), ApiError> {
     let current_depth = state.queue_depth.load(Ordering::Relaxed);
     if current_depth >= state.max_queue_depth {
         warn!(
@@ -572,6 +589,41 @@ pub async fn trigger_task_handler(
             "Service at capacity, please try again in a few minutes",
         ));
     }
+    Ok(())
+}
+
+/// Pushes a validated task onto the creator queue, maintaining the depth gauge and ingress
+/// metrics. Shared by `/trigger` and the JSON-RPC ingress.
+pub(crate) fn enqueue_task(
+    state: &IngressState,
+    request: GasKillerTaskRequest,
+) -> Result<(), ApiError> {
+    let depth = state.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
+    if state.sender.send(request).is_err() {
+        state.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        tracing::error!("task channel closed, dropping request");
+        return Err(ApiError::internal("Internal error: task queue unavailable"));
+    }
+    if let Some(m) = &state.metrics {
+        m.ingress_accepted.inc();
+        m.task_queue_depth.set(depth as i64);
+    }
+    Ok(())
+}
+
+// Handler for POST /trigger
+pub async fn trigger_task_handler(
+    State(state): State<IngressState>,
+    headers: HeaderMap,
+    ApiJson(request): ApiJson<GasKillerTaskRequest>,
+) -> Result<(StatusCode, Json<GasKillerTaskResponse>), ApiError> {
+    authorize_task_request(&state, &headers).await?;
+
+    // Load-shed before any validation work. Onchain validation costs multiple RPC
+    // round-trips, so rejecting at-capacity requests up front keeps an overloaded
+    // service from amplifying its own load; a request that would have failed
+    // validation gets a 503 instead of a 400 while the queue is full.
+    check_queue_capacity(&state)?;
 
     if let Err(e) = request.validate() {
         warn!(
@@ -611,16 +663,7 @@ pub async fn trigger_task_handler(
         call_data_len = request.body.call_data.len(),
         "Task accepted"
     );
-    let depth = state.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
-    if state.sender.send(request).is_err() {
-        state.queue_depth.fetch_sub(1, Ordering::Relaxed);
-        tracing::error!("task channel closed, dropping request");
-        return Err(ApiError::internal("Internal error: task queue unavailable"));
-    }
-    if let Some(m) = &state.metrics {
-        m.ingress_accepted.inc();
-        m.task_queue_depth.set(depth as i64);
-    }
+    enqueue_task(&state, request)?;
     Ok((
         StatusCode::OK,
         Json(GasKillerTaskResponse {
@@ -787,6 +830,21 @@ async fn wrap_framework_error(mut resp: Response) -> Response {
 }
 
 pub fn build_app() -> Router<IngressState> {
+    // The JSON-RPC routes get an open CORS policy so browser dapps (viem/ethers pointed
+    // straight at this endpoint) can call it cross-origin; auth still applies to every request.
+    // Headers are listed explicitly rather than wildcarded: the Fetch spec excludes
+    // `Authorization` from `Access-Control-Allow-Headers: *`, so a wildcard would break
+    // Bearer-token auth from browsers (Firefox/Safari enforce this).
+    // tower-http answers OPTIONS preflights before they reach the method router.
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+    let rpc_routes = Router::new()
+        .route("/rpc", post(crate::rpc::rpc_handler))
+        .route("/rpc/:key", post(crate::rpc::rpc_with_key_handler))
+        .layer(cors);
+
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/avs-metadata", get(avs_metadata_handler))
@@ -796,6 +854,7 @@ pub fn build_app() -> Router<IngressState> {
             post(create_api_key_handler).get(list_api_keys_handler),
         )
         .route("/admin/keys/:id", delete(revoke_api_key_handler))
+        .merge(rpc_routes)
         .layer(axum::middleware::map_response(wrap_framework_error))
 }
 
