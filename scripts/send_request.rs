@@ -64,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             from_address,
             value,
             block_height,
+            auth: None,
         };
         GasKillerTaskRequest { body }
     };
@@ -303,6 +304,7 @@ async fn build_mock_request()
         from_address,
         value,
         block_height,
+        auth: None,
     };
 
     Ok(GasKillerTaskRequest { body })

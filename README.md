@@ -233,11 +233,15 @@ How it works:
   (`eth_sendTransaction`, `eth_sign*`, `debug_*`, ...). Auth failures return `-32001`; queue
   saturation returns `-32005`.
 
-Requirements and caveats (v1): the target function is executed permissionlessly through
-`verifyAndUpdate` — `msg.sender` fidelity holds in the operators' simulation (whose storage diff
-is what lands on-chain), but the contract itself cannot verify sender attribution, and the
-transaction nonce is never consumed on-chain (duplicate suppression is best-effort,
-per-router-process). Use `send_raw_tx_request` for the full e2e flow:
+Sender attribution and replay (trustless): `eth_sendRawTransaction` tasks settle through
+`GasKillerSDK.verifyAndUpdateWithAuth`, which **reconstructs the transaction's EIP-1559 signing
+hash on-chain and recovers the sender**, binding the executed call to the signer cryptographically
+(not by operator trust), and rejects a reused `(signer, nonce)` — on-chain replay protection for a
+transaction that is never broadcast. Only EIP-1559 (type-2) transactions with an empty access list
+are accepted on this path; legacy/2930/blob/set-code types are rejected. This requires the deployed
+`GasKillerSDK` to include `verifyAndUpdateWithAuth` (the solidity-sdk trustless-auth change); the
+`/trigger` path continues to use the permissionless `verifyAndUpdate`. Use `send_raw_tx_request`
+for the full e2e flow:
 ```bash
 GAS_KILLER_API_KEY=gk_... GAS_KILLER_TARGET_ADDRESS=0x... cargo run -p scripts --bin send_raw_tx_request
 ```

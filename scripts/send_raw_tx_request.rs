@@ -11,6 +11,12 @@
 //! state transition), and clean JSON-RPC errors for garbage bytes, wrong-chain signatures, and
 //! unsupported methods.
 //!
+//! Settlement path: the router now converts the raw tx into a *sender-authenticated* task, so the
+//! target settles on-chain through `GasKillerSDK.verifyAndUpdateWithAuth`, which recovers the
+//! signer from the carried signature and enforces replay protection. This requires the deployed
+//! contract to include that function (solidity-sdk trustless-auth change); against an older
+//! deployment the on-chain settlement reverts.
+//!
 //! Required env: `HTTP_RPC`, `PRIVATE_KEY`, `GAS_KILLER_TARGET_ADDRESS`, `GAS_KILLER_API_KEY`.
 //! Optional: `GAS_KILLER_ROUTER_URL` (default `http://localhost:8080`).
 

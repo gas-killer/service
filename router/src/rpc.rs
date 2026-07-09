@@ -498,26 +498,42 @@ async fn handle_send_raw_transaction(
         RpcErrorObject::invalid_params(format!("could not decode transaction: {e}"))
     })?;
 
-    match &envelope {
-        TxEnvelope::Eip4844(_) => {
-            return Err(RpcErrorObject::server(
-                "transaction type not supported: blob (EIP-4844) transactions cannot be converted to Gas Killer tasks",
-            ));
-        }
-        TxEnvelope::Eip7702(_) => {
-            return Err(RpcErrorObject::server(
-                "transaction type not supported: set-code (EIP-7702) transactions cannot be converted to Gas Killer tasks",
-            ));
-        }
-        _ => {}
+    // Only EIP-1559 (type-2) transactions with an empty access list are accepted: that is the
+    // exact shape the on-chain `verifyAndUpdateWithAuth` can reconstruct and verify trustlessly
+    // (`Eip1559TxLib`), and the shape every wallet produces against an RPC. Rejecting everything
+    // else fails closed — a legacy/2930/blob/set-code tx is never converted into a task whose
+    // sender the chain cannot later prove.
+    let Some(signed) = envelope.as_eip1559() else {
+        return Err(RpcErrorObject::server(
+            "only EIP-1559 (type-2) transactions are supported; re-send as a type-2 transaction",
+        ));
+    };
+    if !signed.tx().access_list.is_empty() {
+        return Err(RpcErrorObject::server(
+            "transactions with an access list are not supported",
+        ));
     }
 
     // The recovered signer is the task's from_address: operators simulate the call with it as
-    // msg.sender, so acting as an address requires its private key — same proof a real node
-    // demands. recover_signer enforces EIP-2 low-s, correct for newly signed transactions.
+    // msg.sender, and the settlement contract independently recovers the same address from the
+    // signature we carry, binding the executed call to the signer. recover_signer enforces EIP-2
+    // low-s, correct for newly signed transactions.
     let from = envelope
         .recover_signer()
         .map_err(|e| RpcErrorObject::server(format!("invalid transaction signature: {e}")))?;
+
+    // Capture the fields the contract needs to rebuild the EIP-1559 signing preimage and recover
+    // the sender; `nonce` is also the on-chain replay key.
+    let sig = signed.signature();
+    let auth = gas_killer_common::task_data::TxAuth {
+        nonce: envelope.nonce(),
+        max_priority_fee_per_gas: envelope.max_priority_fee_per_gas().unwrap_or(0),
+        max_fee_per_gas: envelope.max_fee_per_gas(),
+        gas_limit: envelope.gas_limit(),
+        y_parity: sig.v(),
+        r: sig.r(),
+        s: sig.s(),
+    };
 
     let Some(target) = envelope.to() else {
         return Err(RpcErrorObject::server(
@@ -576,7 +592,7 @@ async fn handle_send_raw_transaction(
     // upstream RPC hangs; on expiry the reservation is rolled back like any other failure.
     let converted = tokio::time::timeout(
         rpc_upstream_timeout(),
-        convert_and_enqueue(state, &envelope, from, target),
+        convert_and_enqueue(state, &envelope, from, target, auth),
     )
     .await
     .unwrap_or_else(|_| {
@@ -684,6 +700,7 @@ async fn convert_and_enqueue(
     envelope: &TxEnvelope,
     from: Address,
     target: Address,
+    auth: gas_killer_common::task_data::TxAuth,
 ) -> Result<(), RpcErrorObject> {
     let chain = resolve_target_chain(state, target, envelope.chain_id()).await?;
 
@@ -725,6 +742,7 @@ async fn convert_and_enqueue(
             from_address: from,
             value,
             block_height,
+            auth: Some(auth),
         },
     };
 
@@ -927,12 +945,22 @@ mod tests {
             task.body.transition_index, None,
             "transition index must be auto-resolved"
         );
+        let auth = task
+            .body
+            .auth
+            .expect("RPC-ingress task must carry auth for sender-authenticated settlement");
+        assert_eq!(auth.nonce, 0, "nonce carried from the tx");
+        assert_eq!(auth.gas_limit, 1_000_000);
+        assert_eq!(auth.max_fee_per_gas, 1_000_000_000);
+        // Recovering the sender from the carried signature must reproduce from_address.
+        assert!(auth.r > U256::ZERO && auth.s > U256::ZERO);
     }
 
     #[tokio::test]
-    async fn send_raw_tx_legacy_eip155_works() {
-        let (app, mut receiver, asserter) = make_app();
-        push_happy_path(&asserter);
+    async fn send_raw_tx_legacy_rejected() {
+        // Legacy transactions cannot be verified trustlessly on-chain, so the authenticated RPC
+        // path rejects them before any RPC round-trip.
+        let (app, mut receiver, _asserter) = make_app();
 
         let mut tx = TxLegacy {
             chain_id: Some(CHAIN_ID),
@@ -951,32 +979,38 @@ mod tests {
             .await
             .unwrap();
         let json = response_json(resp).await;
+        assert_eq!(json["error"]["code"], -32000);
         assert!(
-            json["error"].is_null(),
-            "unexpected error: {}",
-            json["error"]
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("EIP-1559"),
+            "error should point at EIP-1559: {}",
+            json["error"]["message"]
         );
-
-        let task = receiver.try_recv().expect("task should be queued");
-        assert_eq!(task.body.from_address, TEST_ADDR);
-        assert_eq!(task.body.call_data, vec![1, 2, 3, 4, 5]);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
-    async fn send_raw_tx_pre_eip155_skips_chain_id_check() {
-        let (app, mut receiver, asserter) = make_app();
-        // Only getCode + blockNumber are consumed: no chain id fetch for a pre-155 tx.
-        asserter.push_success(&Bytes::from(vec![0x60u8]));
-        asserter.push_success(&U64::from(1234u64));
-
-        let mut tx = TxLegacy {
-            chain_id: None,
+    async fn send_raw_tx_access_list_rejected() {
+        // A type-2 tx with a non-empty access list changes the signing preimage in a way the
+        // on-chain reconstruction does not model, so reject it up front.
+        let (app, mut receiver, _asserter) = make_app();
+        let mut tx = TxEip1559 {
+            chain_id: CHAIN_ID,
             nonce: 0,
-            gas_price: 1_000_000_000,
-            gas_limit: 500_000,
+            gas_limit: 1_000_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
             to: TxKind::Call(TARGET),
             value: U256::ZERO,
-            input: vec![9, 9, 9, 9].into(),
+            input: vec![0xAB, 0xCD, 0xEF, 0x01].into(),
+            access_list: alloy::eips::eip2930::AccessList(vec![
+                alloy::eips::eip2930::AccessListItem {
+                    address: TARGET,
+                    storage_keys: vec![alloy_primitives::B256::ZERO],
+                },
+            ]),
         };
         let sig = signer().sign_transaction_sync(&mut tx).unwrap();
         let envelope = TxEnvelope::from(tx.into_signed(sig));
@@ -986,12 +1020,14 @@ mod tests {
             .await
             .unwrap();
         let json = response_json(resp).await;
+        assert_eq!(json["error"]["code"], -32000);
         assert!(
-            json["error"].is_null(),
-            "unexpected error: {}",
-            json["error"]
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("access list")
         );
-        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1159,7 +1195,9 @@ mod tests {
             json["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("type not supported")
+                .contains("EIP-1559"),
+            "non-1559 type should be rejected with EIP-1559 guidance: {}",
+            json["error"]["message"]
         );
         assert!(receiver.try_recv().is_err());
     }
