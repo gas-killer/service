@@ -2,6 +2,7 @@ use alloy_provider::Provider;
 use anyhow::Result;
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
 use commonware_runtime::telemetry::metrics::raw::Histogram;
 use commonware_runtime::telemetry::metrics::registry::Registry;
@@ -85,6 +86,25 @@ fn executor_cache_capacity(num_chains: usize) -> usize {
     per_chain * num_chains.max(1)
 }
 
+/// Digest-cache key covering every task field that influences the recomputed payload digest:
+/// transition index, block height, target, sender, value, and the full calldata.
+///
+/// Keying by `(transition_index, block_height)` alone is not sound: two different tasks — e.g.
+/// two contracts both at transition 0 anchored at the same head block, which the JSON-RPC
+/// ingress makes routine — would collide, and the second task would be served the first task's
+/// cached digest, silently failing its aggregation. `storage_updates` and `chain_id` are
+/// derived values and are deliberately excluded.
+fn digest_cache_key(task_data: &GasKillerTaskData) -> Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(&task_data.transition_index.to_le_bytes());
+    hasher.update(&task_data.block_height.to_le_bytes());
+    hasher.update(task_data.target_address.as_slice());
+    hasher.update(task_data.from_address.as_slice());
+    hasher.update(&task_data.value.to_le_bytes::<32>());
+    hasher.update(&task_data.call_data);
+    hasher.finalize()
+}
+
 /// Validator implementation for the gas killer use case with multi-chain support
 #[derive(Clone)]
 pub struct GasKillerValidator {
@@ -94,10 +114,10 @@ pub struct GasKillerValidator {
     providers: Arc<HashMap<ChainRole, ReadOnlyProvider>>,
     /// Default chain for backwards compatibility
     default_chain: ChainRole,
-    /// Cache: (transition_index, block_height) -> computed digest
+    /// Cache: task identity -> computed digest (see [`digest_cache_key`]).
     /// Prevents re-running expensive EVMSketch for the same round when the
     /// orchestrator validates multiple signatures for identical task data.
-    digest_cache: Arc<Mutex<HashMap<(u64, u64), Digest>>>,
+    digest_cache: Arc<Mutex<HashMap<Digest, Digest>>>,
     /// LRU cache of pre-built EvmSketch executors keyed by (rpc_url, block_number).
     /// Eliminates the 2× eth_getBlockByNumber build cost (~80–120 ms) for the
     /// 2nd…Nth request at the same block height.
@@ -354,7 +374,7 @@ impl GasKillerValidator {
     /// node signature for the same round.
     pub async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
         let digest = task_data.build_payload_hash(storage_updates);
-        let cache_key = (task_data.transition_index, task_data.block_height);
+        let cache_key = digest_cache_key(task_data);
         let mut cache = self.digest_cache.lock().await;
         cache.insert(cache_key, digest);
         debug!(
@@ -560,7 +580,7 @@ impl GasKillerValidator {
         let aggregation = self.validate_message_format(msg).await?;
         let task_data = &aggregation.metadata;
 
-        let cache_key = (task_data.transition_index, task_data.block_height);
+        let cache_key = digest_cache_key(task_data);
 
         // Check cache before running expensive EVMSketch
         {

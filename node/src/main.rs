@@ -326,7 +326,12 @@ fn main() {
         // (re)discovery while keeping recommended's abuse-resistance (concurrent-handshake cap, subnet
         // rate limit, ping cadence).
         p2p_cfg.dial_frequency = Duration::from_millis(500);
-        p2p_cfg.peer_connection_cooldown = Duration::from_secs(1);
+        // 3s, not 1s: at 1s both sides can re-reserve the same peer while the previous
+        // connection's teardown is still in flight, and the crossed handshakes flap the link
+        // with HandshakeError(DecryptionFailed) right as a round broadcast goes out — seen on
+        // virtualized Docker hosts, where teardown latencies exceed the 1s window. 3s clears
+        // the race while staying far under the 30s round timeout for staggered startup.
+        p2p_cfg.peer_connection_cooldown = Duration::from_secs(3);
         p2p_cfg.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(16));
 
         let (mut network, mut oracle) = Network::new(context.child("network"), p2p_cfg);

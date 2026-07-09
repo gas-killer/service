@@ -195,6 +195,53 @@ Set `GAS_KILLER_API_KEY` to a minted key when the router requires auth:
 GAS_KILLER_API_KEY=gk_... cargo run -p scripts --bin send_request
 ```
 
+## Ethereum JSON-RPC Ingress
+
+The router also speaks standard Ethereum JSON-RPC at `POST /rpc`, so existing wallets and
+tooling can submit to Gas Killer by **switching their RPC URL over** — no payload changes:
+
+```bash
+# Wallet-style URL with the API key in the path (for clients that cannot set headers):
+#   http://localhost:8080/rpc/gk_...
+# Or programmatic clients with a Bearer header:
+cast send <target> "sum(uint256[])" "[1,2,3]" \
+  --rpc-url http://localhost:8080/rpc/gk_... \
+  --private-key $PRIVATE_KEY
+```
+
+How it works:
+
+- **`eth_sendRawTransaction`** is intercepted: the signed transaction is decoded, the sender is
+  **recovered from its ECDSA signature** and used as the task's `from_address` (so acting as an
+  address requires holding its key — operators simulate the call with it as `msg.sender`), the
+  target/calldata/value become the task, `block_height` is pinned to the current head, and the
+  transition index is auto-resolved. The transaction hash is returned, but the transaction itself
+  is never broadcast: the state change lands via the router's `verifyAndUpdate`, the sender pays
+  **zero gas**, and no receipt will exist for the returned hash. Duplicate submissions of the
+  same raw bytes return the same hash without enqueueing a second task (a duplicate racing a
+  still-in-flight first submission gets the geth-style `already known` error). When a
+  transaction carries an EIP-155 chain id, that signed intent picks the chain: the target must
+  have code on that chain, and same-address deployments on multiple configured chains are
+  refused as ambiguous.
+- **Read methods** (`eth_chainId`, `eth_blockNumber`, `eth_getTransactionCount`, `eth_gasPrice`,
+  `eth_call`, `eth_estimateGas`, ... — any `eth_`/`net_`/`web3_` read) are proxied to the
+  upstream chain RPC, so nonce fetching and gas estimation keep working. `?chain=l2` selects the
+  L2 upstream when configured. Batches (JSON arrays) are supported.
+- **Rejected with clear JSON-RPC errors**: contract creation, plain ETH transfers (no calldata),
+  blob/set-code transaction types, transactions whose chain id does not match the chain where
+  the target contract lives, value transfers the sender cannot fund, and unknown/unsafe methods
+  (`eth_sendTransaction`, `eth_sign*`, `debug_*`, ...). Auth failures return `-32001`; queue
+  saturation returns `-32005`.
+
+Requirements and caveats (v1): the target function is executed permissionlessly through
+`verifyAndUpdate` — `msg.sender` fidelity holds in the operators' simulation (whose storage diff
+is what lands on-chain), but the contract itself cannot verify sender attribution, and the
+transaction nonce is never consumed on-chain (duplicate suppression is best-effort,
+per-router-process). Use `send_raw_tx_request` for the full e2e flow:
+```bash
+GAS_KILLER_API_KEY=gk_... GAS_KILLER_TARGET_ADDRESS=0x... cargo run -p scripts --bin send_raw_tx_request
+```
+
 ## Development
 
 ### Dependencies

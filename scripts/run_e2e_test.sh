@@ -82,6 +82,7 @@ echo -e "${YELLOW}Step 1: Building scripts...${NC}"
 cd "$PROJECT_ROOT/scripts"
 cargo build --release -p scripts --bin deploy_array_summation
 cargo build --release -p scripts --bin send_request
+cargo build --release -p scripts --bin send_raw_tx_request
 cargo build --release -p scripts --bin verify_message_hash_parity
 cd "$PROJECT_ROOT"
 
@@ -202,7 +203,10 @@ cd "$PROJECT_ROOT"
 
 # Step 8: Wait for router ingress to be reachable
 echo -e "${YELLOW}Step 8: Waiting for router ingress to be ready...${NC}"
-ROUTER_HEALTH_URL="http://localhost:8080/healthz"
+ROUTER_URL="${GAS_KILLER_ROUTER_URL:-http://localhost:8080}"
+# send_request reads GAS_KILLER_TRIGGER_URL directly; keep it in lockstep with the router URL.
+export GAS_KILLER_TRIGGER_URL="${GAS_KILLER_TRIGGER_URL:-$ROUTER_URL/trigger}"
+ROUTER_HEALTH_URL="$ROUTER_URL/healthz"
 ROUTER_TIMEOUT=120
 ROUTER_INTERVAL=3
 elapsed=0
@@ -230,7 +234,7 @@ CREATE_RESP=$(curl -s -X POST \
     -H "Authorization: Bearer $ADMIN_KEY" \
     -H "Content-Type: application/json" \
     -d '{"label":"e2e"}' \
-    http://localhost:8080/admin/keys)
+    "$ROUTER_URL/admin/keys")
 if command -v jq >/dev/null 2>&1; then
     GAS_KILLER_API_KEY=$(printf '%s' "$CREATE_RESP" | jq -r '.key // empty')
 else
@@ -268,8 +272,29 @@ else
     TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -o "transaction_hash=0x[a-fA-F0-9]*" | sed 's/transaction_hash=//' | tail -1)
     if [ -n "$TX_HASH" ] && command -v cast >/dev/null 2>&1; then
         echo -e "${YELLOW}Execution trace for $TX_HASH:${NC}"
-        cast run "$TX_HASH" --rpc-url http://localhost:8545 || true
+        cast run "$TX_HASH" --rpc-url "${HTTP_RPC:-http://localhost:8545}" || true
     fi
+    exit 1
+fi
+
+# Step 10b: Exercise the Ethereum JSON-RPC ingress with a real signed transaction.
+# This signs an EIP-1559 tx with PRIVATE_KEY, submits it via eth_sendRawTransaction on
+# /rpc/<api_key>, and verifies the state transition lands on-chain — the "switch your RPC
+# over" user flow.
+echo -e "${YELLOW}Step 10b: Testing the JSON-RPC ingress (eth_sendRawTransaction)...${NC}"
+cd "$PROJECT_ROOT/scripts"
+cargo run --release -p scripts --bin send_raw_tx_request
+RAW_TX_STATUS=$?
+cd "$PROJECT_ROOT"
+
+if [ $RAW_TX_STATUS -eq 0 ]; then
+    echo -e "${GREEN}✅ JSON-RPC ingress verified - raw transaction executed through Gas Killer!${NC}"
+else
+    echo -e "${RED}❌ JSON-RPC ingress test failed.${NC}"
+    echo -e "${YELLOW}Recent router logs:${NC}"
+    docker compose logs --tail=100 router || true
+    echo -e "${YELLOW}Recent node logs:${NC}"
+    docker compose logs --tail=50 node-1 node-2 node-3 || true
     exit 1
 fi
 
@@ -282,7 +307,7 @@ docker compose logs --tail=50 router || true
 TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -o "transaction_hash=0x[a-fA-F0-9]*" | sed 's/transaction_hash=//' | tail -1)
 if [ -n "$TX_HASH" ] && command -v cast >/dev/null 2>&1; then
     echo -e "${YELLOW}Execution trace for $TX_HASH:${NC}"
-    cast rpc debug_traceTransaction "$TX_HASH" '{"tracer":"callTracer"}' --rpc-url http://localhost:8545 | jq '.' || true
+    cast rpc debug_traceTransaction "$TX_HASH" '{"tracer":"callTracer"}' --rpc-url "${HTTP_RPC:-http://localhost:8545}" | jq '.' || true
 fi
 
 echo -e "${GREEN}✅ Test passed - Stack is up and array summation completed successfully!${NC}"

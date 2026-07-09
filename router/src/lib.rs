@@ -7,6 +7,7 @@ pub mod factories;
 pub mod ingress;
 pub mod metrics;
 pub mod orchestrator;
+pub mod rpc;
 pub mod store;
 
 // Re-export task_data from common crate
