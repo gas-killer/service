@@ -524,6 +524,12 @@ pub struct GasKillerTaskRequestBody {
     pub from_address: Address,
     pub value: U256,
     pub block_height: u64,
+    /// Set only by the JSON-RPC ingress when the task derives from a user's signed EIP-1559
+    /// transaction; it carries the fields the on-chain `verifyAndUpdateWithAuth` needs to
+    /// reconstruct the signature and recover the sender. `None` (the default, and always the case
+    /// for `/trigger`) settles through the permissionless `verifyAndUpdate` path.
+    #[serde(default)]
+    pub auth: Option<gas_killer_common::task_data::TxAuth>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -888,6 +894,7 @@ mod tests {
                 transition_index: Some(0),
                 value: U256::ZERO,
                 block_height: 1,
+                auth: None,
             },
         }
     }
@@ -1022,6 +1029,7 @@ mod tests {
                 transition_index: Some(u64::MAX),
                 value: U256::MAX,
                 block_height: 0,
+                auth: None,
             },
         };
         // First check is target_address
@@ -1954,6 +1962,7 @@ mod tests {
                 transition_index: Some(5),
                 value: U256::ZERO,
                 block_height: 50,
+                auth: None,
             }
         }
 

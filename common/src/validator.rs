@@ -641,6 +641,7 @@ mod tests {
             value: U256::from(1000),
             block_height: 12345,
             chain_id: 1u64,
+            auth: None,
         }
     }
 

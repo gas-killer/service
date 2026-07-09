@@ -400,6 +400,9 @@ impl Creator for ListeningGasKillerCreator {
                         value: enriched.task.body.value,
                         block_height: enriched.block_height,
                         chain_id: enriched.chain_id,
+                        // Carries through from the JSON-RPC ingress; drives sender-authenticated
+                        // settlement and the signed payload hash. `None` for `/trigger` tasks.
+                        auth: enriched.task.body.auth.clone(),
                     };
                 }
                 warn!(
@@ -540,6 +543,7 @@ mod tests {
             value: U256::from(1000),
             block_height: 12345,
             chain_id: 1u64,
+            auth: None,
         };
 
         // Simulate the wire protocol serialization (what happens in production)
@@ -580,6 +584,7 @@ mod tests {
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
                 block_height: 12345,
+                auth: None,
             },
         };
 
@@ -599,6 +604,7 @@ mod tests {
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
                 block_height: 12345,
+                auth: None,
             },
         };
 
@@ -611,6 +617,7 @@ mod tests {
             value: task.body.value,
             block_height: task.body.block_height,
             chain_id: 1u64,
+            auth: None,
         };
 
         assert_eq!(task_data.transition_index, 42);

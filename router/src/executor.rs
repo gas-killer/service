@@ -2,7 +2,10 @@ use crate::creator::{DispatchTime, take_dispatch_time};
 use crate::metrics::MetricsCollector;
 use gas_killer_common::ChainRole;
 use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
-use gas_killer_common::bindings::gaskillersdk::{BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes};
+use gas_killer_common::bindings::gaskillersdk::{
+    BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes,
+    IGasKillerSDKAuth::SignedTx,
+};
 use commonware_avs_router::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever::getNonSignerStakesAndSignatureReturn;
 use commonware_avs_router::executor::bls::BlsSignatureVerificationHandler;
 use commonware_avs_router::executor::ExecutionResult;
@@ -282,21 +285,55 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         //   require(referenceBlockNumber < block.number)
         // Without the decrement, eth_estimateGas at block N sees referenceBlockNumber == N
         // and reverts with FutureBlockNumber.
-        info!("Sending verifyAndUpdate transaction");
+        let reference_block = current_block_number.saturating_sub(1);
         let tx_send_start = Instant::now();
-        let send_result = gas_killer_sdk
-            .verifyAndUpdate(
-                msg_hash,
-                quorum_numbers,
-                current_block_number.saturating_sub(1),
-                storage_updates,
-                transition_index,
-                target_function,
-                non_signer_struct_data,
-            )
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send verifyAndUpdate transaction: {}", e));
+        // Sender-authenticated tasks (from the JSON-RPC ingress) settle through
+        // verifyAndUpdateWithAuth, which reconstructs the user's signature on-chain and enforces
+        // replay protection; permissionless tasks keep the original verifyAndUpdate path.
+        let send_result = match &task_data.auth {
+            Some(auth) => {
+                let user_tx = SignedTx {
+                    nonce: U256::from(auth.nonce),
+                    maxPriorityFeePerGas: U256::from(auth.max_priority_fee_per_gas),
+                    maxFeePerGas: U256::from(auth.max_fee_per_gas),
+                    gasLimit: U256::from(auth.gas_limit),
+                    value: task_data.value,
+                    callData: Bytes::from(task_data.call_data.clone()),
+                    yParity: u8::from(auth.y_parity),
+                    r: FixedBytes::<32>::from(auth.r.to_be_bytes::<32>()),
+                    s: FixedBytes::<32>::from(auth.s.to_be_bytes::<32>()),
+                };
+                info!("Sending verifyAndUpdateWithAuth transaction (sender-authenticated)");
+                gas_killer_sdk
+                    .verifyAndUpdateWithAuth(
+                        msg_hash,
+                        quorum_numbers,
+                        reference_block,
+                        storage_updates,
+                        transition_index,
+                        user_tx,
+                        non_signer_struct_data,
+                    )
+                    .send()
+                    .await
+            }
+            None => {
+                info!("Sending verifyAndUpdate transaction");
+                gas_killer_sdk
+                    .verifyAndUpdate(
+                        msg_hash,
+                        quorum_numbers,
+                        reference_block,
+                        storage_updates,
+                        transition_index,
+                        target_function,
+                        non_signer_struct_data,
+                    )
+                    .send()
+                    .await
+            }
+        }
+        .map_err(|e| anyhow::anyhow!("Failed to send verifyAndUpdate transaction: {}", e));
         if let Some(m) = &self.metrics {
             m.executor_tx_send_seconds
                 .observe(tx_send_start.elapsed().as_secs_f64());
