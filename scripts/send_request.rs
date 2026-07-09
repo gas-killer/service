@@ -206,7 +206,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .stateTransitionCount()
                     .call()
                     .await
-                    .map_err(|e| format!("Failed to read stateTransitionCount after trigger: {}", e))?
+                    .map_err(|e| {
+                        format!("Failed to read stateTransitionCount after trigger: {}", e)
+                    })?
                     .to::<u64>()
             } else {
                 array_contract
