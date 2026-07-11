@@ -145,7 +145,21 @@ impl GasKillerValidator {
     ///
     /// Returns an error if L1 RPC is not set.
     pub fn new() -> Result<Self> {
-        let chain_rpc_urls = crate::chain_rpc_urls_from_env()?;
+        let mut chain_rpc_urls = crate::chain_rpc_urls_from_env()?;
+        // GK_SIM_RPC: optional dedicated endpoint for tracked-function SIMULATION
+        // only (debug_traceCall). Lets operators point analysis at a node with
+        // lifted trace caps and/or locally materialized state — e.g. an anvil
+        // fork with pinned code overlays (UNBOUNDED_V2_OVERLAYS) setCode'd in —
+        // while transaction submission and staking reads stay on HTTP_RPC
+        // against the real chain. All operators and the router must use
+        // equivalently-prepared simulation endpoints or their signed payloads
+        // diverge, exactly like every other pinned-env parameter.
+        if let Ok(sim_rpc) = std::env::var("GK_SIM_RPC")
+            && !sim_rpc.is_empty()
+        {
+            tracing::info!(sim_rpc = %sim_rpc, "validator simulation RPC overridden by GK_SIM_RPC");
+            chain_rpc_urls.insert(ChainRole::L1, sim_rpc);
+        }
         let capacity = executor_cache_capacity(chain_rpc_urls.len());
         let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
         if !providers.contains_key(&ChainRole::L1) {
