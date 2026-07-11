@@ -293,6 +293,15 @@ spec:
             # derive this from the same global value so their signed payloads agree.
             - name: GK_SIM_PROFILE
               value: {{ include "gas-killer.simProfile" . | quote }}
+            {{- if .Values.global.simRpc }}
+            # Dedicated simulation endpoint (GK_SIM_RPC): tracked-function analysis
+            # traces against this node (e.g. an anvil fork with pinned code overlays
+            # setCode'd in) while HTTP_RPC stays on the real chain for settlement.
+            # Shared by router and all nodes — a divergent sim endpoint diverges
+            # signed payloads, same discipline as GK_SIM_PROFILE.
+            - name: GK_SIM_RPC
+              value: {{ .Values.global.simRpc | quote }}
+            {{- end }}
             - name: DATA_DIR
               value: {{ .Values.router.persistence.mountPath | quote }}
             - name: INGRESS_TIMEOUT_MS

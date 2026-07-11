@@ -26,6 +26,12 @@ global:
   # Timeout for init containers waiting for dependencies (in seconds)
   initTimeout: 300
 
+  # Dedicated simulation RPC (GK_SIM_RPC) for tracked-function analysis, shared by
+  # router and nodes. Empty = simulate on the regular HTTP_RPC. Point it at an
+  # anvil fork with overlay chunks setCode'd in to serve overlay-mode consumers
+  # (see UNBOUNDED_V2_OVERLAYS.md in solidity-sdk) without shipping overlay bytes
+  # through the upstream RPC.
+  simRpc: ""
   # Simulation profile for tracked-function analysis (GK_SIM_PROFILE), shared by the
   # router and every node. It is a single global value on purpose: the router and all
   # nodes MUST agree or their independently derived payloads — and thus signatures —
