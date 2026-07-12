@@ -4004,6 +4004,7 @@ dependencies = [
  "dotenv",
  "futures",
  "gas-analyzer-evmsketch",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

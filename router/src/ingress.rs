@@ -15,6 +15,7 @@ use gas_killer_common::ChainRole;
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
+use gas_killer_common::prewarm::{PrewarmSlot, PrewarmTask};
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,6 +79,11 @@ pub struct IngressState {
     /// path ([`IngressState::new`], which always attaches a store) can never accidentally serve
     /// an open endpoint.
     pub allow_unauthenticated: bool,
+    /// Shared prewarm slot: every accepted task is published here so the internal
+    /// `/prewarm` endpoint (health server) can hand it to operator nodes, which start
+    /// simulating at ingress time instead of waiting for the round broadcast. `None`
+    /// disables publishing (tests).
+    pub prewarm: Option<Arc<PrewarmSlot>>,
 }
 
 impl IngressState {
@@ -99,6 +105,7 @@ impl IngressState {
             avs_metadata,
             store: None,
             allow_unauthenticated: false,
+            prewarm: None,
         }
     }
 
@@ -118,6 +125,7 @@ impl IngressState {
             avs_metadata: AvsMetadata::default(),
             store: None,
             allow_unauthenticated: true,
+            prewarm: None,
         }
     }
 
@@ -131,6 +139,13 @@ impl IngressState {
     /// construction.
     pub fn with_admin_key(mut self, admin_key: Option<String>) -> Self {
         self.admin_key = admin_key;
+        self
+    }
+
+    /// Attaches the shared prewarm slot accepted tasks are published to, returning the updated
+    /// state for chained construction.
+    pub fn with_prewarm(mut self, prewarm: Arc<PrewarmSlot>) -> Self {
+        self.prewarm = Some(prewarm);
         self
     }
 }
@@ -611,11 +626,26 @@ pub async fn trigger_task_handler(
         call_data_len = request.body.call_data.len(),
         "Task accepted"
     );
+    // Snapshot the fields nodes need to prewarm before `request` moves into the queue.
+    let prewarm_task = state.prewarm.as_ref().map(|_| PrewarmTask {
+        target_address: request.body.target_address,
+        call_data: request.body.call_data.clone(),
+        transition_index: request.body.transition_index,
+        from_address: request.body.from_address,
+        value: request.body.value,
+        block_height: request.body.block_height,
+    });
     let depth = state.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
     if state.sender.send(request).is_err() {
         state.queue_depth.fetch_sub(1, Ordering::Relaxed);
         tracing::error!("task channel closed, dropping request");
         return Err(ApiError::internal("Internal error: task queue unavailable"));
+    }
+    // Publish only after the task is durably queued, so nodes never prewarm a task
+    // that was rejected by the queue.
+    if let (Some(slot), Some(task)) = (&state.prewarm, prewarm_task) {
+        let seq = slot.publish(task);
+        info!(seq, "Published accepted task to prewarm channel");
     }
     if let Some(m) = &state.metrics {
         m.ingress_accepted.inc();

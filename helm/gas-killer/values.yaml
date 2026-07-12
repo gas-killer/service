@@ -46,6 +46,17 @@ global:
   # own block gas limit.
   simProfile: "chain"
 
+  # Operator prewarm pre-pass: nodes poll the router's internal /prewarm endpoint
+  # (served on the health port) and start the tracked-function simulation as soon as
+  # the router ACCEPTS a task — instead of waiting for the round broadcast, which the
+  # router only sends after finishing its own simulation. For long simulations (LLM
+  # traces are ~20+ minutes per leg) this collapses round time from
+  # router-leg + operator-leg to ~max(router-leg, operator-leg). Pure latency
+  # optimization, zero protocol changes: a missed or failed prewarm falls back to
+  # simulate-on-arrival.
+  prewarm:
+    enabled: true
+
 # GCP Secret Manager configuration for TESTNET deployments
 # When enabled, operator BLS keys and avs_deploy.json are read from GCP Secret Manager
 # rather than the shared PVC. This makes keys durable across cluster recreations.

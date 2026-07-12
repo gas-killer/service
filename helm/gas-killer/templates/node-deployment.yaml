@@ -243,6 +243,13 @@ spec:
               {{- else }}
               value: "/app/.nodes/avs_deploy.json"
               {{- end }}
+            {{- if $root.Values.global.prewarm.enabled }}
+            # Prewarm feed: the router publishes every ingress-accepted task on its
+            # internal health port; the node polls it and starts simulating at
+            # ingress time so the round broadcast hits a warm digest cache.
+            - name: GK_PREWARM_URL
+              value: "http://{{ include "gas-killer.router.fullname" $root }}:{{ $root.Values.router.healthzPort }}/prewarm"
+            {{- end }}
             - name: HEALTHZ_PORT
               value: {{ $root.Values.node.healthzPort | quote }}
             - name: P2P_MESSAGE_BACKLOG

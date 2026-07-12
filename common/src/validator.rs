@@ -5,9 +5,10 @@ use commonware_cryptography::sha256::Digest;
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
 use commonware_runtime::telemetry::metrics::raw::Histogram;
 use commonware_runtime::telemetry::metrics::registry::Registry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::Mutex as StdMutex;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -100,6 +101,12 @@ pub struct GasKillerValidator {
     /// Prevents re-running expensive EVMSketch for the same round when the
     /// orchestrator validates multiple signatures for identical task data.
     digest_cache: Arc<Mutex<HashMap<(u64, u64), Digest>>>,
+    /// Keys currently being simulated by [`prewarm`](Self::prewarm). Guards
+    /// duplicate prewarms and lets `validate_and_build_hash` wait for an
+    /// in-flight prewarm instead of launching a second multi-minute EVMSketch
+    /// run for the same round. A `std` mutex (never held across `.await`) so
+    /// the panic-safe [`PrewarmInflightGuard`] can release entries in `Drop`.
+    prewarm_inflight: Arc<StdMutex<HashSet<(u64, u64)>>>,
     /// LRU cache of pre-built EvmSketch executors keyed by (rpc_url, block_number).
     /// Eliminates the 2× eth_getBlockByNumber build cost (~80–120 ms) for the
     /// 2nd…Nth request at the same block height.
@@ -113,6 +120,27 @@ pub struct GasKillerValidator {
     /// protocol configuration, so the router and every node MUST agree on it or
     /// their independently derived payloads (and thus signatures) diverge.
     sim_profile: SimProfile,
+}
+
+/// How often a validation blocked on an in-flight prewarm re-checks the digest
+/// cache. Coarse on purpose: the guarded computation runs for minutes, and the
+/// waiter only burns a map lookup per tick.
+const PREWARM_WAIT_POLL: Duration = Duration::from_secs(1);
+
+/// Removes a key from the prewarm in-flight set on drop, so a panic or early
+/// return inside the prewarm computation can never leave the key stuck
+/// in-flight (which would make `validate_and_build_hash` wait forever).
+struct PrewarmInflightGuard {
+    inflight: Arc<StdMutex<HashSet<(u64, u64)>>>,
+    key: (u64, u64),
+}
+
+impl Drop for PrewarmInflightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut inflight) = self.inflight.lock() {
+            inflight.remove(&self.key);
+        }
+    }
 }
 
 /// Parses `GK_SIM_PROFILE` into a [`SimProfile`]. Accepted values:
@@ -171,6 +199,7 @@ impl GasKillerValidator {
             providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
@@ -190,6 +219,7 @@ impl GasKillerValidator {
             providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
@@ -205,6 +235,7 @@ impl GasKillerValidator {
             providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
@@ -409,6 +440,69 @@ impl GasKillerValidator {
             block_height = task_data.block_height,
             "Primed validator digest cache from creator (verification will skip EVMSketch)"
         );
+    }
+
+    /// Pre-computes and caches the payload digest for a task before its round
+    /// broadcast arrives (the ingress prewarm path — see `crate::prewarm`).
+    ///
+    /// Runs the exact simulate-and-hash pipeline `validate_and_build_hash`
+    /// uses on a cache miss and lands the result under the same
+    /// `(transition_index, block_height)` key, so the later round arrival is a
+    /// pure cache hit. `task_data.storage_updates` is ignored (the digest is
+    /// always built from the freshly recomputed updates), so callers pass it
+    /// empty.
+    ///
+    /// Returns `Ok(true)` when a digest was computed and cached, `Ok(false)`
+    /// when the key was already cached or another prewarm for it is in flight.
+    /// Concurrent duplicate prewarms of one key are guarded by
+    /// `prewarm_inflight`; a validation arriving mid-prewarm waits for this
+    /// computation instead of starting its own.
+    pub async fn prewarm(&self, task_data: &GasKillerTaskData) -> Result<bool> {
+        let cache_key = (task_data.transition_index, task_data.block_height);
+
+        {
+            let cache = self.digest_cache.lock().await;
+            if cache.contains_key(&cache_key) {
+                return Ok(false);
+            }
+        }
+
+        // Claim the key; the guard releases it on every exit path, including panic.
+        {
+            let mut inflight = self
+                .prewarm_inflight
+                .lock()
+                .expect("prewarm_inflight mutex poisoned");
+            if !inflight.insert(cache_key) {
+                return Ok(false);
+            }
+        }
+        let _guard = PrewarmInflightGuard {
+            inflight: Arc::clone(&self.prewarm_inflight),
+            key: cache_key,
+        };
+
+        let storage_updates = self.compute_storage_updates(task_data).await?;
+        let payload_hash = task_data.build_payload_hash(&storage_updates);
+
+        {
+            let mut cache = self.digest_cache.lock().await;
+            cache.insert(cache_key, payload_hash);
+        }
+        debug!(
+            transition_index = task_data.transition_index,
+            block_height = task_data.block_height,
+            "Prewarmed validator digest cache (round arrival will skip EVMSketch)"
+        );
+        Ok(true)
+    }
+
+    /// Whether a prewarm simulation for `key` is currently in flight.
+    fn is_prewarm_inflight(&self, key: &(u64, u64)) -> bool {
+        self.prewarm_inflight
+            .lock()
+            .expect("prewarm_inflight mutex poisoned")
+            .contains(key)
     }
 
     /// Performs the core gas analysis using gas-analyzer.
@@ -620,6 +714,33 @@ impl GasKillerValidator {
                     "Returning cached digest (skipping EVMSketch)"
                 );
                 return Ok(*cached);
+            }
+        }
+
+        // An ingress prewarm for this exact key may already be simulating
+        // (node-side, started at task-ingress time). Wait for it to land in
+        // the cache rather than launching a second multi-minute EVMSketch run:
+        // recomputing here would double memory and erase the prewarm's head
+        // start. If the prewarm fails, its key leaves the in-flight set with
+        // no cache entry and we fall through to computing ourselves.
+        if self.is_prewarm_inflight(&cache_key) {
+            info!(
+                transition_index = task_data.transition_index,
+                block_height = task_data.block_height,
+                "Round arrived while its prewarm is still simulating — waiting for the in-flight result"
+            );
+            loop {
+                tokio::time::sleep(PREWARM_WAIT_POLL).await;
+                {
+                    let cache = self.digest_cache.lock().await;
+                    if let Some(cached) = cache.get(&cache_key) {
+                        return Ok(*cached);
+                    }
+                }
+                if !self.is_prewarm_inflight(&cache_key) {
+                    // Prewarm finished without caching (it failed); compute below.
+                    break;
+                }
             }
         }
 
