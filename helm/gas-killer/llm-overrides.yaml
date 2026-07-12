@@ -5,13 +5,19 @@
 #   a few seconds of simulation per operator — modest bumps over the defaults.
 #
 #   Qwen3-0.6B (commented values): hundreds of billions of gas per ask() —
-#   ~345B gas for prompt+1 token, ~545B for an 8-token answer, ~10min simulation
-#   per operator at ~1B gas/s. Needs the large ROUND_TIMEOUT, node memory
-#   headroom (revm journaling on a 10^11-gas trace), and an RPC/tracer path
-#   without client-side timeouts. Weights: either pre-installed as chain state
-#   on the fork (anvil_setCode; see solidity-sdk tools/deploy_anvil.py) or, once
-#   gas-analyzer#168 lands, mounted as pinned code overlays from a local
-#   artifact store.
+#   ~345B gas for prompt+1 token, ~545B for an 8-token answer, ~10-25min
+#   simulation per operator at ~1B gas/s. Needs the large ROUND_TIMEOUT, node
+#   memory headroom (revm journaling on a 10^11-gas trace), and an RPC/tracer
+#   path without client-side timeouts. Weights: either pre-installed as chain
+#   state on the fork (anvil_setCode; see solidity-sdk tools/deploy_anvil.py)
+#   or — now that gas-analyzer#168 landed — mounted as pinned code overlays
+#   from local artifact files by flipping `overlay.enabled` below. In overlay
+#   mode the fork only needs base chain state; each debug_traceCall carries
+#   the overlay as stateOverrides instead.
+#
+# The ingress-time prewarm (global.prewarm, default on) makes operators start
+# simulating when the task is ACCEPTED rather than when the round broadcasts,
+# so a Qwen round costs ~max(router leg, operator leg) instead of their sum.
 #
 # Usage:
 #   helm upgrade --install gas-killer ./helm/gas-killer \
@@ -24,11 +30,25 @@ global:
 l1:
   anvilExtraArgs: "--disable-block-gas-limit"
 
+# Pinned code overlays (UNBOUNDED_V2). Off for the stories260K profile, whose
+# weights are deployed as real data contracts. For Qwen3-0.6B flip enabled: true —
+# the router and every node then download weights.bin + tokenizer.bin (~600MB)
+# from overlay.artifactBaseUrl at pod start, verify them against overlay.manifest,
+# and mount them per-trace as debug_traceCall state overrides. No setCode step on
+# the fork is needed anymore.
+overlay:
+  enabled: false
+  # enabled: true          # Qwen3-0.6B
+  # Defaults in values.yaml already point at the Qwen3-0.6B onchain-v1 release
+  # (artifactBaseUrl, manifest 0x23216cb9...); override here only for other models.
+
 router:
   # Aggregation window: round broadcast -> quorum. Operators must finish the
   # tracked-function simulation inside it. stories260K needs seconds; the
   # default 300 is already fine, 600 adds slow-runner margin.
-  # Qwen3-0.6B: use 1800 (and expect ~10min rounds).
+  # Qwen3-0.6B: use 1800. With prewarm the operator leg starts at ingress, so
+  # rounds complete in ~max(router leg, operator leg) — but the window must
+  # still cover a full cold simulation for the fallback path.
   roundTimeout: "600"
   # roundTimeout: "1800"   # Qwen3-0.6B
   resources:
@@ -38,6 +58,10 @@ router:
     limits:
       memory: "2Gi"
       cpu: "1000m"
+      # Qwen3-0.6B + overlay: raise router to requests 4Gi / limits 12Gi. The
+      # router simulates too, and overlay mode holds the ~600MB chunk set
+      # resident plus transiently materializes the hex-encoded stateOverrides
+      # (~1.2GB JSON per tracer call, two tracer calls in flight).
 
 node:
   # Nodes execute the unbounded simulation via debug_traceCall against the
@@ -50,14 +74,19 @@ node:
     limits:
       memory: "4Gi"
       cpu: "2000m"
-      # Qwen3-0.6B: raise to 8Gi/4000m — a 5x10^11-gas callTracer run holds
-      # substantially more journal state, and slow CPU directly extends the
-      # round beyond roundTimeout.
+      # Qwen3-0.6B: raise to requests 4Gi / limits 8Gi and 4000m — a 5x10^11-gas
+      # callTracer run holds substantially more journal state, and slow CPU
+      # directly extends the round beyond roundTimeout.
+      # Qwen3-0.6B + overlay: raise limits to 12Gi — add the resident ~600MB
+      # chunk set and the transient hex-encoded stateOverrides request bodies
+      # (~1.2GB per tracer call) on top of the trace itself.
 
 ethereum:
   # anvil serves the heavy debug_traceCall; give it the same headroom.
   # ANVIL_EXTRA_ARGS must include --disable-block-gas-limit (set by the
   # e2e scripts; set it in the chart env for standing deployments).
+  # Overlay mode: anvil additionally parses ~1.2GB stateOverrides JSON per
+  # tracer call — raise limits to 12Gi for Qwen3-0.6B.
   resources:
     requests:
       memory: "2Gi"

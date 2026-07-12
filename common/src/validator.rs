@@ -20,7 +20,8 @@ use commonware_avs_router::wire;
 
 use alloy::rpc::types::TransactionRequest;
 use gas_analyzer::{
-    EvmSketchExecutorCache, SimProfile, call_to_encoded_state_updates_with_evmsketch_profiled,
+    EvmSketchExecutorCache, OverlayEnv, SimProfile,
+    call_to_encoded_state_updates_with_evmsketch_env,
 };
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
@@ -120,6 +121,16 @@ pub struct GasKillerValidator {
     /// protocol configuration, so the router and every node MUST agree on it or
     /// their independently derived payloads (and thus signatures) diverge.
     sim_profile: SimProfile,
+    /// Pinned code overlay for the tracked-function simulation (`UNBOUNDED_V2`,
+    /// see gas-analyzer's docs/UNBOUNDED_OVERLAYS.md): large immutable blobs
+    /// (LLM weights, tokenizer) mounted as contract code via `debug_traceCall`
+    /// state overrides, verified against the pinned manifest at startup. Read
+    /// from `GK_OVERLAY_WEIGHTS`/`GK_OVERLAY_TOKENIZER`/`GK_OVERLAY_MANIFEST`.
+    /// Pinned-environment configuration like `sim_profile`: the router and
+    /// every node MUST mount the same bytes or their payloads diverge.
+    /// `Arc` because the mounted set is ~the size of the blobs (hundreds of MB)
+    /// and the validator is cloned.
+    overlay_env: Option<Arc<OverlayEnv>>,
 }
 
 /// How often a validation blocked on an in-flight prewarm re-checks the digest
@@ -164,6 +175,58 @@ fn sim_profile_from_env() -> SimProfile {
     }
 }
 
+/// Loads the pinned code-overlay environment from `GK_OVERLAY_WEIGHTS` and
+/// `GK_OVERLAY_TOKENIZER` (blob file paths) and verifies it against
+/// `GK_OVERLAY_MANIFEST` (0x-prefixed 32-byte hex). Returns `None` when no
+/// overlay is configured.
+///
+/// Panics on any invalid or partial configuration — missing counterpart
+/// variable, unreadable blob, malformed manifest, or a manifest mismatch.
+/// Same rationale as [`sim_profile_from_env`]: the overlay is part of the
+/// pinned simulation environment, and one operator silently degrading to a
+/// different (or missing) overlay would fork the quorum. Mismatched bytes are
+/// refused outright rather than mounted (`OverlayEnv::verify`).
+fn overlay_env_from_env() -> Option<Arc<OverlayEnv>> {
+    let weights_path = std::env::var("GK_OVERLAY_WEIGHTS").unwrap_or_default();
+    let tokenizer_path = std::env::var("GK_OVERLAY_TOKENIZER").unwrap_or_default();
+    if weights_path.is_empty() && tokenizer_path.is_empty() {
+        return None;
+    }
+    assert!(
+        !weights_path.is_empty() && !tokenizer_path.is_empty(),
+        "GK_OVERLAY_WEIGHTS and GK_OVERLAY_TOKENIZER must be set together"
+    );
+    let manifest_hex = std::env::var("GK_OVERLAY_MANIFEST").unwrap_or_default();
+    assert!(
+        !manifest_hex.is_empty(),
+        "GK_OVERLAY_MANIFEST must be set when overlay artifacts are configured: \
+         refusing to mount unverified bytes"
+    );
+    let expected: alloy::primitives::B256 = manifest_hex
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid GK_OVERLAY_MANIFEST {manifest_hex:?}: {e}"));
+
+    let weights = std::fs::read(&weights_path)
+        .unwrap_or_else(|e| panic!("failed to read GK_OVERLAY_WEIGHTS {weights_path:?}: {e}"));
+    let tokenizer = std::fs::read(&tokenizer_path)
+        .unwrap_or_else(|e| panic!("failed to read GK_OVERLAY_TOKENIZER {tokenizer_path:?}: {e}"));
+
+    let env = OverlayEnv::from_blobs(&weights, &tokenizer)
+        .unwrap_or_else(|e| panic!("failed to build overlay env: {e}"));
+    env.verify(expected)
+        .unwrap_or_else(|e| panic!("GK_OVERLAY_MANIFEST verification failed: {e}"));
+
+    info!(
+        manifest = %env.manifest,
+        chunks = env.overlays.len(),
+        weights_bytes = weights.len(),
+        tokenizer_bytes = tokenizer.len(),
+        "mounted pinned code overlay for tracked-function simulation (UNBOUNDED_V2)"
+    );
+    Some(Arc::new(env))
+}
+
 impl GasKillerValidator {
     /// Creates a new GasKillerValidator with multi-chain support.
     ///
@@ -203,6 +266,7 @@ impl GasKillerValidator {
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
+            overlay_env: overlay_env_from_env(),
         })
     }
 
@@ -223,6 +287,7 @@ impl GasKillerValidator {
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
+            overlay_env: overlay_env_from_env(),
         }
     }
 
@@ -239,6 +304,7 @@ impl GasKillerValidator {
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
+            overlay_env: overlay_env_from_env(),
         }
     }
 
@@ -541,14 +607,18 @@ impl GasKillerValidator {
 
         // Call gas-analyzer to get storage updates and gas estimate using EvmSketch.
         // The executor cache eliminates the build cost on repeated requests at the
-        // same block height.
+        // same block height. When a pinned overlay is configured (UNBOUNDED_V2) it
+        // rides along as debug_traceCall state overrides, so the simulation RPC only
+        // needs base chain state — the overlay bytes come from the local, verified
+        // artifact files. `None` is byte-identical to the pre-overlay profiled call.
         let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_evmsketch_profiled(
+            call_to_encoded_state_updates_with_evmsketch_env(
                 &self.executor_cache,
                 rpc_url,
                 tx_request,
                 block_height,
                 self.sim_profile,
+                self.overlay_env.as_deref(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;

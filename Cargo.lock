@@ -3914,7 +3914,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Funbounded-sim-mode#5f7479dc8f8f24da8dd4aa55d55b7e7b3cbe9919"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Funbounded-v2-code-overlays#e6fb2c99700ba823c66dc632afccb7aa50db6230"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -3929,7 +3929,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Funbounded-sim-mode#5f7479dc8f8f24da8dd4aa55d55b7e7b3cbe9919"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Funbounded-v2-code-overlays#e6fb2c99700ba823c66dc632afccb7aa50db6230"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -3945,7 +3945,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Funbounded-sim-mode#5f7479dc8f8f24da8dd4aa55d55b7e7b3cbe9919"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Funbounded-v2-code-overlays#e6fb2c99700ba823c66dc632afccb7aa50db6230"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -3970,7 +3970,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Funbounded-sim-mode#5f7479dc8f8f24da8dd4aa55d55b7e7b3cbe9919"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Funbounded-v2-code-overlays#e6fb2c99700ba823c66dc632afccb7aa50db6230"
 dependencies = [
  "alloy",
  "alloy-eips",

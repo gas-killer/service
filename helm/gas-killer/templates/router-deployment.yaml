@@ -205,6 +205,29 @@ spec:
               mountPath: /app
         {{- end }}
 
+        {{- if .Values.overlay.enabled }}
+        # Download the pinned overlay artifacts (model weights + tokenizer, ~600MB)
+        # into an emptyDir. Integrity is enforced by the service itself: at startup
+        # it recomputes the manifest from the blobs and refuses to boot on a
+        # mismatch with GK_OVERLAY_MANIFEST, so a corrupted download cannot be mounted.
+        - name: fetch-overlay-artifacts
+          image: {{ .Values.overlay.downloaderImage | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              BASE="{{ .Values.overlay.artifactBaseUrl }}"
+              for f in "{{ .Values.overlay.weightsFile }}" "{{ .Values.overlay.tokenizerFile }}"; do
+                echo "Downloading ${BASE}/${f}..."
+                curl -fSL --retry 5 --retry-delay 10 -o "/overlay/${f}" "${BASE}/${f}"
+              done
+              echo "Overlay artifacts downloaded."
+          volumeMounts:
+            - name: overlay-artifacts
+              mountPath: /overlay
+        {{- end }}
+
         {{- $routerDelay := mul (int .Values.global.nodeCount) (int .Values.node.startupDelaySecsPerNode) }}
         {{- if gt $routerDelay 0 }}
         # Stagger EigenSDK eth_getLogs backfill: router waits {{ $routerDelay }}s so it runs its
@@ -302,6 +325,18 @@ spec:
             - name: GK_SIM_RPC
               value: {{ .Values.global.simRpc | quote }}
             {{- end }}
+            {{- if .Values.overlay.enabled }}
+            # Pinned code overlay (UNBOUNDED_V2): blobs downloaded by the
+            # fetch-overlay-artifacts initContainer, verified against the manifest
+            # at startup, mounted as debug_traceCall state overrides. Pinned-env
+            # config shared by router and all nodes, like GK_SIM_PROFILE.
+            - name: GK_OVERLAY_WEIGHTS
+              value: "{{ .Values.overlay.mountPath }}/{{ .Values.overlay.weightsFile }}"
+            - name: GK_OVERLAY_TOKENIZER
+              value: "{{ .Values.overlay.mountPath }}/{{ .Values.overlay.tokenizerFile }}"
+            - name: GK_OVERLAY_MANIFEST
+              value: {{ .Values.overlay.manifest | quote }}
+            {{- end }}
             - name: DATA_DIR
               value: {{ .Values.router.persistence.mountPath | quote }}
             - name: INGRESS_TIMEOUT_MS
@@ -393,6 +428,11 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+            {{- if .Values.overlay.enabled }}
+            - name: overlay-artifacts
+              mountPath: {{ .Values.overlay.mountPath }}
+              readOnly: true
+            {{- end }}
             - name: router-data
               mountPath: {{ .Values.router.persistence.mountPath }}
             {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
@@ -413,6 +453,10 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" . }}
+        {{- if .Values.overlay.enabled }}
+        - name: overlay-artifacts
+          emptyDir: {}
+        {{- end }}
         - name: router-data
           {{- if .Values.router.persistence.enabled }}
           persistentVolumeClaim:

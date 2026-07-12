@@ -45,8 +45,9 @@ eigen-services-operatorsinfo = "2.0.0"
 eigen-utils = "2.0.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
-# TODO: repoint at the default branch once gas-killer/gas-analyzer#165 + #166 (unbounded simulation mode) merge.
-gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch", branch = "ron/unbounded-sim-mode" }
+# TODO: repoint at the default branch once gas-killer/gas-analyzer#165 + #166 (unbounded
+# simulation mode) and #168 (pinned code overlays, UNBOUNDED_V2) merge.
+gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch", branch = "ron/unbounded-v2-code-overlays" }
 gas-killer-common = { path = "common" }
 governor = "0.10.4"
 hex = "0.4"

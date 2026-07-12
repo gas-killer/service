@@ -28,9 +28,10 @@ global:
 
   # Dedicated simulation RPC (GK_SIM_RPC) for tracked-function analysis, shared by
   # router and nodes. Empty = simulate on the regular HTTP_RPC. Point it at an
-  # anvil fork with overlay chunks setCode'd in to serve overlay-mode consumers
-  # (see UNBOUNDED_V2_OVERLAYS.md in solidity-sdk) without shipping overlay bytes
-  # through the upstream RPC.
+  # anvil fork with lifted trace caps (--disable-block-gas-limit) for unbounded-mode
+  # consumers. For overlay-mode consumers, prefer `overlay.enabled` below (blobs
+  # verified locally, mounted per-trace as state overrides) over setCode'ing the
+  # chunks into the fork.
   simRpc: ""
   # Simulation profile for tracked-function analysis (GK_SIM_PROFILE), shared by the
   # router and every node. It is a single global value on purpose: the router and all
@@ -56,6 +57,29 @@ global:
   # simulate-on-arrival.
   prewarm:
     enabled: true
+
+# Pinned code overlays (UNBOUNDED_V2, gas-analyzer docs/UNBOUNDED_OVERLAYS.md).
+# When enabled, an initContainer on the router and every node downloads the model
+# artifacts (weights + tokenizer) into an emptyDir, and the service mounts them as
+# debug_traceCall state overrides for tracked-function simulation — verified at
+# startup against the pinned manifest (a mismatch refuses to boot). The simulation
+# RPC (GK_SIM_RPC) then only provides base chain state; the weights never need to
+# be setCode'd into the fork.
+# Part of the pinned simulation environment: router and ALL nodes must run with
+# identical settings or their signed payloads diverge, exactly like simProfile.
+overlay:
+  enabled: false
+  # Base URL the initContainer downloads <weightsFile>/<tokenizerFile> from.
+  artifactBaseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3-0.6b-onchain-v1"
+  weightsFile: "weights.bin"
+  tokenizerFile: "tokenizer.bin"
+  # keccak256(keccak256(weightsBlob) || keccak256(tokenizerBlob)) — must match the
+  # manifest the consumer contract committed to. Qwen3-0.6B onchain-v1:
+  manifest: "0x23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
+  # Image used by the artifact-download initContainer (needs curl).
+  downloaderImage: "curlimages/curl:8.10.1"
+  # Where the artifacts land inside the pods.
+  mountPath: /overlay
 
 # GCP Secret Manager configuration for TESTNET deployments
 # When enabled, operator BLS keys and avs_deploy.json are read from GCP Secret Manager

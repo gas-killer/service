@@ -154,6 +154,29 @@ spec:
               echo "L1 is ready!"
         {{- end }}
 
+        {{- if $root.Values.overlay.enabled }}
+        # Download the pinned overlay artifacts (model weights + tokenizer, ~600MB)
+        # into an emptyDir. Integrity is enforced by the service itself: at startup
+        # it recomputes the manifest from the blobs and refuses to boot on a
+        # mismatch with GK_OVERLAY_MANIFEST, so a corrupted download cannot be mounted.
+        - name: fetch-overlay-artifacts
+          image: {{ $root.Values.overlay.downloaderImage | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              BASE="{{ $root.Values.overlay.artifactBaseUrl }}"
+              for f in "{{ $root.Values.overlay.weightsFile }}" "{{ $root.Values.overlay.tokenizerFile }}"; do
+                echo "Downloading ${BASE}/${f}..."
+                curl -fSL --retry 5 --retry-delay 10 -o "/overlay/${f}" "${BASE}/${f}"
+              done
+              echo "Overlay artifacts downloaded."
+          volumeMounts:
+            - name: overlay-artifacts
+              mountPath: /overlay
+        {{- end }}
+
         {{- $delayPerNode := int $root.Values.node.startupDelaySecsPerNode }}
         {{- $nodeDelay := mul $i $delayPerNode }}
         {{- if gt $nodeDelay 0 }}
@@ -237,6 +260,18 @@ spec:
             - name: GK_SIM_RPC
               value: {{ $root.Values.global.simRpc | quote }}
             {{- end }}
+            {{- if $root.Values.overlay.enabled }}
+            # Pinned code overlay (UNBOUNDED_V2): blobs downloaded by the
+            # fetch-overlay-artifacts initContainer, verified against the manifest
+            # at startup, mounted as debug_traceCall state overrides. Pinned-env
+            # config shared by router and all nodes, like GK_SIM_PROFILE.
+            - name: GK_OVERLAY_WEIGHTS
+              value: "{{ $root.Values.overlay.mountPath }}/{{ $root.Values.overlay.weightsFile }}"
+            - name: GK_OVERLAY_TOKENIZER
+              value: "{{ $root.Values.overlay.mountPath }}/{{ $root.Values.overlay.tokenizerFile }}"
+            - name: GK_OVERLAY_MANIFEST
+              value: {{ $root.Values.overlay.manifest | quote }}
+            {{- end }}
             - name: AVS_DEPLOYMENT_PATH
               {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
               value: "/app/secrets/avs_deploy.json"
@@ -281,6 +316,11 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+            {{- if $root.Values.overlay.enabled }}
+            - name: overlay-artifacts
+              mountPath: {{ $root.Values.overlay.mountPath }}
+              readOnly: true
+            {{- end }}
             {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
             - name: node-secrets
               mountPath: /app/secrets
@@ -299,6 +339,10 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" $root }}
+        {{- if $root.Values.overlay.enabled }}
+        - name: overlay-artifacts
+          emptyDir: {}
+        {{- end }}
         {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
         - name: node-secrets
           emptyDir: {}
