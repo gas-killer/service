@@ -351,6 +351,31 @@ pub fn signature_scheme() -> SignatureScheme {
     }
 }
 
+/// Reads the storage-update encoding from `STATE_ENCODING` (case-insensitive
+/// `legacy` | `canonical`), defaulting to [`StateEncoding::Legacy`].
+///
+/// `canonical` emits canonical state slices before every external call and a
+/// final re-assertion slice, so a re-entrant call into a Gas Killer target
+/// observes the storage native execution would have had (see
+/// `gas_analyzer::compute_state_updates_canonical`). **Node and router must run
+/// the same value** — the encoding changes `storage_updates`, hence the task
+/// digest — so this is read from one env var threaded to both binaries.
+/// Panics on an unrecognized value rather than silently diverging digests.
+pub fn state_encoding() -> gas_analyzer::StateEncoding {
+    parse_state_encoding(env::var("STATE_ENCODING").ok().as_deref())
+}
+
+/// Parse the `STATE_ENCODING` value (case-insensitive, trimmed). `None` / empty →
+/// `Legacy`. Panics on an unrecognized value rather than silently diverging the
+/// node's and router's digests.
+fn parse_state_encoding(raw: Option<&str>) -> gas_analyzer::StateEncoding {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("legacy") => gas_analyzer::StateEncoding::Legacy,
+        Some("canonical") => gas_analyzer::StateEncoding::Canonical,
+        Some(other) => panic!("STATE_ENCODING must be 'legacy' or 'canonical', got '{other}'"),
+    }
+}
+
 /// The quorum threshold fraction `num/den` (e.g. 2/3) from `QUORUM_THRESHOLD` /
 /// `THRESHOLD_DENOMINATOR`, defaulting to 2/3.
 ///
@@ -506,6 +531,32 @@ mod tests {
     #[test]
     fn p2p_quota_period_default_is_one_per_second() {
         assert_eq!(parse_p2p_quota_period(None), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn state_encoding_parsing() {
+        use gas_analyzer::StateEncoding;
+        assert_eq!(parse_state_encoding(None), StateEncoding::Legacy);
+        assert_eq!(parse_state_encoding(Some("")), StateEncoding::Legacy);
+        assert_eq!(parse_state_encoding(Some("legacy")), StateEncoding::Legacy);
+        assert_eq!(
+            parse_state_encoding(Some(" LEGACY ")),
+            StateEncoding::Legacy
+        );
+        assert_eq!(
+            parse_state_encoding(Some("canonical")),
+            StateEncoding::Canonical
+        );
+        assert_eq!(
+            parse_state_encoding(Some("Canonical")),
+            StateEncoding::Canonical
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "STATE_ENCODING must be")]
+    fn state_encoding_rejects_unknown() {
+        let _ = parse_state_encoding(Some("bogus"));
     }
 
     #[test]

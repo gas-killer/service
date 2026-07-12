@@ -3830,7 +3830,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#81b1ab9c858206cb7d04fcb9b325a68eaf450eb6"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fcanonical-state-checkpoints#72d420130f478bdec8665d4c680321054d5011b4"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -3845,7 +3845,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#81b1ab9c858206cb7d04fcb9b325a68eaf450eb6"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fcanonical-state-checkpoints#72d420130f478bdec8665d4c680321054d5011b4"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -3861,7 +3861,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#81b1ab9c858206cb7d04fcb9b325a68eaf450eb6"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fcanonical-state-checkpoints#72d420130f478bdec8665d4c680321054d5011b4"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -3886,7 +3886,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#81b1ab9c858206cb7d04fcb9b325a68eaf450eb6"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fcanonical-state-checkpoints#72d420130f478bdec8665d4c680321054d5011b4"
 dependencies = [
  "alloy",
  "alloy-eips",
