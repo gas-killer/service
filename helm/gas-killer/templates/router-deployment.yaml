@@ -435,9 +435,18 @@ spec:
             httpGet:
               path: /healthz
               port: healthz
+            # The CPU-bound gas-analysis trace is offloaded to Tokio's blocking
+            # pool (see common/src/validator.rs analyze_transaction) so it no
+            # longer monopolizes the async worker pool /healthz runs on, even
+            # during a multi-minute GK_SIM_EXECUTOR=local trace. These settings
+            # are sane defaults for that workload: timeoutSeconds is generous enough
+            # to absorb scheduling jitter under load, and periodSeconds/failureThreshold
+            # give a genuinely hung pod ~3 minutes to prove itself dead before Kubernetes
+            # kills it, rather than the previous 15s*4=60s window that fired mid-analysis.
             initialDelaySeconds: 30
-            periodSeconds: 15
-            failureThreshold: 4
+            timeoutSeconds: 5
+            periodSeconds: 30
+            failureThreshold: 6
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes

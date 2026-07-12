@@ -761,49 +761,97 @@ impl GasKillerValidator {
         // from OverlayMount::from_files into call_to_encoded_state_updates_local,
         // branch here on `prefer_mmap_overlay(self.sim_executor)` to build the
         // mmap mount instead — see local_exec_shim.rs for the exact shape.
-        let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) = match self
-            .sim_executor
-        {
-            SimExecutor::Rpc => call_to_encoded_state_updates_with_evmsketch_env(
-                &self.executor_cache,
-                rpc_url,
-                tx_request,
-                block_height,
-                self.sim_profile,
-                self.overlay_env.as_deref(),
-            )
+        //
+        // Runtime-starvation fix (production incident, PR #319): under
+        // GK_SIM_EXECUTOR=local, this call bottoms out in gas-analyzer's
+        // in-process revm `transact` for the tracked function. For
+        // Qwen3.5-35B-A3B that is a single synchronous, CPU-bound stretch of
+        // ~20-40 minutes that never yields to the async scheduler (unlike the
+        // RPC path, foundry-fork-db's SharedBackend already runs state fetches
+        // on its own thread — the remaining work here is pure compute).
+        //
+        // commonware's `tokio::Runner` builds a genuine multi-threaded Tokio
+        // runtime (`Builder::new_multi_thread()`, commonware-runtime
+        // src/tokio/runtime.rs) but router/node main.rs both start it with
+        // `tokio::Config::default()`, which pins `worker_threads` to 2. Every
+        // commonware task spawned with the default (non-dedicated) execution
+        // mode — including the /healthz, /readyz, /metrics, /prewarm axum
+        // server and the P2P layer — lands on that same 2-worker shared pool.
+        // Directly `.await`ing the analyzer here occupies a worker thread for
+        // the full trace; with only 2 workers, a couple of concurrent traces
+        // (or one trace plus normal P2P/health load) fully starves the pool,
+        // /healthz stops responding within its 1s timeout, and Kubernetes'
+        // liveness probe SIGKILLs the pod mid-round.
+        //
+        // Fix: run the whole analyzer call on Tokio's blocking-thread pool via
+        // `spawn_blocking`, which is disjoint from the shared worker pool
+        // (bounded separately by `max_blocking_threads`, 512 by default) and
+        // therefore cannot starve /healthz or P2P. Re-entering async context
+        // inside the blocking closure via a `Handle` captured *before*
+        // `spawn_blocking` is safe here specifically because the underlying
+        // runtime is multi-threaded — `Handle::block_on` on a current-thread
+        // runtime from inside `spawn_blocking` would deadlock, but that does
+        // not apply to this runtime.
+        let handle = tokio::runtime::Handle::current();
+        let rpc_url = rpc_url.to_owned();
+        let executor_cache = Arc::clone(&self.executor_cache);
+        let local_state_cache = Arc::clone(&self.local_state_cache);
+        let overlay_env = self.overlay_env.clone();
+        let overlay_files = self.overlay_files.clone();
+        let sim_executor = self.sim_executor;
+        let sim_profile = self.sim_profile;
+        let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
+            tokio::task::spawn_blocking(move || {
+                handle.block_on(async move {
+                    match sim_executor {
+                        SimExecutor::Rpc => call_to_encoded_state_updates_with_evmsketch_env(
+                            &executor_cache,
+                            &rpc_url,
+                            tx_request,
+                            block_height,
+                            sim_profile,
+                            overlay_env.as_deref(),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e)),
+                        SimExecutor::Local => match &overlay_files {
+                            // mmap mode: the analyzer mounts the artifact files directly
+                            // (streaming manifest verify + lazy chunk materialization) —
+                            // no blob bytes ever enter this process's heap.
+                            Some((weights, tokenizer, manifest)) => {
+                                call_to_encoded_state_updates_local_files(
+                                    &executor_cache,
+                                    &local_state_cache,
+                                    &rpc_url,
+                                    tx_request,
+                                    block_height,
+                                    sim_profile,
+                                    weights,
+                                    tokenizer,
+                                    *manifest,
+                                )
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Local gas analysis (mmap) failed: {}", e)
+                                })
+                            }
+                            None => call_to_encoded_state_updates_local(
+                                &executor_cache,
+                                &local_state_cache,
+                                &rpc_url,
+                                tx_request,
+                                block_height,
+                                sim_profile,
+                                overlay_env.as_deref(),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Local gas analysis failed: {}", e)),
+                        },
+                    }
+                })
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?,
-            SimExecutor::Local => match &self.overlay_files {
-                // mmap mode: the analyzer mounts the artifact files directly
-                // (streaming manifest verify + lazy chunk materialization) —
-                // no blob bytes ever enter this process's heap.
-                Some((weights, tokenizer, manifest)) => call_to_encoded_state_updates_local_files(
-                    &self.executor_cache,
-                    &self.local_state_cache,
-                    rpc_url,
-                    tx_request,
-                    block_height,
-                    self.sim_profile,
-                    weights,
-                    tokenizer,
-                    *manifest,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Local gas analysis (mmap) failed: {}", e))?,
-                None => call_to_encoded_state_updates_local(
-                    &self.executor_cache,
-                    &self.local_state_cache,
-                    rpc_url,
-                    tx_request,
-                    block_height,
-                    self.sim_profile,
-                    self.overlay_env.as_deref(),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Local gas analysis failed: {}", e))?,
-            },
-        };
+            .map_err(|e| anyhow::anyhow!("gas analysis task panicked or was cancelled: {}", e))??;
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
@@ -1165,5 +1213,71 @@ mod tests {
         let hash2 = task_data.build_payload_hash(&[0x03, 0x04]);
 
         assert_ne!(hash1, hash2);
+    }
+
+    /// Regression coverage for the runtime-starvation fix (PR #319).
+    ///
+    /// `analyze_transaction` moves the CPU-bound, non-yielding analysis call
+    /// onto Tokio's blocking pool via `spawn_blocking` + a captured `Handle`
+    /// so it cannot starve other tasks on the shared worker pool — notably
+    /// the /healthz, /readyz, /metrics, /prewarm axum server and the
+    /// commonware P2P layer, both spawned via commonware's default
+    /// (non-dedicated) execution mode onto that same pool. Exercising the
+    /// real analyzer needs live RPC access (see the `#[ignore]`d
+    /// `test_full_validation_with_rpc` above), so this test instead proves
+    /// the underlying mechanism directly: on a 2-worker multi-thread runtime
+    /// — matching commonware-runtime's `tokio::Config::new()` default
+    /// (`worker_threads: 2`), which router/main.rs and node/main.rs both use
+    /// unmodified — a long, synchronous, non-yielding closure offloaded via
+    /// `spawn_blocking` must not delay a concurrent healthz-style async task
+    /// spawned on the shared pool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_healthz_style_task_stays_responsive_during_blocking_analysis() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let blocking_task_started = Arc::new(AtomicBool::new(false));
+        let started = Arc::clone(&blocking_task_started);
+
+        // Mirrors `analyze_transaction`'s offload: a long CPU-bound section
+        // that never yields to the async scheduler (stand-in for the revm
+        // trace) runs inside `spawn_blocking`, re-entering async context via
+        // a `Handle` captured before the blocking call — exactly the pattern
+        // used for `GK_SIM_EXECUTOR=local`.
+        let handle = tokio::runtime::Handle::current();
+        let blocking = tokio::task::spawn_blocking(move || {
+            started.store(true, Ordering::SeqCst);
+            handle.block_on(async {
+                // Synchronous, non-yielding sleep: stands in for the revm
+                // `transact` compute section, which is what starved the
+                // shared worker pool in production.
+                std::thread::sleep(Duration::from_millis(500));
+            });
+        });
+
+        // Don't race the healthz-style task until the blocking task is
+        // actually occupying its thread.
+        while !blocking_task_started.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        // Stand-in for the /healthz handler: a trivial async task spawned
+        // onto the same 2-worker shared pool the test runtime uses. Before
+        // this fix, `analyze_transaction` awaited the analysis directly on
+        // that pool, so with only 2 workers a couple of concurrent traces
+        // (or one trace plus ordinary load) could starve this task the same
+        // way it starved the real healthz server.
+        let healthz = tokio::spawn(async { 200u16 });
+
+        let status = tokio::time::timeout(Duration::from_millis(200), healthz)
+            .await
+            .expect(
+                "healthz-style task must respond well within the liveness probe's \
+                 timeoutSeconds even while a long analysis is offloaded to the blocking pool",
+            )
+            .expect("healthz-style task panicked");
+        assert_eq!(status, 200);
+
+        blocking.await.expect("blocking analysis task panicked");
     }
 }
