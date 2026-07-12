@@ -154,7 +154,7 @@ spec:
               echo "L1 is ready!"
         {{- end }}
 
-        {{- if $root.Values.overlay.enabled }}
+        {{- if dig "enabled" false ($root.Values.overlay | default dict) }}
         # Download the pinned overlay artifacts (model weights + tokenizer, ~600MB)
         # into an emptyDir. Integrity is enforced by the service itself: at startup
         # it recomputes the manifest from the blobs and refuses to boot on a
@@ -260,7 +260,7 @@ spec:
             - name: GK_SIM_RPC
               value: {{ $root.Values.global.simRpc | quote }}
             {{- end }}
-            {{- if $root.Values.overlay.enabled }}
+            {{- if dig "enabled" false ($root.Values.overlay | default dict) }}
             # Pinned code overlay (UNBOUNDED_V2): blobs downloaded by the
             # fetch-overlay-artifacts initContainer, verified against the manifest
             # at startup, mounted as debug_traceCall state overrides. Pinned-env
@@ -278,7 +278,7 @@ spec:
               {{- else }}
               value: "/app/.nodes/avs_deploy.json"
               {{- end }}
-            {{- if $root.Values.global.prewarm.enabled }}
+            {{- if dig "prewarm" "enabled" false ($root.Values.global | default dict) }}
             # Prewarm feed: the router publishes every ingress-accepted task on its
             # internal health port; the node polls it and starts simulating at
             # ingress time so the round broadcast hits a warm digest cache.
@@ -316,7 +316,7 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
-            {{- if $root.Values.overlay.enabled }}
+            {{- if dig "enabled" false ($root.Values.overlay | default dict) }}
             - name: overlay-artifacts
               mountPath: {{ $root.Values.overlay.mountPath }}
               readOnly: true
@@ -339,7 +339,7 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" $root }}
-        {{- if $root.Values.overlay.enabled }}
+        {{- if dig "enabled" false ($root.Values.overlay | default dict) }}
         - name: overlay-artifacts
           emptyDir: {}
         {{- end }}
