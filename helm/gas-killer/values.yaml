@@ -53,6 +53,32 @@ global:
   # own block gas limit.
   simProfile: "chain"
 
+  # Which engine executes the tracked call (GK_SIM_EXECUTOR, gas-analyzer#169),
+  # shared by the router and every node. Single global value for the same reason
+  # as simProfile: local and RPC execution byte-agree by construction, but every
+  # operator must actually make the same choice for it to matter.
+  #   rpc    (default) simulate via debug_traceCall against the simulation RPC —
+  #          the historical path. Required for consumers served through a shared
+  #          anvil fork (stateOverrides), and the only option against RPCs
+  #          without in-process access to blob artifacts.
+  #   local  execute the tracked call in-process inside gas-analyzer; the
+  #          simulation RPC becomes a pure lazy state backend (accounts/storage/
+  #          code fetched on first touch) instead of the executor. Required —
+  #          not just faster — once pinned code overlays exceed what a
+  #          stateOverrides JSON request body can carry (e.g. 35GB-class models:
+  #          see llm-overrides.yaml's Qwen3.5-35B section).
+  simExecutor: "rpc"
+
+  # Prefer the mmap-backed overlay source over the in-RAM one when simExecutor is
+  # "local" (GK_OVERLAY_MMAP). Only meaningful together with overlay.enabled.
+  # Null here means "use the code default" (true under local, false under rpc);
+  # set explicitly to override. NOTE: as of gas-analyzer#169 the analyzer's
+  # public local-execution entry point only accepts the in-RAM overlay source —
+  # this flag is wired end-to-end (env + helm) but currently only affects
+  # startup logging until the analyzer exposes a public mmap path (see
+  # gas-killer/service common/src/local_exec_shim.rs for the exact gap).
+  overlayMmap: null
+
   # Operator prewarm pre-pass: nodes poll the router's internal /prewarm endpoint
   # (served on the health port) and start the tracked-function simulation as soon as
   # the router ACCEPTS a task — instead of waiting for the round broadcast, which the
@@ -66,11 +92,17 @@ global:
 
 # Pinned code overlays (UNBOUNDED_V2, gas-analyzer docs/UNBOUNDED_OVERLAYS.md).
 # When enabled, an initContainer on the router and every node downloads the model
-# artifacts (weights + tokenizer) into an emptyDir, and the service mounts them as
-# debug_traceCall state overrides for tracked-function simulation — verified at
-# startup against the pinned manifest (a mismatch refuses to boot). The simulation
-# RPC (GK_SIM_RPC) then only provides base chain state; the weights never need to
-# be setCode'd into the fork.
+# artifacts (weights + tokenizer) into an emptyDir, and the service mounts them
+# for tracked-function simulation — verified at startup against the pinned
+# manifest (a mismatch refuses to boot). Same download/verify flow regardless of
+# simExecutor:
+#   rpc    mounts the artifacts as debug_traceCall state overrides. The
+#          simulation RPC (GK_SIM_RPC) then only provides base chain state; the
+#          weights never need to be setCode'd into the fork.
+#   local  mounts the artifacts natively in-process (no stateOverrides JSON —
+#          the only way 35GB-class artifacts are servable at all; see
+#          llm-overrides.yaml's Qwen3.5-35B-A3B section for artifactBaseUrl /
+#          manifest placeholders for that model).
 # Part of the pinned simulation environment: router and ALL nodes must run with
 # identical settings or their signed payloads diverge, exactly like simProfile.
 overlay:

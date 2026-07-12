@@ -1,5 +1,6 @@
 pub mod bindings;
 pub mod config;
+pub mod local_exec_shim;
 pub mod prewarm;
 pub mod providers;
 pub mod task_data;
@@ -11,6 +12,7 @@ pub use config::{
     detect_chain_for_address, get_operator_states, load_key_from_file, load_orchestrator_config,
     p2p_message_backlog, p2p_quota_period,
 };
+pub use local_exec_shim::{SimExecutor, prefer_mmap_overlay, sim_executor_from_env};
 pub use prewarm::{PrewarmSlot, PrewarmSnapshot, PrewarmTask, run_prewarm_loop};
 pub use providers::{build_read_providers, chain_rpc_urls_from_env};
 pub use task_data::GasKillerTaskData;

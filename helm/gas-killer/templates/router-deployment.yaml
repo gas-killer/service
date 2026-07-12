@@ -316,6 +316,20 @@ spec:
             # derive this from the same global value so their signed payloads agree.
             - name: GK_SIM_PROFILE
               value: {{ include "gas-killer.simProfile" . | quote }}
+            # Executor selection (gas-analyzer#169): "rpc" simulates via
+            # debug_traceCall (historical path); "local" executes in-process
+            # inside gas-analyzer, reducing the simulation RPC to a lazy state
+            # backend. Router and all nodes derive this from the same global
+            # value, same discipline as GK_SIM_PROFILE.
+            - name: GK_SIM_EXECUTOR
+              value: {{ include "gas-killer.simExecutor" . | quote }}
+            {{- if not (kindIs "invalid" .Values.global.overlayMmap) }}
+            # Prefer the mmap-backed overlay source over the in-RAM one (only
+            # meaningful under GK_SIM_EXECUTOR=local + overlay.enabled). Omitted
+            # by default so the binary's own default applies (true under local).
+            - name: GK_OVERLAY_MMAP
+              value: {{ .Values.global.overlayMmap | toString | quote }}
+            {{- end }}
             {{- if .Values.global.simRpc }}
             # Dedicated simulation endpoint (GK_SIM_RPC): tracked-function analysis
             # traces against this node (e.g. an anvil fork with pinned code overlays

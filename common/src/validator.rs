@@ -14,14 +14,15 @@ use tracing::{debug, info, warn};
 
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
+use crate::local_exec_shim::{prefer_mmap_overlay, sim_executor_from_env};
 use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
 use commonware_avs_router::wire;
 
 use alloy::rpc::types::TransactionRequest;
 use gas_analyzer::{
-    EvmSketchExecutorCache, OverlayEnv, SimProfile,
-    call_to_encoded_state_updates_with_evmsketch_env,
+    EvmSketchExecutorCache, LocalStateCache, OverlayEnv, SimExecutor, SimProfile,
+    call_to_encoded_state_updates_local, call_to_encoded_state_updates_with_evmsketch_env,
 };
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
@@ -133,6 +134,21 @@ pub struct GasKillerValidator {
     /// `Arc` because the mounted set is ~the size of the blobs (hundreds of MB)
     /// and the validator is cloned.
     overlay_env: Option<Arc<OverlayEnv>>,
+    /// Executor selection for tracked-function analysis (`GK_SIM_EXECUTOR=rpc|local`,
+    /// gas-analyzer#169). `local` re-executes the call in-process inside the
+    /// analyzer (`call_to_encoded_state_updates_local`) instead of delegating
+    /// to `debug_traceCall` — the RPC becomes a pure lazy state backend.
+    /// Pinned-environment configuration like `sim_profile`/`overlay_env`:
+    /// router and every node must agree, and `local` is required (not just
+    /// faster) once overlay artifacts exceed what a `stateOverrides` JSON
+    /// body can carry (~35GB models).
+    sim_executor: SimExecutor,
+    /// Block-scoped remote-state backends + overlay mounts for the local
+    /// executor (gas-analyzer's counterpart to `executor_cache`, mirrored
+    /// here 1:1 — see `gas_analyzer::LocalStateCache` docs). Always
+    /// constructed (cheap, lazily populated) so flipping `GK_SIM_EXECUTOR`
+    /// doesn't need a validator rebuild.
+    local_state_cache: Arc<LocalStateCache>,
 }
 
 /// How often a validation blocked on an in-flight prewarm re-checks the digest
@@ -279,6 +295,19 @@ impl GasKillerValidator {
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
+            sim_executor: {
+                let executor = sim_executor_from_env();
+                let prefer_mmap = prefer_mmap_overlay(executor);
+                if executor == SimExecutor::Local {
+                    info!(
+                        prefer_mmap_overlay = prefer_mmap,
+                        "GK_SIM_EXECUTOR=local: tracked-function analysis executes in-process \
+                         inside gas-analyzer instead of via debug_traceCall"
+                    );
+                }
+                executor
+            },
+            local_state_cache: Arc::new(LocalStateCache::default()),
         })
     }
 
@@ -300,6 +329,19 @@ impl GasKillerValidator {
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
+            sim_executor: {
+                let executor = sim_executor_from_env();
+                let prefer_mmap = prefer_mmap_overlay(executor);
+                if executor == SimExecutor::Local {
+                    info!(
+                        prefer_mmap_overlay = prefer_mmap,
+                        "GK_SIM_EXECUTOR=local: tracked-function analysis executes in-process \
+                         inside gas-analyzer instead of via debug_traceCall"
+                    );
+                }
+                executor
+            },
+            local_state_cache: Arc::new(LocalStateCache::default()),
         }
     }
 
@@ -317,6 +359,19 @@ impl GasKillerValidator {
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
+            sim_executor: {
+                let executor = sim_executor_from_env();
+                let prefer_mmap = prefer_mmap_overlay(executor);
+                if executor == SimExecutor::Local {
+                    info!(
+                        prefer_mmap_overlay = prefer_mmap,
+                        "GK_SIM_EXECUTOR=local: tracked-function analysis executes in-process \
+                         inside gas-analyzer instead of via debug_traceCall"
+                    );
+                }
+                executor
+            },
+            local_state_cache: Arc::new(LocalStateCache::default()),
         }
     }
 
@@ -620,11 +675,31 @@ impl GasKillerValidator {
         // Call gas-analyzer to get storage updates and gas estimate using EvmSketch.
         // The executor cache eliminates the build cost on repeated requests at the
         // same block height. When a pinned overlay is configured (UNBOUNDED_V2) it
-        // rides along as debug_traceCall state overrides, so the simulation RPC only
-        // needs base chain state — the overlay bytes come from the local, verified
-        // artifact files. `None` is byte-identical to the pre-overlay profiled call.
-        let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_evmsketch_env(
+        // rides along as debug_traceCall state overrides (RPC path) or a native
+        // in-process mount (local path), so the simulation RPC only needs base
+        // chain state — the overlay bytes come from the local, verified artifact
+        // files. `None` is byte-identical to the pre-overlay profiled call.
+        //
+        // GK_SIM_EXECUTOR=local (gas-analyzer#169) re-executes the call in-process
+        // inside the analyzer instead of delegating to debug_traceCall — required
+        // once overlay artifacts exceed what a stateOverrides JSON body can carry
+        // (~35GB models). The RPC becomes a pure lazy state backend, shared across
+        // concurrent traces of the same block via `local_state_cache` (this
+        // validator's counterpart to `executor_cache`).
+        //
+        // TODO(gas-analyzer#169): the mmap-backed OverlayMount::from_files source
+        // (GK_OVERLAY_MMAP=true, the default under `local`) is not yet reachable
+        // from this public entry point — it only accepts `Option<&OverlayEnv>`,
+        // the same in-RAM type as the RPC path. overlay_env is currently always
+        // built from OverlayEnv::from_blobs (see overlay_env_from_env below)
+        // regardless of GK_OVERLAY_MMAP. Once the analyzer exposes a public path
+        // from OverlayMount::from_files into call_to_encoded_state_updates_local,
+        // branch here on `prefer_mmap_overlay(self.sim_executor)` to build the
+        // mmap mount instead — see local_exec_shim.rs for the exact shape.
+        let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) = match self
+            .sim_executor
+        {
+            SimExecutor::Rpc => call_to_encoded_state_updates_with_evmsketch_env(
                 &self.executor_cache,
                 rpc_url,
                 tx_request,
@@ -633,7 +708,19 @@ impl GasKillerValidator {
                 self.overlay_env.as_deref(),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?,
+            SimExecutor::Local => call_to_encoded_state_updates_local(
+                &self.executor_cache,
+                &self.local_state_cache,
+                rpc_url,
+                tx_request,
+                block_height,
+                self.sim_profile,
+                self.overlay_env.as_deref(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Local gas analysis failed: {}", e))?,
+        };
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",

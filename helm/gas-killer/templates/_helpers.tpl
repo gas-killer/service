@@ -63,6 +63,25 @@ they cannot disagree — a divergence would fork the quorum's signed payloads.
 {{- end }}
 
 {{/*
+Simulation executor (GK_SIM_EXECUTOR) shared by the router and every node
+(gas-analyzer#169). Validated here so a typo fails at `helm install` rather
+than crash-looping every pod on the binary's own panic
+(SimExecutor::parse). Both deployments read this single global value, so
+they cannot disagree — a divergent executor choice is not itself
+consensus-breaking (local and RPC execution byte-agree by construction,
+see gas-analyzer#169's differential tests) but defeats the point of
+choosing "local" (e.g. no in-process RPC access to a 35GB overlay) if only
+some operators honor it.
+*/}}
+{{- define "gas-killer.simExecutor" -}}
+{{- $executor := .Values.global.simExecutor | default "rpc" -}}
+{{- if not (has $executor (list "rpc" "local")) -}}
+{{- fail (printf "global.simExecutor must be \"rpc\" or \"local\", got %q" $executor) -}}
+{{- end -}}
+{{- $executor -}}
+{{- end }}
+
+{{/*
 L1 service name
 */}}
 {{- define "gas-killer.l1.fullname" -}}

@@ -97,6 +97,8 @@ See `values.yaml` for all available configuration options.
 | `global.nodeCount` | Number of operator nodes | `3` |
 | `global.initTimeout` | Init container timeout in seconds | `300` |
 | `global.simProfile` | Tracked-function simulation profile (`GK_SIM_PROFILE`), shared by the router and all nodes so their signed payloads agree. `chain` = the target chain's real gas limits; `unbounded-v1` = the pinned protocol limits (2^40), allowing analysis of functions whose direct execution exceeds the block gas limit; `unbounded-v1-xl` = the raised 2^43 gas tier of the same family for multi-Tgas tasks such as Qwen3.5-35B-A3B inference (see gas-analyzer `docs/UNBOUNDED_MODE.md`). | `chain` |
+| `global.simExecutor` | Which engine executes the tracked call (`GK_SIM_EXECUTOR`, gas-analyzer#169), shared by the router and all nodes. `rpc` = simulate via `debug_traceCall` against the simulation RPC (the historical path); `local` = execute in-process inside gas-analyzer, with the simulation RPC reduced to a pure lazy state backend — required (not just faster) once pinned code overlays exceed what a `stateOverrides` JSON body can carry (e.g. 35GB-class models). | `rpc` |
+| `global.overlayMmap` | Prefer the mmap-backed overlay source over the in-RAM one under `simExecutor: local` (`GK_OVERLAY_MMAP`). `null` = code default (`true` under `local`, `false` under `rpc`). Only meaningful with `overlay.enabled: true`. | `null` |
 | `secrets.forkUrl` | Anvil fork URL (required for LOCAL mode) | `""` |
 | `secrets.privateKey` | Deployer private key | `""` |
 | `secrets.fundedKey` | Funded account private key | `""` |
