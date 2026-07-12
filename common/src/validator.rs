@@ -22,7 +22,8 @@ use commonware_avs_router::wire;
 use alloy::rpc::types::TransactionRequest;
 use gas_analyzer::{
     EvmSketchExecutorCache, LocalStateCache, OverlayEnv, SimExecutor, SimProfile,
-    call_to_encoded_state_updates_local, call_to_encoded_state_updates_with_evmsketch_env,
+    call_to_encoded_state_updates_local, call_to_encoded_state_updates_local_files,
+    call_to_encoded_state_updates_with_evmsketch_env,
 };
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
@@ -134,6 +135,14 @@ pub struct GasKillerValidator {
     /// `Arc` because the mounted set is ~the size of the blobs (hundreds of MB)
     /// and the validator is cloned.
     overlay_env: Option<Arc<OverlayEnv>>,
+    /// mmap-mode overlay: the artifact FILE PATHS + pinned manifest, retained
+    /// instead of materializing `OverlayEnv::from_blobs` in RAM. Set when
+    /// `GK_SIM_EXECUTOR=local` and `GK_OVERLAY_MMAP` (default true under
+    /// local) — the analyzer mounts via `OverlayMount::from_files`
+    /// (streaming-keccak manifest verify + lazy chunk materialization), which
+    /// is what makes ~35GB artifacts servable. Mutually exclusive with
+    /// `overlay_env`.
+    overlay_files: Option<(String, String, alloy::primitives::B256)>,
     /// Executor selection for tracked-function analysis (`GK_SIM_EXECUTOR=rpc|local`,
     /// gas-analyzer#169). `local` re-executes the call in-process inside the
     /// analyzer (`call_to_encoded_state_updates_local`) instead of delegating
@@ -255,6 +264,45 @@ fn overlay_env_from_env() -> Option<Arc<OverlayEnv>> {
     Some(Arc::new(env))
 }
 
+/// mmap-mode variant of [`overlay_env_from_env`]: returns the artifact file
+/// paths + parsed manifest WITHOUT reading the blobs (the analyzer's
+/// `OverlayMount::from_files` mmaps and verifies them lazily). Same
+/// fail-loud rules for partial configuration.
+fn overlay_files_from_env() -> Option<(String, String, alloy::primitives::B256)> {
+    let weights_path = std::env::var("GK_OVERLAY_WEIGHTS").unwrap_or_default();
+    let tokenizer_path = std::env::var("GK_OVERLAY_TOKENIZER").unwrap_or_default();
+    if weights_path.is_empty() && tokenizer_path.is_empty() {
+        return None;
+    }
+    assert!(
+        !weights_path.is_empty() && !tokenizer_path.is_empty(),
+        "GK_OVERLAY_WEIGHTS and GK_OVERLAY_TOKENIZER must be set together"
+    );
+    let manifest_hex = std::env::var("GK_OVERLAY_MANIFEST").unwrap_or_default();
+    assert!(
+        !manifest_hex.is_empty(),
+        "GK_OVERLAY_MANIFEST must be set when overlay artifacts are configured: \
+         refusing to mount unverified bytes"
+    );
+    let expected: alloy::primitives::B256 = manifest_hex
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid GK_OVERLAY_MANIFEST {manifest_hex:?}: {e}"));
+    for p in [&weights_path, &tokenizer_path] {
+        assert!(
+            std::path::Path::new(p).is_file(),
+            "overlay artifact path {p:?} does not exist or is not a file"
+        );
+    }
+    info!(
+        weights = %weights_path,
+        tokenizer = %tokenizer_path,
+        manifest = %expected,
+        "overlay artifacts will be mmap-mounted at first analysis (OverlayMount::from_files)"
+    );
+    Some((weights_path, tokenizer_path, expected))
+}
+
 impl GasKillerValidator {
     /// Creates a new GasKillerValidator with multi-chain support.
     ///
@@ -294,7 +342,22 @@ impl GasKillerValidator {
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
-            overlay_env: overlay_env_from_env(),
+            overlay_env: {
+                let executor = sim_executor_from_env();
+                if prefer_mmap_overlay(executor) {
+                    None
+                } else {
+                    overlay_env_from_env()
+                }
+            },
+            overlay_files: {
+                let executor = sim_executor_from_env();
+                if prefer_mmap_overlay(executor) {
+                    overlay_files_from_env()
+                } else {
+                    None
+                }
+            },
             sim_executor: {
                 let executor = sim_executor_from_env();
                 let prefer_mmap = prefer_mmap_overlay(executor);
@@ -329,6 +392,7 @@ impl GasKillerValidator {
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
+            overlay_files: None,
             sim_executor: {
                 let executor = sim_executor_from_env();
                 let prefer_mmap = prefer_mmap_overlay(executor);
@@ -359,6 +423,7 @@ impl GasKillerValidator {
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
+            overlay_files: None,
             sim_executor: {
                 let executor = sim_executor_from_env();
                 let prefer_mmap = prefer_mmap_overlay(executor);
@@ -709,17 +774,35 @@ impl GasKillerValidator {
             )
             .await
             .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?,
-            SimExecutor::Local => call_to_encoded_state_updates_local(
-                &self.executor_cache,
-                &self.local_state_cache,
-                rpc_url,
-                tx_request,
-                block_height,
-                self.sim_profile,
-                self.overlay_env.as_deref(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Local gas analysis failed: {}", e))?,
+            SimExecutor::Local => match &self.overlay_files {
+                // mmap mode: the analyzer mounts the artifact files directly
+                // (streaming manifest verify + lazy chunk materialization) —
+                // no blob bytes ever enter this process's heap.
+                Some((weights, tokenizer, manifest)) => call_to_encoded_state_updates_local_files(
+                    &self.executor_cache,
+                    &self.local_state_cache,
+                    rpc_url,
+                    tx_request,
+                    block_height,
+                    self.sim_profile,
+                    weights,
+                    tokenizer,
+                    *manifest,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Local gas analysis (mmap) failed: {}", e))?,
+                None => call_to_encoded_state_updates_local(
+                    &self.executor_cache,
+                    &self.local_state_cache,
+                    rpc_url,
+                    tx_request,
+                    block_height,
+                    self.sim_profile,
+                    self.overlay_env.as_deref(),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Local gas analysis failed: {}", e))?,
+            },
         };
 
         debug!(
