@@ -37,10 +37,16 @@ global:
   # router and every node. It is a single global value on purpose: the router and all
   # nodes MUST agree or their independently derived payloads — and thus signatures —
   # diverge and fork the quorum.
-  #   chain         (default) simulate under the target chain's real gas limits.
-  #   unbounded-v1  lift the simulated gas limits to the pinned protocol constants so
-  #                 tracked functions whose direct execution exceeds the block gas
-  #                 limit can still be analyzed (see gas-analyzer docs/UNBOUNDED_MODE.md).
+  #   chain            (default) simulate under the target chain's real gas limits.
+  #   unbounded-v1     lift the simulated gas limits to the pinned protocol constants
+  #                    (2^40 ~ 1.1 Tgas) so tracked functions whose direct execution
+  #                    exceeds the block gas limit can still be analyzed (see
+  #                    gas-analyzer docs/UNBOUNDED_MODE.md).
+  #   unbounded-v1-xl  raised gas tier of the same V1 family (2^43 ~ 8.8 Tgas), for
+  #                    multi-Tgas tasks that blow through the V1 cap — e.g.
+  #                    Qwen3.5-35B-A3B on-chain inference (~3.6 Tgas per call). Same
+  #                    semantics and payload-shape gate as unbounded-v1; only the
+  #                    pinned ceiling differs, and it is equally protocol-pinned.
   # LOCAL-mode note: exercising an above-block-limit target against the bundled Anvil L1
   # also requires Anvil to start with --disable-block-gas-limit. That flag lives in the
   # ethereum image's entrypoint, not here — the sim profile alone does not lift the L1's

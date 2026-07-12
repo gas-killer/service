@@ -1,5 +1,5 @@
 # Helm overrides for running the on-chain LLM consumer (solidity-sdk `onchain-llm`)
-# through a real operator deployment. Two profiles in one file:
+# through a real operator deployment. Three profiles in one file:
 #
 #   stories260K (default assumptions here): ~1.4B simulated gas per tellStory(32),
 #   a few seconds of simulation per operator — modest bumps over the defaults.
@@ -15,6 +15,17 @@
 #   mode the fork only needs base chain state; each debug_traceCall carries
 #   the overlay as stateOverrides instead.
 #
+#   Qwen3.5-35B-A3B (commented values): ~3.6T gas per call — above the
+#   unbounded-v1 2^40 (~1.1T) cap, so it REQUIRES simProfile
+#   "unbounded-v1-xl" (the pinned 2^43 tier; same semantics and shape gate,
+#   only the ceiling differs). At ~1B gas/s that is ~1h of simulation per
+#   operator; roundTimeout 14400 (4h) covers a cold fallback simulation plus
+#   slow-runner margin. Memory scales ~60x over the 0.6B numbers: the
+#   resident overlay chunk set is ~the artifact size (tens of GB for a 35B
+#   MoE at ~1 byte/param), the hex-encoded stateOverrides JSON transiently
+#   ~2x that per tracer call, and revm journal/tracer state grows with the
+#   10^12-gas trace — plan high-memory nodes (see per-component notes below).
+#
 # The ingress-time prewarm (global.prewarm, default on) makes operators start
 # simulating when the task is ACCEPTED rather than when the round broadcasts,
 # so a Qwen round costs ~max(router leg, operator leg) instead of their sum.
@@ -25,7 +36,11 @@
 
 global:
   # Unbounded simulation is what makes LLM-scale tracked functions extractable.
+  # stories260K / Qwen3-0.6B fit under the V1 2^40 cap; Qwen3.5-35B-A3B
+  # (~3.6T gas) needs the 2^43 XL tier. The profile is protocol-pinned and
+  # global on purpose — router and ALL nodes must agree or payloads diverge.
   simProfile: "unbounded-v1"
+  # simProfile: "unbounded-v1-xl"   # Qwen3.5-35B-A3B
 
 l1:
   anvilExtraArgs: "--disable-block-gas-limit"
@@ -49,8 +64,11 @@ router:
   # Qwen3-0.6B: use 1800. With prewarm the operator leg starts at ingress, so
   # rounds complete in ~max(router leg, operator leg) — but the window must
   # still cover a full cold simulation for the fallback path.
+  # Qwen3.5-35B-A3B: use 14400 (4h) — ~1h of simulation at ~1B gas/s for a
+  # ~3.6T-gas call, with margin for a cold fallback run and slow operators.
   roundTimeout: "600"
   # roundTimeout: "1800"   # Qwen3-0.6B
+  # roundTimeout: "14400"  # Qwen3.5-35B-A3B (requires simProfile unbounded-v1-xl)
   resources:
     requests:
       memory: "1Gi"
@@ -62,6 +80,10 @@ router:
       # router simulates too, and overlay mode holds the ~600MB chunk set
       # resident plus transiently materializes the hex-encoded stateOverrides
       # (~1.2GB JSON per tracer call, two tracer calls in flight).
+      # Qwen3.5-35B-A3B + overlay: the same components scale with the ~60x
+      # larger artifacts — resident chunk set in the tens of GB plus ~2x that
+      # transiently per tracer call. Start at requests 64Gi / limits 128Gi on
+      # a high-memory node pool and tune down from observed peak RSS.
 
 node:
   # Nodes execute the unbounded simulation via debug_traceCall against the
@@ -80,6 +102,11 @@ node:
       # Qwen3-0.6B + overlay: raise limits to 12Gi — add the resident ~600MB
       # chunk set and the transient hex-encoded stateOverrides request bodies
       # (~1.2GB per tracer call) on top of the trace itself.
+      # Qwen3.5-35B-A3B + overlay: journal/tracer state for a ~3.6x10^12-gas
+      # trace plus the tens-of-GB resident chunk set and ~2x-artifact-size
+      # transient stateOverrides bodies. Start at requests 64Gi / limits 128Gi
+      # and the fastest CPUs available — wall-clock simulation time is what
+      # roundTimeout (14400) has to cover.
 
 ethereum:
   # anvil serves the heavy debug_traceCall; give it the same headroom.
@@ -87,6 +114,10 @@ ethereum:
   # e2e scripts; set it in the chart env for standing deployments).
   # Overlay mode: anvil additionally parses ~1.2GB stateOverrides JSON per
   # tracer call — raise limits to 12Gi for Qwen3-0.6B.
+  # Qwen3.5-35B-A3B + overlay: the stateOverrides body scales with the
+  # artifacts (~2x their size per tracer call) and the traced run itself is
+  # ~3.6T gas — give anvil the same high-memory treatment as the nodes
+  # (start at limits 128Gi) or heavy calls fail mid-trace.
   resources:
     requests:
       memory: "2Gi"

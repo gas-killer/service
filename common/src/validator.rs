@@ -117,7 +117,9 @@ pub struct GasKillerValidator {
     /// Simulation profile for tracked-function analysis. `UnboundedV1` lifts the
     /// simulated gas limits to the pinned protocol constants (see gas-analyzer's
     /// docs/UNBOUNDED_MODE.md), enabling tracked functions whose direct execution
-    /// exceeds the real block gas limit. Read from `GK_SIM_PROFILE` — it is
+    /// exceeds the real block gas limit; `UnboundedV1Xl` is the raised 2^43 gas
+    /// tier of the same family for multi-Tgas tasks (~3.6 Tgas Qwen3.5-35B-A3B
+    /// inference). Read from `GK_SIM_PROFILE` — it is
     /// protocol configuration, so the router and every node MUST agree on it or
     /// their independently derived payloads (and thus signatures) diverge.
     sim_profile: SimProfile,
@@ -155,8 +157,10 @@ impl Drop for PrewarmInflightGuard {
 }
 
 /// Parses `GK_SIM_PROFILE` into a [`SimProfile`]. Accepted values:
-/// `chain` (default) and `unbounded-v1`. Panics on any other value — a typo
-/// silently falling back to `Chain` on one node would fork the quorum.
+/// `chain` (default), `unbounded-v1`, and `unbounded-v1-xl` (raised gas tier
+/// of the V1 family, pinned 2^43 limits — sized for multi-Tgas tasks such as
+/// Qwen3.5-35B-A3B inference at ~3.6 Tgas/call). Panics on any other value —
+/// a typo silently falling back to `Chain` on one node would fork the quorum.
 fn sim_profile_from_env() -> SimProfile {
     match std::env::var("GK_SIM_PROFILE") {
         Err(_) => SimProfile::Chain,
@@ -168,8 +172,16 @@ fn sim_profile_from_env() -> SimProfile {
                 );
                 SimProfile::UnboundedV1
             }
+            "unbounded-v1-xl" => {
+                info!(
+                    "GK_SIM_PROFILE=unbounded-v1-xl: simulating tracked functions under the pinned XL-tier (2^43) unbounded gas limits"
+                );
+                SimProfile::UnboundedV1Xl
+            }
             other => {
-                panic!("invalid GK_SIM_PROFILE {other:?}: expected \"chain\" or \"unbounded-v1\"")
+                panic!(
+                    "invalid GK_SIM_PROFILE {other:?}: expected \"chain\", \"unbounded-v1\", or \"unbounded-v1-xl\""
+                )
             }
         },
     }

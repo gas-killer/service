@@ -56,8 +56,8 @@ they cannot disagree — a divergence would fork the quorum's signed payloads.
 */}}
 {{- define "gas-killer.simProfile" -}}
 {{- $profile := .Values.global.simProfile | default "chain" -}}
-{{- if not (has $profile (list "chain" "unbounded-v1")) -}}
-{{- fail (printf "global.simProfile must be \"chain\" or \"unbounded-v1\", got %q" $profile) -}}
+{{- if not (has $profile (list "chain" "unbounded-v1" "unbounded-v1-xl")) -}}
+{{- fail (printf "global.simProfile must be \"chain\", \"unbounded-v1\" or \"unbounded-v1-xl\", got %q" $profile) -}}
 {{- end -}}
 {{- $profile -}}
 {{- end }}

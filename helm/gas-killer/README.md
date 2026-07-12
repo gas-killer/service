@@ -96,7 +96,7 @@ See `values.yaml` for all available configuration options.
 | `global.environment` | Environment mode (LOCAL or TESTNET) | `LOCAL` |
 | `global.nodeCount` | Number of operator nodes | `3` |
 | `global.initTimeout` | Init container timeout in seconds | `300` |
-| `global.simProfile` | Tracked-function simulation profile (`GK_SIM_PROFILE`), shared by the router and all nodes so their signed payloads agree. `chain` = the target chain's real gas limits; `unbounded-v1` = the pinned protocol limits, allowing analysis of functions whose direct execution exceeds the block gas limit (see gas-analyzer `docs/UNBOUNDED_MODE.md`). | `chain` |
+| `global.simProfile` | Tracked-function simulation profile (`GK_SIM_PROFILE`), shared by the router and all nodes so their signed payloads agree. `chain` = the target chain's real gas limits; `unbounded-v1` = the pinned protocol limits (2^40), allowing analysis of functions whose direct execution exceeds the block gas limit; `unbounded-v1-xl` = the raised 2^43 gas tier of the same family for multi-Tgas tasks such as Qwen3.5-35B-A3B inference (see gas-analyzer `docs/UNBOUNDED_MODE.md`). | `chain` |
 | `secrets.forkUrl` | Anvil fork URL (required for LOCAL mode) | `""` |
 | `secrets.privateKey` | Deployer private key | `""` |
 | `secrets.fundedKey` | Funded account private key | `""` |
