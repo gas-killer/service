@@ -17,6 +17,7 @@ on:
       # demonstrated as a gating check. Remove once the stack lands on a mainline
       # branch.
       - RonTuretzky/pr299-ecdsa-signatures
+      - RonTuretzky/schnorr-aggregate-signatures
   workflow_dispatch:
 
 jobs:
