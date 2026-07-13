@@ -109,6 +109,16 @@ async fn shard_infer_handler(
 #[derive(serde::Deserialize)]
 struct ShardWorkQuery {
     operator: u32,
+    /// Weight-shard capability advertisement (present iff the worker holds a
+    /// layer slice). `layer_lo` + `layer_hi` together enable layer-affinity
+    /// scheduling for this operator; the flags mark the embedding / classifier
+    /// stage holder. See gas_killer_common::shard::run_shard_loop.
+    layer_lo: Option<u64>,
+    layer_hi: Option<u64>,
+    #[serde(default)]
+    has_embedding: bool,
+    #[serde(default)]
+    has_classifier: bool,
 }
 
 /// Segment work feed for one operator (same sidecar pattern as /prewarm).
@@ -116,6 +126,17 @@ async fn shard_work_handler(
     State(s): State<HealthState>,
     Query(q): Query<ShardWorkQuery>,
 ) -> axum::response::Response {
+    if let (Some(layer_lo), Some(layer_hi)) = (q.layer_lo, q.layer_hi) {
+        s.shard.advertise(
+            q.operator,
+            gas_killer_router::shard::WorkerCaps {
+                layer_lo,
+                layer_hi,
+                has_embedding: q.has_embedding,
+                has_classifier: q.has_classifier,
+            },
+        );
+    }
     let jobs = s.shard.take_work(q.operator);
     if jobs.is_empty() {
         StatusCode::NO_CONTENT.into_response()

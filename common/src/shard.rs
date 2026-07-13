@@ -68,12 +68,71 @@ sol! {
 
     /// Mirror of `GasKillerChatSharded.fulfil` (solidity-sdk) — the tracked,
     /// pure-commit settlement function whose calldata the validator gate decodes.
+    /// Shared by the 0.6B (`GasKillerChatSharded`) and 35B
+    /// (`GasKillerChat35Sharded`) consumers: identical signature/selector, only
+    /// the CHAT_DOMAIN differs, so one gate decoder serves both.
     function fulfil(
         uint32[] promptIds,
         uint256 maxNewTokens,
         uint32[] answerIds,
         bytes32 pipelineRoot
     ) external;
+}
+
+/// Engine-v3 (Qwen3.5-35B-A3B, `Qwen35SegEngine`) segment ABI. Kept in its own
+/// module because alloy's `sol!` derives the call struct name from the function
+/// name (`forwardRange`/`argmaxRange`), so the 0.6B and 35B families would
+/// otherwise collide. Two differences vs the 0.6B ABI above: (1) `packedConfig`
+/// is `bytes32[4]` — SPEC §10 adds a 4th packed word; (2) the segment carries a
+/// unified `stateIn`/`stateAppend` (full-attention KV **and** DeltaNet recurrent
+/// snapshots), not the KV-only `kvIn`.
+///
+/// The return SHAPE is identical to the 0.6B forward — `(bytes, bytes, bytes32)`
+/// — so `seg_chk(Forward, ..)` (third head word) is model-agnostic and needs no
+/// change. Selectors are pinned in `common/tests/shard_selectors.rs` (forwardRange
+/// 0x4faab046, argmaxRange 0x18d6ba7d — from the Qwen35Seg engine, commit 916ad17).
+pub mod seg35 {
+    use alloy::sol;
+
+    sol! {
+        /// Mirror of `Qwen35Seg.Span`.
+        struct Span35 {
+            uint256 maxPos;
+            uint256 posLo;
+            uint256 posHi;
+            uint256 layerLo;
+            uint256 layerHi;
+        }
+
+        /// Mirror of `Qwen35Seg.Call` — note `stateIn`/`expectStateIn` (unified
+        /// full-attention KV + DeltaNet conv/S snapshots) replacing `kvIn`.
+        struct Call35 {
+            Span35 span;
+            uint32[] tokenIds;
+            bytes xIn;
+            bytes stateIn;
+            bytes32 expectXIn;
+            bytes32 expectStateIn;
+        }
+
+        /// Mirror of `Qwen35SegEngine.forwardRange`.
+        function forwardRange(
+            address rootDirectory,
+            bytes32 manifestHash,
+            bytes32[4] packedConfig,
+            Call35 q
+        ) external view returns (bytes memory xOut, bytes memory stateAppend, bytes32 chk);
+
+        /// Mirror of `Qwen35SegEngine.argmaxRange`.
+        function argmaxRange(
+            address rootDirectory,
+            bytes32 manifestHash,
+            bytes32[4] packedConfig,
+            bytes memory xbFinal,
+            uint256 vocabLo,
+            uint256 vocabHi
+        ) external view returns (int256 bestScore, uint256 bestId);
+    }
 }
 
 /// Segment kind, mirrored in job/chain records.
@@ -174,6 +233,17 @@ pub struct ShardState {
     pub consumer: Option<Address>,
     /// Base URL of the router's internal server, e.g. `http://router:8081`.
     pub router_base: String,
+    /// Weight-sharding capability advertisement. `layer_range = Some((lo, hi))`
+    /// means this worker HOLDS only layers `[lo, hi)` of the model (a
+    /// weight-shard slice) and may execute only segments whose layer span it
+    /// covers; `None` (the default) means "full model" — today's behavior, no
+    /// advertisement sent, so the router falls back to unrestricted committee
+    /// rotation. `has_embedding`/`has_classifier` advertise the embedding
+    /// (layer-0) stage and the vocab-classifier (argmax) capability, which for a
+    /// weight-shard fleet live only on the first/last slice respectively.
+    pub layer_range: Option<(u64, u64)>,
+    pub has_embedding: bool,
+    pub has_classifier: bool,
     executed: Mutex<HashMap<(String, u64), ExecutedSeg>>,
 }
 
@@ -183,8 +253,28 @@ impl ShardState {
             operator_id,
             consumer,
             router_base,
+            layer_range: None,
+            has_embedding: false,
+            has_classifier: false,
             executed: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Advertise this worker's held weight-shard slice (env
+    /// `GK_SHARD_LAYER_LO`/`GK_SHARD_LAYER_HI`/`GK_SHARD_HAS_EMBEDDING`/
+    /// `GK_SHARD_HAS_CLASSIFIER`). The values are appended to the work-poll query
+    /// so the router's layer-affinity planner learns the fleet layout without a
+    /// separate registration round-trip.
+    pub fn with_capabilities(
+        mut self,
+        layer_range: Option<(u64, u64)>,
+        has_embedding: bool,
+        has_classifier: bool,
+    ) -> Self {
+        self.layer_range = layer_range;
+        self.has_embedding = has_embedding;
+        self.has_classifier = has_classifier;
+        self
     }
 
     /// Whether this task is a sharded-settlement round this node must gate:
@@ -381,14 +471,27 @@ pub async fn run_shard_loop(state: std::sync::Arc<ShardState>, rpc_url: String) 
             return;
         }
     };
-    let work_url = format!(
+    // Advertise the held weight-shard slice on the work poll (if configured), so
+    // the router's layer-affinity planner assigns this worker only segments whose
+    // layer span it covers. A full-model worker (no layer range) sends just its
+    // operator id — exactly today's behavior.
+    let mut work_url = format!(
         "{}/shard/work?operator={}",
         state.router_base, state.operator_id
     );
+    if let Some((lo, hi)) = state.layer_range {
+        use std::fmt::Write as _;
+        let _ = write!(
+            work_url,
+            "&layer_lo={lo}&layer_hi={hi}&has_embedding={}&has_classifier={}",
+            state.has_embedding, state.has_classifier
+        );
+    }
     let result_url = format!("{}/shard/result", state.router_base);
     info!(
         operator = state.operator_id,
         work_url = %work_url,
+        layer_range = ?state.layer_range,
         poll_ms = interval.as_millis() as u64,
         "shard loop started"
     );

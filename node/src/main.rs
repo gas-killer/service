@@ -423,11 +423,38 @@ fn main() {
                         .ok()
                         .filter(|c| !c.is_empty())
                         .map(|c| c.parse().expect("GK_SHARD_CONSUMER must be an address"));
-                let shard_state = Arc::new(gas_killer_common::ShardState::new(
-                    operator_id,
-                    consumer,
-                    url.trim_end_matches('/').to_string(),
-                ));
+                // Weight-sharding: advertise the held layer slice so the router's
+                // layer-affinity planner only assigns segments this worker holds
+                // weights for. GK_SHARD_LAYER_LO/HI together enable it; unset =
+                // full-model worker (today's behavior, no advertisement).
+                let env_u64 = |k: &str| -> Option<u64> {
+                    std::env::var(k).ok().and_then(|v| v.parse().ok())
+                };
+                let env_bool = |k: &str| -> bool {
+                    std::env::var(k)
+                        .ok()
+                        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+                        .unwrap_or(false)
+                };
+                let layer_range = match (
+                    env_u64("GK_SHARD_LAYER_LO"),
+                    env_u64("GK_SHARD_LAYER_HI"),
+                ) {
+                    (Some(lo), Some(hi)) => Some((lo, hi)),
+                    _ => None,
+                };
+                let shard_state = Arc::new(
+                    gas_killer_common::ShardState::new(
+                        operator_id,
+                        consumer,
+                        url.trim_end_matches('/').to_string(),
+                    )
+                    .with_capabilities(
+                        layer_range,
+                        env_bool("GK_SHARD_HAS_EMBEDDING"),
+                        env_bool("GK_SHARD_HAS_CLASSIFIER"),
+                    ),
+                );
                 let rpc_url = validator.rpc_url().to_string();
                 let loop_state = Arc::clone(&shard_state);
                 context.child("shard").spawn(move |_| async move {
@@ -436,6 +463,7 @@ fn main() {
                 tracing::info!(
                     operator_id,
                     consumer = ?consumer,
+                    layer_range = ?layer_range,
                     "sharded inference enabled: segment executor + validator gate armed"
                 );
                 Arc::new(Arc::unwrap_or_clone(validator).with_shard_state(shard_state))

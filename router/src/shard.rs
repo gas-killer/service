@@ -21,16 +21,64 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use alloy::sol_types::{SolCall, SolValue};
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, I256, keccak256};
 
 use gas_killer_common::shard::{
-    ChainEntry, SegCall, SegKind, SegSpan, ShardChain, ShardJob, ShardResultMsg, argmaxRangeCall,
-    forwardRangeCall, seg_chk,
+    ChainEntry, SegKind, ShardChain, ShardJob, ShardResultMsg, seg_chk,
 };
+
+use crate::model::{ArgmaxArgs, ForwardArgs, ModelSpec};
 
 /// Per-segment results: (infer_id, seg_id) -> operator -> raw returndata.
 type SegmentResults = HashMap<(String, u64), HashMap<u32, Vec<u8>>>;
+
+/// A worker's advertised weight-shard capability, learned from its work-poll
+/// query params (`common::shard::run_shard_loop`). Layer-affinity assignment
+/// draws each segment's committee only from workers that COVER its layer span
+/// (and hold the embedding / classifier stage when the segment needs it).
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerCaps {
+    pub layer_lo: u64,
+    pub layer_hi: u64,
+    pub has_embedding: bool,
+    pub has_classifier: bool,
+}
+
+/// What a segment needs a worker to hold to be eligible for its committee.
+#[derive(Debug, Clone, Copy)]
+struct SegReq {
+    layer_lo: u64,
+    layer_hi: u64,
+    needs_embedding: bool,
+    needs_classifier: bool,
+}
+
+impl WorkerCaps {
+    fn covers(&self, r: &SegReq) -> bool {
+        // An empty span (layer_lo >= layer_hi) carries no layer requirement — used
+        // by the classifier/argmax segment, which is gated on `has_classifier`
+        // alone (the untied classifier lives on the last weight-shard slice, not
+        // at a specific decoder-layer index).
+        let span_ok =
+            r.layer_lo >= r.layer_hi || (self.layer_lo <= r.layer_lo && self.layer_hi >= r.layer_hi);
+        span_ok
+            && (!r.needs_embedding || self.has_embedding)
+            && (!r.needs_classifier || self.has_classifier)
+    }
+}
+
+impl std::fmt::Display for SegReq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "layers [{}, {}){}{}",
+            self.layer_lo,
+            self.layer_hi,
+            if self.needs_embedding { " +embedding" } else { "" },
+            if self.needs_classifier { " +classifier" } else { "" },
+        )
+    }
+}
 
 /// `POST /shard/infer` request: everything the coordinator needs to plan and
 /// verify one inference. All model facts are caller-supplied so the router
@@ -43,6 +91,10 @@ pub struct InferRequest {
     pub weights_root: Address,
     pub manifest: B256,
     pub packed_config: [B256; 3],
+    /// 4th packed-config word, required only by the 35B (`qwen35`) ABI whose
+    /// `packedConfig` is `bytes32[4]` (SPEC §10 w3). Unused/absent for 0.6B.
+    #[serde(default)]
+    pub packed_config_w3: Option<B256>,
     pub n_layers: u64,
     pub kvd: u64,
     pub dim: u64,
@@ -78,14 +130,25 @@ pub struct InferResponse {
 pub struct ShardCoordinator {
     /// Committee size per segment (`GK_SHARD_K`, default 2).
     pub k: u64,
-    /// Operator id space 0..N (`GK_SHARD_OPERATORS`, default 3).
+    /// Operator id space 0..N (`GK_SHARD_OPERATORS`, default 3). Only used by the
+    /// legacy (non-weight-sharded) committee rotation; under layer-affinity the
+    /// eligible set comes from the worker registry instead.
     pub n_operators: u64,
     /// Gas override for segment view calls (`GK_SHARD_GAS`, default 2^40).
     pub gas: u64,
+    /// Model family the DAG planner is parameterized on (`GK_SHARD_MODEL`).
+    pub spec: ModelSpec,
+    /// Snap stage boundaries to full-attention layer boundaries for hybrid
+    /// models (`GK_SHARD_ALIGN_STAGES`, default true). See [`ModelSpec::stage_bounds`].
+    pub align_stages: bool,
     seq: AtomicU64,
     queues: Mutex<HashMap<u32, VecDeque<ShardJob>>>,
     results: Mutex<SegmentResults>,
     chains: Mutex<HashMap<B256, ShardChain>>,
+    /// Live weight-shard registry keyed by operator id, populated by worker
+    /// advertisements on the work poll. Empty => no weight-sharding => legacy
+    /// unrestricted committee rotation (today's 0.6B behavior).
+    workers: Mutex<HashMap<u32, WorkerCaps>>,
 }
 
 impl ShardCoordinator {
@@ -96,15 +159,36 @@ impl ShardCoordinator {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d)
         };
+        let spec = ModelSpec::from_env().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "shard: bad GK_SHARD_MODEL, defaulting to qwen3-0.6b");
+            ModelSpec::qwen3_06b()
+        });
+        let align_stages = std::env::var("GK_SHARD_ALIGN_STAGES")
+            .ok()
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no"))
+            .unwrap_or(true);
+        info!(model = spec.name, align_stages, "shard coordinator: model spec selected");
         Self {
             k: env_u64("GK_SHARD_K", 2),
             n_operators: env_u64("GK_SHARD_OPERATORS", 3),
             gas: env_u64("GK_SHARD_GAS", 1 << 40),
+            spec,
+            align_stages,
             seq: AtomicU64::new(0),
             queues: Mutex::new(HashMap::new()),
             results: Mutex::new(HashMap::new()),
             chains: Mutex::new(HashMap::new()),
+            workers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Records a worker's advertised weight-shard capability (`GET /shard/work`
+    /// query params). Idempotent upsert keyed by operator id.
+    pub fn advertise(&self, operator: u32, caps: WorkerCaps) {
+        self.workers
+            .lock()
+            .expect("shard workers lock poisoned")
+            .insert(operator, caps);
     }
 
     /// Drains the pending jobs for one operator (`GET /shard/work`).
@@ -114,6 +198,54 @@ impl ShardCoordinator {
             .get_mut(&operator)
             .map(|q| q.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    /// Picks the k-of-N committee for one segment.
+    ///
+    /// - **No advertisements** (empty registry) => the legacy deterministic
+    ///   rotation over the full `0..n_operators` space — byte-for-byte the
+    ///   original behavior, so the 0.6B path is unchanged.
+    /// - **Weight-sharded** (workers advertised slices) => the eligible set is
+    ///   restricted to workers that COVER the segment (`WorkerCaps::covers`), then
+    ///   the same deterministic rotation is applied *within* that set. Errors
+    ///   clearly if fewer than `k` workers cover the span — a fleet misconfig.
+    fn plan_committee(&self, unit: u64, seed: u64, req: &SegReq) -> Result<Vec<u32>> {
+        let eligible: Option<Vec<u32>> = {
+            let workers = self.workers.lock().expect("shard workers lock poisoned");
+            if workers.is_empty() {
+                None
+            } else {
+                let mut ops: Vec<u32> = workers
+                    .iter()
+                    .filter(|(_, c)| c.covers(req))
+                    .map(|(&op, _)| op)
+                    .collect();
+                ops.sort_unstable();
+                Some(ops)
+            }
+        };
+
+        match eligible {
+            None => Ok((0..self.k)
+                .map(|j| ((seed + unit * self.k + j) % self.n_operators) as u32)
+                .collect()),
+            Some(ops) => {
+                if (ops.len() as u64) < self.k {
+                    bail!(
+                        "layer-affinity: no {}-of committee covers segment {req} — only {} eligible \
+                         worker(s) {ops:?} advertised coverage. Check GK_SHARD_LAYER_LO/HI and \
+                         GK_SHARD_HAS_EMBEDDING/CLASSIFIER across the fleet (each covered span needs \
+                         >= k workers).",
+                        self.k,
+                        ops.len(),
+                    );
+                }
+                let n = ops.len() as u64;
+                Ok((0..self.k)
+                    .map(|j| ops[((seed + unit * self.k + j) % n) as usize])
+                    .collect())
+            }
+        }
     }
 
     /// Accepts one executed segment result (`POST /shard/result`).
@@ -216,21 +348,18 @@ impl ShardCoordinator {
         })
     }
 
-    /// Dispatches one segment to its committee and awaits byte-identical results.
+    /// Dispatches one segment to its (already-planned) committee and awaits
+    /// byte-identical results.
     #[allow(clippy::too_many_arguments)]
     async fn exec_segment(
         &self,
         infer_id: &str,
         seg_id: u64,
-        unit: u64,
-        seed: u64,
+        committee: Vec<u32>,
         kind: SegKind,
         to: Address,
         calldata: Vec<u8>,
     ) -> Result<(Vec<u8>, ChainEntry)> {
-        let committee: Vec<u32> = (0..self.k)
-            .map(|j| ((seed + unit * self.k + j) % self.n_operators) as u32)
-            .collect();
         {
             let mut queues = self.queues.lock().expect("shard queues lock poisoned");
             for &op in &committee {
@@ -307,8 +436,14 @@ struct InferRun<'a> {
     max_pos: u64,
     seed: u64,
     next_seg: u64,
+    /// Per-layer full-attention KV accumulators (append semantics). For a
+    /// pure-attention model (0.6B) every layer uses these — identical to before.
     k_acc: Vec<Vec<u8>>,
     v_acc: Vec<Vec<u8>>,
+    /// Per-layer DeltaNet recurrent snapshot (conv || S), replace semantics — a
+    /// fixed-size blob overwritten each segment (35B DeltaNet layers only; empty
+    /// for attention layers).
+    delta_acc: Vec<Vec<u8>>,
     entries: Vec<ChainEntry>,
 }
 
@@ -317,10 +452,13 @@ impl<'a> InferRun<'a> {
         if req.n_layers == 0 || req.kvd == 0 || req.dim == 0 || req.vocab == 0 {
             bail!("bad model config");
         }
-        let s = req.stages.clamp(1, req.n_layers);
-        let bounds = (0..s)
-            .map(|i| (i * req.n_layers / s, (i + 1) * req.n_layers / s))
-            .collect();
+        // Stage bounds come from the model spec: even split for 0.6B (unchanged),
+        // full-attention-boundary-aligned for the 35B hybrid (keeps costly
+        // DeltaNet snapshots off stage cuts — see ModelSpec::stage_bounds).
+        let bounds = co
+            .spec
+            .stage_bounds(req.n_layers, req.stages, co.align_stages);
+        let s = bounds.len() as u64;
         let max_pos = (req.prompt_ids.len() as u64 + req.max_new).min(req.seq_cap);
         let seed_bytes = keccak256(format!("{infer_id}:{}", req.consumer).as_bytes());
         let seed = u64::from_be_bytes(seed_bytes[0..8].try_into().expect("8 bytes"));
@@ -335,30 +473,66 @@ impl<'a> InferRun<'a> {
             next_seg: 0,
             k_acc: vec![Vec::new(); req.n_layers as usize],
             v_acc: vec![Vec::new(); req.n_layers as usize],
+            delta_acc: vec![Vec::new(); req.n_layers as usize],
             entries: Vec::new(),
         })
     }
 
-    fn kv_in(&self, stage: u64) -> Vec<u8> {
+    /// The resume boundary state for `stage`, layer-major per the wire format:
+    /// full-attention layers contribute their accumulated `K || V` slices;
+    /// DeltaNet layers contribute their current recurrent snapshot. For a
+    /// pure-attention model this is exactly the original KV concatenation.
+    fn state_in(&self, stage: u64) -> Vec<u8> {
         let (lo, hi) = self.bounds[stage as usize];
         let mut out = Vec::new();
         for l in lo..hi {
-            out.extend_from_slice(&self.k_acc[l as usize]);
-            out.extend_from_slice(&self.v_acc[l as usize]);
+            if self.co.spec.is_full_attention(l) {
+                out.extend_from_slice(&self.k_acc[l as usize]);
+                out.extend_from_slice(&self.v_acc[l as usize]);
+            } else {
+                out.extend_from_slice(&self.delta_acc[l as usize]);
+            }
         }
         out
     }
 
-    fn fold_kv(&mut self, stage: u64, pos_n: u64, kv_append: &[u8]) -> Result<()> {
+    /// Fold a segment's produced boundary state back into the accumulators:
+    /// full-attention layers APPEND the new positions' `K`/`V`; DeltaNet layers
+    /// REPLACE the running snapshot (it is position-count-defined, not additive).
+    fn fold_state(&mut self, stage: u64, pos_n: u64, state_append: &[u8]) -> Result<()> {
         let (lo, hi) = self.bounds[stage as usize];
-        let blk = (pos_n * self.req.kvd * 4) as usize;
-        if kv_append.len() != ((hi - lo) as usize) * 2 * blk {
-            bail!("kvAppend length mismatch: {} bytes", kv_append.len());
+        let kv_side = self.co.spec.full_kv_side_bytes(pos_n); // per K or V side
+        let snap = self.co.spec.delta_snapshot_bytes();
+
+        let expected: usize = (lo..hi)
+            .map(|l| {
+                if self.co.spec.is_full_attention(l) {
+                    2 * kv_side
+                } else {
+                    snap
+                }
+            })
+            .sum();
+        if state_append.len() != expected {
+            bail!(
+                "stateAppend length mismatch: {} bytes, expected {expected}",
+                state_append.len()
+            );
         }
-        for (j, l) in (lo..hi).enumerate() {
-            let at = j * 2 * blk;
-            self.k_acc[l as usize].extend_from_slice(&kv_append[at..at + blk]);
-            self.v_acc[l as usize].extend_from_slice(&kv_append[at + blk..at + 2 * blk]);
+
+        let mut at = 0usize;
+        for l in lo..hi {
+            let l = l as usize;
+            if self.co.spec.is_full_attention(l as u64) {
+                self.k_acc[l].extend_from_slice(&state_append[at..at + kv_side]);
+                at += kv_side;
+                self.v_acc[l].extend_from_slice(&state_append[at..at + kv_side]);
+                at += kv_side;
+            } else {
+                // DeltaNet snapshot is "state after [0, posHi)" — replace wholesale.
+                self.delta_acc[l] = state_append[at..at + snap].to_vec();
+                at += snap;
+            }
         }
         Ok(())
     }
@@ -373,26 +547,34 @@ impl<'a> InferRun<'a> {
         x_in: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let (lo, hi) = self.bounds[stage as usize];
-        let kv_in = self.kv_in(stage);
-        let call = forwardRangeCall {
-            rootDirectory: self.req.weights_root,
-            manifestHash: self.req.manifest,
-            packedConfig: self.req.packed_config,
-            q: SegCall {
-                span: SegSpan {
-                    maxPos: U256::from(self.max_pos),
-                    posLo: U256::from(pos_lo),
-                    posHi: U256::from(pos_hi),
-                    layerLo: U256::from(lo),
-                    layerHi: U256::from(hi),
-                },
-                tokenIds: token_ids,
-                xIn: x_in.clone().into(),
-                kvIn: kv_in.clone().into(),
-                expectXIn: keccak256(&x_in),
-                expectKvIn: keccak256(&kv_in),
+        let state_in = self.state_in(stage);
+        let calldata = self.co.spec.encode_forward(&ForwardArgs {
+            weights_root: self.req.weights_root,
+            manifest: self.req.manifest,
+            packed_config: self.req.packed_config,
+            packed_config_w3: self.req.packed_config_w3,
+            max_pos: self.max_pos,
+            pos_lo,
+            pos_hi,
+            layer_lo: lo,
+            layer_hi: hi,
+            token_ids: &token_ids,
+            x_in: &x_in,
+            state_in: &state_in,
+        })?;
+        // Layer-affinity: this segment covers layers [lo, hi); the embedding
+        // (token lookup) happens when lo == 0, so that stage additionally needs a
+        // worker advertising the embedding.
+        let committee = self.co.plan_committee(
+            stage,
+            self.seed,
+            &SegReq {
+                layer_lo: lo,
+                layer_hi: hi,
+                needs_embedding: lo == 0,
+                needs_classifier: false,
             },
-        };
+        )?;
         let seg_id = self.next_seg;
         self.next_seg += 1;
         let (rd, entry) = self
@@ -400,25 +582,23 @@ impl<'a> InferRun<'a> {
             .exec_segment(
                 &self.infer_id,
                 seg_id,
-                stage,
-                self.seed,
+                committee,
                 SegKind::Forward,
                 self.req.seg_engine,
-                call.abi_encode(),
+                calldata,
             )
             .await?;
         self.entries.push(entry);
-        let ret = forwardRangeCall::abi_decode_returns(&rd)
-            .context("decoding forwardRange returndata")?;
-        self.fold_kv(stage, pos_hi - pos_lo, &ret.kvAppend)?;
-        Ok(ret.xOut.to_vec())
+        let (x_out, state_append) = self.co.spec.decode_forward_returns(&rd)?;
+        self.fold_state(stage, pos_hi - pos_lo, &state_append)?;
+        Ok(x_out)
     }
 
     /// M-way vocab-sharded argmax merged (score desc, id asc); returns the token id.
     async fn argmax(&mut self, xb_final: Vec<u8>) -> Result<u32> {
         let m = self.req.argmax_shards.clamp(1, self.req.vocab);
         let step = self.req.vocab / m;
-        let mut best: Option<(alloy_primitives::I256, u64)> = None;
+        let mut best: Option<(I256, u64)> = None;
         for j in 0..m {
             let (lo, hi) = (
                 j * step,
@@ -428,14 +608,27 @@ impl<'a> InferRun<'a> {
                     (j + 1) * step
                 },
             );
-            let call = argmaxRangeCall {
-                rootDirectory: self.req.weights_root,
-                manifestHash: self.req.manifest,
-                packedConfig: self.req.packed_config,
-                xbFinal: xb_final.clone().into(),
-                vocabLo: U256::from(lo),
-                vocabHi: U256::from(hi),
-            };
+            let calldata = self.co.spec.encode_argmax(&ArgmaxArgs {
+                weights_root: self.req.weights_root,
+                manifest: self.req.manifest,
+                packed_config: self.req.packed_config,
+                packed_config_w3: self.req.packed_config_w3,
+                xb_final: &xb_final,
+                vocab_lo: lo,
+                vocab_hi: hi,
+            })?;
+            // The classifier is untied and lives on the last weight-shard slice —
+            // argmax shards go only to workers advertising it.
+            let committee = self.co.plan_committee(
+                self.s + j,
+                self.seed,
+                &SegReq {
+                    layer_lo: 0,
+                    layer_hi: 0,
+                    needs_embedding: false,
+                    needs_classifier: true,
+                },
+            )?;
             let seg_id = self.next_seg;
             self.next_seg += 1;
             let (rd, entry) = self
@@ -443,17 +636,14 @@ impl<'a> InferRun<'a> {
                 .exec_segment(
                     &self.infer_id,
                     seg_id,
-                    self.s + j,
-                    self.seed,
+                    committee,
                     SegKind::Argmax,
                     self.req.seg_engine,
-                    call.abi_encode(),
+                    calldata,
                 )
                 .await?;
             self.entries.push(entry);
-            let ret = argmaxRangeCall::abi_decode_returns(&rd)
-                .context("decoding argmaxRange returndata")?;
-            let (score, id) = (ret.bestScore, ret.bestId.to::<u64>());
+            let (score, id) = self.co.spec.decode_argmax_returns(&rd)?;
             best = Some(match best {
                 None => (score, id),
                 Some((bs, bi)) if score > bs || (score == bs && id < bi) => (score, id),
@@ -474,13 +664,6 @@ fn segment_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-// Silence unused-import lint for SolValue if the compiler decides it is unused
-// in some cfg; abi encoding of tuples may route through it.
-#[allow(unused)]
-fn _assert_solvalue_in_scope() {
-    let _ = <(U256,) as SolValue>::abi_encode;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,10 +673,22 @@ mod tests {
             k,
             n_operators: n,
             gas: 1 << 40,
+            spec: ModelSpec::qwen3_06b(),
+            align_stages: true,
             seq: AtomicU64::new(0),
             queues: Mutex::new(HashMap::new()),
             results: Mutex::new(HashMap::new()),
             chains: Mutex::new(HashMap::new()),
+            workers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn caps(lo: u64, hi: u64, emb: bool, cls: bool) -> WorkerCaps {
+        WorkerCaps {
+            layer_lo: lo,
+            layer_hi: hi,
+            has_embedding: emb,
+            has_classifier: cls,
         }
     }
 
@@ -532,8 +727,15 @@ mod tests {
     #[tokio::test]
     async fn committee_divergence_aborts() {
         let co = coordinator(2, 3);
-        let fut = co.exec_segment("inf-0", 0, 0, 0, SegKind::Argmax, Address::ZERO, vec![0xAA]);
-        // committee for unit 0, seed 0 = {0, 1}; feed them different results
+        let fut = co.exec_segment(
+            "inf-0",
+            0,
+            vec![0, 1],
+            SegKind::Argmax,
+            Address::ZERO,
+            vec![0xAA],
+        );
+        // committee {0, 1}; feed them different results
         co.put_result(ShardResultMsg {
             infer_id: "inf-0".into(),
             seg_id: 0,
@@ -553,7 +755,14 @@ mod tests {
     #[tokio::test]
     async fn committee_agreement_produces_entry() {
         let co = coordinator(2, 3);
-        let fut = co.exec_segment("inf-0", 0, 0, 0, SegKind::Argmax, Address::ZERO, vec![0xAA]);
+        let fut = co.exec_segment(
+            "inf-0",
+            0,
+            vec![0, 1],
+            SegKind::Argmax,
+            Address::ZERO,
+            vec![0xAA],
+        );
         for op in [0u32, 1u32] {
             co.put_result(ShardResultMsg {
                 infer_id: "inf-0".into(),
@@ -566,5 +775,84 @@ mod tests {
         assert_eq!(rd, vec![9, 9]);
         assert_eq!(entry.committee, vec![0, 1]);
         assert_eq!(entry.returndata_hash, keccak256([9u8, 9u8]));
+    }
+
+    #[test]
+    fn plan_committee_empty_registry_is_legacy_rotation() {
+        // No advertisements => byte-for-byte the original modulo rotation over
+        // the full operator space (the 0.6B path is unchanged).
+        let co = coordinator(2, 3);
+        let req = SegReq {
+            layer_lo: 0,
+            layer_hi: 14,
+            needs_embedding: true,
+            needs_classifier: false,
+        };
+        for unit in 0..10u64 {
+            let c = co.plan_committee(unit, 7, &req).unwrap();
+            let expect: Vec<u32> = (0..2).map(|j| ((7 + unit * 2 + j) % 3) as u32).collect();
+            assert_eq!(c, expect);
+        }
+    }
+
+    #[test]
+    fn plan_committee_respects_layer_affinity() {
+        // Two weight-shard groups: A holds [0,20)+embedding (ops 0,1),
+        // B holds [20,40)+classifier (ops 2,3).
+        let co = coordinator(2, 4);
+        co.advertise(0, caps(0, 20, true, false));
+        co.advertise(1, caps(0, 20, true, false));
+        co.advertise(2, caps(20, 40, false, true));
+        co.advertise(3, caps(20, 40, false, true));
+
+        // A segment over layers [0,20) needing embedding must draw from {0,1}.
+        let front = SegReq {
+            layer_lo: 0,
+            layer_hi: 20,
+            needs_embedding: true,
+            needs_classifier: false,
+        };
+        for unit in 0..8u64 {
+            let c = co.plan_committee(unit, 3, &front).unwrap();
+            assert!(c.iter().all(|op| *op == 0 || *op == 1), "front committee {c:?}");
+            assert_ne!(c[0], c[1]);
+        }
+
+        // A back segment over [20,40) must draw from {2,3}.
+        let back = SegReq {
+            layer_lo: 20,
+            layer_hi: 40,
+            needs_embedding: false,
+            needs_classifier: false,
+        };
+        let c = co.plan_committee(0, 3, &back).unwrap();
+        assert!(c.iter().all(|op| *op == 2 || *op == 3), "back committee {c:?}");
+
+        // Argmax needs the classifier — only group B qualifies.
+        let cls = SegReq {
+            layer_lo: 0,
+            layer_hi: 0,
+            needs_embedding: false,
+            needs_classifier: true,
+        };
+        let c = co.plan_committee(5, 3, &cls).unwrap();
+        assert!(c.iter().all(|op| *op == 2 || *op == 3), "classifier committee {c:?}");
+    }
+
+    #[test]
+    fn plan_committee_errors_when_span_uncovered() {
+        // Only one worker covers a mid-range span; k=2 cannot be formed.
+        let co = coordinator(2, 4);
+        co.advertise(0, caps(0, 20, true, false));
+        co.advertise(1, caps(0, 10, true, false)); // covers [0,10) only
+        co.advertise(2, caps(20, 40, false, true));
+        let req = SegReq {
+            layer_lo: 10,
+            layer_hi: 20,
+            needs_embedding: false,
+            needs_classifier: false,
+        };
+        let err = co.plan_committee(0, 0, &req).unwrap_err();
+        assert!(err.to_string().contains("layer-affinity"), "{err}");
     }
 }

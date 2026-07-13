@@ -6,6 +6,7 @@ pub mod executor;
 pub mod factories;
 pub mod ingress;
 pub mod metrics;
+pub mod model;
 pub mod orchestrator;
 pub mod shard;
 pub mod store;
