@@ -2,7 +2,8 @@ use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
 use ark_serialize::CanonicalDeserialize;
 use axum::{
-    Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
+    Json, Router, extract::State, http::StatusCode, http::header, response::IntoResponse,
+    routing::get,
 };
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{PublicKey, get_signer};
@@ -19,8 +20,8 @@ use commonware_utils::NZU32;
 use commonware_utils::ordered::Map;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
-    GasKillerValidator, SpeculativePrebuildConfig, get_operator_states, load_key_from_file,
-    p2p_message_backlog, p2p_quota_period,
+    GasKillerValidator, PrewarmSlot, SpeculativePrebuildConfig, get_operator_states,
+    load_key_from_file, p2p_message_backlog, p2p_quota_period,
 };
 use gas_killer_router::GasKillerOrchestratorBuilder;
 use gas_killer_router::metrics::MetricsCollector;
@@ -40,6 +41,9 @@ struct HealthState {
     ready: Arc<AtomicBool>,
     context: Arc<tokio::Context>,
     metrics: Arc<MetricsCollector>,
+    /// Latest ingress-accepted task, served at GET /prewarm so operator nodes can
+    /// start simulating at ingress time (see gas_killer_common::prewarm).
+    prewarm: Arc<PrewarmSlot>,
 }
 
 /// Liveness probe — always 200 if the process is running.
@@ -67,6 +71,16 @@ async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
         )],
         output,
     )
+}
+
+/// Internal prewarm feed for operator nodes — `{"seq": n, "task": {...}}` for the most
+/// recently accepted task, or 204 when nothing has been accepted yet. Served on the
+/// internal health port (never exposed through the public ingress).
+async fn prewarm_handler(State(s): State<HealthState>) -> axum::response::Response {
+    match s.prewarm.snapshot() {
+        Some(snapshot) => Json(snapshot).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
 }
 
 /// Resolve a hostname:port with retry logic for Docker DNS readiness
@@ -324,11 +338,16 @@ fn main() {
             });
         }
 
+        // Prewarm channel: the ingress publishes accepted tasks into this slot; the
+        // health server below serves it at GET /prewarm for operator nodes.
+        let prewarm_slot = Arc::new(PrewarmSlot::default());
+
         let orchestrator = GasKillerOrchestratorBuilder::build(
             builder,
             validator,
             Arc::clone(&metrics),
             &executor_ctx,
+            Arc::clone(&prewarm_slot),
         )
         .await
         .expect("Failed to build orchestrator");
@@ -348,12 +367,14 @@ fn main() {
             ready: Arc::clone(&ready),
             context: health_ctx,
             metrics: Arc::clone(&metrics),
+            prewarm: prewarm_slot,
         };
         healthz_ctx.spawn(move |_| async move {
             let app = Router::new()
                 .route("/healthz", get(healthz_handler))
                 .route("/readyz", get(readyz_handler))
                 .route("/metrics", get(metrics_handler))
+                .route("/prewarm", get(prewarm_handler))
                 .with_state(health_state);
             match TcpListener::bind(healthz_addr).await {
                 Ok(listener) => {

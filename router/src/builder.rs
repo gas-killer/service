@@ -32,6 +32,9 @@ impl GasKillerOrchestratorBuilder {
     /// * `metrics` - The shared metrics collector
     /// * `context` - The runtime context the upstream executor registers its
     ///   EigenLayer state-retrieval metrics on
+    /// * `prewarm` - Shared slot the ingress publishes accepted tasks to; the caller
+    ///   also serves it via `GET /prewarm` on the internal health server so operator
+    ///   nodes can start simulating at ingress time
     ///
     /// # Returns
     /// * `Result<GasKillerOrchestrator<C>>` - The constructed gas killer orchestrator
@@ -40,6 +43,7 @@ impl GasKillerOrchestratorBuilder {
         validator: Arc<GasKillerValidator>,
         metrics: Arc<MetricsCollector>,
         context: &impl Metrics,
+        prewarm: Arc<gas_killer_common::PrewarmSlot>,
     ) -> Result<GasKillerOrchestrator<C>, Box<dyn std::error::Error>> {
         // The validator is created and owned by the caller (which also spawns the speculative
         // pre-build loop on it); it is shared here by both the creator and the orchestrator.
@@ -59,6 +63,7 @@ impl GasKillerOrchestratorBuilder {
                 Arc::clone(&validator),
                 Arc::clone(&metrics),
                 Arc::clone(&dispatch_time),
+                Some(prewarm),
             )
             .await?
         } else {

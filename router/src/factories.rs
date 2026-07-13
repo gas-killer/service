@@ -65,6 +65,7 @@ pub async fn create_listening_creator_with_server(
     validator: Arc<GasKillerValidator>,
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
+    prewarm: Option<Arc<gas_killer_common::PrewarmSlot>>,
 ) -> anyhow::Result<GasKillerCreatorType> {
     let (sender, receiver) = task_channel();
     let queue_depth = task_queue_depth();
@@ -143,7 +144,7 @@ pub async fn create_listening_creator_with_server(
         });
     }
 
-    let ingress_state = IngressState::new(
+    let mut ingress_state = IngressState::new(
         sender,
         queue_depth,
         gas_killer_common::p2p_message_backlog(),
@@ -153,6 +154,9 @@ pub async fn create_listening_creator_with_server(
     )
     .with_store(store)
     .with_admin_key(admin_key);
+    if let Some(prewarm) = prewarm {
+        ingress_state = ingress_state.with_prewarm(prewarm);
+    }
     tokio::spawn(async move {
         start_gas_killer_http_server(ingress_state, &addr).await;
     });

@@ -11,6 +11,9 @@ on:
       - main
       - dev
       - staging
+      # TODO: drop once the unbounded/LLM stack (#313/#319) merges to main
+      - ron/unbounded-e2e
+      - ron/llm-e2e
   workflow_dispatch:
 
 jobs:
@@ -163,7 +166,8 @@ jobs:
             --set l2.enabled=true \
             --set bridge.enabled=true \
             --set bridge.waitForBridge=true \
-            --set yieldDistribution.enabled=true
+            --set yieldDistribution.enabled=true \
+            --set l1.anvilExtraArgs=--disable-block-gas-limit
 
       - name: Check deployment status
         run: |
@@ -541,6 +545,7 @@ jobs:
 
           echo "✅ All $SUCCESSFUL triggers completed successfully!"
 
+
       - name: Trigger Yield Distribution via router
         run: |
           echo "=== Triggering Yield Distribution through router ==="
@@ -653,6 +658,82 @@ jobs:
             kubectl logs -l gas-killer/node-index=3 -c node --tail 50 || true
             exit 1
           fi
+
+
+      # The yield-distribution consumer runs under the chain profile; the LLM needs
+      # unbounded-v1. Flip the operators' pinned profile (a config-only change — the
+      # L1 keeps its state and its lifted gas cap) and re-establish port forwards,
+      # which die with the restarted pods. This doubles as coverage of the profile
+      # migration an operator deployment would actually perform.
+      - name: Switch operators to the unbounded profile
+        run: |
+          kubectl set env deployment -l app.kubernetes.io/component=router GK_SIM_PROFILE=unbounded-v1
+          kubectl set env deployment -l app.kubernetes.io/component=node GK_SIM_PROFILE=unbounded-v1
+          for d in $(kubectl get deployments -l app.kubernetes.io/component=router -o name) \
+                   $(kubectl get deployments -l app.kubernetes.io/component=node -o name); do
+            kubectl rollout status "$d" --timeout=300s
+          done
+
+          # Restart port forwards (old ones bound to the replaced pods)
+          pkill -f "kubectl port-forward" || true
+          sleep 2
+          L1_SERVICE=$(kubectl get services -o name | grep '\-l1$' | head -1 | sed 's|service/||')
+          ROUTER_SERVICE=$(kubectl get services -o name | grep router | head -1 | sed 's|service/||')
+          kubectl port-forward service/$L1_SERVICE 8545:8545 &
+          kubectl port-forward service/$ROUTER_SERVICE 8080:8080 &
+          sleep 5
+          cast block-number --rpc-url http://localhost:8545
+          for i in $(seq 1 30); do
+            curl -s -o /dev/null http://localhost:8080/health && break || sleep 2
+          done
+
+
+      - name: Deploy on-chain LLM consumer (stories260K)
+        run: |
+          export HTTP_RPC=http://localhost:8545
+          export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+          export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
+          LLM_TARGET=$(bash scripts/deploy_onchain_llm.sh | grep '^LLM_TARGET=' | cut -d= -f2)
+          [ -n "$LLM_TARGET" ] || { echo "LLM deployment failed"; exit 1; }
+          echo "GasKillerLLM deployed at $LLM_TARGET"
+          echo "LLM_TARGET=$LLM_TARGET" >> $GITHUB_ENV
+
+      - name: Trigger the on-chain LLM through the quorum and verify the story
+        run: |
+          export HTTP_RPC=http://localhost:8545
+          export WS_RPC=ws://localhost:8545
+          export GAS_KILLER_TRIGGER_URL=http://localhost:8080/trigger
+          export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+
+          # The unbounded claim: direct execution cannot fit in a real block.
+          # (A full estimate would binary-search a ~1.4B-gas call past cast's client
+          # timeout; a 30M-gas-capped call that OOGs is the sharp, cheap assertion.)
+          if cast call "$LLM_TARGET" "tellStory(string,uint256)" "Once upon a time" 32 \
+              --gas-limit 30000000 --rpc-url http://localhost:8545 >/dev/null 2>&1; then
+            echo "direct LLM execution fit in a mainnet block — expected it to OOG"; exit 1
+          fi
+          echo "✅ Direct execution OOGs at the 30M block limit — unlandable on-chain"
+
+          START_BLOCK=$(cast block-number --rpc-url http://localhost:8545)
+          export GAS_KILLER_TARGET_ADDRESS="$LLM_TARGET"
+          export GAS_KILLER_CALL_DATA=$(cast calldata "tellStory(string,uint256)" "Once upon a time" 32)
+          export GAS_KILLER_FROM_ADDRESS=$(cast wallet address --private-key "$PRIVATE_KEY")
+          export GAS_KILLER_TRANSITION_INDEX=auto
+          export GK_VERIFY_MODE=transition-count
+          export GK_VERIFY_TIMEOUT_SECS=300
+          ./target/release/send_request || { echo "LLM task failed"; kubectl logs -l app.kubernetes.io/component=router --tail 100; exit 1; }
+
+          # Decode the StoryTold event the quorum signed and assert the reference text.
+          EVENT_TOPIC=$(cast keccak 'StoryTold(uint256,bytes32,string,string,uint16[])')
+          LOG_DATA=$(cast logs --from-block "$START_BLOCK" --address "$LLM_TARGET" "$EVENT_TOPIC" --rpc-url http://localhost:8545 --json | jq -r '.[0].data')
+          [ -n "$LOG_DATA" ] && [ "$LOG_DATA" != "null" ] || { echo "StoryTold event not found"; exit 1; }
+          STORY=$(cast abi-decode "x()(string,string,uint16[])" "$LOG_DATA" | sed -n 2p)
+          echo "📖 On-chain LLM story (signed by the operator quorum):"
+          echo "$STORY"
+          case "$STORY" in
+            *Lily*) echo "✅ Story matches the reference generation" ;;
+            *) echo "❌ Story does not match the reference generation"; exit 1 ;;
+          esac
 
       - name: Show router logs
         run: |

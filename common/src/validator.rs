@@ -5,21 +5,25 @@ use commonware_cryptography::sha256::Digest;
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
 use commonware_runtime::telemetry::metrics::raw::Histogram;
 use commonware_runtime::telemetry::metrics::registry::Registry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::Mutex as StdMutex;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
+use crate::local_exec_shim::{prefer_mmap_overlay, sim_executor_from_env};
 use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
 use commonware_avs_router::wire;
 
 use alloy::rpc::types::TransactionRequest;
 use gas_analyzer::{
-    EvmSketchExecutorCache, SimProfile, call_to_encoded_state_updates_with_evmsketch_profiled,
+    EvmSketchExecutorCache, LocalStateCache, OverlayEnv, SimExecutor, SimProfile,
+    call_to_encoded_state_updates_local, call_to_encoded_state_updates_local_multi,
+    call_to_encoded_state_updates_with_evmsketch_env,
 };
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
@@ -100,6 +104,12 @@ pub struct GasKillerValidator {
     /// Prevents re-running expensive EVMSketch for the same round when the
     /// orchestrator validates multiple signatures for identical task data.
     digest_cache: Arc<Mutex<HashMap<(u64, u64), Digest>>>,
+    /// Keys currently being simulated by [`prewarm`](Self::prewarm). Guards
+    /// duplicate prewarms and lets `validate_and_build_hash` wait for an
+    /// in-flight prewarm instead of launching a second multi-minute EVMSketch
+    /// run for the same round. A `std` mutex (never held across `.await`) so
+    /// the panic-safe [`PrewarmInflightGuard`] can release entries in `Drop`.
+    prewarm_inflight: Arc<StdMutex<HashSet<(u64, u64)>>>,
     /// LRU cache of pre-built EvmSketch executors keyed by (rpc_url, block_number).
     /// Eliminates the 2× eth_getBlockByNumber build cost (~80–120 ms) for the
     /// 2nd…Nth request at the same block height.
@@ -109,15 +119,80 @@ pub struct GasKillerValidator {
     /// Simulation profile for tracked-function analysis. `UnboundedV1` lifts the
     /// simulated gas limits to the pinned protocol constants (see gas-analyzer's
     /// docs/UNBOUNDED_MODE.md), enabling tracked functions whose direct execution
-    /// exceeds the real block gas limit. Read from `GK_SIM_PROFILE` — it is
+    /// exceeds the real block gas limit; `UnboundedV1Xl` is the raised 2^43 gas
+    /// tier of the same family for multi-Tgas tasks (~3.6 Tgas Qwen3.5-35B-A3B
+    /// inference). Read from `GK_SIM_PROFILE` — it is
     /// protocol configuration, so the router and every node MUST agree on it or
     /// their independently derived payloads (and thus signatures) diverge.
     sim_profile: SimProfile,
+    /// Pinned code overlay for the tracked-function simulation (`UNBOUNDED_V2`,
+    /// see gas-analyzer's docs/UNBOUNDED_OVERLAYS.md): large immutable blobs
+    /// (LLM weights, tokenizer) mounted as contract code via `debug_traceCall`
+    /// state overrides, verified against the pinned manifest at startup. Read
+    /// from `GK_OVERLAY_WEIGHTS`/`GK_OVERLAY_TOKENIZER`/`GK_OVERLAY_MANIFEST`.
+    /// Pinned-environment configuration like `sim_profile`: the router and
+    /// every node MUST mount the same bytes or their payloads diverge.
+    /// `Arc` because the mounted set is ~the size of the blobs (hundreds of MB)
+    /// and the validator is cloned.
+    overlay_env: Option<Arc<OverlayEnv>>,
+    /// mmap-mode overlays: one `(weights_path, tokenizer_path, manifest)`
+    /// artifact spec PER PINNED MODEL, retained instead of materializing
+    /// `OverlayEnv::from_blobs` in RAM. Populated when
+    /// `GK_SIM_EXECUTOR=local` and `GK_OVERLAY_MMAP` (default true under
+    /// local) — the analyzer mounts each spec via `OverlayMount::from_files`
+    /// (streaming-keccak manifest verify + lazy chunk materialization), which
+    /// is what makes ~35GB artifacts servable. Multiple models mount
+    /// simultaneously as ONE composite lookup: chunk addresses are derived
+    /// per-manifest, so distinct models' address sets are disjoint and every
+    /// on-chain consumer finds exactly its own model's chunks. Slot 1 comes
+    /// from the unsuffixed `GK_OVERLAY_WEIGHTS/TOKENIZER/MANIFEST` triplet;
+    /// additional models from `GK_OVERLAY_WEIGHTS_2/...` and up (see
+    /// [`overlay_files_from_env`]). Empty when unconfigured; mutually
+    /// exclusive with `overlay_env`.
+    overlay_files: Vec<(String, String, alloy::primitives::B256)>,
+    /// Executor selection for tracked-function analysis (`GK_SIM_EXECUTOR=rpc|local`,
+    /// gas-analyzer#169). `local` re-executes the call in-process inside the
+    /// analyzer (`call_to_encoded_state_updates_local`) instead of delegating
+    /// to `debug_traceCall` — the RPC becomes a pure lazy state backend.
+    /// Pinned-environment configuration like `sim_profile`/`overlay_env`:
+    /// router and every node must agree, and `local` is required (not just
+    /// faster) once overlay artifacts exceed what a `stateOverrides` JSON
+    /// body can carry (~35GB models).
+    sim_executor: SimExecutor,
+    /// Block-scoped remote-state backends + overlay mounts for the local
+    /// executor (gas-analyzer's counterpart to `executor_cache`, mirrored
+    /// here 1:1 — see `gas_analyzer::LocalStateCache` docs). Always
+    /// constructed (cheap, lazily populated) so flipping `GK_SIM_EXECUTOR`
+    /// doesn't need a validator rebuild.
+    local_state_cache: Arc<LocalStateCache>,
+}
+
+/// How often a validation blocked on an in-flight prewarm re-checks the digest
+/// cache. Coarse on purpose: the guarded computation runs for minutes, and the
+/// waiter only burns a map lookup per tick.
+const PREWARM_WAIT_POLL: Duration = Duration::from_secs(1);
+
+/// Removes a key from the prewarm in-flight set on drop, so a panic or early
+/// return inside the prewarm computation can never leave the key stuck
+/// in-flight (which would make `validate_and_build_hash` wait forever).
+struct PrewarmInflightGuard {
+    inflight: Arc<StdMutex<HashSet<(u64, u64)>>>,
+    key: (u64, u64),
+}
+
+impl Drop for PrewarmInflightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut inflight) = self.inflight.lock() {
+            inflight.remove(&self.key);
+        }
+    }
 }
 
 /// Parses `GK_SIM_PROFILE` into a [`SimProfile`]. Accepted values:
-/// `chain` (default) and `unbounded-v1`. Panics on any other value — a typo
-/// silently falling back to `Chain` on one node would fork the quorum.
+/// `chain` (default), `unbounded-v1`, and `unbounded-v1-xl` (raised gas tier
+/// of the V1 family, pinned 2^43 limits — sized for multi-Tgas tasks such as
+/// Qwen3.5-35B-A3B inference at ~3.6 Tgas/call). Panics on any other value —
+/// a typo silently falling back to `Chain` on one node would fork the quorum.
 fn sim_profile_from_env() -> SimProfile {
     match std::env::var("GK_SIM_PROFILE") {
         Err(_) => SimProfile::Chain,
@@ -129,11 +204,210 @@ fn sim_profile_from_env() -> SimProfile {
                 );
                 SimProfile::UnboundedV1
             }
+            "unbounded-v1-xl" => {
+                info!(
+                    "GK_SIM_PROFILE=unbounded-v1-xl: simulating tracked functions under the pinned XL-tier (2^43) unbounded gas limits"
+                );
+                SimProfile::UnboundedV1Xl
+            }
             other => {
-                panic!("invalid GK_SIM_PROFILE {other:?}: expected \"chain\" or \"unbounded-v1\"")
+                panic!(
+                    "invalid GK_SIM_PROFILE {other:?}: expected \"chain\", \"unbounded-v1\", or \"unbounded-v1-xl\""
+                )
             }
         },
     }
+}
+
+/// Loads the pinned code-overlay environment from `GK_OVERLAY_WEIGHTS` and
+/// `GK_OVERLAY_TOKENIZER` (blob file paths) and verifies it against
+/// `GK_OVERLAY_MANIFEST` (0x-prefixed 32-byte hex). Returns `None` when no
+/// overlay is configured.
+///
+/// Panics on any invalid or partial configuration — missing counterpart
+/// variable, unreadable blob, malformed manifest, or a manifest mismatch.
+/// Same rationale as [`sim_profile_from_env`]: the overlay is part of the
+/// pinned simulation environment, and one operator silently degrading to a
+/// different (or missing) overlay would fork the quorum. Mismatched bytes are
+/// refused outright rather than mounted (`OverlayEnv::verify`).
+fn overlay_env_from_env() -> Option<Arc<OverlayEnv>> {
+    let weights_path = std::env::var("GK_OVERLAY_WEIGHTS").unwrap_or_default();
+    let tokenizer_path = std::env::var("GK_OVERLAY_TOKENIZER").unwrap_or_default();
+    if weights_path.is_empty() && tokenizer_path.is_empty() {
+        return None;
+    }
+    assert!(
+        !weights_path.is_empty() && !tokenizer_path.is_empty(),
+        "GK_OVERLAY_WEIGHTS and GK_OVERLAY_TOKENIZER must be set together"
+    );
+    let manifest_hex = std::env::var("GK_OVERLAY_MANIFEST").unwrap_or_default();
+    assert!(
+        !manifest_hex.is_empty(),
+        "GK_OVERLAY_MANIFEST must be set when overlay artifacts are configured: \
+         refusing to mount unverified bytes"
+    );
+    let expected: alloy::primitives::B256 = manifest_hex
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid GK_OVERLAY_MANIFEST {manifest_hex:?}: {e}"));
+
+    let weights = std::fs::read(&weights_path)
+        .unwrap_or_else(|e| panic!("failed to read GK_OVERLAY_WEIGHTS {weights_path:?}: {e}"));
+    let tokenizer = std::fs::read(&tokenizer_path)
+        .unwrap_or_else(|e| panic!("failed to read GK_OVERLAY_TOKENIZER {tokenizer_path:?}: {e}"));
+
+    let env = OverlayEnv::from_blobs(&weights, &tokenizer)
+        .unwrap_or_else(|e| panic!("failed to build overlay env: {e}"));
+    env.verify(expected)
+        .unwrap_or_else(|e| panic!("GK_OVERLAY_MANIFEST verification failed: {e}"));
+
+    info!(
+        manifest = %env.manifest,
+        chunks = env.overlays.len(),
+        weights_bytes = weights.len(),
+        tokenizer_bytes = tokenizer.len(),
+        "mounted pinned code overlay for tracked-function simulation (UNBOUNDED_V2)"
+    );
+    Some(Arc::new(env))
+}
+
+/// One overlay slot's `(weights_path, tokenizer_path, manifest)` from
+/// `GK_OVERLAY_WEIGHTS{suffix}` / `GK_OVERLAY_TOKENIZER{suffix}` /
+/// `GK_OVERLAY_MANIFEST{suffix}` (suffix `""` for the historical slot-1
+/// triplet, `"_2"`, `"_3"`, ... for additional models). Returns `None` when
+/// the slot is entirely unconfigured; panics on any partial configuration —
+/// same fail-loud rules as [`overlay_env_from_env`].
+fn overlay_files_slot(suffix: &str) -> Option<(String, String, alloy::primitives::B256)> {
+    let weights_var = format!("GK_OVERLAY_WEIGHTS{suffix}");
+    let tokenizer_var = format!("GK_OVERLAY_TOKENIZER{suffix}");
+    let manifest_var = format!("GK_OVERLAY_MANIFEST{suffix}");
+    let weights_path = std::env::var(&weights_var).unwrap_or_default();
+    let tokenizer_path = std::env::var(&tokenizer_var).unwrap_or_default();
+    if weights_path.is_empty() && tokenizer_path.is_empty() {
+        let manifest_hex = std::env::var(&manifest_var).unwrap_or_default();
+        assert!(
+            manifest_hex.trim().is_empty(),
+            "{manifest_var} is set but {weights_var}/{tokenizer_var} are not: \
+             partial overlay slot configuration"
+        );
+        return None;
+    }
+    assert!(
+        !weights_path.is_empty() && !tokenizer_path.is_empty(),
+        "{weights_var} and {tokenizer_var} must be set together"
+    );
+    let manifest_hex = std::env::var(&manifest_var).unwrap_or_default();
+    assert!(
+        !manifest_hex.is_empty(),
+        "{manifest_var} must be set when overlay artifacts are configured: \
+         refusing to mount unverified bytes"
+    );
+    let expected: alloy::primitives::B256 = manifest_hex
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid {manifest_var} {manifest_hex:?}: {e}"));
+    for p in [&weights_path, &tokenizer_path] {
+        assert!(
+            std::path::Path::new(p).is_file(),
+            "overlay artifact path {p:?} does not exist or is not a file"
+        );
+    }
+    info!(
+        weights = %weights_path,
+        tokenizer = %tokenizer_path,
+        manifest = %expected,
+        "overlay artifacts will be mmap-mounted at first analysis (OverlayMount::from_files)"
+    );
+    Some((weights_path, tokenizer_path, expected))
+}
+
+/// The indexed overlay slot numbers (`GK_OVERLAY_*_N`, N >= 2) present in
+/// the environment, sorted and deduped. Discovery scans the environment
+/// rather than probing sequentially, so a numbering gap (`_2` unset but `_3`
+/// set) cannot silently drop a configured model. Panics on a non-numeric
+/// suffix or on the reserved slots 0/1 (slot 1 is the unsuffixed triplet).
+fn indexed_overlay_slots() -> Vec<u32> {
+    indexed_overlay_slots_from(std::env::vars())
+}
+
+/// [`indexed_overlay_slots`] over an explicit variable set (unit-testable
+/// without mutating the process environment).
+fn indexed_overlay_slots_from(vars: impl Iterator<Item = (String, String)>) -> Vec<u32> {
+    let mut slots: Vec<u32> = vars
+        .filter_map(|(key, value)| {
+            let suffix = [
+                "GK_OVERLAY_WEIGHTS_",
+                "GK_OVERLAY_TOKENIZER_",
+                "GK_OVERLAY_MANIFEST_",
+            ]
+            .iter()
+            .find_map(|prefix| key.strip_prefix(prefix))?;
+            // GK_OVERLAY_MMAP starts with none of the three prefixes, so any
+            // match here is meant as an overlay slot; a malformed suffix is a
+            // config typo and must fail loudly, not be skipped.
+            if value.trim().is_empty() {
+                return None;
+            }
+            let slot: u32 = suffix.parse().unwrap_or_else(|_| {
+                panic!("invalid overlay slot suffix in {key:?}: expected an integer >= 2")
+            });
+            assert!(
+                slot >= 2,
+                "{key} uses reserved slot {slot}: the first model is configured on the \
+                 unsuffixed GK_OVERLAY_WEIGHTS/TOKENIZER/MANIFEST variables"
+            );
+            Some(slot)
+        })
+        .collect();
+    slots.sort_unstable();
+    slots.dedup();
+    slots
+}
+
+/// mmap-mode variant of [`overlay_env_from_env`]: returns each configured
+/// model's artifact file paths + parsed manifest WITHOUT reading the blobs
+/// (the analyzer's `OverlayMount::from_files` mmaps and verifies them
+/// lazily). Same fail-loud rules for partial configuration, applied per
+/// slot.
+///
+/// Multi-overlay: slot 1 is the historical unsuffixed
+/// `GK_OVERLAY_WEIGHTS/TOKENIZER/MANIFEST` triplet; each additional pinned
+/// model gets a suffixed triplet (`GK_OVERLAY_WEIGHTS_2`, ...). All slots
+/// mount simultaneously as one composite lookup — chunk addresses are
+/// derived per-manifest, so distinct models' address sets are disjoint.
+/// Duplicate manifests across slots are refused (the analyzer memoizes
+/// mounts by manifest, so the later slot's paths would silently lose), as
+/// are indexed slots without the base slot.
+fn overlay_files_from_env() -> Vec<(String, String, alloy::primitives::B256)> {
+    let mut specs = Vec::new();
+    if let Some(spec) = overlay_files_slot("") {
+        specs.push(spec);
+    }
+    for slot in indexed_overlay_slots() {
+        assert!(
+            !specs.is_empty(),
+            "GK_OVERLAY_*_{slot} is set but the base GK_OVERLAY_WEIGHTS/TOKENIZER/MANIFEST \
+             triplet is not: configure the first model on the unsuffixed variables"
+        );
+        let spec = overlay_files_slot(&format!("_{slot}"))
+            .unwrap_or_else(|| unreachable!("slot {slot} was discovered from a set variable"));
+        specs.push(spec);
+    }
+    let mut seen = HashSet::new();
+    for (_, _, manifest) in &specs {
+        assert!(
+            seen.insert(*manifest),
+            "duplicate overlay manifest {manifest} across GK_OVERLAY slots: \
+             every mounted model must have a distinct pinned manifest"
+        );
+    }
+    if specs.len() > 1 {
+        info!(
+            models = specs.len(),
+            "multi-overlay: all pinned models mount simultaneously as one composite lookup"
+        );
+    }
+    specs
 }
 
 impl GasKillerValidator {
@@ -145,7 +419,21 @@ impl GasKillerValidator {
     ///
     /// Returns an error if L1 RPC is not set.
     pub fn new() -> Result<Self> {
-        let chain_rpc_urls = crate::chain_rpc_urls_from_env()?;
+        let mut chain_rpc_urls = crate::chain_rpc_urls_from_env()?;
+        // GK_SIM_RPC: optional dedicated endpoint for tracked-function SIMULATION
+        // only (debug_traceCall). Lets operators point analysis at a node with
+        // lifted trace caps and/or locally materialized state — e.g. an anvil
+        // fork with pinned code overlays (UNBOUNDED_V2_OVERLAYS) setCode'd in —
+        // while transaction submission and staking reads stay on HTTP_RPC
+        // against the real chain. All operators and the router must use
+        // equivalently-prepared simulation endpoints or their signed payloads
+        // diverge, exactly like every other pinned-env parameter.
+        if let Ok(sim_rpc) = std::env::var("GK_SIM_RPC")
+            && !sim_rpc.is_empty()
+        {
+            tracing::info!(sim_rpc = %sim_rpc, "validator simulation RPC overridden by GK_SIM_RPC");
+            chain_rpc_urls.insert(ChainRole::L1, sim_rpc);
+        }
         let capacity = executor_cache_capacity(chain_rpc_urls.len());
         let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
         if !providers.contains_key(&ChainRole::L1) {
@@ -157,9 +445,48 @@ impl GasKillerValidator {
             providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
+            overlay_env: {
+                let executor = sim_executor_from_env();
+                if prefer_mmap_overlay(executor) {
+                    None
+                } else {
+                    // The in-RAM/stateOverrides path mounts exactly one model;
+                    // silently ignoring an indexed slot here would fork the
+                    // quorum against mmap-mode operators serving both.
+                    assert!(
+                        indexed_overlay_slots().is_empty(),
+                        "GK_OVERLAY_*_N is configured but multi-overlay requires \
+                         GK_SIM_EXECUTOR=local with GK_OVERLAY_MMAP enabled (the default \
+                         under local); the in-RAM/stateOverrides path serves one model only"
+                    );
+                    overlay_env_from_env()
+                }
+            },
+            overlay_files: {
+                let executor = sim_executor_from_env();
+                if prefer_mmap_overlay(executor) {
+                    overlay_files_from_env()
+                } else {
+                    Vec::new()
+                }
+            },
+            sim_executor: {
+                let executor = sim_executor_from_env();
+                let prefer_mmap = prefer_mmap_overlay(executor);
+                if executor == SimExecutor::Local {
+                    info!(
+                        prefer_mmap_overlay = prefer_mmap,
+                        "GK_SIM_EXECUTOR=local: tracked-function analysis executes in-process \
+                         inside gas-analyzer instead of via debug_traceCall"
+                    );
+                }
+                executor
+            },
+            local_state_cache: Arc::new(LocalStateCache::default()),
         })
     }
 
@@ -176,9 +503,25 @@ impl GasKillerValidator {
             providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
+            overlay_env: overlay_env_from_env(),
+            overlay_files: Vec::new(),
+            sim_executor: {
+                let executor = sim_executor_from_env();
+                let prefer_mmap = prefer_mmap_overlay(executor);
+                if executor == SimExecutor::Local {
+                    info!(
+                        prefer_mmap_overlay = prefer_mmap,
+                        "GK_SIM_EXECUTOR=local: tracked-function analysis executes in-process \
+                         inside gas-analyzer instead of via debug_traceCall"
+                    );
+                }
+                executor
+            },
+            local_state_cache: Arc::new(LocalStateCache::default()),
         }
     }
 
@@ -191,9 +534,25 @@ impl GasKillerValidator {
             providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             sim_profile: sim_profile_from_env(),
+            overlay_env: overlay_env_from_env(),
+            overlay_files: Vec::new(),
+            sim_executor: {
+                let executor = sim_executor_from_env();
+                let prefer_mmap = prefer_mmap_overlay(executor);
+                if executor == SimExecutor::Local {
+                    info!(
+                        prefer_mmap_overlay = prefer_mmap,
+                        "GK_SIM_EXECUTOR=local: tracked-function analysis executes in-process \
+                         inside gas-analyzer instead of via debug_traceCall"
+                    );
+                }
+                executor
+            },
+            local_state_cache: Arc::new(LocalStateCache::default()),
         }
     }
 
@@ -397,6 +756,69 @@ impl GasKillerValidator {
         );
     }
 
+    /// Pre-computes and caches the payload digest for a task before its round
+    /// broadcast arrives (the ingress prewarm path — see `crate::prewarm`).
+    ///
+    /// Runs the exact simulate-and-hash pipeline `validate_and_build_hash`
+    /// uses on a cache miss and lands the result under the same
+    /// `(transition_index, block_height)` key, so the later round arrival is a
+    /// pure cache hit. `task_data.storage_updates` is ignored (the digest is
+    /// always built from the freshly recomputed updates), so callers pass it
+    /// empty.
+    ///
+    /// Returns `Ok(true)` when a digest was computed and cached, `Ok(false)`
+    /// when the key was already cached or another prewarm for it is in flight.
+    /// Concurrent duplicate prewarms of one key are guarded by
+    /// `prewarm_inflight`; a validation arriving mid-prewarm waits for this
+    /// computation instead of starting its own.
+    pub async fn prewarm(&self, task_data: &GasKillerTaskData) -> Result<bool> {
+        let cache_key = (task_data.transition_index, task_data.block_height);
+
+        {
+            let cache = self.digest_cache.lock().await;
+            if cache.contains_key(&cache_key) {
+                return Ok(false);
+            }
+        }
+
+        // Claim the key; the guard releases it on every exit path, including panic.
+        {
+            let mut inflight = self
+                .prewarm_inflight
+                .lock()
+                .expect("prewarm_inflight mutex poisoned");
+            if !inflight.insert(cache_key) {
+                return Ok(false);
+            }
+        }
+        let _guard = PrewarmInflightGuard {
+            inflight: Arc::clone(&self.prewarm_inflight),
+            key: cache_key,
+        };
+
+        let storage_updates = self.compute_storage_updates(task_data).await?;
+        let payload_hash = task_data.build_payload_hash(&storage_updates);
+
+        {
+            let mut cache = self.digest_cache.lock().await;
+            cache.insert(cache_key, payload_hash);
+        }
+        debug!(
+            transition_index = task_data.transition_index,
+            block_height = task_data.block_height,
+            "Prewarmed validator digest cache (round arrival will skip EVMSketch)"
+        );
+        Ok(true)
+    }
+
+    /// Whether a prewarm simulation for `key` is currently in flight.
+    fn is_prewarm_inflight(&self, key: &(u64, u64)) -> bool {
+        self.prewarm_inflight
+            .lock()
+            .expect("prewarm_inflight mutex poisoned")
+            .contains(key)
+    }
+
     /// Performs the core gas analysis using gas-analyzer.
     ///
     /// Uses the shared executor cache to skip the 2× `eth_getBlockByNumber` build
@@ -433,17 +855,133 @@ impl GasKillerValidator {
 
         // Call gas-analyzer to get storage updates and gas estimate using EvmSketch.
         // The executor cache eliminates the build cost on repeated requests at the
-        // same block height.
+        // same block height. When a pinned overlay is configured (UNBOUNDED_V2) it
+        // rides along as debug_traceCall state overrides (RPC path) or a native
+        // in-process mount (local path), so the simulation RPC only needs base
+        // chain state — the overlay bytes come from the local, verified artifact
+        // files. `None` is byte-identical to the pre-overlay profiled call.
+        //
+        // GK_SIM_EXECUTOR=local (gas-analyzer#169) re-executes the call in-process
+        // inside the analyzer instead of delegating to debug_traceCall — required
+        // once overlay artifacts exceed what a stateOverrides JSON body can carry
+        // (~35GB models). The RPC becomes a pure lazy state backend, shared across
+        // concurrent traces of the same block via `local_state_cache` (this
+        // validator's counterpart to `executor_cache`).
+        //
+        // Multi-overlay (gas-analyzer#172): under GK_SIM_EXECUTOR=local with
+        // mmap mode (GK_OVERLAY_MMAP, default true under local), EVERY
+        // configured model's artifact spec in `overlay_files` mounts
+        // simultaneously via call_to_encoded_state_updates_local_multi.
+        // Chunk addresses are derived per-manifest
+        // (keccak("gaskiller.llm.overlay.v1"||manifest||u64be(i))[12:]), so
+        // distinct models' address sets are disjoint and the composite lookup
+        // serves each consumer exactly its own model's chunks. This replaces
+        // hosting a second model's chunks as anvil-fork setCode state, which
+        // raced reforking: a task pinned to a block that predated the fork's
+        // latest refork read the chunks through the fork's historical-state
+        // proxy (no chunks there), saw zero-length weights, and all
+        // participants deterministically signed an empty payload.
+        //
+        // Runtime-starvation fix (production incident, PR #319): under
+        // GK_SIM_EXECUTOR=local, this call bottoms out in gas-analyzer's
+        // in-process revm `transact` for the tracked function. For
+        // Qwen3.5-35B-A3B that is a single synchronous, CPU-bound stretch of
+        // ~20-40 minutes that never yields to the async scheduler (unlike the
+        // RPC path, foundry-fork-db's SharedBackend already runs state fetches
+        // on its own thread — the remaining work here is pure compute).
+        //
+        // commonware's `tokio::Runner` builds a genuine multi-threaded Tokio
+        // runtime (`Builder::new_multi_thread()`, commonware-runtime
+        // src/tokio/runtime.rs) but router/node main.rs both start it with
+        // `tokio::Config::default()`, which pins `worker_threads` to 2. Every
+        // commonware task spawned with the default (non-dedicated) execution
+        // mode — including the /healthz, /readyz, /metrics, /prewarm axum
+        // server and the P2P layer — lands on that same 2-worker shared pool.
+        // Directly `.await`ing the analyzer here occupies a worker thread for
+        // the full trace; with only 2 workers, a couple of concurrent traces
+        // (or one trace plus normal P2P/health load) fully starves the pool,
+        // /healthz stops responding within its 1s timeout, and Kubernetes'
+        // liveness probe SIGKILLs the pod mid-round.
+        //
+        // Fix: run the whole analyzer call on Tokio's blocking-thread pool via
+        // `spawn_blocking`, which is disjoint from the shared worker pool
+        // (bounded separately by `max_blocking_threads`, 512 by default) and
+        // therefore cannot starve /healthz or P2P. Re-entering async context
+        // inside the blocking closure via a `Handle` captured *before*
+        // `spawn_blocking` is safe here specifically because the underlying
+        // runtime is multi-threaded — `Handle::block_on` on a current-thread
+        // runtime from inside `spawn_blocking` would deadlock, but that does
+        // not apply to this runtime.
+        let handle = tokio::runtime::Handle::current();
+        let rpc_url = rpc_url.to_owned();
+        let executor_cache = Arc::clone(&self.executor_cache);
+        let local_state_cache = Arc::clone(&self.local_state_cache);
+        let overlay_env = self.overlay_env.clone();
+        let overlay_files = self.overlay_files.clone();
+        let sim_executor = self.sim_executor;
+        let sim_profile = self.sim_profile;
         let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_evmsketch_profiled(
-                &self.executor_cache,
-                rpc_url,
-                tx_request,
-                block_height,
-                self.sim_profile,
-            )
+            tokio::task::spawn_blocking(move || {
+                handle.block_on(async move {
+                    match sim_executor {
+                        SimExecutor::Rpc => call_to_encoded_state_updates_with_evmsketch_env(
+                            &executor_cache,
+                            &rpc_url,
+                            tx_request,
+                            block_height,
+                            sim_profile,
+                            overlay_env.as_deref(),
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e)),
+                        SimExecutor::Local => {
+                            if overlay_files.is_empty() {
+                                call_to_encoded_state_updates_local(
+                                    &executor_cache,
+                                    &local_state_cache,
+                                    &rpc_url,
+                                    tx_request,
+                                    block_height,
+                                    sim_profile,
+                                    overlay_env.as_deref(),
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("Local gas analysis failed: {}", e))
+                            } else {
+                                // mmap mode: the analyzer mounts every configured
+                                // model's artifact files directly (streaming
+                                // manifest verify + lazy chunk materialization)
+                                // and consults them as one composite lookup —
+                                // no blob bytes ever enter this process's heap.
+                                // With a single spec this is byte-identical to
+                                // the historical single-model entry point (both
+                                // resolve through the same manifest-keyed mount
+                                // cache and shared extraction body).
+                                let models = overlay_files.len();
+                                call_to_encoded_state_updates_local_multi(
+                                    &executor_cache,
+                                    &local_state_cache,
+                                    &rpc_url,
+                                    tx_request,
+                                    block_height,
+                                    sim_profile,
+                                    &overlay_files,
+                                )
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Local gas analysis (mmap, {} model(s)) failed: {}",
+                                        models,
+                                        e
+                                    )
+                                })
+                            }
+                        }
+                    }
+                })
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("gas analysis task panicked or was cancelled: {}", e))??;
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
@@ -606,6 +1144,33 @@ impl GasKillerValidator {
                     "Returning cached digest (skipping EVMSketch)"
                 );
                 return Ok(*cached);
+            }
+        }
+
+        // An ingress prewarm for this exact key may already be simulating
+        // (node-side, started at task-ingress time). Wait for it to land in
+        // the cache rather than launching a second multi-minute EVMSketch run:
+        // recomputing here would double memory and erase the prewarm's head
+        // start. If the prewarm fails, its key leaves the in-flight set with
+        // no cache entry and we fall through to computing ourselves.
+        if self.is_prewarm_inflight(&cache_key) {
+            info!(
+                transition_index = task_data.transition_index,
+                block_height = task_data.block_height,
+                "Round arrived while its prewarm is still simulating — waiting for the in-flight result"
+            );
+            loop {
+                tokio::time::sleep(PREWARM_WAIT_POLL).await;
+                {
+                    let cache = self.digest_cache.lock().await;
+                    if let Some(cached) = cache.get(&cache_key) {
+                        return Ok(*cached);
+                    }
+                }
+                if !self.is_prewarm_inflight(&cache_key) {
+                    // Prewarm finished without caching (it failed); compute below.
+                    break;
+                }
             }
         }
 
@@ -778,5 +1343,137 @@ mod tests {
         let hash2 = task_data.build_payload_hash(&[0x03, 0x04]);
 
         assert_ne!(hash1, hash2);
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Iterator<Item = (String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// Multi-overlay slot discovery: indexed `GK_OVERLAY_*_N` variables are
+    /// found by scanning (so numbering gaps cannot silently drop a model),
+    /// sorted, deduped across the three per-slot variables, and unrelated
+    /// variables — including `GK_OVERLAY_MMAP` and the unsuffixed slot-1
+    /// triplet — are ignored.
+    #[test]
+    fn test_indexed_overlay_slots_discovery() {
+        assert_eq!(
+            indexed_overlay_slots_from(vars(&[
+                ("GK_OVERLAY_WEIGHTS", "/overlay/weights.bin"),
+                ("GK_OVERLAY_TOKENIZER", "/overlay/tokenizer.bin"),
+                ("GK_OVERLAY_MANIFEST", "0xabc"),
+                ("GK_OVERLAY_MMAP", "true"),
+                ("HTTP_RPC", "http://x"),
+            ])),
+            Vec::<u32>::new(),
+            "slot-1 triplet and unrelated vars must not register as indexed slots"
+        );
+
+        assert_eq!(
+            indexed_overlay_slots_from(vars(&[
+                ("GK_OVERLAY_WEIGHTS_3", "/m3/weights.bin"),
+                ("GK_OVERLAY_TOKENIZER_3", "/m3/tokenizer.bin"),
+                ("GK_OVERLAY_MANIFEST_3", "0xdef"),
+                ("GK_OVERLAY_WEIGHTS_2", "/m2/weights.bin"),
+                ("GK_OVERLAY_TOKENIZER_2", "/m2/tokenizer.bin"),
+                ("GK_OVERLAY_MANIFEST_2", "0xabc"),
+            ])),
+            vec![2, 3],
+            "slots must come back sorted and deduped across the three variables"
+        );
+
+        // A gap in numbering still surfaces the configured slot — the
+        // partial-slot assertions in overlay_files_slot then judge it.
+        assert_eq!(
+            indexed_overlay_slots_from(vars(&[("GK_OVERLAY_MANIFEST_4", "0xabc")])),
+            vec![4],
+        );
+
+        // Empty values are "unset".
+        assert_eq!(
+            indexed_overlay_slots_from(vars(&[("GK_OVERLAY_WEIGHTS_2", "  ")])),
+            Vec::<u32>::new(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved slot")]
+    fn test_indexed_overlay_slots_reject_reserved_slot_one() {
+        indexed_overlay_slots_from(vars(&[("GK_OVERLAY_WEIGHTS_1", "/m1/weights.bin")]));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid overlay slot suffix")]
+    fn test_indexed_overlay_slots_reject_non_numeric_suffix() {
+        indexed_overlay_slots_from(vars(&[("GK_OVERLAY_WEIGHTS_QWEN", "/m/weights.bin")]));
+    }
+
+    /// Regression coverage for the runtime-starvation fix (PR #319).
+    ///
+    /// `analyze_transaction` moves the CPU-bound, non-yielding analysis call
+    /// onto Tokio's blocking pool via `spawn_blocking` + a captured `Handle`
+    /// so it cannot starve other tasks on the shared worker pool — notably
+    /// the /healthz, /readyz, /metrics, /prewarm axum server and the
+    /// commonware P2P layer, both spawned via commonware's default
+    /// (non-dedicated) execution mode onto that same pool. Exercising the
+    /// real analyzer needs live RPC access (see the `#[ignore]`d
+    /// `test_full_validation_with_rpc` above), so this test instead proves
+    /// the underlying mechanism directly: on a 2-worker multi-thread runtime
+    /// — matching commonware-runtime's `tokio::Config::new()` default
+    /// (`worker_threads: 2`), which router/main.rs and node/main.rs both use
+    /// unmodified — a long, synchronous, non-yielding closure offloaded via
+    /// `spawn_blocking` must not delay a concurrent healthz-style async task
+    /// spawned on the shared pool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_healthz_style_task_stays_responsive_during_blocking_analysis() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let blocking_task_started = Arc::new(AtomicBool::new(false));
+        let started = Arc::clone(&blocking_task_started);
+
+        // Mirrors `analyze_transaction`'s offload: a long CPU-bound section
+        // that never yields to the async scheduler (stand-in for the revm
+        // trace) runs inside `spawn_blocking`, re-entering async context via
+        // a `Handle` captured before the blocking call — exactly the pattern
+        // used for `GK_SIM_EXECUTOR=local`.
+        let handle = tokio::runtime::Handle::current();
+        let blocking = tokio::task::spawn_blocking(move || {
+            started.store(true, Ordering::SeqCst);
+            handle.block_on(async {
+                // Synchronous, non-yielding sleep: stands in for the revm
+                // `transact` compute section, which is what starved the
+                // shared worker pool in production.
+                std::thread::sleep(Duration::from_millis(500));
+            });
+        });
+
+        // Don't race the healthz-style task until the blocking task is
+        // actually occupying its thread.
+        while !blocking_task_started.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        // Stand-in for the /healthz handler: a trivial async task spawned
+        // onto the same 2-worker shared pool the test runtime uses. Before
+        // this fix, `analyze_transaction` awaited the analysis directly on
+        // that pool, so with only 2 workers a couple of concurrent traces
+        // (or one trace plus ordinary load) could starve this task the same
+        // way it starved the real healthz server.
+        let healthz = tokio::spawn(async { 200u16 });
+
+        let status = tokio::time::timeout(Duration::from_millis(200), healthz)
+            .await
+            .expect(
+                "healthz-style task must respond well within the liveness probe's \
+                 timeoutSeconds even while a long analysis is offloaded to the blocking pool",
+            )
+            .expect("healthz-style task panicked");
+        assert_eq!(status, 200);
+
+        blocking.await.expect("blocking analysis task panicked");
     }
 }

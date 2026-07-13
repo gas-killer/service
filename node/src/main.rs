@@ -390,6 +390,19 @@ fn main() {
                 });
         }
 
+        // Prewarm: when GK_PREWARM_URL is set, poll the router's internal endpoint for
+        // ingress-accepted tasks and start simulating them immediately, so the round
+        // broadcast (sent only after the router finishes its own ~20-minute simulation)
+        // hits a warm digest cache and this node signs without re-simulating.
+        if let Ok(prewarm_url) = std::env::var("GK_PREWARM_URL")
+            && !prewarm_url.is_empty()
+        {
+            let prewarm_validator = Arc::clone(&validator);
+            context.child("prewarm").spawn(move |_| async move {
+                gas_killer_common::run_prewarm_loop(prewarm_validator, prewarm_url).await;
+            });
+        }
+
         // Create contributor with GasKillerTaskData as the metadata type
         let contributor = Contributor::<GasKillerTaskData>::new(
             orchestrator_pub_key,

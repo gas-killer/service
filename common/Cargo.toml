@@ -33,6 +33,9 @@ dotenv = { workspace = true }
 
 # Gas analysis
 gas-analyzer = { workspace = true }
+
+# HTTP client for the node's prewarm poll loop
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

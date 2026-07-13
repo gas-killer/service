@@ -26,19 +26,116 @@ global:
   # Timeout for init containers waiting for dependencies (in seconds)
   initTimeout: 300
 
+  # Dedicated simulation RPC (GK_SIM_RPC) for tracked-function analysis, shared by
+  # router and nodes. Empty = simulate on the regular HTTP_RPC. Point it at an
+  # anvil fork with lifted trace caps (--disable-block-gas-limit) for unbounded-mode
+  # consumers. For overlay-mode consumers, prefer `overlay.enabled` below (blobs
+  # verified locally, mounted per-trace as state overrides) over setCode'ing the
+  # chunks into the fork.
+  simRpc: ""
   # Simulation profile for tracked-function analysis (GK_SIM_PROFILE), shared by the
   # router and every node. It is a single global value on purpose: the router and all
   # nodes MUST agree or their independently derived payloads — and thus signatures —
   # diverge and fork the quorum.
-  #   chain         (default) simulate under the target chain's real gas limits.
-  #   unbounded-v1  lift the simulated gas limits to the pinned protocol constants so
-  #                 tracked functions whose direct execution exceeds the block gas
-  #                 limit can still be analyzed (see gas-analyzer docs/UNBOUNDED_MODE.md).
+  #   chain            (default) simulate under the target chain's real gas limits.
+  #   unbounded-v1     lift the simulated gas limits to the pinned protocol constants
+  #                    (2^40 ~ 1.1 Tgas) so tracked functions whose direct execution
+  #                    exceeds the block gas limit can still be analyzed (see
+  #                    gas-analyzer docs/UNBOUNDED_MODE.md).
+  #   unbounded-v1-xl  raised gas tier of the same V1 family (2^43 ~ 8.8 Tgas), for
+  #                    multi-Tgas tasks that blow through the V1 cap — e.g.
+  #                    Qwen3.5-35B-A3B on-chain inference (~3.6 Tgas per call). Same
+  #                    semantics and payload-shape gate as unbounded-v1; only the
+  #                    pinned ceiling differs, and it is equally protocol-pinned.
   # LOCAL-mode note: exercising an above-block-limit target against the bundled Anvil L1
   # also requires Anvil to start with --disable-block-gas-limit. That flag lives in the
   # ethereum image's entrypoint, not here — the sim profile alone does not lift the L1's
   # own block gas limit.
   simProfile: "chain"
+
+  # Which engine executes the tracked call (GK_SIM_EXECUTOR, gas-analyzer#169),
+  # shared by the router and every node. Single global value for the same reason
+  # as simProfile: local and RPC execution byte-agree by construction, but every
+  # operator must actually make the same choice for it to matter.
+  #   rpc    (default) simulate via debug_traceCall against the simulation RPC —
+  #          the historical path. Required for consumers served through a shared
+  #          anvil fork (stateOverrides), and the only option against RPCs
+  #          without in-process access to blob artifacts.
+  #   local  execute the tracked call in-process inside gas-analyzer; the
+  #          simulation RPC becomes a pure lazy state backend (accounts/storage/
+  #          code fetched on first touch) instead of the executor. Required —
+  #          not just faster — once pinned code overlays exceed what a
+  #          stateOverrides JSON request body can carry (e.g. 35GB-class models:
+  #          see llm-overrides.yaml's Qwen3.5-35B section).
+  simExecutor: "rpc"
+
+  # Prefer the mmap-backed overlay source over the in-RAM one when simExecutor is
+  # "local" (GK_OVERLAY_MMAP). Only meaningful together with overlay.enabled.
+  # Null here means "use the code default" (true under local, false under rpc);
+  # set explicitly to override. Under mmap mode the analyzer mounts the artifact
+  # files directly (streaming-keccak manifest verify + lazy chunk
+  # materialization) — required for 35GB-class artifacts, and the only mode that
+  # supports mounting multiple models simultaneously (overlay.extraModels).
+  overlayMmap: null
+
+  # Operator prewarm pre-pass: nodes poll the router's internal /prewarm endpoint
+  # (served on the health port) and start the tracked-function simulation as soon as
+  # the router ACCEPTS a task — instead of waiting for the round broadcast, which the
+  # router only sends after finishing its own simulation. For long simulations (LLM
+  # traces are ~20+ minutes per leg) this collapses round time from
+  # router-leg + operator-leg to ~max(router-leg, operator-leg). Pure latency
+  # optimization, zero protocol changes: a missed or failed prewarm falls back to
+  # simulate-on-arrival.
+  prewarm:
+    enabled: true
+
+# Pinned code overlays (UNBOUNDED_V2, gas-analyzer docs/UNBOUNDED_OVERLAYS.md).
+# When enabled, an initContainer on the router and every node downloads the model
+# artifacts (weights + tokenizer) into an emptyDir, and the service mounts them
+# for tracked-function simulation — verified at startup against the pinned
+# manifest (a mismatch refuses to boot). Same download/verify flow regardless of
+# simExecutor:
+#   rpc    mounts the artifacts as debug_traceCall state overrides. The
+#          simulation RPC (GK_SIM_RPC) then only provides base chain state; the
+#          weights never need to be setCode'd into the fork.
+#   local  mounts the artifacts natively in-process (no stateOverrides JSON —
+#          the only way 35GB-class artifacts are servable at all; see
+#          llm-overrides.yaml's Qwen3.5-35B-A3B section for artifactBaseUrl /
+#          manifest placeholders for that model).
+# Part of the pinned simulation environment: router and ALL nodes must run with
+# identical settings or their signed payloads diverge, exactly like simProfile.
+overlay:
+  enabled: false
+  # Base URL the initContainer downloads <weightsFile>/<tokenizerFile> from.
+  artifactBaseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3-0.6b-onchain-v1"
+  weightsFile: "weights.bin"
+  tokenizerFile: "tokenizer.bin"
+  # keccak256(keccak256(weightsBlob) || keccak256(tokenizerBlob)) — must match the
+  # manifest the consumer contract committed to. Qwen3-0.6B onchain-v1:
+  manifest: "0x23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
+  # Image used by the artifact-download initContainer (needs curl).
+  downloaderImage: "curlimages/curl:8.10.1"
+  # Where the artifacts land inside the pods.
+  mountPath: /overlay
+  # Additional pinned models mounted SIMULTANEOUSLY with the primary one
+  # (multi-overlay, gas-analyzer#172). Requires simExecutor "local" with mmap
+  # mode (overlayMmap null/true) — the service refuses indexed overlay slots
+  # on the rpc/in-RAM path at startup. Each entry downloads into
+  # <mountPath>/<name>/ and exports the numbered env triplet
+  # (GK_OVERLAY_WEIGHTS_2/..., in list order starting at 2). Chunk addresses
+  # are derived per-manifest, so distinct models' address sets are disjoint
+  # and each on-chain consumer finds exactly its own model's chunks in the
+  # composite mount. Every manifest must be distinct. Pinned-environment
+  # configuration like the primary overlay: router and ALL nodes must mount
+  # the same model set or payloads diverge.
+  #
+  # extraModels:
+  #   - name: qwen3-0.6b
+  #     artifactBaseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3-0.6b-onchain-v1"
+  #     weightsFile: "weights.bin"
+  #     tokenizerFile: "tokenizer.bin"
+  #     manifest: "0x23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
+  extraModels: []
 
 # GCP Secret Manager configuration for TESTNET deployments
 # When enabled, operator BLS keys and avs_deploy.json are read from GCP Secret Manager
@@ -135,6 +232,10 @@ secrets:
 # L1 (Anvil) configuration - only used in LOCAL mode
 l1:
   enabled: true
+  # Extra flags appended to the anvil command (ANVIL_EXTRA_ARGS). Unbounded-mode
+  # deployments need "--disable-block-gas-limit" so debug_traceCall can execute
+  # multi-billion-gas tracked functions (see llm-overrides.yaml).
+  anvilExtraArgs: ""
   image:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: latest

@@ -154,6 +154,38 @@ spec:
               echo "L1 is ready!"
         {{- end }}
 
+        {{- if dig "enabled" false ($root.Values.overlay | default dict) }}
+        # Download the pinned overlay artifacts (model weights + tokenizer) into
+        # an emptyDir — the primary model at the root, each extra model
+        # (multi-overlay) in its own subdirectory. Integrity is enforced by the
+        # service itself: at startup / first mount it recomputes each manifest
+        # from the blobs and refuses to serve on a mismatch with the pinned
+        # GK_OVERLAY_MANIFEST[_N], so a corrupted download cannot be mounted.
+        - name: fetch-overlay-artifacts
+          image: {{ $root.Values.overlay.downloaderImage | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              BASE="{{ $root.Values.overlay.artifactBaseUrl }}"
+              for f in "{{ $root.Values.overlay.weightsFile }}" "{{ $root.Values.overlay.tokenizerFile }}"; do
+                echo "Downloading ${BASE}/${f}..."
+                curl -fSL --retry 5 --retry-delay 10 -o "/overlay/${f}" "${BASE}/${f}"
+              done
+              {{- range $model := ($root.Values.overlay.extraModels | default list) }}
+              mkdir -p "/overlay/{{ $model.name }}"
+              for f in "{{ $model.weightsFile | default "weights.bin" }}" "{{ $model.tokenizerFile | default "tokenizer.bin" }}"; do
+                echo "Downloading {{ $model.artifactBaseUrl }}/${f} (extra model {{ $model.name }})..."
+                curl -fSL --retry 5 --retry-delay 10 -o "/overlay/{{ $model.name }}/${f}" "{{ $model.artifactBaseUrl }}/${f}"
+              done
+              {{- end }}
+              echo "Overlay artifacts downloaded."
+          volumeMounts:
+            - name: overlay-artifacts
+              mountPath: /overlay
+        {{- end }}
+
         {{- $delayPerNode := int $root.Values.node.startupDelaySecsPerNode }}
         {{- $nodeDelay := mul $i $delayPerNode }}
         {{- if gt $nodeDelay 0 }}
@@ -228,12 +260,65 @@ spec:
             # derive this from the same global value so their signed payloads agree.
             - name: GK_SIM_PROFILE
               value: {{ include "gas-killer.simProfile" $root | quote }}
+            # Executor selection (gas-analyzer#169): "rpc" simulates via
+            # debug_traceCall (historical path); "local" executes in-process
+            # inside gas-analyzer, reducing the simulation RPC to a lazy state
+            # backend. Router and all nodes derive this from the same global
+            # value, same discipline as GK_SIM_PROFILE.
+            - name: GK_SIM_EXECUTOR
+              value: {{ include "gas-killer.simExecutor" $root | quote }}
+            {{- if not (kindIs "invalid" $root.Values.global.overlayMmap) }}
+            # Prefer the mmap-backed overlay source over the in-RAM one (only
+            # meaningful under GK_SIM_EXECUTOR=local + overlay.enabled). Omitted
+            # by default so the binary's own default applies (true under local).
+            - name: GK_OVERLAY_MMAP
+              value: {{ $root.Values.global.overlayMmap | toString | quote }}
+            {{- end }}
+            {{- if $root.Values.global.simRpc }}
+            # Dedicated simulation endpoint (GK_SIM_RPC): tracked-function analysis
+            # traces against this node (e.g. an anvil fork with pinned code overlays
+            # setCode'd in) while HTTP_RPC stays on the real chain for settlement.
+            # Shared by router and all nodes — a divergent sim endpoint diverges
+            # signed payloads, same discipline as GK_SIM_PROFILE.
+            - name: GK_SIM_RPC
+              value: {{ $root.Values.global.simRpc | quote }}
+            {{- end }}
+            {{- if dig "enabled" false ($root.Values.overlay | default dict) }}
+            # Pinned code overlay (UNBOUNDED_V2): blobs downloaded by the
+            # fetch-overlay-artifacts initContainer, verified against the manifest
+            # at startup, mounted as debug_traceCall state overrides. Pinned-env
+            # config shared by router and all nodes, like GK_SIM_PROFILE.
+            - name: GK_OVERLAY_WEIGHTS
+              value: "{{ $root.Values.overlay.mountPath }}/{{ $root.Values.overlay.weightsFile }}"
+            - name: GK_OVERLAY_TOKENIZER
+              value: "{{ $root.Values.overlay.mountPath }}/{{ $root.Values.overlay.tokenizerFile }}"
+            - name: GK_OVERLAY_MANIFEST
+              value: {{ $root.Values.overlay.manifest | quote }}
+            {{- range $mi, $model := ($root.Values.overlay.extraModels | default list) }}
+            # Extra pinned model "{{ $model.name }}" (multi-overlay slot {{ add $mi 2 }}):
+            # mounted simultaneously with the primary model — per-manifest
+            # derived chunk addresses keep the models' address sets disjoint.
+            - name: GK_OVERLAY_WEIGHTS_{{ add $mi 2 }}
+              value: "{{ $root.Values.overlay.mountPath }}/{{ $model.name }}/{{ $model.weightsFile | default "weights.bin" }}"
+            - name: GK_OVERLAY_TOKENIZER_{{ add $mi 2 }}
+              value: "{{ $root.Values.overlay.mountPath }}/{{ $model.name }}/{{ $model.tokenizerFile | default "tokenizer.bin" }}"
+            - name: GK_OVERLAY_MANIFEST_{{ add $mi 2 }}
+              value: {{ $model.manifest | quote }}
+            {{- end }}
+            {{- end }}
             - name: AVS_DEPLOYMENT_PATH
               {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
               value: "/app/secrets/avs_deploy.json"
               {{- else }}
               value: "/app/.nodes/avs_deploy.json"
               {{- end }}
+            {{- if dig "prewarm" "enabled" false ($root.Values.global | default dict) }}
+            # Prewarm feed: the router publishes every ingress-accepted task on its
+            # internal health port; the node polls it and starts simulating at
+            # ingress time so the round broadcast hits a warm digest cache.
+            - name: GK_PREWARM_URL
+              value: "http://{{ include "gas-killer.router.fullname" $root }}:{{ $root.Values.router.healthzPort }}/prewarm"
+            {{- end }}
             - name: HEALTHZ_PORT
               value: {{ $root.Values.node.healthzPort | quote }}
             - name: P2P_MESSAGE_BACKLOG
@@ -258,13 +343,27 @@ spec:
             httpGet:
               path: /healthz
               port: healthz
+            # The CPU-bound gas-analysis trace is offloaded to Tokio's blocking
+            # pool (see common/src/validator.rs analyze_transaction) so it no
+            # longer monopolizes the async worker pool /healthz runs on, even
+            # during a multi-minute GK_SIM_EXECUTOR=local trace. These settings
+            # are sane defaults for that workload: timeoutSeconds is generous enough
+            # to absorb scheduling jitter under load, and periodSeconds/failureThreshold
+            # give a genuinely hung pod ~3 minutes to prove itself dead before Kubernetes
+            # kills it, rather than the previous 15s*4=60s window that fired mid-analysis.
             initialDelaySeconds: 30
-            periodSeconds: 15
-            failureThreshold: 4
+            timeoutSeconds: 5
+            periodSeconds: 30
+            failureThreshold: 6
           volumeMounts:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+            {{- if dig "enabled" false ($root.Values.overlay | default dict) }}
+            - name: overlay-artifacts
+              mountPath: {{ $root.Values.overlay.mountPath }}
+              readOnly: true
+            {{- end }}
             {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
             - name: node-secrets
               mountPath: /app/secrets
@@ -283,6 +382,10 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" $root }}
+        {{- if dig "enabled" false ($root.Values.overlay | default dict) }}
+        - name: overlay-artifacts
+          emptyDir: {}
+        {{- end }}
         {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
         - name: node-secrets
           emptyDir: {}

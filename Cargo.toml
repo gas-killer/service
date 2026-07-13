@@ -45,8 +45,12 @@ eigen-services-operatorsinfo = "2.0.0"
 eigen-utils = "2.0.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
-# TODO: repoint at the default branch once gas-killer/gas-analyzer#165 + #166 (unbounded simulation mode) merge.
-gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch", branch = "ron/unbounded-sim-mode" }
+# TODO: repoint at the default branch once gas-killer/gas-analyzer#165 + #166 (unbounded
+# simulation mode), #168 (pinned code overlays, UNBOUNDED_V2), and #169 (local execution,
+# see ron/local-execution) merge. ron/local-execution is a superset of
+# ron/unbounded-v2-code-overlays (stacked on top of it — includes the UnboundedV1Xl tier
+# and UNBOUNDED_V2 overlay commits), so this repoint is additive.
+gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch", branch = "ron/local-execution" }
 gas-killer-common = { path = "common" }
 governor = "0.10.4"
 hex = "0.4"

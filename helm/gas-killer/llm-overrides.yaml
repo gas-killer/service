@@ -1,0 +1,206 @@
+# Helm overrides for running the on-chain LLM consumer (solidity-sdk `onchain-llm`)
+# through a real operator deployment. Three profiles in one file:
+#
+#   stories260K (default assumptions here): ~1.4B simulated gas per tellStory(32),
+#   a few seconds of simulation per operator — modest bumps over the defaults.
+#
+#   Qwen3-0.6B (commented values): hundreds of billions of gas per ask() —
+#   ~345B gas for prompt+1 token, ~545B for an 8-token answer, ~10-25min
+#   simulation per operator at ~1B gas/s. Needs the large ROUND_TIMEOUT, node
+#   memory headroom (revm journaling on a 10^11-gas trace), and an RPC/tracer
+#   path without client-side timeouts. Weights: either pre-installed as chain
+#   state on the fork (anvil_setCode; see solidity-sdk tools/deploy_anvil.py)
+#   or — now that gas-analyzer#168 landed — mounted as pinned code overlays
+#   from local artifact files by flipping `overlay.enabled` below. In overlay
+#   mode the fork only needs base chain state; each debug_traceCall carries
+#   the overlay as stateOverrides instead. Executor stays "rpc" (the default)
+#   for this tier — see the Qwen3.5-35B-A3B note below for why the next tier
+#   needs "local" instead.
+#
+#   Qwen3.5-35B-A3B (commented values): ~3.6T gas per call — above the
+#   unbounded-v1 2^40 (~1.1T) cap, so it REQUIRES simProfile
+#   "unbounded-v1-xl" (the pinned 2^43 tier; same semantics and shape gate,
+#   only the ceiling differs). At ~1B gas/s that is ~1h of simulation per
+#   operator; roundTimeout 14400 (4h) covers a cold fallback simulation plus
+#   slow-runner margin. Memory scales ~60x over the 0.6B numbers: the
+#   resident overlay chunk set is ~the artifact size (tens of GB for a 35B
+#   MoE at ~1 byte/param) — plan high-memory nodes (see per-component notes
+#   below).
+#
+#   This tier ALSO requires simExecutor "local" (gas-analyzer#169), not just
+#   "rpc" + overlay: a stateOverrides JSON body scales ~2x the artifact size
+#   per tracer call, which is already impractical for the 0.6B model's
+#   ~600MB and flatly impossible for a ~35GB MoE (~70GB request bodies).
+#   "local" executes the tracked call in-process inside gas-analyzer instead
+#   of delegating to debug_traceCall, so:
+#     - the simulation RPC (GK_SIM_RPC) becomes a pure lazy state backend —
+#       no separately provisioned "qwen-sim-fork" anvil deployment is needed
+#       for this tier the way earlier LLM tiers used one; base chain reads
+#       go through the regular RPC/HTTP_RPC path instead, and
+#       l1.anvilExtraArgs / ethereum.resources below are irrelevant unless
+#       you are still also running stories260K/Qwen3-0.6B off the same
+#       release.
+#     - the overlay artifacts mount natively — via mmap under GK_OVERLAY_MMAP
+#       (the default under local: OverlayMount::from_files, streaming-keccak
+#       manifest verify + lazy chunk materialization, never the full model in
+#       heap), never as a serialized JSON body.
+#   The artifact download/verify flow via overlay.enabled is unchanged; only
+#   artifactBaseUrl/manifest need to point at the 35B release (placeholders
+#   below — fill in once that release is published) and overlayMmap should
+#   stay at its "local" default (true) so the tens-of-GB blob is never fully
+#   resident.
+#
+#   Multi-overlay (gas-analyzer#172): under simExecutor local + mmap, SEVERAL
+#   models' overlays mount simultaneously from local artifact files via
+#   overlay.extraModels — e.g. Qwen3.5-35B-A3B as the primary overlay and
+#   Qwen3-0.6B as an extra model. Chunk addresses are derived per-manifest,
+#   so the models' address sets are disjoint and each on-chain consumer finds
+#   exactly its own model's chunks. This replaces hosting a second model's
+#   chunks as anvil-fork setCode state, which is unfixably racy with
+#   reforking: a task pinned to a block predating the fork's latest refork
+#   reads the chunks through the fork's historical-state proxy (no chunks
+#   there), the engine sees zero-length weights, and every operator
+#   deterministically signs an empty payload — a settled-but-empty round.
+#
+# The ingress-time prewarm (global.prewarm, default on) makes operators start
+# simulating when the task is ACCEPTED rather than when the round broadcasts,
+# so a Qwen round costs ~max(router leg, operator leg) instead of their sum.
+#
+# Usage:
+#   helm upgrade --install gas-killer ./helm/gas-killer \
+#     -f helm/gas-killer/local-overrides.yaml -f helm/gas-killer/llm-overrides.yaml
+
+global:
+  # Unbounded simulation is what makes LLM-scale tracked functions extractable.
+  # stories260K / Qwen3-0.6B fit under the V1 2^40 cap; Qwen3.5-35B-A3B
+  # (~3.6T gas) needs the 2^43 XL tier. The profile is protocol-pinned and
+  # global on purpose — router and ALL nodes must agree or payloads diverge.
+  simProfile: "unbounded-v1"
+  # simProfile: "unbounded-v1-xl"   # Qwen3.5-35B-A3B
+
+  # Executor selection (gas-analyzer#169). "rpc" (default) is fine through
+  # Qwen3-0.6B; Qwen3.5-35B-A3B REQUIRES "local" — see the file header above
+  # for why (stateOverrides body size). Global and pinned like simProfile:
+  # router and ALL nodes must agree.
+  simExecutor: "rpc"
+  # simExecutor: "local"            # Qwen3.5-35B-A3B (required, not optional)
+
+  # Prefer the mmap-backed overlay source under simExecutor: local. Leave
+  # null (code default: true under local) for the 35B tier — the whole point
+  # is to never fully materialize a tens-of-GB blob in RAM.
+  overlayMmap: null
+
+l1:
+  anvilExtraArgs: "--disable-block-gas-limit"
+
+# Pinned code overlays (UNBOUNDED_V2). Off for the stories260K profile, whose
+# weights are deployed as real data contracts. For Qwen3-0.6B flip enabled: true —
+# the router and every node then download weights.bin + tokenizer.bin (~600MB)
+# from overlay.artifactBaseUrl at pod start, verify them against overlay.manifest,
+# and mount them per-trace as debug_traceCall state overrides. No setCode step on
+# the fork is needed anymore. Qwen3.5-35B-A3B uses the same enabled: true flow —
+# only artifactBaseUrl/manifest change (placeholders below) — and pairs it with
+# global.simExecutor: local so the artifacts mount natively instead of riding
+# along as a stateOverrides JSON body.
+overlay:
+  enabled: false
+  # enabled: true          # Qwen3-0.6B / Qwen3.5-35B-A3B
+  # Defaults in values.yaml already point at the Qwen3-0.6B onchain-v1 release
+  # (artifactBaseUrl, manifest 0x23216cb9...); override here for other models.
+  # Qwen3.5-35B-A3B (fill in once the release is published):
+  # artifactBaseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3.5-35b-a3b-onchain-v1"  # TODO: placeholder, release not yet published
+  # weightsFile: "weights.bin"
+  # tokenizerFile: "tokenizer.bin"
+  # manifest: "0x0000000000000000000000000000000000000000000000000000000000000000"  # TODO: placeholder — keccak256(keccak256(weightsBlob) || keccak256(tokenizerBlob)) for the 35B release
+  #
+  # Serving BOTH LLM tiers from one deployment (multi-overlay, requires
+  # simExecutor local + mmap — see the file header): keep the 35B release as
+  # the primary triplet above and add Qwen3-0.6B as an extra model. Every
+  # operator and the router must configure the same model set.
+  # extraModels:
+  #   - name: qwen3-0.6b
+  #     artifactBaseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3-0.6b-onchain-v1"
+  #     weightsFile: "weights.bin"
+  #     tokenizerFile: "tokenizer.bin"
+  #     manifest: "0x23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
+
+router:
+  # Aggregation window: round broadcast -> quorum. Operators must finish the
+  # tracked-function simulation inside it. stories260K needs seconds; the
+  # default 300 is already fine, 600 adds slow-runner margin.
+  # Qwen3-0.6B: use 1800. With prewarm the operator leg starts at ingress, so
+  # rounds complete in ~max(router leg, operator leg) — but the window must
+  # still cover a full cold simulation for the fallback path.
+  # Qwen3.5-35B-A3B: use 14400 (4h) — ~1h of simulation at ~1B gas/s for a
+  # ~3.6T-gas call, with margin for a cold fallback run and slow operators.
+  roundTimeout: "600"
+  # roundTimeout: "1800"   # Qwen3-0.6B
+  # roundTimeout: "14400"  # Qwen3.5-35B-A3B (requires simProfile unbounded-v1-xl + simExecutor local)
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+      # Qwen3-0.6B + overlay (rpc executor): raise router to requests 4Gi /
+      # limits 12Gi. The router simulates too, and overlay mode holds the
+      # ~600MB chunk set resident plus transiently materializes the
+      # hex-encoded stateOverrides (~1.2GB JSON per tracer call, two tracer
+      # calls in flight).
+      # Qwen3.5-35B-A3B + overlay (local executor): the resident chunk set
+      # scales ~60x to the tens of GB, but the local executor never
+      # materializes a stateOverrides JSON body — mmap mode (overlayMmap
+      # default true) keeps only touched chunks resident rather than the
+      # full artifact. Start at requests 64Gi / limits 128Gi on a
+      # high-memory node pool and tune down from observed peak RSS; this is
+      # dominated by the traced 10^12-gas revm run, not the overlay anymore.
+
+node:
+  # Nodes execute the unbounded simulation via debug_traceCall (rpc executor)
+  # or in-process revm (local executor) against the chain service: the memory
+  # cost is dominated by the traced EVM run (revm journal + tracer state for
+  # multi-billion-gas calls).
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+      # Qwen3-0.6B: raise to requests 4Gi / limits 8Gi and 4000m — a 5x10^11-gas
+      # callTracer run holds substantially more journal state, and slow CPU
+      # directly extends the round beyond roundTimeout.
+      # Qwen3-0.6B + overlay (rpc executor): raise limits to 12Gi — add the
+      # resident ~600MB chunk set and the transient hex-encoded
+      # stateOverrides request bodies (~1.2GB per tracer call) on top of the
+      # trace itself.
+      # Qwen3.5-35B-A3B + overlay (local executor, required): journal/tracer
+      # state for a ~3.6x10^12-gas trace plus the resident overlay chunk
+      # working set (bounded by mmap's chunk memo under overlayMmap: true,
+      # not the full tens-of-GB artifact) — no transient stateOverrides body
+      # at all, since the local executor never serializes one. Start at
+      # requests 64Gi / limits 128Gi and the fastest CPUs available —
+      # wall-clock simulation time is what roundTimeout (14400) has to
+      # cover.
+
+ethereum:
+  # anvil serves the heavy debug_traceCall for the rpc executor (stories260K,
+  # Qwen3-0.6B). Not used by Qwen3.5-35B-A3B's local executor — HTTP_RPC/
+  # GK_SIM_RPC only needs to serve base chain state reads there, so this
+  # section (and l1.anvilExtraArgs above) can stay at defaults, or the
+  # ethereum service can be pointed at a lighter-weight endpoint, once
+  # simExecutor: local is set. No dedicated "qwen-sim-fork" anvil deployment
+  # is needed for the 35B tier.
+  # ANVIL_EXTRA_ARGS must include --disable-block-gas-limit (set by the
+  # e2e scripts; set it in the chart env for standing deployments) for any
+  # tier still using the rpc executor.
+  # Overlay mode (rpc executor only): anvil additionally parses ~1.2GB
+  # stateOverrides JSON per tracer call — raise limits to 12Gi for Qwen3-0.6B.
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"

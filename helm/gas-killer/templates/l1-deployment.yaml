@@ -27,6 +27,19 @@ spec:
         - name: l1
           image: "{{ .Values.l1.image.repository }}:{{ .Values.l1.image.tag }}"
           imagePullPolicy: {{ .Values.l1.image.pullPolicy }}
+          {{- if .Values.l1.anvilExtraArgs }}
+          # The image does not read ANVIL_EXTRA_ARGS; the compose harness overrides
+          # the entrypoint to splice extra flags into the anvil command — mirror it
+          # here. Unbounded simulation requires the execution cap lifted
+          # (--disable-block-gas-limit) or heavy debug_traceCall runs OOG.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              anvil --fork-url $FORK_URL --host 0.0.0.0 --port 8545 --code-size-limit 65536 \
+                --timeout 120000 \
+                --retries 5 \
+                --compute-units-per-second 300 {{ .Values.l1.anvilExtraArgs }}
+          {{- end }}
           env:
             - name: FORK_URL
               valueFrom:
