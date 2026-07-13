@@ -1,0 +1,323 @@
+{{- /*
+Weight-sharded worker fleet. One Deployment per worker-group REPLICA, each
+holding only its layer slice. Rendered only when shard.enabled=true and
+shard.workers is non-empty — so the legacy single-model path is untouched.
+
+Global operator ids are assigned densely across groups in listed order; the
+running base is carried in $opBase (reassigned after each group). A worker is
+the node binary in shard-executor mode: GK_SHARD_URL + GK_SHARD_OPERATOR_ID arm
+the segment poll/execute loop and the validator gate (common/src/shard.rs), and
+GK_SHARD_LAYER_LO/HI/HAS_* advertise the held slice to the router's coordinator.
+*/ -}}
+{{- if and .Values.shard.enabled .Values.shard.workers }}
+{{- $root := . -}}
+{{- $shard := .Values.shard -}}
+{{- $k := int (default 2 (index .Values.shard "k")) -}}
+{{- $routerUrl := $shard.routerUrlOverride -}}
+{{- if not $routerUrl -}}
+{{- $routerUrl = printf "http://%s:%v" (include "gas-killer.router.fullname" $root) $root.Values.router.healthzPort -}}
+{{- end -}}
+{{- $opBase := 0 -}}
+{{- range $gi, $group := $shard.workers }}
+{{- $replicas := int $group.replicas }}
+{{- if lt $replicas $k }}
+{{- fail (printf "shard.workers[%d] (%s): replicas %d < k %d — each covered layer span needs at least k workers" $gi $group.name $replicas $k) }}
+{{- end }}
+{{- $slice := $group.artifactSlice }}
+{{- range $r := until $replicas }}
+{{- $opId := add $opBase $r }}
+{{- $nodeIndex := add $opId 1 }}
+{{- $port := add (int $shard.basePort) $opId }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gas-killer.fullname" $root }}-shard-{{ $group.name }}-{{ $r }}
+  labels:
+    {{- include "gas-killer.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: shard-worker
+    gas-killer/shard-group: {{ $group.name | quote }}
+    gas-killer/shard-operator-id: {{ $opId | quote }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "gas-killer.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: shard-worker
+      gas-killer/shard-operator-id: {{ $opId | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "gas-killer.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: shard-worker
+        gas-killer/shard-group: {{ $group.name | quote }}
+        gas-killer/shard-operator-id: {{ $opId | quote }}
+    spec:
+      terminationGracePeriodSeconds: {{ $root.Values.node.terminationGracePeriodSeconds }}
+      # Land only on the dedicated Spot pool (n2-highmem-4, autoscale 0-8).
+      {{- with $shard.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $shard.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $root.Values.secretManager.enabled }}
+      serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" $root) $root.Values.secretManager.serviceAccountName }}
+      {{- end }}
+      initContainers:
+        {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+        # Fetch this operator's BLS key + shared config from GCP Secret Manager
+        # (reuses the node-{N} secret namespace; N = operatorId + 1).
+        - name: fetch-secrets
+          image: {{ $root.Values.secretManager.cloudSdkImage | quote }}
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" $root.Values.secretManager.projectId }}"
+              PREFIX="{{ $root.Values.secretManager.keyPrefix }}"
+              TIMEOUT={{ $root.Values.global.initTimeout }}
+              fetch_secret() {
+                local name="$1" dest="$2" elapsed=0
+                until gcloud secrets versions access latest --secret="$name" --project="$PROJECT" > "$dest" 2>/dev/null; do
+                  if [ "$elapsed" -ge "$TIMEOUT" ]; then echo "Timeout waiting for ${name}"; exit 1; fi
+                  echo "waiting for ${name}... (${elapsed}s)"; sleep 10; elapsed=$((elapsed + 10))
+                done
+                echo "fetched ${name}"
+              }
+              fetch_secret "${PREFIX}-node-{{ $nodeIndex }}-bls-key" /app/secrets/bls-key.json
+              fetch_secret "${PREFIX}-avs-deploy"                    /app/secrets/avs_deploy.json
+              fetch_secret "${PREFIX}-router-public-key"             /app/secrets/public_orchestrator.json
+          volumeMounts:
+            - name: worker-secrets
+              mountPath: /app/secrets
+        {{- else }}
+        # Wait for the setup job (registers operators + writes keys to shared-data).
+        - name: wait-for-setup
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              KEY_FILE="/app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json"
+              TIMEOUT={{ $root.Values.global.initTimeout }}; ELAPSED=0
+              until [ -f /app/.nodes/.setup_complete ] && [ -f "$KEY_FILE" ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then echo "Timeout waiting for setup"; exit 1; fi
+                echo "waiting for setup + $KEY_FILE... (${ELAPSED}s)"; sleep 10; ELAPSED=$((ELAPSED + 10))
+              done
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+        {{- end }}
+        # Download ONLY this worker's layer-slice artifacts. Integrity is enforced
+        # by the service at startup (recomputes the manifest, refuses to boot on a
+        # mismatch with GK_OVERLAY_MANIFEST), so a corrupt slice cannot be mounted.
+        - name: fetch-slice
+          image: {{ $shard.downloaderImage | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              BASE="{{ $slice.baseUrl }}"
+              for f in "{{ $slice.weightsFile }}"{{ if $slice.tokenizerFile }} "{{ $slice.tokenizerFile }}"{{ end }}; do
+                echo "Downloading ${BASE}/${f} (slice {{ $group.name }})..."
+                curl -fSL --retry 5 --retry-delay 10 -o "{{ $shard.artifactMountPath }}/${f}" "${BASE}/${f}"
+              done
+              echo "Slice {{ $group.name }} artifacts downloaded."
+          volumeMounts:
+            - name: slice-artifacts
+              mountPath: {{ $shard.artifactMountPath }}
+      containers:
+        - name: shard-worker
+          image: "{{ default $root.Values.node.image.repository $shard.image.repository }}:{{ required "shard.image.tag (or node.image.tag) must be set" (default $root.Values.node.image.tag $shard.image.tag) }}"
+          imagePullPolicy: {{ default $root.Values.node.image.pullPolicy $shard.image.pullPolicy }}
+          args:
+            - "--key-file"
+            {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+            - "/app/secrets/bls-key.json"
+            {{- else }}
+            - "/app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json"
+            {{- end }}
+            - "--port"
+            - {{ $port | quote }}
+            - "--orchestrator"
+            {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+            - "/app/secrets/public_orchestrator.json"
+            {{- else if $root.Values.orchestrator.publicConfig }}
+            - "/app/public_orchestrator.json"
+            {{- else }}
+            {{- fail "orchestrator.publicConfig must be set (or secretManager.enabled=true for TESTNET)" }}
+            {{- end }}
+          env:
+            {{- if eq $root.Values.global.environment "TESTNET" }}
+            - name: HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" $root }}
+                  key: HTTP_RPC
+            - name: WS_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" $root }}
+                  key: WS_RPC
+            {{- else }}
+            - name: HTTP_RPC
+              value: "http://{{ include "gas-killer.l1.fullname" $root }}:{{ $root.Values.l1.service.port }}"
+            - name: WS_RPC
+              value: "ws://{{ include "gas-killer.l1.fullname" $root }}:{{ $root.Values.l1.service.port }}"
+            {{- end }}
+            - name: RUST_BACKTRACE
+              value: "1"
+            - name: AVS_DEPLOYMENT_PATH
+              {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+              value: "/app/secrets/avs_deploy.json"
+              {{- else }}
+              value: "/app/.nodes/avs_deploy.json"
+              {{- end }}
+            # Pinned simulation env — shared with the router and every node so
+            # segment eth_calls execute byte-identically (same discipline as the
+            # single-model path). The 35B tier needs unbounded-v1-xl + local.
+            - name: GK_SIM_PROFILE
+              value: {{ include "gas-killer.simProfile" $root | quote }}
+            - name: GK_SIM_EXECUTOR
+              value: {{ include "gas-killer.simExecutor" $root | quote }}
+            {{- if $root.Values.global.simRpc }}
+            - name: GK_SIM_RPC
+              value: {{ $root.Values.global.simRpc | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" $root.Values.global.overlayMmap) }}
+            - name: GK_OVERLAY_MMAP
+              value: {{ $root.Values.global.overlayMmap | toString | quote }}
+            {{- end }}
+            # This worker's layer-slice overlay (ONLY its slice's files).
+            - name: GK_OVERLAY_WEIGHTS
+              value: "{{ $shard.artifactMountPath }}/{{ $slice.weightsFile }}"
+            {{- if $slice.tokenizerFile }}
+            - name: GK_OVERLAY_TOKENIZER
+              value: "{{ $shard.artifactMountPath }}/{{ $slice.tokenizerFile }}"
+            {{- end }}
+            - name: GK_OVERLAY_MANIFEST
+              value: {{ $slice.manifest | quote }}
+            # Sharded-inference: arm the segment executor + validator gate and
+            # advertise this worker's held layer slice for layer-affinity assignment.
+            - name: GK_SHARD_URL
+              value: {{ $routerUrl | quote }}
+            - name: GK_SHARD_OPERATOR_ID
+              value: {{ $opId | quote }}
+            - name: GK_SHARD_MODEL
+              value: {{ $shard.model | quote }}
+            - name: GK_SHARD_ALIGN_STAGES
+              value: {{ $shard.alignStages | toString | quote }}
+            - name: GK_SHARD_LAYER_LO
+              value: {{ $group.layerLo | quote }}
+            - name: GK_SHARD_LAYER_HI
+              value: {{ $group.layerHi | quote }}
+            - name: GK_SHARD_HAS_EMBEDDING
+              value: {{ $group.hasEmbedding | toString | quote }}
+            - name: GK_SHARD_HAS_CLASSIFIER
+              value: {{ $group.hasClassifier | toString | quote }}
+            {{- if $shard.consumer }}
+            - name: GK_SHARD_CONSUMER
+              value: {{ $shard.consumer | quote }}
+            {{- end }}
+            - name: HEALTHZ_PORT
+              value: {{ $root.Values.node.healthzPort | quote }}
+            - name: P2P_MESSAGE_BACKLOG
+              value: {{ $root.Values.node.p2pMessageBacklog | quote }}
+            - name: P2P_MESSAGES_PER_SECOND
+              value: {{ $root.Values.node.p2pMessagesPerSecond | quote }}
+          ports:
+            - name: p2p
+              containerPort: {{ $port }}
+              protocol: TCP
+            - name: healthz
+              containerPort: {{ $root.Values.node.healthzPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: healthz
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            periodSeconds: 30
+            failureThreshold: 6
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+              readOnly: true
+            - name: slice-artifacts
+              mountPath: {{ $shard.artifactMountPath }}
+              readOnly: true
+            {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+            - name: worker-secrets
+              mountPath: /app/secrets
+              readOnly: true
+            {{- end }}
+            {{- if and $root.Values.orchestrator.publicConfig (not (and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled)) }}
+            - name: config
+              mountPath: /app/public_orchestrator.json
+              subPath: public_orchestrator.json
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml $shard.resources | nindent 12 }}
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: {{ include "gas-killer.shareddata.fullname" $root }}
+        - name: slice-artifacts
+          emptyDir: {}
+        {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
+        - name: worker-secrets
+          emptyDir: {}
+        {{- end }}
+        {{- if and $root.Values.orchestrator.publicConfig (not (and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled)) }}
+        - name: config
+          configMap:
+            name: {{ include "gas-killer.config.fullname" $root }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gas-killer.fullname" $root }}-shard-{{ $group.name }}-{{ $r }}
+  labels:
+    {{- include "gas-killer.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: shard-worker
+    gas-killer/shard-operator-id: {{ $opId | quote }}
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  ports:
+    - port: {{ $port }}
+      targetPort: p2p
+      protocol: TCP
+      name: p2p
+    - port: {{ $root.Values.node.healthzPort }}
+      targetPort: healthz
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "gas-killer.selectorLabels" $root | nindent 4 }}
+    app.kubernetes.io/component: shard-worker
+    gas-killer/shard-operator-id: {{ $opId | quote }}
+{{- end }}
+{{- $opBase = add $opBase $replicas }}
+{{- end }}
+{{- end }}

@@ -119,6 +119,91 @@ overlay:
   # Where the artifacts land inside the pods.
   mountPath: /overlay
 
+# =============================================================================
+# Weight-sharded worker fleet (sharded on-chain LLM inference)
+# =============================================================================
+# When shard.enabled=true and shard.workers is non-empty, one Deployment is
+# rendered per worker-group REPLICA on the shard-workers Spot pool. Each worker
+# HOLDS only its layer slice (weight-sharding): it advertises that slice to the
+# router's shard coordinator (GK_SHARD_LAYER_LO/HI/HAS_*), which then assigns it
+# only segments it can run, and mounts ONLY that slice's overlay artifacts.
+#
+# This is additive: with shard.enabled=false (default) nothing here renders and
+# the legacy single-model node/router path is untouched. See
+# helm/gas-killer/shard-35b-overrides.yaml for a runnable 2-group example and
+# docs/SHARDED_INFERENCE.md (Addendum) for the bring-up sequence.
+shard:
+  enabled: false
+  # Model family the router's shard coordinator plans for (GK_SHARD_MODEL); the
+  # workers echo it so their logs agree. "qwen35" or "qwen3-0.6b".
+  model: "qwen35"
+  # Snap stage boundaries to full-attention layer boundaries (GK_SHARD_ALIGN_STAGES)
+  # so the ~2.1MB/layer DeltaNet boundary snapshot is never split across a stage
+  # cut. Applies to hybrid models only; harmless for 0.6B.
+  alignStages: true
+  # Sharded consumer the validator gate scopes to (GK_SHARD_CONSUMER). Empty =
+  # gate any fulfil() round (lets the fleet arm before the consumer is deployed).
+  consumer: ""
+  image:
+    # Defaults to the node image — a worker is the node binary in shard-executor
+    # mode (GK_SHARD_URL + GK_SHARD_OPERATOR_ID arm the segment loop + gate).
+    repository: ghcr.io/gas-killer/service
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Placement on the dedicated Spot pool (n2-highmem-4, autoscale 0-8). The pool
+  # is tainted shard-worker=true:NoSchedule so only these pods land on it.
+  nodeSelector:
+    role: shard-worker
+  tolerations:
+    - key: shard-worker
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  # Base p2p listen port; worker with global operator id N listens on basePort+N.
+  basePort: 4001
+  # Router internal base URL the workers poll (GK_SHARD_URL). Empty = derive from
+  # the in-cluster router service and its healthzPort.
+  routerUrlOverride: ""
+  # Where each worker's layer-slice artifacts are downloaded to inside the pod.
+  artifactMountPath: /overlay
+  downloaderImage: "curlimages/curl:8.10.1"
+  resources:
+    requests:
+      memory: "16Gi"
+      cpu: "2000m"
+    limits:
+      # Per-slice working set is a fraction of the full 35GB model; a ~half-model
+      # slice plus the traced revm run. Tune from observed RSS on the pool.
+      memory: "48Gi"
+      cpu: "4000m"
+  # Worker groups. Global operator ids are assigned DENSELY in listed order:
+  # group 0 gets [0, replicas0), group 1 gets [replicas0, replicas0+replicas1)...
+  # Each covered layer span needs >= GK_SHARD_K workers, so replicas >= k per group.
+  # artifactSlice.{weightsFile,tokenizerFile,manifest} select which overlay files
+  # this group mounts (tokenizerFile optional — typically only the embedding slice).
+  workers: []
+  #   - name: front
+  #     replicas: 2
+  #     layerLo: 0
+  #     layerHi: 20
+  #     hasEmbedding: true
+  #     hasClassifier: false
+  #     artifactSlice:
+  #       baseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3.5-35b-a3b-onchain-v1"
+  #       weightsFile: "weights.layers-0-19.bin"
+  #       tokenizerFile: "tokenizer.bin"
+  #       manifest: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  #   - name: back
+  #     replicas: 2
+  #     layerLo: 20
+  #     layerHi: 40
+  #     hasEmbedding: false
+  #     hasClassifier: true
+  #     artifactSlice:
+  #       baseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3.5-35b-a3b-onchain-v1"
+  #       weightsFile: "weights.layers-20-39.bin"
+  #       manifest: "0x0000000000000000000000000000000000000000000000000000000000000000"
+
 # GCP Secret Manager configuration for TESTNET deployments
 # When enabled, operator BLS keys and avs_deploy.json are read from GCP Secret Manager
 # rather than the shared PVC. This makes keys durable across cluster recreations.

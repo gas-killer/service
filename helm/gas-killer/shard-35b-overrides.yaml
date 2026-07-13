@@ -1,0 +1,81 @@
+# Weight-sharded Qwen3.5-35B-A3B fleet — a 2-group example.
+#
+# Splits the 40-layer hybrid model across two worker groups at layer 20 (a
+# full-attention boundary: layer 19 is full-attention, so the stage cut there
+# threads only the cheap KV slice, never a ~2.1MB DeltaNet snapshot). Each group
+# runs GK_SHARD_K=2 replicas on the shard-workers Spot pool and mounts ONLY its
+# layer slice:
+#
+#   front  ops 0,1   layers [0,20)   +embedding   (holds the token embedding)
+#   back   ops 2,3   layers [20,40)  +classifier  (holds the final norm + lm_head)
+#
+# The router's shard coordinator (GK_SHARD_MODEL=qwen35) then assigns:
+#   - stage-0 forward segments (layers [0,20), needs embedding) -> {0,1}
+#   - stage-1 forward segments (layers [20,40))                 -> {2,3}
+#   - argmax segments (needs classifier)                        -> {2,3}
+#
+# Usage:
+#   helm template gas-killer ./helm/gas-killer \
+#     -f helm/gas-killer/local-overrides.yaml \
+#     -f helm/gas-killer/shard-35b-overrides.yaml \
+#     --set node.image.tag=dev --set router.image.tag=dev
+#
+# Fill in the real release URL + per-slice manifests once the 35B weight-shard
+# artifacts are published (the slice tooling in the sdk produces per-slice files).
+
+global:
+  # ~3.6T gas/call needs the 2^43 XL tier; the 35B overlay is only servable
+  # in-process, so the local executor is required (see llm-overrides.yaml).
+  simProfile: "unbounded-v1-xl"
+  simExecutor: "local"
+  overlayMmap: null   # code default (true under local): never fully materialize a slice
+
+# The single-model overlay stays off — each shard worker mounts its OWN slice
+# via shard.workers[].artifactSlice instead.
+overlay:
+  enabled: false
+
+router:
+  # A sharded round settles a cheap fulfil() commit, but the router also plans the
+  # DAG; give it headroom and a long window for a cold fallback simulation.
+  roundTimeout: "14400"
+
+# The plain node fleet is not the executor here — the shard workers are. Keep the
+# default nodeCount for the router's wait-for-nodes gate / quorum bootstrap; the
+# weight-shard execution happens on the shard.workers fleet below.
+
+shard:
+  enabled: true
+  model: "qwen35"
+  alignStages: true
+  # consumer: "0x..."   # GasKillerChat35Sharded address (optional; gate scopes to it)
+  basePort: 4001
+  resources:
+    requests:
+      memory: "24Gi"
+      cpu: "2000m"
+    limits:
+      memory: "64Gi"
+      cpu: "4000m"
+  workers:
+    - name: front
+      replicas: 2
+      layerLo: 0
+      layerHi: 20
+      hasEmbedding: true
+      hasClassifier: false
+      artifactSlice:
+        baseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3.5-35b-a3b-onchain-v1"  # TODO: placeholder
+        weightsFile: "weights.layers-0-19.bin"
+        tokenizerFile: "tokenizer.bin"
+        manifest: "0x0000000000000000000000000000000000000000000000000000000000000000"  # TODO: per-slice manifest
+    - name: back
+      replicas: 2
+      layerLo: 20
+      layerHi: 40
+      hasEmbedding: false
+      hasClassifier: true
+      artifactSlice:
+        baseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3.5-35b-a3b-onchain-v1"  # TODO: placeholder
+        weightsFile: "weights.layers-20-39.bin"
+        manifest: "0x0000000000000000000000000000000000000000000000000000000000000000"  # TODO: per-slice manifest
