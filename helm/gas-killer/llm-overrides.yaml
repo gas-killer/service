@@ -40,16 +40,27 @@
 #       l1.anvilExtraArgs / ethereum.resources below are irrelevant unless
 #       you are still also running stories260K/Qwen3-0.6B off the same
 #       release.
-#     - the overlay artifacts mount natively (in-RAM or, once
-#       GK_OVERLAY_MMAP's mmap path is exposed publicly by the analyzer —
-#       see gas-killer/service common/src/local_exec_shim.rs — via mmap
-#       without ever fully materializing the model in heap), never as a
-#       serialized JSON body.
+#     - the overlay artifacts mount natively — via mmap under GK_OVERLAY_MMAP
+#       (the default under local: OverlayMount::from_files, streaming-keccak
+#       manifest verify + lazy chunk materialization, never the full model in
+#       heap), never as a serialized JSON body.
 #   The artifact download/verify flow via overlay.enabled is unchanged; only
 #   artifactBaseUrl/manifest need to point at the 35B release (placeholders
 #   below — fill in once that release is published) and overlayMmap should
 #   stay at its "local" default (true) so the tens-of-GB blob is never fully
 #   resident.
+#
+#   Multi-overlay (gas-analyzer#172): under simExecutor local + mmap, SEVERAL
+#   models' overlays mount simultaneously from local artifact files via
+#   overlay.extraModels — e.g. Qwen3.5-35B-A3B as the primary overlay and
+#   Qwen3-0.6B as an extra model. Chunk addresses are derived per-manifest,
+#   so the models' address sets are disjoint and each on-chain consumer finds
+#   exactly its own model's chunks. This replaces hosting a second model's
+#   chunks as anvil-fork setCode state, which is unfixably racy with
+#   reforking: a task pinned to a block predating the fork's latest refork
+#   reads the chunks through the fork's historical-state proxy (no chunks
+#   there), the engine sees zero-length weights, and every operator
+#   deterministically signs an empty payload — a settled-but-empty round.
 #
 # The ingress-time prewarm (global.prewarm, default on) makes operators start
 # simulating when the task is ACCEPTED rather than when the round broadcasts,
@@ -101,6 +112,17 @@ overlay:
   # weightsFile: "weights.bin"
   # tokenizerFile: "tokenizer.bin"
   # manifest: "0x0000000000000000000000000000000000000000000000000000000000000000"  # TODO: placeholder — keccak256(keccak256(weightsBlob) || keccak256(tokenizerBlob)) for the 35B release
+  #
+  # Serving BOTH LLM tiers from one deployment (multi-overlay, requires
+  # simExecutor local + mmap — see the file header): keep the 35B release as
+  # the primary triplet above and add Qwen3-0.6B as an extra model. Every
+  # operator and the router must configure the same model set.
+  # extraModels:
+  #   - name: qwen3-0.6b
+  #     artifactBaseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3-0.6b-onchain-v1"
+  #     weightsFile: "weights.bin"
+  #     tokenizerFile: "tokenizer.bin"
+  #     manifest: "0x23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
 
 router:
   # Aggregation window: round broadcast -> quorum. Operators must finish the

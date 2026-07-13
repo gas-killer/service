@@ -72,11 +72,10 @@ global:
   # Prefer the mmap-backed overlay source over the in-RAM one when simExecutor is
   # "local" (GK_OVERLAY_MMAP). Only meaningful together with overlay.enabled.
   # Null here means "use the code default" (true under local, false under rpc);
-  # set explicitly to override. NOTE: as of gas-analyzer#169 the analyzer's
-  # public local-execution entry point only accepts the in-RAM overlay source —
-  # this flag is wired end-to-end (env + helm) but currently only affects
-  # startup logging until the analyzer exposes a public mmap path (see
-  # gas-killer/service common/src/local_exec_shim.rs for the exact gap).
+  # set explicitly to override. Under mmap mode the analyzer mounts the artifact
+  # files directly (streaming-keccak manifest verify + lazy chunk
+  # materialization) — required for 35GB-class artifacts, and the only mode that
+  # supports mounting multiple models simultaneously (overlay.extraModels).
   overlayMmap: null
 
   # Operator prewarm pre-pass: nodes poll the router's internal /prewarm endpoint
@@ -118,6 +117,25 @@ overlay:
   downloaderImage: "curlimages/curl:8.10.1"
   # Where the artifacts land inside the pods.
   mountPath: /overlay
+  # Additional pinned models mounted SIMULTANEOUSLY with the primary one
+  # (multi-overlay, gas-analyzer#172). Requires simExecutor "local" with mmap
+  # mode (overlayMmap null/true) — the service refuses indexed overlay slots
+  # on the rpc/in-RAM path at startup. Each entry downloads into
+  # <mountPath>/<name>/ and exports the numbered env triplet
+  # (GK_OVERLAY_WEIGHTS_2/..., in list order starting at 2). Chunk addresses
+  # are derived per-manifest, so distinct models' address sets are disjoint
+  # and each on-chain consumer finds exactly its own model's chunks in the
+  # composite mount. Every manifest must be distinct. Pinned-environment
+  # configuration like the primary overlay: router and ALL nodes must mount
+  # the same model set or payloads diverge.
+  #
+  # extraModels:
+  #   - name: qwen3-0.6b
+  #     artifactBaseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3-0.6b-onchain-v1"
+  #     weightsFile: "weights.bin"
+  #     tokenizerFile: "tokenizer.bin"
+  #     manifest: "0x23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
+  extraModels: []
 
 # GCP Secret Manager configuration for TESTNET deployments
 # When enabled, operator BLS keys and avs_deploy.json are read from GCP Secret Manager
