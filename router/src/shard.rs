@@ -59,8 +59,8 @@ impl WorkerCaps {
         // by the classifier/argmax segment, which is gated on `has_classifier`
         // alone (the untied classifier lives on the last weight-shard slice, not
         // at a specific decoder-layer index).
-        let span_ok =
-            r.layer_lo >= r.layer_hi || (self.layer_lo <= r.layer_lo && self.layer_hi >= r.layer_hi);
+        let span_ok = r.layer_lo >= r.layer_hi
+            || (self.layer_lo <= r.layer_lo && self.layer_hi >= r.layer_hi);
         span_ok
             && (!r.needs_embedding || self.has_embedding)
             && (!r.needs_classifier || self.has_classifier)
@@ -74,8 +74,16 @@ impl std::fmt::Display for SegReq {
             "layers [{}, {}){}{}",
             self.layer_lo,
             self.layer_hi,
-            if self.needs_embedding { " +embedding" } else { "" },
-            if self.needs_classifier { " +classifier" } else { "" },
+            if self.needs_embedding {
+                " +embedding"
+            } else {
+                ""
+            },
+            if self.needs_classifier {
+                " +classifier"
+            } else {
+                ""
+            },
         )
     }
 }
@@ -167,7 +175,10 @@ impl ShardCoordinator {
             .ok()
             .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no"))
             .unwrap_or(true);
-        info!(model = spec.name, align_stages, "shard coordinator: model spec selected");
+        info!(
+            model = spec.name,
+            align_stages, "shard coordinator: model spec selected"
+        );
         Self {
             k: env_u64("GK_SHARD_K", 2),
             n_operators: env_u64("GK_SHARD_OPERATORS", 3),
@@ -814,7 +825,10 @@ mod tests {
         };
         for unit in 0..8u64 {
             let c = co.plan_committee(unit, 3, &front).unwrap();
-            assert!(c.iter().all(|op| *op == 0 || *op == 1), "front committee {c:?}");
+            assert!(
+                c.iter().all(|op| *op == 0 || *op == 1),
+                "front committee {c:?}"
+            );
             assert_ne!(c[0], c[1]);
         }
 
@@ -826,7 +840,10 @@ mod tests {
             needs_classifier: false,
         };
         let c = co.plan_committee(0, 3, &back).unwrap();
-        assert!(c.iter().all(|op| *op == 2 || *op == 3), "back committee {c:?}");
+        assert!(
+            c.iter().all(|op| *op == 2 || *op == 3),
+            "back committee {c:?}"
+        );
 
         // Argmax needs the classifier — only group B qualifies.
         let cls = SegReq {
@@ -836,7 +853,10 @@ mod tests {
             needs_classifier: true,
         };
         let c = co.plan_committee(5, 3, &cls).unwrap();
-        assert!(c.iter().all(|op| *op == 2 || *op == 3), "classifier committee {c:?}");
+        assert!(
+            c.iter().all(|op| *op == 2 || *op == 3),
+            "classifier committee {c:?}"
+        );
     }
 
     #[test]

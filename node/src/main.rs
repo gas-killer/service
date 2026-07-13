@@ -427,19 +427,16 @@ fn main() {
                 // layer-affinity planner only assigns segments this worker holds
                 // weights for. GK_SHARD_LAYER_LO/HI together enable it; unset =
                 // full-model worker (today's behavior, no advertisement).
-                let env_u64 = |k: &str| -> Option<u64> {
-                    std::env::var(k).ok().and_then(|v| v.parse().ok())
-                };
+                let env_u64 =
+                    |k: &str| -> Option<u64> { std::env::var(k).ok().and_then(|v| v.parse().ok()) };
                 let env_bool = |k: &str| -> bool {
                     std::env::var(k)
                         .ok()
                         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
                         .unwrap_or(false)
                 };
-                let layer_range = match (
-                    env_u64("GK_SHARD_LAYER_LO"),
-                    env_u64("GK_SHARD_LAYER_HI"),
-                ) {
+                let layer_range = match (env_u64("GK_SHARD_LAYER_LO"), env_u64("GK_SHARD_LAYER_HI"))
+                {
                     (Some(lo), Some(hi)) => Some((lo, hi)),
                     _ => None,
                 };

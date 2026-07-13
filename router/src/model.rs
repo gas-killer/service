@@ -16,9 +16,9 @@
 //! format** used to thread blobs between segments (via [`ModelSpec::layer_kind`]
 //! and the byte-size helpers).
 
-use anyhow::{Context, Result, bail};
 use alloy::sol_types::SolCall;
 use alloy_primitives::{B256, U256, keccak256};
+use anyhow::{Context, Result, bail};
 
 use gas_killer_common::shard::{SegCall, SegSpan, argmaxRangeCall, forwardRangeCall, seg35};
 
@@ -166,8 +166,8 @@ impl ModelSpec {
     /// `nVH*dK*dV*4`. For 35B: 98,304 + 2,097,152 = 2,195,456 B (~2.1 MB) — the
     /// reason [`stage_bounds`](Self::stage_bounds) avoids cutting mid-DeltaNet.
     pub fn delta_snapshot_bytes(&self) -> usize {
-        (((self.conv_k.saturating_sub(1)) * self.conv_dim) * 4 + self.n_v_heads * self.d_k * self.d_v * 4)
-            as usize
+        (((self.conv_k.saturating_sub(1)) * self.conv_dim) * 4
+            + self.n_v_heads * self.d_k * self.d_v * 4) as usize
     }
 
     /// Plan the S contiguous layer stages of the prefill/decode pipeline.
@@ -185,12 +185,16 @@ impl ModelSpec {
     /// stage, so every boundary is a min-cost KV boundary. Falls back to the even
     /// split when there are too few full-attention boundaries to place `S-1`
     /// distinct cuts, or when snapping collides.
-    pub fn stage_bounds(&self, n_layers: u64, requested_stages: u64, align: bool) -> Vec<(u64, u64)> {
+    pub fn stage_bounds(
+        &self,
+        n_layers: u64,
+        requested_stages: u64,
+        align: bool,
+    ) -> Vec<(u64, u64)> {
         let n = n_layers.max(1);
         let s = requested_stages.clamp(1, n);
-        let even = |s: u64| -> Vec<(u64, u64)> {
-            (0..s).map(|i| (i * n / s, (i + 1) * n / s)).collect()
-        };
+        let even =
+            |s: u64| -> Vec<(u64, u64)> { (0..s).map(|i| (i * n / s, (i + 1) * n / s)).collect() };
 
         let Some(interval) = self.full_attention_interval else {
             return even(s);
@@ -441,7 +445,10 @@ mod tests {
     #[test]
     fn stage_bounds_align_off_is_even_split() {
         let s = ModelSpec::qwen35();
-        assert_eq!(s.stage_bounds(40, 3, false), vec![(0, 13), (13, 26), (26, 40)]);
+        assert_eq!(
+            s.stage_bounds(40, 3, false),
+            vec![(0, 13), (13, 26), (26, 40)]
+        );
     }
 
     #[test]
