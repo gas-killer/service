@@ -18,6 +18,15 @@ export GAS_KILLER_TRIGGER_URL="http://localhost:${ROUTER_INGRESS_PORT}/trigger"
 SIGNATURE_SCHEME_CHOICE="${SIGNATURE_SCHEME:-ecdsa}"
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 
+# STATE_ENCODING (legacy|canonical) and E2E_EXAMPLE (array-summation|reentrant) follow the
+# same capture-then-re-export discipline as SIGNATURE_SCHEME so the containers AND the
+# host-side deploy/send binaries agree. `reentrant` deploys a ReentrantCheckpoint whose
+# task re-enters mid-transition; pair it with `canonical` to prove re-entrancy is safe.
+STATE_ENCODING_CHOICE="${STATE_ENCODING:-legacy}"
+export STATE_ENCODING="$STATE_ENCODING_CHOICE"
+E2E_EXAMPLE_CHOICE="${E2E_EXAMPLE:-array-summation}"
+export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -169,9 +178,11 @@ source ../.env
 # .env carries GAS_KILLER_ROUTER_URL=...:8080; re-pin it to the chosen ingress port.
 export GAS_KILLER_ROUTER_URL="http://localhost:${ROUTER_INGRESS_PORT}"
 export GAS_KILLER_TRIGGER_URL="http://localhost:${ROUTER_INGRESS_PORT}/trigger"
-# Re-pin the scheme chosen at the top (a stray .env entry must not diverge from
-# what the running containers were started with).
+# Re-pin the scheme/encoding/example chosen at the top (a stray .env entry must not
+# diverge from what the running containers were started with).
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
+export STATE_ENCODING="$STATE_ENCODING_CHOICE"
+export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then

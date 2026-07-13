@@ -2,11 +2,49 @@ use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolCall;
 use bindings::arraysummation::ArraySummation::sumCall;
+use bindings::reentrantcheckpoint::ReentrantCheckpoint::advanceCall;
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
 use serde_json::json;
 use std::env;
 use std::fs;
 use url::Url;
+
+/// True when `E2E_EXAMPLE=reentrant` selects the re-entrancy demonstration target
+/// (a `ReentrantCheckpoint`, task `advance()`, progress read via `counter()`) instead of
+/// the default array-summation one (`sum(uint256[])`, progress via `currentSum()`).
+fn e2e_example_is_reentrant() -> bool {
+    matches!(
+        env::var("E2E_EXAMPLE").map(|v| v.trim().to_ascii_lowercase()),
+        Ok(ref v) if v == "reentrant" || v == "reentrant-checkpoint"
+    )
+}
+
+/// Read the target's "progress" value — the state the e2e watches for change to confirm a
+/// task settled. `counter()` for the re-entrancy target, `currentSum()` otherwise.
+async fn read_progress_value<P: Provider>(
+    target: Address,
+    provider: &P,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    if e2e_example_is_reentrant() {
+        Ok(
+            bindings::reentrantcheckpoint::ReentrantCheckpoint::new(target, provider)
+                .counter()
+                .call()
+                .await
+                .map_err(|e| format!("Failed to read counter(): {}", e))?
+                .to::<u64>(),
+        )
+    } else {
+        Ok(
+            bindings::arraysummation::ArraySummation::new(target, provider)
+                .currentSum()
+                .call()
+                .await
+                .map_err(|e| format!("Failed to read currentSum(): {}", e))?
+                .to::<u64>(),
+        )
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -107,11 +145,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let rpc_for_read = env::var("HTTP_RPC")?;
     let rpc_url_for_read = Url::parse(&rpc_for_read)?;
     let provider = ProviderBuilder::new().connect_http(rpc_url_for_read);
-    let array_contract = bindings::arraysummation::ArraySummation::new(
-        request.body.target_address,
-        provider.clone(),
-    );
-
     // Ensure target has code deployed
     let code = provider
         .get_code_at(request.body.target_address)
@@ -130,14 +163,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .into());
     }
 
-    // Capture initial currentSum before posting task
-    // Each trigger uses different indexes, so currentSum will change each time
-    let initial_sum = array_contract
-        .currentSum()
-        .call()
-        .await
-        .map_err(|e| format!("Failed to read currentSum before trigger: {}", e))?
-        .to::<u64>();
+    // Capture the target's progress value before posting the task; a settled task changes
+    // it (currentSum for array-summation, counter for the re-entrancy target).
+    let initial_sum = read_progress_value(request.body.target_address, &provider).await?;
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
         .unwrap_or_else(|_| "http://localhost:8080/trigger".to_string());
@@ -177,15 +205,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let start_time = Instant::now();
 
         loop {
-            let current_sum = array_contract
-                .currentSum()
-                .call()
-                .await
-                .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
-                .to::<u64>();
+            let current_sum = read_progress_value(request.body.target_address, &provider).await?;
 
             println!(
-                "currentSum: {}, Initial: {}, Elapsed: {:.1}s",
+                "progress: {}, Initial: {}, Elapsed: {:.1}s",
                 current_sum,
                 initial_sum,
                 start_time.elapsed().as_secs_f64()
@@ -193,7 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             if current_sum != initial_sum {
                 println!(
-                    "✅ SUCCESS: currentSum changed from {} to {}",
+                    "✅ SUCCESS: target progress changed from {} to {}",
                     initial_sum, current_sum
                 );
                 return Ok(());
@@ -201,11 +224,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             if start_time.elapsed() >= max_wait_time {
                 println!(
-                    "❌ TIMEOUT: currentSum unchanged ({}), waited {:.1} seconds",
+                    "❌ TIMEOUT: target progress unchanged ({}), waited {:.1} seconds",
                     current_sum,
                     max_wait_time.as_secs_f64()
                 );
-                return Err("Timeout waiting for currentSum to change".into());
+                return Err("Timeout waiting for target progress to change".into());
             }
 
             sleep(check_interval).await;
@@ -290,8 +313,14 @@ async fn build_mock_request()
         base_idx + 2,
         current_count
     );
-    let call = sumCall { indexes };
-    let call_data = call.abi_encode().to_vec();
+    // The re-entrancy target's task is the no-arg `advance()`, which re-enters itself
+    // mid-transition; the array-summation target's task is `sum(indexes)`.
+    let call_data = if e2e_example_is_reentrant() {
+        println!("Using ReentrantCheckpoint.advance() for transition_index={current_count}");
+        advanceCall {}.abi_encode().to_vec()
+    } else {
+        sumCall { indexes }.abi_encode().to_vec()
+    };
 
     // Resolve block_height for deterministic execution
     let block_height = resolve_block_height(&provider).await?;
