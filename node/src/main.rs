@@ -403,6 +403,46 @@ fn main() {
             });
         }
 
+        // Sharded inference: when GK_SHARD_URL (router internal base URL),
+        // GK_SHARD_OPERATOR_ID, and GK_SHARD_CONSUMER are set, this node
+        // (1) polls the router's segment work queue and executes its committee's
+        // hash-committed segment view calls against its own simulation RPC, and
+        // (2) gates rounds targeting the sharded consumer on commit-chain
+        // verification before signing (see gas_killer_common::shard).
+        let validator = match (
+            std::env::var("GK_SHARD_URL"),
+            std::env::var("GK_SHARD_OPERATOR_ID"),
+        ) {
+            (Ok(url), Ok(op)) if !url.is_empty() => {
+                let operator_id: u32 = op.parse().expect("GK_SHARD_OPERATOR_ID must be a u32");
+                // Optional consumer allowlist; when unset the gate fires on any
+                // fulfil(...) round, so sharding can be armed before the
+                // consumer is deployed (no mid-run node recreation, no p2p tear).
+                let consumer: Option<alloy::primitives::Address> =
+                    std::env::var("GK_SHARD_CONSUMER")
+                        .ok()
+                        .filter(|c| !c.is_empty())
+                        .map(|c| c.parse().expect("GK_SHARD_CONSUMER must be an address"));
+                let shard_state = Arc::new(gas_killer_common::ShardState::new(
+                    operator_id,
+                    consumer,
+                    url.trim_end_matches('/').to_string(),
+                ));
+                let rpc_url = validator.rpc_url().to_string();
+                let loop_state = Arc::clone(&shard_state);
+                context.child("shard").spawn(move |_| async move {
+                    gas_killer_common::run_shard_loop(loop_state, rpc_url).await;
+                });
+                tracing::info!(
+                    operator_id,
+                    consumer = ?consumer,
+                    "sharded inference enabled: segment executor + validator gate armed"
+                );
+                Arc::new(Arc::unwrap_or_clone(validator).with_shard_state(shard_state))
+            }
+            _ => validator,
+        };
+
         // Create contributor with GasKillerTaskData as the metadata type
         let contributor = Contributor::<GasKillerTaskData>::new(
             orchestrator_pub_key,

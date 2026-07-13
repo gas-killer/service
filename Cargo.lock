@@ -4030,6 +4030,7 @@ dependencies = [
  "dotenv",
  "futures",
  "gas-analyzer-evmsketch",
+ "hex",
  "reqwest",
  "serde",
  "serde_json",

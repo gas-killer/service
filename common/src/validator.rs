@@ -116,6 +116,11 @@ pub struct GasKillerValidator {
     executor_cache: Arc<EvmSketchExecutorCache>,
     /// Optional Prometheus metrics — injected on the node, absent on the router.
     validator_metrics: Option<Arc<ValidatorMetrics>>,
+    /// Node-side sharded-inference state (`GK_SHARD_*`). When set, rounds whose
+    /// task targets the sharded consumer are gated: the node refuses to sign
+    /// unless the segment commit chain verifies against the segments this node
+    /// executed itself (see crate::shard::ShardState::verify_fulfil_task).
+    shard: Option<Arc<crate::shard::ShardState>>,
     /// Simulation profile for tracked-function analysis. `UnboundedV1` lifts the
     /// simulated gas limits to the pinned protocol constants (see gas-analyzer's
     /// docs/UNBOUNDED_MODE.md), enabling tracked functions whose direct execution
@@ -341,6 +346,7 @@ impl GasKillerValidator {
             prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
+            shard: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: {
                 let executor = sim_executor_from_env();
@@ -390,6 +396,7 @@ impl GasKillerValidator {
             prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
+            shard: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
             overlay_files: None,
@@ -421,6 +428,7 @@ impl GasKillerValidator {
             prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
+            shard: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
             overlay_files: None,
@@ -443,6 +451,13 @@ impl GasKillerValidator {
     /// Attaches Prometheus metrics; call this on the node before passing the validator to the contributor.
     pub fn with_validator_metrics(mut self, metrics: Arc<ValidatorMetrics>) -> Self {
         self.validator_metrics = Some(metrics);
+        self
+    }
+
+    /// Attaches node-side sharded-inference state; rounds targeting the sharded
+    /// consumer are then gated on commit-chain verification before signing.
+    pub fn with_shard_state(mut self, shard: Arc<crate::shard::ShardState>) -> Self {
+        self.shard = Some(shard);
         self
     }
 
@@ -1001,6 +1016,23 @@ impl GasKillerValidator {
         // Validate message format and decode
         let aggregation = self.validate_message_format(msg).await?;
         let task_data = &aggregation.metadata;
+
+        // Sharded-inference gate: a round targeting the sharded settlement
+        // consumer is only signable if the segment commit chain behind its
+        // pipelineRoot verifies — including that the digests of every segment
+        // THIS node executed match the chain. Erroring here means this node
+        // never signs the round.
+        if let Some(shard) = &self.shard
+            && shard.gates(task_data.target_address, &task_data.call_data)
+        {
+            shard
+                .verify_fulfil_task(&task_data.call_data)
+                .await
+                .map_err(|e| {
+                    warn!(target_address = %task_data.target_address, error = %e, "shard gate: REFUSING to sign");
+                    e
+                })?;
+        }
 
         let cache_key = (task_data.transition_index, task_data.block_height);
 
