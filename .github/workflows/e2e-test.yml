@@ -28,15 +28,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Run the full stack once per quorum-signature scheme: the engine-driven
-        # ECDSA path and the interactive aggregate-Schnorr path. The base legs use the
-        # default state encoding (legacy) and the array-summation example.
-        signature_scheme: [ecdsa, schnorr]
+        # Explicit combinations (include-only, so each entry is its own job — a bare
+        # `include` added to a base axis would MERGE into the matching base combination
+        # instead of creating a separate leg):
+        #   - the engine-driven ECDSA path (legacy encoding, array-summation example)
+        #   - the interactive aggregate-Schnorr path (legacy encoding, array-summation)
+        #   - the aggregate-Schnorr path under the CANONICAL encoding settling a task that
+        #     makes a re-entrant external call mid-transition — a green run proves
+        #     re-entrancy settles safely end-to-end.
         include:
-          # Re-entrancy safety leg: the aggregate-Schnorr path settling a task that makes a
-          # re-entrant external call mid-transition, under the CANONICAL state encoding, so
-          # the re-entrant read observes canonical intermediate state. A green run proves
-          # re-entrancy settles safely end-to-end.
+          - signature_scheme: ecdsa
+            state_encoding: legacy
+            e2e_example: array-summation
+          - signature_scheme: schnorr
+            state_encoding: legacy
+            e2e_example: array-summation
           - signature_scheme: schnorr
             state_encoding: canonical
             e2e_example: reentrant
@@ -94,7 +100,6 @@ jobs:
           # SchnorrStakeRegistry from this repo's deploy binary — same setup image.)
           EIGENLAYER_IMAGE: ghcr.io/breadchaincoop/eigenlayer:pr-ron-gas-killer-ecdsa-stack
           SIGNATURE_SCHEME: ${{ matrix.signature_scheme }}
-          # Empty on the base legs → run_e2e_test.sh defaults them (legacy / array-summation).
           STATE_ENCODING: ${{ matrix.state_encoding }}
           E2E_EXAMPLE: ${{ matrix.e2e_example }}
         run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log; exit ${PIPESTATUS[0]}
@@ -109,6 +114,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-output-${{ matrix.signature_scheme }}-${{ matrix.e2e_example || 'array-summation' }}
+          name: e2e-test-output-${{ matrix.signature_scheme }}-${{ matrix.e2e_example }}
           path: e2e-test-output.log
           retention-days: 1
