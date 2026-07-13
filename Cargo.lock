@@ -2238,6 +2238,144 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-avs-bindings"
+version = "0.1.0"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-signer",
+ "alloy-signer-local",
+ "anyhow",
+ "commonware-cryptography",
+ "serde",
+]
+
+[[package]]
+name = "commonware-avs-core"
+version = "0.1.0"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "alloy-signer",
+ "anyhow",
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff 0.5.0",
+ "ark-serialize 0.5.0",
+ "async-trait",
+ "bytes",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-utils",
+ "eigen-crypto-bn254",
+ "hex",
+ "rand 0.9.2",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "commonware-avs-eigenlayer"
+version = "0.1.0"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+dependencies = [
+ "alloy-primitives",
+ "alloy-provider",
+ "commonware-avs-bindings",
+ "commonware-avs-core",
+ "eigen-client-avsregistry",
+ "eigen-common",
+ "eigen-crypto-bls",
+ "eigen-services-operatorsinfo",
+ "eigen-utils",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "commonware-avs-node"
+version = "0.1.0"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+dependencies = [
+ "alloy",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-signer",
+ "alloy-signer-local",
+ "anyhow",
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff 0.5.0",
+ "ark-serialize 0.5.0",
+ "async-trait",
+ "bytes",
+ "clap",
+ "commonware-actor",
+ "commonware-avs-core",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "dotenv",
+ "eigen-crypto-bls",
+ "eigen-crypto-bn254",
+ "eigen-logging",
+ "futures",
+ "futures-util",
+ "governor",
+ "hex",
+ "prost 0.13.5",
+ "prost-build",
+ "rand 0.9.2",
+ "serde",
+ "serde_json",
+ "serde_yaml 0.9.34+deprecated",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+ "url",
+]
+
+[[package]]
+name = "commonware-avs-router"
+version = "0.1.0"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "alloy-provider",
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "commonware-actor",
+ "commonware-avs-bindings",
+ "commonware-avs-core",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-utils",
+ "eigen-crypto-bls",
+ "futures",
+ "rand_core 0.6.4",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-broadcast"
 version = "2026.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3909,35 +4047,21 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "anyhow",
- "ark-bn254",
- "ark-ec",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
  "async-trait",
  "bytes",
+ "commonware-avs-bindings",
+ "commonware-avs-core",
+ "commonware-avs-eigenlayer",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
- "commonware-math",
- "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "dotenv",
- "eigen-client-avsregistry",
- "eigen-common",
- "eigen-crypto-bls",
- "eigen-crypto-bn254",
- "eigen-logging",
- "eigen-services-operatorsinfo",
- "eigen-utils",
  "futures",
  "gas-analyzer-evmsketch",
- "hex",
- "rand 0.9.2",
- "rand_core 0.6.4",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",
@@ -3949,11 +4073,12 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
- "async-trait",
  "axum 0.7.9",
  "bytes",
  "clap",
  "commonware-actor",
+ "commonware-avs-core",
+ "commonware-avs-node",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
@@ -3961,9 +4086,7 @@ dependencies = [
  "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
- "dotenv",
  "eigen-logging",
- "futures",
  "gas-killer-common",
  "governor",
  "serde",
@@ -3984,7 +4107,6 @@ dependencies = [
  "alloy-signer-local",
  "anyhow",
  "ark-bn254",
- "ark-ec",
  "ark-ff 0.5.0",
  "ark-serialize 0.5.0",
  "async-trait",
@@ -3992,6 +4114,10 @@ dependencies = [
  "bytes",
  "clap",
  "commonware-actor",
+ "commonware-avs-bindings",
+ "commonware-avs-core",
+ "commonware-avs-eigenlayer",
+ "commonware-avs-router",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
@@ -4001,20 +4127,11 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "dotenv",
- "eigen-client-avsregistry",
- "eigen-common",
- "eigen-crypto-bls",
- "eigen-crypto-bn254",
  "eigen-logging",
- "eigen-services-operatorsinfo",
- "eigen-utils",
- "futures",
- "futures-util",
  "gas-analyzer-evmsketch",
  "gas-killer-common",
  "governor",
  "hex",
- "num-bigint 0.4.6",
  "prost 0.13.5",
  "prost-build",
  "rand 0.9.2",

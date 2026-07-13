@@ -29,7 +29,6 @@ anyhow = { workspace = true }
 
 # Cryptography
 ark-bn254 = { workspace = true }
-ark-ec = { workspace = true }
 ark-ff = { workspace = true }
 ark-serialize = { workspace = true }
 
@@ -46,6 +45,10 @@ clap = { workspace = true }
 
 # Commonware ecosystem
 commonware-actor = { workspace = true }
+commonware-avs-bindings = { workspace = true }
+commonware-avs-core = { workspace = true }
+commonware-avs-eigenlayer = { workspace = true }
+commonware-avs-router = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
@@ -57,15 +60,7 @@ commonware-utils = { workspace = true }
 dotenv = { workspace = true }
 
 # EigenLayer SDK
-eigen-client-avsregistry = { workspace = true }
-eigen-common = { workspace = true }
-eigen-crypto-bls = { workspace = true }
-eigen-crypto-bn254 = { workspace = true }
 eigen-logging = { workspace = true }
-eigen-services-operatorsinfo = { workspace = true }
-eigen-utils = { workspace = true }
-futures = { workspace = true }
-futures-util = { workspace = true }
 
 # Gas analysis
 gas-analyzer = { workspace = true }
@@ -74,7 +69,6 @@ gas-analyzer = { workspace = true }
 gas-killer-common = { workspace = true }
 governor = { workspace = true }
 hex = { workspace = true }
-num-bigint = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

@@ -6,15 +6,17 @@
 //! skip digest when the router abandons the height), and gossips TipAcks on
 //! channel 0 until the height certifies.
 
-mod automaton;
-mod reporter;
-mod task_book;
-
 use ::tokio::net::TcpListener;
 use axum::{
     Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
 };
 use clap::{Arg, Command};
+use commonware_avs_core::bn254::{Bn254, Bn254Scheme, G1PublicKey, PublicKey, get_signer};
+use commonware_avs_core::consensus::StaticEpochMonitor;
+use commonware_avs_core::validator::ValidatorTrait;
+use commonware_avs_node::automaton::NodeAutomaton;
+use commonware_avs_node::reporter::NodeReporter;
+use commonware_avs_node::task_book::{self, TaskBook};
 use commonware_consensus::aggregation::{Config as AggregationConfig, Engine};
 use commonware_consensus::types::{Epoch, EpochDelta, HeightDelta};
 use commonware_cryptography::Signer as _;
@@ -27,22 +29,17 @@ use commonware_runtime::{Metrics, Quota, Runner, Spawner, Supervisor, tokio};
 use commonware_utils::ordered::{Map, Quorum as _, Set};
 use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
 use eigen_logging::log_level::LogLevel;
-use gas_killer_common::bn254::{Bn254, G1PublicKey, PublicKey, get_signer};
 use gas_killer_common::{
-    Bn254Scheme, GasKillerValidator, OrchestratorConfig, SpeculativePrebuildConfig,
-    StaticEpochMonitor, ValidatorMetrics, ack_messages_per_second, agg_activity_timeout,
-    agg_window, get_operator_states, load_key_from_file, load_orchestrator_config,
-    p2p_message_backlog, p2p_quota_period, rebroadcast_interval, round_timeout, storage_directory,
+    GasKillerTaskData, GasKillerValidator, OrchestratorConfig, SpeculativePrebuildConfig,
+    ValidatorMetrics, ack_messages_per_second, agg_activity_timeout, agg_window,
+    get_operator_states, load_key_from_file, load_orchestrator_config, p2p_message_backlog,
+    p2p_quota_period, rebroadcast_interval, round_timeout, storage_directory,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-
-use crate::automaton::GasKillerAutomaton;
-use crate::reporter::NodeReporter;
-use crate::task_book::TaskBook;
 
 /// Unique namespace to avoid message replay attacks
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
@@ -469,7 +466,8 @@ fn main() {
 
         // TaskBook actor: owns the router's per-height directives and parks the
         // automaton's subscriptions until the skip rules resolve them.
-        let (task_book, task_book_mailbox) = TaskBook::new(context.child("task_book"));
+        let (task_book, task_book_mailbox) =
+            TaskBook::<GasKillerTaskData>::new(context.child("task_book"));
         context
             .child("task_book_actor")
             .spawn(move |_| task_book.run());
@@ -492,6 +490,7 @@ fn main() {
                     router_key,
                     task_book_mailbox,
                     engine_tip,
+                    agg_window().get(),
                     min_report_interval,
                 )
                 .await;
@@ -499,10 +498,11 @@ fn main() {
         }
 
         // Reporter actor: certificate/tip accounting + TaskBook pruning.
-        let (node_reporter, reporter_mailbox) = NodeReporter::new(
+        let (node_reporter, reporter_mailbox) = NodeReporter::<_, Bn254Scheme>::new(
             context.child("reporter"),
             task_book_mailbox.clone(),
             Arc::clone(&engine_tip),
+            APPLICATION_NAMESPACE.to_vec(),
         );
         context
             .child("reporter_actor")
@@ -510,10 +510,12 @@ fn main() {
 
         // Automaton: resolves each proposed height to the expected task digest
         // (validated via EVMSketch) or the skip digest, per the TaskBook.
-        let automaton = GasKillerAutomaton::new(
+        let validator_trait = Arc::clone(&validator) as Arc<dyn ValidatorTrait<GasKillerTaskData>>;
+        let automaton = NodeAutomaton::new(
             context.child("automaton"),
             task_book_mailbox,
-            Arc::clone(&validator),
+            validator_trait,
+            APPLICATION_NAMESPACE.to_vec(),
             // Retry transient validation errors up to the router's round timeout:
             // past that the router is broadcasting Skip{h} anyway.
             round_timeout(),

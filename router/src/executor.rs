@@ -1,10 +1,11 @@
 use crate::metrics::MetricsCollector;
-use crate::sequencer::{DispatchTime, take_dispatch_time};
 use crate::task_data::GasKillerTaskData;
 use alloy::network::Ethereum;
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
 use anyhow::Result;
+use commonware_avs_router::executor::{BlsSignatureVerificationHandler, ExecutionResult};
+use commonware_avs_router::sequencer::{DispatchTime, take_dispatch_time};
 use gas_killer_common::ChainRole;
 use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::IBLSSignatureCheckerTypes as RetrieverIBLSTypes;
@@ -16,15 +17,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-
-/// Outcome of a `verifyAndUpdate` submission (previously the upstream
-/// `commonware_avs_router::executor::ExecutionResult`, vendored with the dep).
-#[derive(Debug, Clone)]
-pub struct ExecutionResult {
-    pub transaction_hash: String,
-    pub block_number: Option<u64>,
-    pub status: Option<bool>,
-}
 
 /// Default receipt-wait timeout on L1. At ~12s/block this covers several blocks
 /// plus mempool-replacement headroom before the round is abandoned.
@@ -350,17 +342,23 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Ok(ExecutionResult {
             transaction_hash: format!("{:?}", receipt.transaction_hash),
             block_number: receipt.block_number,
+            gas_used: Some(receipt.gas_used),
             status: Some(receipt.status()),
+            contract_address: receipt.contract_address.map(|a| a.to_string()),
         })
     }
 }
 
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
+#[async_trait::async_trait]
+impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerificationHandler
+    for GasKillerHandler<P>
+{
+    type TaskData = GasKillerTaskData;
+
     /// Submits `verifyAndUpdate` for a certified height, recording round-trip
-    /// and execution metrics. Called by [`crate::submitter::Submitter`] with the
-    /// aggregation height as the metric key (previously the upstream
-    /// `BlsSignatureVerificationHandler::handle_verification` with `round`).
-    pub async fn handle_verification(
+    /// and execution metrics. Called by [`commonware_avs_router::submitter::Submitter`]
+    /// with the aggregation height as the metric key.
+    async fn handle_verification(
         &mut self,
         height: u64,
         msg_hash: FixedBytes<32>,

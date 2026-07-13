@@ -2,8 +2,8 @@ use ark_bn254::G2Affine;
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalDeserialize;
 use clap::{Arg, Command, value_parser};
+use commonware_avs_core::bn254::get_signer;
 use commonware_cryptography::Signer;
-use gas_killer_common::bn254::get_signer;
 use rand::RngCore;
 use std::os::unix::fs::PermissionsExt;
 

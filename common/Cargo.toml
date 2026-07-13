@@ -20,29 +20,13 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 
-# Cryptography (vendored BN254 scheme)
-ark-bn254 = { workspace = true }
-ark-ec = { workspace = true }
-ark-ff = { workspace = true }
-ark-serialize = { workspace = true }
-eigen-client-avsregistry = { workspace = true }
-eigen-common = { workspace = true }
-eigen-crypto-bls = { workspace = true }
-eigen-crypto-bn254 = { workspace = true }
-eigen-logging = { workspace = true }
-eigen-services-operatorsinfo = { workspace = true }
-eigen-utils = { workspace = true }
-hex = { workspace = true }
-rand = { workspace = true }
-rand_core = { workspace = true }
-thiserror = "2"
-
 # Commonware
+commonware-avs-bindings = { workspace = true }
+commonware-avs-core = { workspace = true }
+commonware-avs-eigenlayer = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
-commonware-math = { workspace = true }
-commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 

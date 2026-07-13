@@ -7,14 +7,10 @@ use crate::ingress::{
     start_gas_killer_http_server,
 };
 use crate::metrics::MetricsCollector;
-use crate::reporter::CertifiedReceiver;
-use crate::sequencer::{
-    DispatchTime, ResolutionSender, SharedAssignments, TaskQueueDepth, TaskReceiver, TaskSender,
-    task_channel, task_queue_depth,
-};
+use crate::sequencer::{TaskQueueDepth, TaskReceiver, TaskSender, task_channel, task_queue_depth};
 use crate::store::SqliteStore;
-use crate::submitter::Submitter;
 use alloy::network::{Ethereum, EthereumWallet};
+use alloy_primitives::Bytes;
 use alloy_provider::{
     Identity, Provider, ProviderBuilder, RootProvider,
     fillers::{
@@ -24,15 +20,22 @@ use alloy_provider::{
 };
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
+use commonware_avs_core::bn254::Bn254Scheme;
+use commonware_avs_eigenlayer::AvsDeployment;
+use commonware_avs_router::reporter::CertifiedReceiver;
+use commonware_avs_router::sequencer::{DispatchTime, ResolutionSender, SharedAssignments};
+use commonware_avs_router::submitter::Submitter;
 use gas_killer_common::ChainRole;
 use gas_killer_common::bindings::bls_apk_registry::BLSApkRegistry;
 use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
-use gas_killer_common::bn254::Bn254Scheme;
-use gas_killer_common::eigenlayer::AvsDeployment;
+use gas_killer_common::task_data::GasKillerTaskData;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{env, str::FromStr, sync::Arc};
 use tracing::info;
+
+/// Quorum 0 — the only quorum this deployment operates on.
+const QUORUM_NUMBERS: &[u8] = &[0x00];
 
 /// How often the background loop re-checks SQLite store liveness for the `gas_killer_db_up`
 /// metric. Aligned with a typical Prometheus scrape interval so the gauge stays fresh.
@@ -236,12 +239,13 @@ async fn create_wallet_provider_for_chain(
 #[allow(clippy::too_many_arguments)]
 pub async fn create_submitter(
     scheme: Bn254Scheme,
-    assignments: SharedAssignments,
-    certified: CertifiedReceiver,
+    assignments: SharedAssignments<GasKillerTaskData>,
+    certified: CertifiedReceiver<Bn254Scheme>,
     resolutions: ResolutionSender,
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
-) -> Result<Submitter> {
+    namespace: Vec<u8>,
+) -> Result<Submitter<GasKillerTaskData, GasKillerHandler<SimpleWalletProvider>>> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
@@ -359,5 +363,7 @@ pub async fn create_submitter(
         assignments,
         certified,
         resolutions,
+        namespace,
+        Bytes::from_static(QUORUM_NUMBERS),
     ))
 }

@@ -593,6 +593,13 @@ impl GasKillerValidator {
     }
 }
 
+#[async_trait::async_trait]
+impl commonware_avs_core::validator::ValidatorTrait<GasKillerTaskData> for GasKillerValidator {
+    async fn expected_digest(&self, task: &GasKillerTaskData) -> Result<Digest> {
+        self.expected_digest_for_task(task).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

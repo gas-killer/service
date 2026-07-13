@@ -6,8 +6,8 @@
 //! validates the nodes' TipAcks on channel 0, assembles BN254 certificates at
 //! quorum, journals them, and reports them to the [`CertReporter`]. Task flow:
 //! HTTP ingress → sequencer (assigns aggregation heights, broadcasts
-//! [`gas_killer_common::TaskDirective`]s on channel 1) → nodes sign → engine
-//! certifies → submitter calls `GasKillerSDK.verifyAndUpdate` on-chain.
+//! `TaskDirective`s on channel 1) → nodes sign → engine certifies → submitter
+//! calls `GasKillerSDK.verifyAndUpdate` on-chain.
 
 use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
@@ -16,6 +16,13 @@ use axum::{
     Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
 };
 use clap::{Arg, Command};
+use commonware_avs_core::bn254::{Bn254Scheme, G1PublicKey, PublicKey, get_signer};
+use commonware_avs_core::consensus::StaticEpochMonitor;
+use commonware_avs_router::automaton::RouterAutomaton;
+use commonware_avs_router::reporter::{CertReporter, certified_channel};
+use commonware_avs_router::sequencer::{
+    DispatchTime, Sequencer, TipReports, ingest_tip_reports, resolution_channel, shared_assignments,
+};
 use commonware_consensus::aggregation::{Config as AggregationConfig, Engine};
 use commonware_consensus::types::{Epoch, EpochDelta, HeightDelta};
 use commonware_cryptography::Signer as _;
@@ -31,20 +38,15 @@ use commonware_runtime::{
 use commonware_utils::ordered::{Map, Quorum as _, Set};
 use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
 use eigen_logging::log_level::LogLevel;
-use gas_killer_common::bn254::{Bn254Scheme, G1PublicKey, PublicKey};
 use gas_killer_common::get_operator_states;
 use gas_killer_common::{
-    GasKillerValidator, SpeculativePrebuildConfig, StaticEpochMonitor, ack_messages_per_second,
-    agg_activity_timeout, agg_window, get_signer, load_key_from_file, p2p_message_backlog,
-    p2p_quota_period, rebroadcast_interval, storage_directory,
+    GasKillerTaskData, GasKillerValidator, SpeculativePrebuildConfig, ack_messages_per_second,
+    agg_activity_timeout, agg_window, load_key_from_file, p2p_message_backlog, p2p_quota_period,
+    rebroadcast_interval, round_timeout, storage_directory,
 };
-use gas_killer_router::automaton::RouterAutomaton;
 use gas_killer_router::factories::{create_ingress, create_submitter};
 use gas_killer_router::metrics::MetricsCollector;
-use gas_killer_router::reporter::{CertReporter, certified_channel};
-use gas_killer_router::sequencer::{
-    DispatchTime, Sequencer, TipReports, ingest_tip_reports, resolution_channel, shared_assignments,
-};
+use gas_killer_router::sequencer::GasKillerTaskSource;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
@@ -396,7 +398,7 @@ fn main() {
         }
 
         // State shared across sequencer / automaton / submitter.
-        let assignments = shared_assignments();
+        let assignments = shared_assignments::<GasKillerTaskData>();
         let dispatch_time: DispatchTime = Arc::new(Mutex::new(HashMap::new()));
         let (certified_sender, certified_receiver) = certified_channel();
         let (resolution_sender, resolution_receiver) = resolution_channel();
@@ -453,6 +455,7 @@ fn main() {
             resolution_sender,
             Arc::clone(&metrics),
             Arc::clone(&dispatch_time),
+            APPLICATION_NAMESPACE.to_vec(),
         )
         .await
         .expect("Failed to create submitter");
@@ -461,24 +464,35 @@ fn main() {
         // Node tip reports (channel 1, node → router): if this router lost its
         // journal and assigns heights the nodes are already past, their reports
         // fast-forward the sequencer instead of wedging on a dead height.
-        let tip_reports = TipReports::new(scheme.participants().len());
+        let tip_reports = TipReports::<PublicKey>::new(scheme.participants().len());
         {
             let participant_keys: HashSet<PublicKey> =
                 scheme.participants().iter().cloned().collect();
             let tip_reports = tip_reports.clone();
             context.child("tip_reports").spawn(move |_| async move {
-                ingest_tip_reports(directive_receiver, participant_keys, tip_reports).await;
+                ingest_tip_reports::<GasKillerTaskData, _, _>(
+                    directive_receiver,
+                    participant_keys,
+                    tip_reports,
+                )
+                .await;
             });
         }
 
-        // Sequencer: dequeues tasks, assigns heights, broadcasts directives to the
-        // operator set (explicit keys — see Sequencer::broadcast).
-        let directive_recipients: Vec<PublicKey> = scheme.participants().iter().cloned().collect();
-        let sequencer = Sequencer::new(
+        // Task source: dequeues ingress tasks and enriches them (EVMSketch) for
+        // the sequencer.
+        let task_source = GasKillerTaskSource::new(
             ingress.receiver,
             ingress.queue_depth,
             validator,
             Some(Arc::clone(&metrics)),
+        );
+
+        // Sequencer: assigns heights, broadcasts directives to the operator set
+        // (explicit keys — see Sequencer::broadcast).
+        let directive_recipients: Vec<PublicKey> = scheme.participants().iter().cloned().collect();
+        let sequencer = Sequencer::new(
+            task_source,
             dispatch_time,
             assignments,
             reporter_mailbox,
@@ -486,6 +500,8 @@ fn main() {
             directive_sender,
             directive_recipients,
             tip_reports,
+            round_timeout(),
+            rebroadcast_interval(),
         );
         context.child("sequencer").spawn(move |_| sequencer.run());
 
