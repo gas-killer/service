@@ -17,16 +17,18 @@
 //! "I verified the chain, and I personally executed my committee's share of it".
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use alloy::rpc::types::TransactionRequest;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use alloy_primitives::{Address, B256, keccak256};
+use gas_analyzer::{EvmSketchExecutorCache, LocalStateCache, SimProfile, call_view_local_multi};
 
 sol! {
     /// Mirror of `Qwen3Seg.Span` (solidity-sdk).
@@ -161,6 +163,27 @@ pub struct ShardJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardWork {
     pub jobs: Vec<ShardJob>,
+}
+
+/// The pinned local-execution environment segment view calls run through
+/// under `GK_SIM_EXECUTOR=local` — built by
+/// [`crate::GasKillerValidator::local_view_ctx`] from the validator's OWN
+/// caches and config, so a segment executes in exactly the environment the
+/// tracked-function path uses: same memoized manifest-verified mmap overlay
+/// mounts, same pinned [`SimProfile`], same lazy remote-state backend.
+///
+/// This is what makes phantom-overlay models (the ~34GB Qwen3.5-35B-A3B)
+/// servable as segments at all: their chunks exist on no RPC node, so a
+/// plain `eth_call` reads empty code — the overlay must mount in-process.
+#[derive(Clone)]
+pub struct LocalViewCtx {
+    pub executor_cache: Arc<EvmSketchExecutorCache>,
+    pub local_state_cache: Arc<LocalStateCache>,
+    pub sim_profile: SimProfile,
+    /// One `(weights_path, tokenizer_path, manifest)` spec per pinned model
+    /// (`GK_OVERLAY_WEIGHTS[_N]`/...). Empty mounts nothing — segments then
+    /// see only base chain state, correct for consumers without overlays.
+    pub overlay_files: Vec<(String, String, B256)>,
 }
 
 /// `POST /shard/result` body.
@@ -454,12 +477,97 @@ async fn eth_call(client: &reqwest::Client, rpc_url: &str, job: &ShardJob) -> Re
     hex::decode(hex_str.trim_start_matches("0x")).context("eth_call: result not hex")
 }
 
+/// Fetches the latest block number from `rpc_url` — the pin for the local
+/// executor's block-scoped state backend. Segment view calls read only
+/// immutable code (the deployed seg engine + the mounted overlay), so ANY
+/// recent block yields byte-identical output across committee members; the
+/// pin exists because the analyzer's caches are block-keyed.
+async fn eth_block_number(client: &reqwest::Client, rpc_url: &str) -> Result<u64> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_blockNumber",
+        "params": [],
+    });
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("eth_blockNumber POST {rpc_url}"))?
+        .error_for_status()?
+        .json()
+        .await
+        .context("eth_blockNumber: decoding JSON-RPC response")?;
+    if let Some(err) = resp.get("error") {
+        bail!("eth_blockNumber error: {err}");
+    }
+    let hex_str = resp
+        .get("result")
+        .and_then(|r| r.as_str())
+        .context("eth_blockNumber: missing result")?;
+    u64::from_str_radix(hex_str.trim_start_matches("0x"), 16)
+        .context("eth_blockNumber: result not hex")
+}
+
+/// Executes one pre-encoded segment view call IN-PROCESS through the
+/// analyzer's local executor with the validator's pinned overlay mounts
+/// (`GK_SIM_EXECUTOR=local`), returning the raw returndata — the local twin
+/// of [`eth_call`]. The RPC serves only as the lazy base-state backend (the
+/// deployed seg engine's code); the model weights come from the mmap mounts.
+///
+/// The whole call runs on the blocking pool (`spawn_blocking` +
+/// `Handle::block_on`, exactly the validator's PR#319 starvation fix): a
+/// segment is minutes of pure compute, and the FIRST segment additionally
+/// pays the one-time streaming-keccak verification over the full artifact
+/// files at mount time — none of which may occupy one of the runtime's two
+/// shared worker threads, or /healthz and P2P starve and Kubernetes kills
+/// the node mid-segment.
+async fn local_view_call(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    ctx: &LocalViewCtx,
+    job: &ShardJob,
+) -> Result<Vec<u8>> {
+    let block_number = eth_block_number(client, rpc_url).await?;
+    let tx_request = TransactionRequest::default()
+        .to(job.to)
+        .input(alloy_primitives::Bytes::copy_from_slice(&job.data).into())
+        .gas_limit(job.gas);
+    let handle = tokio::runtime::Handle::current();
+    let rpc_url = rpc_url.to_owned();
+    let ctx = ctx.clone();
+    tokio::task::spawn_blocking(move || {
+        handle.block_on(async move {
+            call_view_local_multi(
+                &ctx.executor_cache,
+                &ctx.local_state_cache,
+                &rpc_url,
+                tx_request,
+                block_number,
+                ctx.sim_profile,
+                &ctx.overlay_files,
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(|e| anyhow!("segment view-call task panicked or was cancelled: {e}"))?
+    .map(|bytes| bytes.to_vec())
+}
+
 /// Runs forever: polls the router's shard work queue for this operator,
-/// executes each job against `rpc_url`, records the digests locally (for the
-/// validator gate), and posts the raw returndata back to the router.
+/// executes each job — in-process through the analyzer's local executor with
+/// the pinned overlay mounts when `view_ctx` is set (`GK_SIM_EXECUTOR=local`),
+/// else as plain `eth_call` against `rpc_url` — records the digests locally
+/// (for the validator gate), and posts the raw returndata back to the router.
 ///
 /// Intended to be spawned on the node when `GK_SHARD_URL` is set.
-pub async fn run_shard_loop(state: std::sync::Arc<ShardState>, rpc_url: String) {
+pub async fn run_shard_loop(
+    state: std::sync::Arc<ShardState>,
+    rpc_url: String,
+    view_ctx: Option<LocalViewCtx>,
+) {
     let interval = shard_poll_interval();
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -493,6 +601,8 @@ pub async fn run_shard_loop(state: std::sync::Arc<ShardState>, rpc_url: String) 
         work_url = %work_url,
         layer_range = ?state.layer_range,
         poll_ms = interval.as_millis() as u64,
+        executor = if view_ctx.is_some() { "local" } else { "rpc" },
+        overlay_models = view_ctx.as_ref().map(|c| c.overlay_files.len()).unwrap_or(0),
         "shard loop started"
     );
 
@@ -515,7 +625,11 @@ pub async fn run_shard_loop(state: std::sync::Arc<ShardState>, rpc_url: String) 
         if let Some(work) = work {
             for job in work.jobs {
                 let started = std::time::Instant::now();
-                match eth_call(&client, &rpc_url, &job).await {
+                let executed = match &view_ctx {
+                    Some(ctx) => local_view_call(&client, &rpc_url, ctx, &job).await,
+                    None => eth_call(&client, &rpc_url, &job).await,
+                };
+                match executed {
                     Ok(returndata) => {
                         let rd_hash = keccak256(&returndata);
                         match seg_chk(job.kind, &job.data, &returndata) {

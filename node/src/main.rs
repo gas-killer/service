@@ -453,9 +453,14 @@ fn main() {
                     ),
                 );
                 let rpc_url = validator.rpc_url().to_string();
+                // Under GK_SIM_EXECUTOR=local, segments execute in-process with
+                // the validator's own pinned overlay mounts (a phantom overlay
+                // exists on no RPC node); under rpc they stay plain eth_calls
+                // against the simulation RPC.
+                let view_ctx = validator.local_view_ctx();
                 let loop_state = Arc::clone(&shard_state);
                 context.child("shard").spawn(move |_| async move {
-                    gas_killer_common::run_shard_loop(loop_state, rpc_url).await;
+                    gas_killer_common::run_shard_loop(loop_state, rpc_url, view_ctx).await;
                 });
                 tracing::info!(
                     operator_id,

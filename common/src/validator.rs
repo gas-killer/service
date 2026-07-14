@@ -585,6 +585,45 @@ impl GasKillerValidator {
             .unwrap_or("")
     }
 
+    /// The local view-call context for the sharded segment executor, or
+    /// `None` under `GK_SIM_EXECUTOR=rpc` (segments then execute as plain
+    /// `eth_call` against the simulation RPC — the historical path, which
+    /// requires the model to be materialized ON that RPC, e.g. setCode'd
+    /// into a harness anvil).
+    ///
+    /// Under `local`, segment view calls run in-process through the SAME
+    /// pinned environment as tracked-function analysis: the shared executor
+    /// and state caches (so segments reuse the validator's memoized,
+    /// manifest-verified mmap mounts rather than re-verifying ~35GB of
+    /// artifacts), the pinned `SimProfile`, and every configured overlay
+    /// artifact spec. This is what makes phantom-overlay models servable as
+    /// segments at all: no RPC node hosts their chunks.
+    ///
+    /// Panics when `local` is combined with an in-RAM overlay
+    /// (`GK_OVERLAY_MMAP=false`): the segment executor only mounts from
+    /// files, and silently running segments WITHOUT the configured overlay
+    /// would fork the committee. Same fail-loud rationale as
+    /// [`sim_profile_from_env`].
+    pub fn local_view_ctx(&self) -> Option<crate::shard::LocalViewCtx> {
+        match self.sim_executor {
+            SimExecutor::Rpc => None,
+            SimExecutor::Local => {
+                assert!(
+                    self.overlay_env.is_none(),
+                    "sharded segment execution under GK_SIM_EXECUTOR=local requires mmap \
+                     overlays (GK_OVERLAY_MMAP=true, the default) — the in-RAM overlay is \
+                     not mountable for segment view calls"
+                );
+                Some(crate::shard::LocalViewCtx {
+                    executor_cache: Arc::clone(&self.executor_cache),
+                    local_state_cache: Arc::clone(&self.local_state_cache),
+                    sim_profile: self.sim_profile,
+                    overlay_files: self.overlay_files.clone(),
+                })
+            }
+        }
+    }
+
     /// Returns the RPC URL for a specific chain
     pub fn rpc_url_for_chain(&self, chain_id: ChainRole) -> Option<&str> {
         self.chain_rpc_urls.get(&chain_id).map(|s| s.as_str())
