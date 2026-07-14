@@ -14,7 +14,6 @@ alloy = { workspace = true }
 
 # Other utilities
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 
 # Serialization
 bytes = { workspace = true }
@@ -24,24 +23,21 @@ axum = { workspace = true }
 
 # CLI / Config
 clap = { workspace = true }
-# Upstream AVS crates
-commonware-avs-core = { workspace = true }
-commonware-avs-node = { workspace = true }
-commonware-avs-eigenlayer = { workspace = true }
 
 # Commonware ecosystem
+commonware-actor = { workspace = true }
+commonware-avs-core = { workspace = true }
+commonware-avs-node = { workspace = true }
 commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true }
+commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
-dotenv = { workspace = true }
 
 # Logging
 eigen-logging = { workspace = true }
-
-# Async / Runtime
-futures = { workspace = true }
 
 # Internal crates
 gas-killer-common = { workspace = true }

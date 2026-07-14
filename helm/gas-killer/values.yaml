@@ -239,6 +239,11 @@ node:
   # P2P channel rate limit in messages per second. Accepts floats (e.g. 0.5 = one
   # message every two seconds). Raising beyond gas-analyzer throughput causes queue buildup.
   p2pMessagesPerSecond: "1.0"
+  # Writable directory for the aggregation engine's journal (STORAGE_DIR), backed
+  # by an emptyDir volume: it survives container restarts within a pod but is
+  # cleared when the pod is deleted/rescheduled — deleting the node pods is the
+  # documented recovery for a height wedged by split real/skip digests.
+  storageDir: /app/data
   # Port for the node's /healthz HTTP endpoint (used by Kubernetes probes)
   healthzPort: 8081
   # How long Kubernetes waits for a node to finish in-flight work after SIGTERM.
@@ -280,6 +285,11 @@ router:
   # P2P channel rate limit in messages per second. Accepts floats (e.g. 0.5 = one
   # message every two seconds). Raising beyond gas-analyzer throughput causes queue buildup.
   p2pMessagesPerSecond: "1.0"
+  # Writable directory for the aggregation engine's journal (STORAGE_DIR), backed
+  # by an emptyDir volume. The router's journal only caches observed certificates
+  # (it is not a signer), so losing it on pod rescheduling is safe: the sequencer
+  # re-reads the tip from the network and skips past stale heights.
+  storageDir: /app/data
   # Port for the router's /healthz and /readyz HTTP endpoints (used by Kubernetes probes)
   healthzPort: 8081
   # How long Kubernetes waits for a router to finish in-flight work after SIGTERM.
@@ -299,10 +309,12 @@ router:
   # for the full window. Tune against gas_killer_p2p_round_trip_seconds and the
   # round-timeout panel in the Grafana dashboard.
   roundTimeout: "300"
-  # How often (in seconds) the router re-sends the Start broadcast for an in-flight round
-  # while waiting for signatures. When equal to or longer than roundTimeout the biased
-  # select ensures no intra-round rebroadcast fires.
-  rebroadcastInterval: "300"
+  # How often (in seconds) the router re-sends the TaskDirective (Announce, then Skip
+  # after roundTimeout) for an in-flight height. Under the aggregation engine,
+  # rebroadcast-until-certified is a liveness requirement: a node that misses every
+  # Announce can only resolve the height as a skip, so this MUST be well below
+  # roundTimeout or a single dropped delivery wedges the 3-of-3 quorum.
+  rebroadcastInterval: "15"
   # Max seconds the executor waits for a verifyAndUpdate transaction receipt before
   # timing out the round and proceeding to the next one. Prevents an indefinite stall
   # under L1 mempool congestion or RPC degradation. Leave empty to use the per-chain

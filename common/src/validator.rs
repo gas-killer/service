@@ -1,6 +1,5 @@
 use alloy_provider::Provider;
 use anyhow::Result;
-use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
 use commonware_runtime::telemetry::metrics::raw::Histogram;
@@ -11,13 +10,35 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use alloy_primitives::{Address, U256};
+
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
 use crate::task_data::GasKillerTaskData;
-use commonware_avs_router::validator::ValidatorTrait;
-use commonware_avs_router::wire;
 
 use alloy::rpc::types::TransactionRequest;
+
+/// Key identifying a task's expected digest in [`GasKillerValidator`]'s digest cache.
+///
+/// The digest is `sha256(abi.encode(transition_index, target_address, selector,
+/// storage_updates))`, and `storage_updates` is derived by EVMSketch from
+/// `(target_address, call_data, from_address, value, block_height)`. `transition_index`
+/// is a *per-contract* counter, so keying on `(transition_index, block_height)` alone
+/// would collide two tasks for *different* contracts that share the same index and
+/// block — returning the wrong contract's digest. The key covers every field the
+/// digest depends on.
+type DigestCacheKey = (u64, u64, Address, Address, U256, Vec<u8>);
+
+fn digest_cache_key(task: &GasKillerTaskData) -> DigestCacheKey {
+    (
+        task.transition_index,
+        task.block_height,
+        task.target_address,
+        task.from_address,
+        task.value,
+        task.call_data.clone(),
+    )
+}
 use gas_analyzer::{EvmSketchExecutorCache, call_to_encoded_state_updates_with_evmsketch};
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
@@ -94,10 +115,10 @@ pub struct GasKillerValidator {
     providers: Arc<HashMap<ChainRole, ReadOnlyProvider>>,
     /// Default chain for backwards compatibility
     default_chain: ChainRole,
-    /// Cache: (transition_index, block_height) -> computed digest
-    /// Prevents re-running expensive EVMSketch for the same round when the
+    /// Cache: task identity ([`DigestCacheKey`]) -> computed digest.
+    /// Prevents re-running expensive EVMSketch for the same task when the
     /// orchestrator validates multiple signatures for identical task data.
-    digest_cache: Arc<Mutex<HashMap<(u64, u64), Digest>>>,
+    digest_cache: Arc<Mutex<HashMap<DigestCacheKey, Digest>>>,
     /// LRU cache of pre-built EvmSketch executors keyed by (rpc_url, block_number).
     /// Eliminates the 2× eth_getBlockByNumber build cost (~80–120 ms) for the
     /// 2nd…Nth request at the same block height.
@@ -324,29 +345,6 @@ impl GasKillerValidator {
         ))
     }
 
-    /// Validates the message format and decodes the aggregation
-    async fn validate_message_format(
-        &self,
-        msg: &[u8],
-    ) -> Result<wire::Aggregation<GasKillerTaskData>> {
-        debug!("Validating message format, length: {} bytes", msg.len());
-
-        if msg.is_empty() {
-            return Err(anyhow::anyhow!("Message is empty"));
-        }
-
-        // Try to decode the aggregation
-        let mut msg_buf = msg;
-        let aggregation = wire::Aggregation::<GasKillerTaskData>::read_cfg(&mut msg_buf, &())
-            .map_err(|e| anyhow::anyhow!("Failed to decode aggregation: {}", e))?;
-
-        debug!(
-            "Successfully decoded aggregation with round: {}",
-            aggregation.round
-        );
-        Ok(aggregation)
-    }
-
     /// Precomputes and caches the payload digest using already-computed storage updates.
     ///
     /// Call this from the task creator after it runs EVMSketch to build the payload, so that
@@ -354,7 +352,7 @@ impl GasKillerValidator {
     /// node signature for the same round.
     pub async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
         let digest = task_data.build_payload_hash(storage_updates);
-        let cache_key = (task_data.transition_index, task_data.block_height);
+        let cache_key = digest_cache_key(task_data);
         let mut cache = self.digest_cache.lock().await;
         cache.insert(cache_key, digest);
         debug!(
@@ -547,20 +545,23 @@ impl GasKillerValidator {
         Ok(result.storage_updates)
     }
 
-    /// Core validation logic: decodes message, computes storage updates, and builds payload hash.
-    /// This is the single place where storage updates are computed to avoid double computation.
+    /// Validates a task and returns the digest a correct node is expected to sign for it.
+    ///
+    /// This is the single place where storage updates are recomputed (via EVMSketch at
+    /// `task.block_height`) to avoid double computation: the recomputed updates are hashed
+    /// with [`GasKillerTaskData::build_payload_hash`], so a task whose announced
+    /// `storage_updates` diverge from local re-execution yields a different digest and the
+    /// dishonest announcement never reaches quorum.
     ///
     /// Results are cached by (transition_index, block_height) so that repeated calls for the
-    /// same round (e.g., the orchestrator validating each of the N node signatures) only run
-    /// the expensive EVMSketch computation once.
-    async fn validate_and_build_hash(&self, msg: &[u8]) -> Result<Digest> {
-        debug!("Validating message of length: {} bytes", msg.len());
+    /// same task (e.g. the router resolving its automaton digest after [`Self::prime_cache`],
+    /// or a node re-proposing a height after restart) only run the expensive EVMSketch
+    /// computation once. Errors are NOT cached: transient RPC failures surface to the caller,
+    /// which retries with backoff (deterministic failures are the caller's cue to skip).
+    pub async fn expected_digest_for_task(&self, task: &GasKillerTaskData) -> Result<Digest> {
+        let task_data = task;
 
-        // Validate message format and decode
-        let aggregation = self.validate_message_format(msg).await?;
-        let task_data = &aggregation.metadata;
-
-        let cache_key = (task_data.transition_index, task_data.block_height);
+        let cache_key = digest_cache_key(task_data);
 
         // Check cache before running expensive EVMSketch
         {
@@ -593,15 +594,9 @@ impl GasKillerValidator {
 }
 
 #[async_trait::async_trait]
-impl ValidatorTrait for GasKillerValidator {
-    async fn validate_and_return_expected_hash(&self, msg: &[u8]) -> Result<Digest> {
-        debug!("validate_and_return_expected_hash called");
-        self.validate_and_build_hash(msg).await
-    }
-
-    async fn get_payload_from_message(&self, msg: &[u8]) -> Result<Digest> {
-        debug!("get_payload_from_message called");
-        self.validate_and_build_hash(msg).await
+impl commonware_avs_core::validator::ValidatorTrait<GasKillerTaskData> for GasKillerValidator {
+    async fn expected_digest(&self, task: &GasKillerTaskData) -> Result<Digest> {
+        self.expected_digest_for_task(task).await
     }
 }
 
@@ -609,7 +604,6 @@ impl ValidatorTrait for GasKillerValidator {
 mod tests {
     use super::*;
     use alloy::primitives::{Address, U256};
-    use commonware_codec::{EncodeSize, Write};
 
     fn create_test_task_data() -> GasKillerTaskData {
         GasKillerTaskData {
@@ -628,6 +622,26 @@ mod tests {
     async fn test_validator_creation() {
         let _validator =
             GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
+    }
+
+    #[test]
+    fn digest_cache_key_distinguishes_different_contracts() {
+        // Two tasks for DIFFERENT contracts at the same (transition_index,
+        // block_height) — the exact collision the key must avoid so one task's
+        // cached digest is never returned for the other.
+        let a = create_test_task_data();
+        let mut b = a.clone();
+        b.target_address = Address::from([9u8; 20]);
+        assert_ne!(digest_cache_key(&a), digest_cache_key(&b));
+
+        // Differing call_data (same contract) must also key distinctly, since it
+        // changes the computed storage updates and therefore the digest.
+        let mut c = a.clone();
+        c.call_data = vec![0xde, 0xad, 0xbe, 0xef];
+        assert_ne!(digest_cache_key(&a), digest_cache_key(&c));
+
+        // Identical task identity keys identically (cache hit is intended here).
+        assert_eq!(digest_cache_key(&a), digest_cache_key(&a.clone()));
     }
 
     #[test]
@@ -664,41 +678,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_invalid_message() {
-        let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
-
-        assert!(
-            validator
-                .validate_and_return_expected_hash(&[])
-                .await
-                .is_err()
-        );
-        assert!(
-            validator
-                .validate_and_return_expected_hash(&[0x01, 0x02, 0x03])
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_message_format_validation() {
-        // Unit test: verify message format validation works without RPC
+    async fn test_expected_digest_uses_primed_cache() {
+        // prime_cache stores the digest keyed by (transition_index, block_height), so
+        // expected_digest_for_task must return it without hitting any RPC. This is the
+        // router-side flow: the sequencer primes after EVMSketch, the automaton looks up.
         let validator = GasKillerValidator::with_rpc_url("https://example.com");
         let task_data = create_test_task_data();
+        let storage_updates = vec![0x01, 0x02, 0x03, 0x04];
 
-        let aggregation = wire::Aggregation::<GasKillerTaskData>::new(1, task_data, None);
+        validator.prime_cache(&task_data, &storage_updates).await;
 
-        let mut msg_bytes = Vec::with_capacity(aggregation.encode_size());
-        aggregation.write(&mut msg_bytes);
-
-        // Message format validation should succeed (doesn't need RPC)
-        let result = validator.validate_message_format(&msg_bytes).await;
-        assert!(result.is_ok());
-
-        let decoded = result.unwrap();
-        assert_eq!(decoded.round, 1);
-        assert_eq!(decoded.metadata.transition_index, 1);
+        let digest = validator
+            .expected_digest_for_task(&task_data)
+            .await
+            .expect("cached digest lookup must not require RPC");
+        assert_eq!(digest, task_data.build_payload_hash(&storage_updates));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -709,14 +703,7 @@ mod tests {
         let validator = GasKillerValidator::with_rpc_url("https://ethereum-sepolia.publicnode.com");
         let task_data = create_test_task_data();
 
-        let aggregation = wire::Aggregation::<GasKillerTaskData>::new(1, task_data, None);
-
-        let mut msg_bytes = Vec::with_capacity(aggregation.encode_size());
-        aggregation.write(&mut msg_bytes);
-
-        let result = validator
-            .validate_and_return_expected_hash(&msg_bytes)
-            .await;
+        let result = validator.expected_digest_for_task(&task_data).await;
 
         // With proper RPC/Anvil setup, this should succeed
         let hash = result.expect("Full validation should succeed with RPC access");

@@ -1,3 +1,14 @@
+//! Gas Killer router: verifier-only aggregation engine + task sequencer +
+//! on-chain submitter.
+//!
+//! The router is NOT a signing participant. It runs the commonware aggregation
+//! engine with a verifier-only [`Bn254Scheme`] (`me() == None`): the engine
+//! validates the nodes' TipAcks on channel 0, assembles BN254 certificates at
+//! quorum, journals them, and reports them to the [`CertReporter`]. Task flow:
+//! HTTP ingress → sequencer (assigns aggregation heights, broadcasts
+//! `TaskDirective`s on channel 1) → nodes sign → engine certifies → submitter
+//! calls `GasKillerSDK.verifyAndUpdate` on-chain.
+
 use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
 use ark_serialize::CanonicalDeserialize;
@@ -5,39 +16,65 @@ use axum::{
     Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
 };
 use clap::{Arg, Command};
-use commonware_avs_core::bn254::{PublicKey, get_signer};
-use commonware_avs_router::orchestrator::builder::OrchestratorBuilder;
-use commonware_avs_router::orchestrator::traits::OrchestratorTrait;
-use commonware_cryptography::Signer;
+use commonware_avs_core::bn254::{Bn254Scheme, G1PublicKey, PublicKey, get_signer};
+use commonware_avs_core::consensus::StaticEpochMonitor;
+use commonware_avs_router::automaton::RouterAutomaton;
+use commonware_avs_router::reporter::{CertReporter, certified_channel};
+use commonware_avs_router::sequencer::{
+    DispatchTime, Sequencer, TipReports, ingest_tip_reports, resolution_channel, shared_assignments,
+};
+use commonware_consensus::aggregation::{Config as AggregationConfig, Engine};
+use commonware_consensus::types::{Epoch, EpochDelta, HeightDelta};
+use commonware_cryptography::Signer as _;
+use commonware_cryptography::certificate::{ConstantProvider, Scheme as _};
 use commonware_p2p::authenticated::lookup::{self, Network};
-use commonware_p2p::{Address, AddressableManager};
+use commonware_p2p::{Address, AddressableManager as _};
+use commonware_parallel::Sequential;
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_runtime::{
-    Metrics, Runner, Spawner, Supervisor,
+    Metrics, Quota, Runner, Spawner, Supervisor,
     tokio::{self},
 };
-use commonware_utils::NZU32;
-use commonware_utils::ordered::Map;
+use commonware_utils::ordered::{Map, Quorum as _, Set};
+use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
 use eigen_logging::log_level::LogLevel;
+use gas_killer_common::get_operator_states;
 use gas_killer_common::{
-    GasKillerValidator, SpeculativePrebuildConfig, get_operator_states, load_key_from_file,
-    p2p_message_backlog, p2p_quota_period,
+    GasKillerTaskData, GasKillerValidator, SpeculativePrebuildConfig, ack_messages_per_second,
+    agg_activity_timeout, agg_window, load_key_from_file, p2p_message_backlog, p2p_quota_period,
+    rebroadcast_interval, round_timeout, storage_directory,
 };
-use gas_killer_router::GasKillerOrchestratorBuilder;
+use gas_killer_router::factories::{create_ingress, create_submitter};
 use gas_killer_router::metrics::MetricsCollector;
-use governor::Quota;
-use std::collections::HashMap;
+use gas_killer_router::sequencer::GasKillerTaskSource;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 
+/// Maximum p2p message size. `TipAck`s are tiny; `TaskDirective::Announce` is
+/// bounded by the 128 KB combined calldata/storage-updates limit — 1 MB is
+/// generous headroom (`Sender::send` panics above this).
+const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
+
+/// P2p channel carrying the aggregation engine's `TipAck`s (engine-internal).
+const ACK_CHANNEL: u64 = 0;
+/// P2p channel on which the router broadcasts `TaskDirective`s to the nodes.
+const DIRECTIVE_CHANNEL: u64 = 1;
+
+/// Journal partition for the router's verifier-only engine (a subdirectory of
+/// the runtime storage directory).
+const JOURNAL_PARTITION: &str = "aggregation-router";
+
 #[derive(Clone)]
 struct HealthState {
     ready: Arc<AtomicBool>,
+    // tokio::Context is !Clone in 2026.5.0; encode() works through a shared handle.
     context: Arc<tokio::Context>,
     metrics: Arc<MetricsCollector>,
 }
@@ -47,7 +84,8 @@ async fn healthz_handler() -> StatusCode {
     StatusCode::OK
 }
 
-/// Readiness probe — 503 until the network is starting and the orchestrator is spawned.
+/// Readiness probe — 503 until the engine/sequencer/submitter are spawned and
+/// the network is starting.
 async fn readyz_handler(State(s): State<HealthState>) -> StatusCode {
     if s.ready.load(Ordering::Relaxed) {
         StatusCode::OK
@@ -107,11 +145,7 @@ fn resolve_with_retry(
 }
 
 fn main() {
-    // Initialize runtime
-    let runtime_cfg = tokio::Config::default();
-    let runner = tokio::Runner::new(runtime_cfg.clone());
-
-    // Parse arguments
+    // Parse arguments (flags unchanged from the pre-migration router).
     let matches = Command::new("orchestrator")
         .about("generate and verify BN254 Multi-Signatures")
         .arg(
@@ -143,14 +177,8 @@ fn main() {
         .get_one::<String>("port")
         .expect("--port is required");
     let key = load_key_from_file(key_file);
-    let me = format!("{key}@{port}");
-    let parts = me.split('@').collect::<Vec<&str>>();
-    if parts.len() != 2 {
-        panic!("Identity not well-formed");
-    }
-    let key = parts[0];
-    let signer = get_signer(key);
-    let port = parts[1].parse::<u16>().expect("Port not well-formed");
+    let signer = get_signer(&key);
+    let port = port.parse::<u16>().expect("Port not well-formed");
     tracing::info!(port, "loaded port");
 
     // Log the router's public key G2 coordinates for config generation
@@ -162,8 +190,20 @@ fn main() {
     println!("  g2_y1: {}", g2_point.y.c0);
     println!("  g2_y2: {}", g2_point.y.c1);
 
+    // Initialize runtime. A stable storage directory is REQUIRED: the engine's
+    // certificate journal must survive restarts (the runtime default is a
+    // random per-process temp dir, which would silently lose replay).
+    let storage_dir = storage_directory().join("router");
+    println!(
+        "Engine journal storage directory: {}",
+        storage_dir.display()
+    );
+    let runtime_cfg = tokio::Config::default()
+        .with_worker_threads(4)
+        .with_storage_directory(storage_dir);
+    let runner = tokio::Runner::new(runtime_cfg);
+
     // Configure network
-    const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
     let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
     let mut p2p_cfg = lookup::Config::recommended(
         signer.clone(),
@@ -182,23 +222,29 @@ fn main() {
     // where external operators are behind NAT. IP-based pre-filtering cannot work in either
     // case; authentication relies entirely on the cryptographic handshake (peer public keys
     // checked against the registered operator set), which is secure for both topologies.
+    // (Was `attempt_unregistered_handshakes` before 2026.5.0.)
     p2p_cfg.bypass_ip_check = true;
 
     // recommended() throttles peer discovery for large open gossip networks where aggressive
     // dialing is abusive. gas-killer instead runs a small, static, allowlisted operator set in a
-    // full mesh: every participant dials every other, so both ends frequently dial at once and one
-    // connection loses the reservation race. The loser must re-dial quickly, and an operator that
-    // restarts must rejoin the signing quorum in seconds rather than ~a minute. Restore fast
-    // (re)discovery while keeping recommended's abuse-resistance (concurrent-handshake cap, subnet
-    // rate limit, ping cadence).
+    // full mesh, so keep discovery fast (500ms dial cadence) for quick (re)join while retaining
+    // recommended's abuse-resistance (concurrent-handshake cap, subnet rate limit, ping cadence).
     p2p_cfg.dial_frequency = Duration::from_millis(500);
-    p2p_cfg.peer_connection_cooldown = Duration::from_secs(1);
+    // `peer_connection_cooldown` is the minimum time between dial reservations for a
+    // single peer, so it also bounds how fast a FAILED initial dial retries. The
+    // router starts after the nodes (compose staggers it), so the nodes' first dials
+    // fail; a long cooldown then delays reconnection past the round timeout and the
+    // first task certifies as a skip. Keep it short so the static mesh re-forms within
+    // a couple of seconds of the router coming up. (A larger value was briefly used to
+    // damp a HandshakeError(DecryptionFailed) reconnect flap, but that was specific to
+    // slow QEMU-emulated CI hosts and does not occur on native amd64.)
+    p2p_cfg.peer_connection_cooldown = Duration::from_secs(3);
     p2p_cfg.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(16));
 
     // Start runtime
     runner.start(|context| async move {
         let (mut network, mut oracle) = Network::new(context.child("network"), p2p_cfg);
-        let mut recipients: Vec<(PublicKey, Address)>;
+        let mut recipients: Vec<(PublicKey, SocketAddr)>;
         let quorum_infos;
         // Configure quorum number from environment (default: 0)
         let quorum_number: usize = std::env::var("QUORUM_NUMBER")
@@ -238,12 +284,12 @@ fn main() {
                     if let Some(socket_addr) =
                         resolve_with_retry(&socket, 30, Duration::from_secs(2))
                     {
-                        recipients.push((verifier, Address::from(socket_addr)));
+                        recipients.push((verifier, socket_addr));
                     } else {
                         // Last resort: try parsing as direct IP:PORT
                         match SocketAddr::from_str(&socket) {
                             Ok(socket_addr) => {
-                                recipients.push((verifier, Address::from(socket_addr)));
+                                recipients.push((verifier, socket_addr));
                             }
                             Err(parse_err) => {
                                 tracing::error!(
@@ -257,8 +303,10 @@ fn main() {
                     }
                 }
             }
+            // Authorize ourselves too (nodes dial the router from
+            // public_orchestrator.json; this entry is never dialed by us).
             let orchestrator_verifier = signer.public_key();
-            recipients.push((orchestrator_verifier, Address::from(my_addr)));
+            recipients.push((orchestrator_verifier, my_addr));
         }
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
@@ -266,52 +314,77 @@ fn main() {
             .finish();
         _ = tracing::subscriber::set_default(subscriber);
 
-        // Register the authorized peer set (id 0).
-        let authorized = Map::from_iter_dedup(recipients);
-        oracle.track(0, authorized);
+        // Provide authorized peers. `from_iter_dedup` keeps the first entry per
+        // key (the operator list may already contain the router's key).
+        let peers: Map<PublicKey, Address> = Map::from_iter_dedup(
+            recipients
+                .iter()
+                .cloned()
+                .map(|(pk, sa)| (pk, Address::Symmetric(sa))),
+        );
+        let _ = oracle.track(0, peers);
 
-        // Parse contributors from operator states
-        let mut contributors = Vec::new();
-        let mut contributors_map = HashMap::new();
+        // Build the participant set (sorted G2 keys — participant indices derive
+        // from this order on every process) and the index-aligned G1 keys.
         let operators = &quorum_infos[quorum_number].operators;
         if operators.is_empty() {
             panic!("Please provide at least one contributor");
         }
-        for operator in operators {
-            let verifier = operator.pub_keys.as_ref().unwrap().g2_pub_key.clone();
-            let verifier_g1 = operator.pub_keys.as_ref().unwrap().g1_pub_key.clone();
-            tracing::info!(key = ?verifier, "registered contributor",);
-            contributors.push(verifier.clone());
-            contributors_map.insert(verifier, verifier_g1);
-        }
+        // Build the G2->G1 map with `from_iter_dedup` (sort + first-write-wins on a
+        // duplicate G2 key) — IDENTICAL to the node's construction in
+        // gas-killer-node/src/main.rs. If node and router deduped differently (e.g.
+        // last-write-wins here), a duplicate G2 key bound to different G1 keys would
+        // silently misalign the two sides' G1 assignment at that participant index.
+        let key_map: Map<PublicKey, G1PublicKey> =
+            Map::from_iter_dedup(operators.iter().map(|operator| {
+                let keys = operator.pub_keys.as_ref().expect("operator has BLS keys");
+                tracing::info!(key = ?keys.g2_pub_key, "registered contributor");
+                (keys.g2_pub_key.clone(), keys.g1_pub_key.clone())
+            }));
+        let participants: Set<PublicKey> = Set::from_iter_dedup(key_map.iter().cloned());
+        let g1_keys: Vec<G1PublicKey> = key_map.iter_pairs().map(|(_, g1)| g1.clone()).collect();
 
-        let threshold = quorum_infos[quorum_number].threshold;
+        // Verifier-only scheme: the router validates acks and assembles
+        // certificates but never signs (its key is not in the participant set).
+        let scheme = Bn254Scheme::verifier(participants, g1_keys);
+        // The contract-derived threshold is informational only: the engine's
+        // quorum is fixed at N3f1 (n - (n-1)/3) and the authoritative stake
+        // check runs on-chain in BLSSignatureChecker.
+        tracing::info!(
+            participants = scheme.participants().len(),
+            engine_quorum = scheme.participants().quorum::<N3f1>(),
+            contract_threshold = quorum_infos[quorum_number].threshold,
+            "operator set loaded"
+        );
 
-        // Run as the orchestrator using the builder pattern
+        // Register channels (must precede network.start()).
+        //
+        // The ack channel needs its own, much larger quota: node engines keep
+        // rebroadcasting each signed height's TipAck until it falls
+        // activity_timeout below the tip (even after certification), and the p2p
+        // limiter silently drops messages beyond the per-peer rate — an undersized
+        // quota here starves the router of fresh acks and stalls certification.
         let p2p_backlog = p2p_message_backlog();
         let p2p_quota = Quota::with_period(p2p_quota_period())
             .expect("p2p_quota_period always returns a non-zero duration");
-        let (sender, receiver) = network.register(0, p2p_quota, p2p_backlog);
+        let ack_rate = ack_messages_per_second();
+        let ack_quota = Quota::per_second(ack_rate);
+        tracing::info!(
+            ack_messages_per_second = ack_rate.get(),
+            "engine channel quota"
+        );
+        let (ack_sender, ack_receiver) = network.register(ACK_CHANNEL, ack_quota, p2p_backlog);
+        // The router SENDS directives on channel 1 and receives the nodes'
+        // rate-limited TipReport replies (journal-loss recovery) on the same
+        // channel.
+        let (directive_sender, directive_receiver) =
+            network.register(DIRECTIVE_CHANNEL, p2p_quota, p2p_backlog);
 
-        // Custom Prometheus metrics — shared with executor, creator, and ingress via builder
+        // Custom Prometheus metrics — shared by ingress, sequencer, and submitter.
         let metrics = Arc::new(MetricsCollector::new());
 
-        let executor_ctx = context.child("executor");
-        let speculative_ctx = context.child("speculative_prebuild");
-        let orchestrator_task_ctx = context.child("orchestrator_task");
-        let healthz_ctx = context.child("healthz_server");
-        let health_ctx = Arc::new(context.child("metrics"));
-
-        // Use the builder pattern to create the orchestrator
-        let builder = OrchestratorBuilder::new(context, signer)
-            .with_contributors(contributors)
-            .with_g1_map(contributors_map)
-            .with_threshold(threshold)
-            .load_from_env(); // Read configuration from environment variables
-
-        // Shared validator, used by the creator and orchestrator. Owned here so we can also run
-        // its speculative executor pre-build loop, which warms the shared executor cache off the
-        // hot path so the first analysis at each block skips the live build().
+        // Shared validator: the sequencer uses it for EVMSketch enrichment; its
+        // speculative pre-build loop warms the executor cache off the hot path.
         let validator = Arc::new(
             GasKillerValidator::new()
                 .expect("HTTP_RPC environment variable must be set for gas analyzer"),
@@ -319,23 +392,120 @@ fn main() {
         {
             let spec_validator = Arc::clone(&validator);
             let prebuild_cfg = SpeculativePrebuildConfig::from_env();
-            speculative_ctx.spawn(move |_| async move {
+            context.child("prebuild").spawn(move |_| async move {
                 spec_validator.run_speculative_prebuild(prebuild_cfg).await;
             });
         }
 
-        let orchestrator = GasKillerOrchestratorBuilder::build(
-            builder,
-            validator,
+        // State shared across sequencer / automaton / submitter.
+        let assignments = shared_assignments::<GasKillerTaskData>();
+        let dispatch_time: DispatchTime = Arc::new(Mutex::new(HashMap::new()));
+        let (certified_sender, certified_receiver) = certified_channel();
+        let (resolution_sender, resolution_receiver) = resolution_channel();
+
+        // Certificate reporter actor (the engine's Reporter).
+        let (cert_reporter, reporter_mailbox) = CertReporter::new(
+            context.child("cert_reporter"),
+            scheme.clone(),
+            certified_sender,
+        );
+        context
+            .child("cert_reporter_actor")
+            .spawn(move |_| cert_reporter.run());
+
+        // Verifier-only aggregation engine on channel 0.
+        let engine = Engine::new(
+            context.child("engine"),
+            AggregationConfig {
+                monitor: StaticEpochMonitor::new(),
+                provider: ConstantProvider::<Bn254Scheme, Epoch>::new(scheme.clone()),
+                automaton: RouterAutomaton::new(assignments.clone()),
+                reporter: reporter_mailbox.clone(),
+                blocker: oracle.clone(),
+                priority_acks: false,
+                rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_interval()),
+                // Single static epoch: nothing to keep or accept beyond it.
+                epoch_bounds: (EpochDelta::new(0), EpochDelta::new(0)),
+                window: agg_window(),
+                activity_timeout: HeightDelta::new(agg_activity_timeout()),
+                journal_partition: JOURNAL_PARTITION.to_string(),
+                journal_write_buffer: NZUsize!(4096),
+                journal_replay_buffer: NZUsize!(4096),
+                journal_heights_per_section: NZU64!(64),
+                journal_compression: None,
+                journal_page_cache: CacheRef::from_pooler(&context, NZU16!(4096), NZUsize!(128)),
+                strategy: Sequential,
+            },
+        );
+        engine.start((ack_sender, ack_receiver));
+
+        // HTTP ingress (env-gated, unchanged endpoints). The returned sender is
+        // kept alive below so the task channel never closes while running
+        // without the HTTP server.
+        let ingress = create_ingress(Arc::clone(&metrics))
+            .await
+            .expect("Failed to create ingress");
+        let _task_sender = ingress.sender;
+
+        // On-chain submitter: consumes verified certificates, resolves heights.
+        let submitter = create_submitter(
+            scheme.clone(),
+            assignments.clone(),
+            certified_receiver,
+            resolution_sender,
             Arc::clone(&metrics),
-            &executor_ctx,
+            Arc::clone(&dispatch_time),
+            APPLICATION_NAMESPACE.to_vec(),
         )
         .await
-        .expect("Failed to build orchestrator");
+        .expect("Failed to create submitter");
+        context.child("submitter").spawn(move |_| submitter.run());
 
-        orchestrator_task_ctx.spawn(|_| async move { orchestrator.run(sender, receiver).await });
+        // Node tip reports (channel 1, node → router): if this router lost its
+        // journal and assigns heights the nodes are already past, their reports
+        // fast-forward the sequencer instead of wedging on a dead height.
+        let tip_reports = TipReports::<PublicKey>::new(scheme.participants().len());
+        {
+            let participant_keys: HashSet<PublicKey> =
+                scheme.participants().iter().cloned().collect();
+            let tip_reports = tip_reports.clone();
+            context.child("tip_reports").spawn(move |_| async move {
+                ingest_tip_reports::<GasKillerTaskData, _, _>(
+                    directive_receiver,
+                    participant_keys,
+                    tip_reports,
+                )
+                .await;
+            });
+        }
 
-        // Readiness flag: set to true after orchestrator is spawned and network is starting
+        // Task source: dequeues ingress tasks and enriches them (EVMSketch) for
+        // the sequencer.
+        let task_source = GasKillerTaskSource::new(
+            ingress.receiver,
+            ingress.queue_depth,
+            validator,
+            Some(Arc::clone(&metrics)),
+        );
+
+        // Sequencer: assigns heights, broadcasts directives to the operator set
+        // (explicit keys — see Sequencer::broadcast).
+        let directive_recipients: Vec<PublicKey> = scheme.participants().iter().cloned().collect();
+        let sequencer = Sequencer::new(
+            task_source,
+            dispatch_time,
+            assignments,
+            reporter_mailbox,
+            resolution_receiver,
+            directive_sender,
+            directive_recipients,
+            tip_reports,
+            round_timeout(),
+            rebroadcast_interval(),
+        );
+        context.child("sequencer").spawn(move |_| sequencer.run());
+
+        // Readiness flag: set to true after everything is spawned and the network is starting
         let ready = Arc::new(AtomicBool::new(false));
 
         // Spawn healthz/metrics HTTP server for Kubernetes probes and Prometheus scraping
@@ -346,10 +516,10 @@ fn main() {
         let healthz_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), healthz_port);
         let health_state = HealthState {
             ready: Arc::clone(&ready),
-            context: health_ctx,
+            context: Arc::new(context.child("metrics_view")),
             metrics: Arc::clone(&metrics),
         };
-        healthz_ctx.spawn(move |_| async move {
+        context.child("healthz").spawn(move |_| async move {
             let app = Router::new()
                 .route("/healthz", get(healthz_handler))
                 .route("/readyz", get(readyz_handler))
@@ -368,9 +538,13 @@ fn main() {
             }
         });
 
-        // BLS key loaded and orchestrator spawned — router is ready to handle aggregation
+        // BLS key loaded, engine + sequencer + submitter spawned — router is
+        // ready to collect certificates.
         ready.store(true, Ordering::Relaxed);
 
-        _ = network.start().await;
+        // Run the network; blocks the root future (and thus the process) until
+        // shutdown. All tasks spawned above are children of this context and
+        // abort when it returns.
+        let _ = network.start().await;
     });
 }
