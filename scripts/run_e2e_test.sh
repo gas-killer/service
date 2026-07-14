@@ -35,6 +35,10 @@ mkdir -p "$LOG_DIR"
 # Cleanup function
 cleanup() {
     echo -e "${YELLOW}Cleaning up Docker containers...${NC}"
+    # Step 10 cd's into scripts/; compose paths (incl. COMPOSE_FILE overlays)
+    # are project-root-relative, so the log dumps below silently print nothing
+    # unless we return first.
+    cd "$PROJECT_ROOT"
 
     # If test didn't pass, dump all container logs for debugging
     if [ "$TEST_PASSED" != "true" ]; then
