@@ -2240,7 +2240,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-bindings"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -2255,7 +2255,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-core"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -2283,7 +2283,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-eigenlayer"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy-primitives",
  "alloy-provider",
@@ -2301,7 +2301,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-node"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy",
  "alloy-network",
@@ -2349,7 +2349,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-router"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -5393,7 +5393,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.1.3",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6557,7 +6557,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "once_cell",
@@ -6577,7 +6577,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6590,7 +6590,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10264,7 +10264,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
