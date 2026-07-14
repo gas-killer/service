@@ -14,7 +14,13 @@ services:
     build:
       context: .
       dockerfile: node/Dockerfile
-    platform: linux/amd64
+    # NO platform pin: build host-native. On Apple-silicon hosts, linux/amd64
+    # under Rosetta 2 MISCOMPUTES ChaCha20-Poly1305 AEAD for inputs >=512B in
+    # aws-lc-rs (handshakes and pings pass; every data broadcast fails with
+    # DecryptionFailed) — the same reason docker-compose.override.yml re-pins
+    # router+node-1..3 to arm64. Explicit COMPOSE_FILE lists disable that
+    # automatic override, so always include it:
+    #   COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.fleet.yml
     depends_on:
       eigenlayer:
         condition: service_completed_successfully
@@ -52,7 +58,13 @@ services:
     build:
       context: .
       dockerfile: node/Dockerfile
-    platform: linux/amd64
+    # NO platform pin: build host-native. On Apple-silicon hosts, linux/amd64
+    # under Rosetta 2 MISCOMPUTES ChaCha20-Poly1305 AEAD for inputs >=512B in
+    # aws-lc-rs (handshakes and pings pass; every data broadcast fails with
+    # DecryptionFailed) — the same reason docker-compose.override.yml re-pins
+    # router+node-1..3 to arm64. Explicit COMPOSE_FILE lists disable that
+    # automatic override, so always include it:
+    #   COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.fleet.yml
     depends_on:
       eigenlayer:
         condition: service_completed_successfully
@@ -90,7 +102,13 @@ services:
     build:
       context: .
       dockerfile: node/Dockerfile
-    platform: linux/amd64
+    # NO platform pin: build host-native. On Apple-silicon hosts, linux/amd64
+    # under Rosetta 2 MISCOMPUTES ChaCha20-Poly1305 AEAD for inputs >=512B in
+    # aws-lc-rs (handshakes and pings pass; every data broadcast fails with
+    # DecryptionFailed) — the same reason docker-compose.override.yml re-pins
+    # router+node-1..3 to arm64. Explicit COMPOSE_FILE lists disable that
+    # automatic override, so always include it:
+    #   COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.fleet.yml
     depends_on:
       eigenlayer:
         condition: service_completed_successfully
@@ -128,7 +146,13 @@ services:
     build:
       context: .
       dockerfile: node/Dockerfile
-    platform: linux/amd64
+    # NO platform pin: build host-native. On Apple-silicon hosts, linux/amd64
+    # under Rosetta 2 MISCOMPUTES ChaCha20-Poly1305 AEAD for inputs >=512B in
+    # aws-lc-rs (handshakes and pings pass; every data broadcast fails with
+    # DecryptionFailed) — the same reason docker-compose.override.yml re-pins
+    # router+node-1..3 to arm64. Explicit COMPOSE_FILE lists disable that
+    # automatic override, so always include it:
+    #   COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.fleet.yml
     depends_on:
       eigenlayer:
         condition: service_completed_successfully
@@ -166,7 +190,13 @@ services:
     build:
       context: .
       dockerfile: node/Dockerfile
-    platform: linux/amd64
+    # NO platform pin: build host-native. On Apple-silicon hosts, linux/amd64
+    # under Rosetta 2 MISCOMPUTES ChaCha20-Poly1305 AEAD for inputs >=512B in
+    # aws-lc-rs (handshakes and pings pass; every data broadcast fails with
+    # DecryptionFailed) — the same reason docker-compose.override.yml re-pins
+    # router+node-1..3 to arm64. Explicit COMPOSE_FILE lists disable that
+    # automatic override, so always include it:
+    #   COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.fleet.yml
     depends_on:
       eigenlayer:
         condition: service_completed_successfully
@@ -204,7 +234,13 @@ services:
     build:
       context: .
       dockerfile: node/Dockerfile
-    platform: linux/amd64
+    # NO platform pin: build host-native. On Apple-silicon hosts, linux/amd64
+    # under Rosetta 2 MISCOMPUTES ChaCha20-Poly1305 AEAD for inputs >=512B in
+    # aws-lc-rs (handshakes and pings pass; every data broadcast fails with
+    # DecryptionFailed) — the same reason docker-compose.override.yml re-pins
+    # router+node-1..3 to arm64. Explicit COMPOSE_FILE lists disable that
+    # automatic override, so always include it:
+    #   COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.fleet.yml
     depends_on:
       eigenlayer:
         condition: service_completed_successfully
@@ -242,7 +278,13 @@ services:
     build:
       context: .
       dockerfile: node/Dockerfile
-    platform: linux/amd64
+    # NO platform pin: build host-native. On Apple-silicon hosts, linux/amd64
+    # under Rosetta 2 MISCOMPUTES ChaCha20-Poly1305 AEAD for inputs >=512B in
+    # aws-lc-rs (handshakes and pings pass; every data broadcast fails with
+    # DecryptionFailed) — the same reason docker-compose.override.yml re-pins
+    # router+node-1..3 to arm64. Explicit COMPOSE_FILE lists disable that
+    # automatic override, so always include it:
+    #   COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.fleet.yml
     depends_on:
       eigenlayer:
         condition: service_completed_successfully

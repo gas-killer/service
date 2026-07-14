@@ -12,7 +12,7 @@
 # single 16-vCPU machine (10 nodes x 1.5 CPU req + router fits):
 #
 #   gcloud container node-pools create tenop-pool --cluster gas-killer \
-#     --region us-east4 --machine-type n2-standard-16 --spot --num-nodes 1 \
+#     --region us-east4 --machine-type n2-standard-8 --spot --num-nodes 1 --node-locations us-east4-a \
 #     --node-labels role=tenop
 #
 # Bring-up:
@@ -100,8 +100,11 @@ node:
     tag: node-pr-321
     pullPolicy: Always
   resources:
-    requests: { memory: "3Gi", cpu: "1500m" }
-    limits: { memory: "6Gi", cpu: "2000m" }
+    # Sized for the whole env on ONE n2-standard-8 (the free CPUS_ALL_REGIONS
+    # quota): 10 x 500m requests + router fits; segments are single-threaded
+    # revm so peak wavefront just time-shares the 8 cores.
+    requests: { memory: "1500Mi", cpu: "500m" }
+    limits: { memory: "3Gi", cpu: "1500m" }
 
 router:
   image:
@@ -109,8 +112,8 @@ router:
     pullPolicy: Always
   roundTimeout: "1800"
   resources:
-    requests: { memory: "4Gi", cpu: "1000m" }
-    limits: { memory: "8Gi", cpu: "2000m" }
+    requests: { memory: "2Gi", cpu: "700m" }
+    limits: { memory: "4Gi", cpu: "1500m" }
 
 sharedData:
   accessMode: ReadWriteOnce     # single-VM topology (see header)

@@ -29,7 +29,7 @@ if phase pool; then
   echo "== phase: pool (single 16-vCPU Spot VM — RWO PVC forces one-VM topology) =="
   if ! gcloud container node-pools describe tenop-pool --cluster gas-killer --region us-east4 >/dev/null 2>&1; then
     gcloud container node-pools create tenop-pool --cluster gas-killer --region us-east4 \
-      --machine-type n2-standard-16 --spot --num-nodes 1 \
+      --machine-type n2-standard-8 --spot --num-nodes 1 --node-locations us-east4-a \
       --node-labels role=tenop --node-version "$(gcloud container clusters describe gas-killer --region us-east4 --format='value(currentNodeVersion)')"
   else echo "pool exists"; fi
 fi

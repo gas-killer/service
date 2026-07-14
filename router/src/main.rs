@@ -465,6 +465,11 @@ fn main() {
                 .route("/shard/work", get(shard_work_handler))
                 .route("/shard/result", post(shard_result_handler))
                 .route("/shard/chain/:root", get(shard_chain_handler))
+                // Sharded 35B segments thread DeltaNet boundary snapshots
+                // (~2.2MB/layer, ~20MB per 12-layer segment, ~40MB hex-JSON):
+                // axum's 2MB default body limit silently kills the operators'
+                // /shard/result POSTs at the transport.
+                .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024))
                 .with_state(health_state);
             match TcpListener::bind(healthz_addr).await {
                 Ok(listener) => {

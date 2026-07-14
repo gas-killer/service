@@ -484,11 +484,18 @@ impl ShardCoordinator {
         let deadline = Instant::now() + segment_timeout();
         let returns: HashMap<u32, Vec<u8>> = loop {
             {
-                let results = self.results.lock().expect("shard results lock poisoned");
-                if let Some(got) = results.get(&(infer_id.to_string(), seg_id))
-                    && committee.iter().all(|op| got.contains_key(op))
+                let mut results = self.results.lock().expect("shard results lock poisoned");
+                let key = (infer_id.to_string(), seg_id);
+                if results
+                    .get(&key)
+                    .is_some_and(|got| committee.iter().all(|op| got.contains_key(op)))
                 {
-                    break got.clone();
+                    // Take ownership and EVICT: a 35B forward segment's
+                    // returndata is ~10-20MB per committee member, and a full
+                    // run has ~100 segments — retaining them all would hold
+                    // gigabytes for the life of the process. Eviction bounds
+                    // memory to the in-flight wavefront.
+                    break results.remove(&key).expect("checked above");
                 }
             }
             if Instant::now() > deadline {

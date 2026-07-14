@@ -681,14 +681,39 @@ pub async fn run_shard_loop(
                                 operator: state.operator_id,
                                 returndata,
                             };
-                            if let Err(e) = client
-                                .post(&result_url)
-                                .json(&msg)
-                                .send()
-                                .await
-                                .and_then(|r| r.error_for_status())
-                            {
-                                warn!(seg_id = job.seg_id, error = %e, "shard: failed to post result");
+                            // A 35B segment result is tens of MB; losing the
+                            // POST silently kills the whole inference (the
+                            // committee wait times out). Retry with backoff.
+                            let mut posted = false;
+                            for attempt in 1..=5u32 {
+                                match client
+                                    .post(&result_url)
+                                    .json(&msg)
+                                    .send()
+                                    .await
+                                    .and_then(|r| r.error_for_status())
+                                {
+                                    Ok(_) => {
+                                        posted = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            seg_id = job.seg_id,
+                                            attempt,
+                                            error = %e,
+                                            "shard: failed to post result; retrying"
+                                        );
+                                        tokio::time::sleep(Duration::from_secs(2 * attempt as u64))
+                                            .await;
+                                    }
+                                }
+                            }
+                            if !posted {
+                                warn!(
+                                    seg_id = job.seg_id,
+                                    "shard: result post gave up after 5 attempts"
+                                );
                             }
                         }
                         Err(e) => {
