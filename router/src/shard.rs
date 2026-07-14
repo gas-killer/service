@@ -282,51 +282,147 @@ impl ShardCoordinator {
     pub async fn run_inference(&self, req: InferRequest) -> Result<InferResponse> {
         let started = Instant::now();
         let infer_id = format!("inf-{}", self.seq.fetch_add(1, Ordering::SeqCst));
-        let mut run = InferRun::new(self, &infer_id, &req)?;
+        let plan = InferPlan::new(self, &infer_id, &req)?;
 
         let p_len = req.prompt_ids.len() as u64;
         if p_len == 0 {
             bail!("empty prompt");
         }
+        let s = plan.s;
+        let m = req.argmax_shards.clamp(1, req.vocab);
 
-        // Prefill: every prompt position through every stage (position-major,
-        // sequential — the wavefront overlap is a latency optimization the
-        // reference driver proves; correctness only needs the order).
-        let mut last_x: Vec<u8> = Vec::new();
-        for pos in 0..p_len {
-            let mut x: Vec<u8> = Vec::new();
-            for stage in 0..run.s {
-                let toks = if stage == 0 {
-                    vec![req.prompt_ids[pos as usize]]
-                } else {
-                    vec![]
-                };
-                x = run.forward_segment(stage, pos, pos + 1, toks, x).await?;
+        // PIPELINE WAVEFRONT: one worker per stage, connected by channels.
+        // The dependency structure of segmented inference is a 2D pipeline —
+        // segment (pos, stage) needs xOut of (pos, stage-1) and the folded
+        // boundary state of (pos-1, stage) — so stage 1 can run position p
+        // while stage 0 runs position p+1. Each worker OWNS its layer range's
+        // accumulators (layers belong to exactly one stage), executes its
+        // positions strictly in arrival order (the recurrent-state chain), and
+        // records its chain entries locally. Segment ids are assigned by the
+        // deterministic formulas below — byte-identical to the sequential
+        // dispatch order, so the assembled commit chain (and thus
+        // pipelineRoot) is unchanged from the pre-wavefront coordinator.
+        //
+        //   prefill (pos p, stage s)         -> p*S + s
+        //   argmax round 0, shard j          -> P*S + j
+        //   decode round r>=1 forward stage s -> P*S + M + (r-1)*(S+M) + s
+        //   decode round r>=1 argmax shard j  -> P*S + M + (r-1)*(S+M) + S + j
+        let cap = p_len as usize + 2;
+        let (tx0, mut rx_prev) = tokio::sync::mpsc::channel::<StageMsg>(cap);
+        let mut worker_futs = Vec::with_capacity(s as usize);
+        let mut rx_last = None;
+        for stage in 0..s {
+            let (tx_next, rx_next) = tokio::sync::mpsc::channel::<StageMsg>(cap);
+            let worker = StageWorker::new(&plan, stage);
+            let rx = std::mem::replace(&mut rx_prev, rx_next);
+            worker_futs.push(worker.run(rx, tx_next));
+            if stage + 1 == s {
+                rx_last = Some(std::mem::replace(
+                    &mut rx_prev,
+                    tokio::sync::mpsc::channel::<StageMsg>(1).1,
+                ));
             }
-            last_x = x;
+        }
+        let mut rx_last = rx_last.expect("s >= 1");
+
+        let driver = async {
+            let mut tx0 = Some(tx0);
+            let send = |tx0: &Option<tokio::sync::mpsc::Sender<StageMsg>>, msg: StageMsg| {
+                let tx = tx0.as_ref().expect("tx0 alive while driving").clone();
+                async move {
+                    tx.send(msg)
+                        .await
+                        .map_err(|_| anyhow::anyhow!("stage pipeline closed unexpectedly"))
+                }
+            };
+
+            // Prefill: feed every prompt position into stage 0 up-front (the
+            // channel capacity covers the whole prompt, so this never blocks
+            // on a slow pipeline), then drain the final stage's outputs in
+            // order, keeping the last position's vector.
+            for pos in 0..p_len {
+                send(
+                    &tx0,
+                    StageMsg {
+                        seg_base: pos * s,
+                        pos,
+                        tokens: vec![req.prompt_ids[pos as usize]],
+                        x: Vec::new(),
+                    },
+                )
+                .await?;
+            }
+            let mut last_x = Vec::new();
+            for _ in 0..p_len {
+                let out = rx_last
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("pipeline ended during prefill"))?;
+                last_x = out.x;
+            }
+
+            // First generated token from the last prompt position's final
+            // vector; then the decode relay, replaying Qwen3.generate's loop
+            // (inherently serial: token r depends on argmax of round r-1).
+            let dim_bytes = (req.dim * 32) as usize;
+            let xb = last_x[last_x.len() - dim_bytes..].to_vec();
+            let mut driver_entries = Vec::new();
+            let (tok0, entries0) = plan.argmax_round(p_len * s, xb).await?;
+            driver_entries.extend(entries0);
+            let mut generated: Vec<u32> = vec![tok0];
+            let mut pos = p_len;
+            let mut round: u64 = 1;
+            while pos + 1 < plan.max_pos
+                && generated.last() != Some(&req.stop0)
+                && generated.last() != Some(&req.stop1)
+            {
+                let token = *generated.last().expect("generated is non-empty");
+                let seg_base = p_len * s + m + (round - 1) * (s + m);
+                send(
+                    &tx0,
+                    StageMsg {
+                        seg_base,
+                        pos,
+                        tokens: vec![token],
+                        x: Vec::new(),
+                    },
+                )
+                .await?;
+                let out = rx_last
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("pipeline ended during decode"))?;
+                let (tok, entries) = plan.argmax_round(seg_base + s, out.x).await?;
+                driver_entries.extend(entries);
+                generated.push(tok);
+                pos += 1;
+                round += 1;
+            }
+            // Close the pipeline: workers drain and return their entries.
+            tx0.take();
+            Ok::<_, anyhow::Error>((generated, driver_entries))
+        };
+
+        let (worker_entries, (generated, driver_entries)) =
+            tokio::try_join!(futures::future::try_join_all(worker_futs), driver)?;
+
+        let mut entries: Vec<ChainEntry> = worker_entries
+            .into_iter()
+            .flatten()
+            .chain(driver_entries)
+            .collect();
+        entries.sort_by_key(|e| e.seg_id);
+        for (i, e) in entries.iter().enumerate() {
+            if e.seg_id != i as u64 {
+                bail!(
+                    "chain assembly bug: segment ids not contiguous at {} (got {})",
+                    i,
+                    e.seg_id
+                );
+            }
         }
 
-        // First generated token comes from the last prompt position's final
-        // vector; then the decode relay, replaying Qwen3.generate's loop.
-        let dim_bytes = (req.dim * 32) as usize;
-        let xb = last_x[last_x.len() - dim_bytes..].to_vec();
-        let mut generated: Vec<u32> = vec![run.argmax(xb).await?];
-        let mut pos = p_len;
-        while pos + 1 < run.max_pos
-            && generated.last() != Some(&req.stop0)
-            && generated.last() != Some(&req.stop1)
-        {
-            let token = *generated.last().expect("generated is non-empty");
-            let mut x: Vec<u8> = Vec::new();
-            for stage in 0..run.s {
-                let toks = if stage == 0 { vec![token] } else { vec![] };
-                x = run.forward_segment(stage, pos, pos + 1, toks, x).await?;
-            }
-            generated.push(run.argmax(x).await?);
-            pos += 1;
-        }
-
-        let segments = run.entries.len() as u64;
+        let segments = entries.len() as u64;
         let mut chain = ShardChain {
             infer_id: infer_id.clone(),
             consumer: req.consumer,
@@ -334,7 +430,7 @@ impl ShardCoordinator {
             max_new: req.max_new,
             answer_ids: generated.clone(),
             pipeline_root: B256::ZERO,
-            entries: run.entries,
+            entries,
         };
         chain.pipeline_root = chain.derive_root();
         let root = chain.pipeline_root;
@@ -435,8 +531,22 @@ impl ShardCoordinator {
     }
 }
 
-/// Per-inference planning state (stage bounds, KV accumulators, commit chain).
-struct InferRun<'a> {
+/// A message flowing through the stage pipeline: one position's activation
+/// entering (from the driver or the previous stage) or leaving a stage.
+struct StageMsg {
+    /// Deterministic id base for this position's forward pass: the segment
+    /// executed by stage `s` for this message gets `seg_base + s`.
+    seg_base: u64,
+    pos: u64,
+    /// Token ids for stage 0 (embedding); empty for later stages.
+    tokens: Vec<u32>,
+    /// xIn for this stage (xOut of the previous); empty for stage 0.
+    x: Vec<u8>,
+}
+
+/// Per-inference planning constants shared by the driver and all stage
+/// workers (immutable during the run).
+struct InferPlan<'a> {
     co: &'a ShardCoordinator,
     infer_id: String,
     req: &'a InferRequest,
@@ -446,19 +556,9 @@ struct InferRun<'a> {
     bounds: Vec<(u64, u64)>,
     max_pos: u64,
     seed: u64,
-    next_seg: u64,
-    /// Per-layer full-attention KV accumulators (append semantics). For a
-    /// pure-attention model (0.6B) every layer uses these — identical to before.
-    k_acc: Vec<Vec<u8>>,
-    v_acc: Vec<Vec<u8>>,
-    /// Per-layer DeltaNet recurrent snapshot (conv || S), replace semantics — a
-    /// fixed-size blob overwritten each segment (35B DeltaNet layers only; empty
-    /// for attention layers).
-    delta_acc: Vec<Vec<u8>>,
-    entries: Vec<ChainEntry>,
 }
 
-impl<'a> InferRun<'a> {
+impl<'a> InferPlan<'a> {
     fn new(co: &'a ShardCoordinator, infer_id: &str, req: &'a InferRequest) -> Result<Self> {
         if req.n_layers == 0 || req.kvd == 0 || req.dim == 0 || req.vocab == 0 {
             bail!("bad model config");
@@ -481,27 +581,166 @@ impl<'a> InferRun<'a> {
             bounds,
             max_pos,
             seed,
-            next_seg: 0,
-            k_acc: vec![Vec::new(); req.n_layers as usize],
-            v_acc: vec![Vec::new(); req.n_layers as usize],
-            delta_acc: vec![Vec::new(); req.n_layers as usize],
-            entries: Vec::new(),
         })
     }
 
-    /// The resume boundary state for `stage`, layer-major per the wire format:
+    /// M-way vocab-sharded argmax, shards dispatched CONCURRENTLY and merged
+    /// (score desc, id asc — identical to the sequential merge); returns the
+    /// token id and the shards' chain entries (seg ids `argmax_base + j`).
+    async fn argmax_round(
+        &self,
+        argmax_base: u64,
+        xb_final: Vec<u8>,
+    ) -> Result<(u32, Vec<ChainEntry>)> {
+        let m = self.req.argmax_shards.clamp(1, self.req.vocab);
+        let step = self.req.vocab / m;
+        let xb = &xb_final;
+        let shard_futs = (0..m).map(|j| async move {
+            let (lo, hi) = (
+                j * step,
+                if j + 1 == m {
+                    self.req.vocab
+                } else {
+                    (j + 1) * step
+                },
+            );
+            let calldata = self.co.spec.encode_argmax(&ArgmaxArgs {
+                weights_root: self.req.weights_root,
+                manifest: self.req.manifest,
+                packed_config: self.req.packed_config,
+                packed_config_w3: self.req.packed_config_w3,
+                xb_final: xb,
+                vocab_lo: lo,
+                vocab_hi: hi,
+            })?;
+            // The classifier is untied and lives on the last weight-shard slice —
+            // argmax shards go only to workers advertising it.
+            let committee = self.co.plan_committee(
+                self.s + j,
+                self.seed,
+                &SegReq {
+                    layer_lo: 0,
+                    layer_hi: 0,
+                    needs_embedding: false,
+                    needs_classifier: true,
+                },
+            )?;
+            let (rd, entry) = self
+                .co
+                .exec_segment(
+                    &self.infer_id,
+                    argmax_base + j,
+                    committee,
+                    SegKind::Argmax,
+                    self.req.seg_engine,
+                    calldata,
+                )
+                .await?;
+            let (score, id) = self.co.spec.decode_argmax_returns(&rd)?;
+            Ok::<_, anyhow::Error>((score, id, entry))
+        });
+        let results = futures::future::try_join_all(shard_futs).await?;
+        let mut best: Option<(I256, u64)> = None;
+        let mut entries = Vec::with_capacity(results.len());
+        for (score, id, entry) in results {
+            entries.push(entry);
+            best = Some(match best {
+                None => (score, id),
+                Some((bs, bi)) if score > bs || (score == bs && id < bi) => (score, id),
+                Some(b) => b,
+            });
+        }
+        let (_, id) = best.expect("m >= 1");
+        Ok((
+            u32::try_from(id).context("argmax id out of u32 range")?,
+            entries,
+        ))
+    }
+}
+
+/// One pipeline stage's worker: owns its layer range's accumulators (each
+/// layer belongs to exactly one stage) and executes its positions strictly in
+/// arrival order — the recurrent-state chain fixes the per-stage order; the
+/// wavefront parallelism is ACROSS stages.
+struct StageWorker<'a> {
+    co: &'a ShardCoordinator,
+    req: &'a InferRequest,
+    infer_id: String,
+    stage: u64,
+    bounds: (u64, u64),
+    max_pos: u64,
+    seed: u64,
+    /// Accumulators for THIS stage's layers, indexed by `layer - layerLo`:
+    /// full-attention K/V (append semantics); DeltaNet recurrent snapshot
+    /// (replace semantics). For a pure-attention model (0.6B) every layer
+    /// uses K/V — identical to before.
+    k_acc: Vec<Vec<u8>>,
+    v_acc: Vec<Vec<u8>>,
+    delta_acc: Vec<Vec<u8>>,
+    entries: Vec<ChainEntry>,
+}
+
+impl<'a> StageWorker<'a> {
+    fn new(plan: &InferPlan<'a>, stage: u64) -> Self {
+        let bounds = plan.bounds[stage as usize];
+        let n = (bounds.1 - bounds.0) as usize;
+        Self {
+            co: plan.co,
+            req: plan.req,
+            infer_id: plan.infer_id.clone(),
+            stage,
+            bounds,
+            max_pos: plan.max_pos,
+            seed: plan.seed,
+            k_acc: vec![Vec::new(); n],
+            v_acc: vec![Vec::new(); n],
+            delta_acc: vec![Vec::new(); n],
+            entries: Vec::new(),
+        }
+    }
+
+    /// Receives positions in order, executes this stage's segment for each,
+    /// forwards xOut downstream. Returns the stage's chain entries once the
+    /// upstream closes (end of inference).
+    async fn run(
+        mut self,
+        mut rx: tokio::sync::mpsc::Receiver<StageMsg>,
+        tx: tokio::sync::mpsc::Sender<StageMsg>,
+    ) -> Result<Vec<ChainEntry>> {
+        while let Some(msg) = rx.recv().await {
+            let x_out = self
+                .forward_segment(msg.seg_base + self.stage, msg.pos, msg.tokens, msg.x)
+                .await?;
+            if tx
+                .send(StageMsg {
+                    seg_base: msg.seg_base,
+                    pos: msg.pos,
+                    tokens: Vec::new(),
+                    x: x_out,
+                })
+                .await
+                .is_err()
+            {
+                bail!("stage {}: downstream closed", self.stage);
+            }
+        }
+        Ok(self.entries)
+    }
+
+    /// This stage's resume boundary state, layer-major per the wire format:
     /// full-attention layers contribute their accumulated `K || V` slices;
     /// DeltaNet layers contribute their current recurrent snapshot. For a
     /// pure-attention model this is exactly the original KV concatenation.
-    fn state_in(&self, stage: u64) -> Vec<u8> {
-        let (lo, hi) = self.bounds[stage as usize];
+    fn state_in(&self) -> Vec<u8> {
+        let (lo, hi) = self.bounds;
         let mut out = Vec::new();
         for l in lo..hi {
+            let i = (l - lo) as usize;
             if self.co.spec.is_full_attention(l) {
-                out.extend_from_slice(&self.k_acc[l as usize]);
-                out.extend_from_slice(&self.v_acc[l as usize]);
+                out.extend_from_slice(&self.k_acc[i]);
+                out.extend_from_slice(&self.v_acc[i]);
             } else {
-                out.extend_from_slice(&self.delta_acc[l as usize]);
+                out.extend_from_slice(&self.delta_acc[i]);
             }
         }
         out
@@ -510,8 +749,8 @@ impl<'a> InferRun<'a> {
     /// Fold a segment's produced boundary state back into the accumulators:
     /// full-attention layers APPEND the new positions' `K`/`V`; DeltaNet layers
     /// REPLACE the running snapshot (it is position-count-defined, not additive).
-    fn fold_state(&mut self, stage: u64, pos_n: u64, state_append: &[u8]) -> Result<()> {
-        let (lo, hi) = self.bounds[stage as usize];
+    fn fold_state(&mut self, pos_n: u64, state_append: &[u8]) -> Result<()> {
+        let (lo, hi) = self.bounds;
         let kv_side = self.co.spec.full_kv_side_bytes(pos_n); // per K or V side
         let snap = self.co.spec.delta_snapshot_bytes();
 
@@ -533,32 +772,33 @@ impl<'a> InferRun<'a> {
 
         let mut at = 0usize;
         for l in lo..hi {
-            let l = l as usize;
-            if self.co.spec.is_full_attention(l as u64) {
-                self.k_acc[l].extend_from_slice(&state_append[at..at + kv_side]);
+            let i = (l - lo) as usize;
+            if self.co.spec.is_full_attention(l) {
+                self.k_acc[i].extend_from_slice(&state_append[at..at + kv_side]);
                 at += kv_side;
-                self.v_acc[l].extend_from_slice(&state_append[at..at + kv_side]);
+                self.v_acc[i].extend_from_slice(&state_append[at..at + kv_side]);
                 at += kv_side;
             } else {
                 // DeltaNet snapshot is "state after [0, posHi)" — replace wholesale.
-                self.delta_acc[l] = state_append[at..at + snap].to_vec();
+                self.delta_acc[i] = state_append[at..at + snap].to_vec();
                 at += snap;
             }
         }
         Ok(())
     }
 
-    /// One forward segment on stage `stage`'s committee; returns xOut.
+    /// One forward segment (`seg_id` pre-assigned by the deterministic id
+    /// formulas in `run_inference`) on this stage's committee; returns xOut.
     async fn forward_segment(
         &mut self,
-        stage: u64,
-        pos_lo: u64,
-        pos_hi: u64,
+        seg_id: u64,
+        pos: u64,
         token_ids: Vec<u32>,
         x_in: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let (lo, hi) = self.bounds[stage as usize];
-        let state_in = self.state_in(stage);
+        let (lo, hi) = self.bounds;
+        let (pos_lo, pos_hi) = (pos, pos + 1);
+        let state_in = self.state_in();
         let calldata = self.co.spec.encode_forward(&ForwardArgs {
             weights_root: self.req.weights_root,
             manifest: self.req.manifest,
@@ -577,7 +817,7 @@ impl<'a> InferRun<'a> {
         // (token lookup) happens when lo == 0, so that stage additionally needs a
         // worker advertising the embedding.
         let committee = self.co.plan_committee(
-            stage,
+            self.stage,
             self.seed,
             &SegReq {
                 layer_lo: lo,
@@ -586,8 +826,6 @@ impl<'a> InferRun<'a> {
                 needs_classifier: false,
             },
         )?;
-        let seg_id = self.next_seg;
-        self.next_seg += 1;
         let (rd, entry) = self
             .co
             .exec_segment(
@@ -601,68 +839,8 @@ impl<'a> InferRun<'a> {
             .await?;
         self.entries.push(entry);
         let (x_out, state_append) = self.co.spec.decode_forward_returns(&rd)?;
-        self.fold_state(stage, pos_hi - pos_lo, &state_append)?;
+        self.fold_state(pos_hi - pos_lo, &state_append)?;
         Ok(x_out)
-    }
-
-    /// M-way vocab-sharded argmax merged (score desc, id asc); returns the token id.
-    async fn argmax(&mut self, xb_final: Vec<u8>) -> Result<u32> {
-        let m = self.req.argmax_shards.clamp(1, self.req.vocab);
-        let step = self.req.vocab / m;
-        let mut best: Option<(I256, u64)> = None;
-        for j in 0..m {
-            let (lo, hi) = (
-                j * step,
-                if j + 1 == m {
-                    self.req.vocab
-                } else {
-                    (j + 1) * step
-                },
-            );
-            let calldata = self.co.spec.encode_argmax(&ArgmaxArgs {
-                weights_root: self.req.weights_root,
-                manifest: self.req.manifest,
-                packed_config: self.req.packed_config,
-                packed_config_w3: self.req.packed_config_w3,
-                xb_final: &xb_final,
-                vocab_lo: lo,
-                vocab_hi: hi,
-            })?;
-            // The classifier is untied and lives on the last weight-shard slice —
-            // argmax shards go only to workers advertising it.
-            let committee = self.co.plan_committee(
-                self.s + j,
-                self.seed,
-                &SegReq {
-                    layer_lo: 0,
-                    layer_hi: 0,
-                    needs_embedding: false,
-                    needs_classifier: true,
-                },
-            )?;
-            let seg_id = self.next_seg;
-            self.next_seg += 1;
-            let (rd, entry) = self
-                .co
-                .exec_segment(
-                    &self.infer_id,
-                    seg_id,
-                    committee,
-                    SegKind::Argmax,
-                    self.req.seg_engine,
-                    calldata,
-                )
-                .await?;
-            self.entries.push(entry);
-            let (score, id) = self.co.spec.decode_argmax_returns(&rd)?;
-            best = Some(match best {
-                None => (score, id),
-                Some((bs, bi)) if score > bs || (score == bs && id < bi) => (score, id),
-                Some(b) => b,
-            });
-        }
-        let (_, id) = best.expect("m >= 1");
-        u32::try_from(id).context("argmax id out of u32 range")
     }
 }
 

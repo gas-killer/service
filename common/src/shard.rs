@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -516,13 +516,12 @@ async fn eth_block_number(client: &reqwest::Client, rpc_url: &str) -> Result<u64
 /// of [`eth_call`]. The RPC serves only as the lazy base-state backend (the
 /// deployed seg engine's code); the model weights come from the mmap mounts.
 ///
-/// The whole call runs on the blocking pool (`spawn_blocking` +
-/// `Handle::block_on`, exactly the validator's PR#319 starvation fix): a
-/// segment is minutes of pure compute, and the FIRST segment additionally
-/// pays the one-time streaming-keccak verification over the full artifact
-/// files at mount time — none of which may occupy one of the runtime's two
-/// shared worker threads, or /healthz and P2P starve and Kubernetes kills
-/// the node mid-segment.
+/// Safe to await directly on the shared 2-worker runtime:
+/// `call_view_local_multi` runs its entire blocking half — the segment's
+/// minutes of revm compute AND the first call's one-time streaming-keccak
+/// mount verification over the full artifact files — on the blocking pool
+/// (the analyzer takes the state cache as an `Arc` precisely for this), so
+/// /healthz and P2P never starve (the PR#319 incident class).
 async fn local_view_call(
     client: &reqwest::Client,
     rpc_url: &str,
@@ -534,25 +533,16 @@ async fn local_view_call(
         .to(job.to)
         .input(alloy_primitives::Bytes::copy_from_slice(&job.data).into())
         .gas_limit(job.gas);
-    let handle = tokio::runtime::Handle::current();
-    let rpc_url = rpc_url.to_owned();
-    let ctx = ctx.clone();
-    tokio::task::spawn_blocking(move || {
-        handle.block_on(async move {
-            call_view_local_multi(
-                &ctx.executor_cache,
-                &ctx.local_state_cache,
-                &rpc_url,
-                tx_request,
-                block_number,
-                ctx.sim_profile,
-                &ctx.overlay_files,
-            )
-            .await
-        })
-    })
+    call_view_local_multi(
+        &ctx.executor_cache,
+        Arc::clone(&ctx.local_state_cache),
+        rpc_url,
+        tx_request,
+        block_number,
+        ctx.sim_profile,
+        &ctx.overlay_files,
+    )
     .await
-    .map_err(|e| anyhow!("segment view-call task panicked or was cancelled: {e}"))?
     .map(|bytes| bytes.to_vec())
 }
 
@@ -596,6 +586,16 @@ pub async fn run_shard_loop(
         );
     }
     let result_url = format!("{}/shard/result", state.router_base);
+    // Concurrent-job budget per node (`GK_SHARD_NODE_CONCURRENCY`, default 3):
+    // sized so a 3-operator fleet can keep a 4-stage k=2 wavefront saturated
+    // (4 stages x 2 executions / 3 operators < 3) without oversubscribing the
+    // node's CPUs — each in-flight job is one single-threaded revm pass.
+    let concurrency: usize = std::env::var("GK_SHARD_NODE_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(3);
+    let job_slots = Arc::new(tokio::sync::Semaphore::new(concurrency));
     info!(
         operator = state.operator_id,
         work_url = %work_url,
@@ -603,6 +603,7 @@ pub async fn run_shard_loop(
         poll_ms = interval.as_millis() as u64,
         executor = if view_ctx.is_some() { "local" } else { "rpc" },
         overlay_models = view_ctx.as_ref().map(|c| c.overlay_files.len()).unwrap_or(0),
+        concurrency,
         "shard loop started"
     );
 
@@ -624,63 +625,82 @@ pub async fn run_shard_loop(
 
         if let Some(work) = work {
             for job in work.jobs {
-                let started = std::time::Instant::now();
-                let executed = match &view_ctx {
-                    Some(ctx) => local_view_call(&client, &rpc_url, ctx, &job).await,
-                    None => eth_call(&client, &rpc_url, &job).await,
+                // Execute jobs CONCURRENTLY (bounded by the semaphore): the
+                // router's pipeline wavefront assigns one operator segments
+                // from several stages at once, and a committee member must
+                // not serialize behind a long segment it shares an operator
+                // with. The heavy compute already rides the blocking pool
+                // (local_view_call), so a spawned task per job costs one
+                // permit, not a runtime worker.
+                let permit = match Arc::clone(&job_slots).acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => return, // semaphore closed: shutting down
                 };
-                match executed {
-                    Ok(returndata) => {
-                        let rd_hash = keccak256(&returndata);
-                        match seg_chk(job.kind, &job.data, &returndata) {
-                            Ok(chk) => {
-                                state.record(
-                                    &job.infer_id,
-                                    job.seg_id,
-                                    ExecutedSeg {
-                                        returndata_hash: rd_hash,
-                                        chk,
-                                    },
-                                );
-                                info!(
-                                    infer_id = %job.infer_id,
-                                    seg_id = job.seg_id,
-                                    kind = ?job.kind,
-                                    elapsed_ms = started.elapsed().as_millis() as u64,
-                                    chk = %chk,
-                                    "shard: executed segment"
-                                );
+                let client = client.clone();
+                let rpc_url = rpc_url.clone();
+                let view_ctx = view_ctx.clone();
+                let state = Arc::clone(&state);
+                let result_url = result_url.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let started = std::time::Instant::now();
+                    let executed = match &view_ctx {
+                        Some(ctx) => local_view_call(&client, &rpc_url, ctx, &job).await,
+                        None => eth_call(&client, &rpc_url, &job).await,
+                    };
+                    match executed {
+                        Ok(returndata) => {
+                            let rd_hash = keccak256(&returndata);
+                            match seg_chk(job.kind, &job.data, &returndata) {
+                                Ok(chk) => {
+                                    state.record(
+                                        &job.infer_id,
+                                        job.seg_id,
+                                        ExecutedSeg {
+                                            returndata_hash: rd_hash,
+                                            chk,
+                                        },
+                                    );
+                                    info!(
+                                        infer_id = %job.infer_id,
+                                        seg_id = job.seg_id,
+                                        kind = ?job.kind,
+                                        elapsed_ms = started.elapsed().as_millis() as u64,
+                                        chk = %chk,
+                                        "shard: executed segment"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(seg_id = job.seg_id, error = %e, "shard: bad returndata shape");
+                                    return;
+                                }
                             }
-                            Err(e) => {
-                                warn!(seg_id = job.seg_id, error = %e, "shard: bad returndata shape");
-                                continue;
+                            let msg = ShardResultMsg {
+                                infer_id: job.infer_id.clone(),
+                                seg_id: job.seg_id,
+                                operator: state.operator_id,
+                                returndata,
+                            };
+                            if let Err(e) = client
+                                .post(&result_url)
+                                .json(&msg)
+                                .send()
+                                .await
+                                .and_then(|r| r.error_for_status())
+                            {
+                                warn!(seg_id = job.seg_id, error = %e, "shard: failed to post result");
                             }
                         }
-                        let msg = ShardResultMsg {
-                            infer_id: job.infer_id.clone(),
-                            seg_id: job.seg_id,
-                            operator: state.operator_id,
-                            returndata,
-                        };
-                        if let Err(e) = client
-                            .post(&result_url)
-                            .json(&msg)
-                            .send()
-                            .await
-                            .and_then(|r| r.error_for_status())
-                        {
-                            warn!(seg_id = job.seg_id, error = %e, "shard: failed to post result");
+                        Err(e) => {
+                            warn!(
+                                infer_id = %job.infer_id,
+                                seg_id = job.seg_id,
+                                error = %e,
+                                "shard: segment execution failed"
+                            );
                         }
                     }
-                    Err(e) => {
-                        warn!(
-                            infer_id = %job.infer_id,
-                            seg_id = job.seg_id,
-                            error = %e,
-                            "shard: segment execution failed"
-                        );
-                    }
-                }
+                });
             }
         }
         tokio::time::sleep(interval).await;

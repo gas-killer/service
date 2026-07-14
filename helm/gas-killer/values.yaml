@@ -162,6 +162,18 @@ shard:
   # Sharded consumer the validator gate scopes to (GK_SHARD_CONSUMER). Empty =
   # gate any fulfil() round (lets the fleet arm before the consumer is deployed).
   consumer: ""
+  # Committee size per segment (GK_SHARD_K) and the operator id space 0..N the
+  # legacy rotation draws from (GK_SHARD_OPERATORS; layer-affinity uses the live
+  # worker registry instead). Must match the deployed operator fleet.
+  k: 2
+  operators: 3
+  # Gas override for segment view calls (GK_SHARD_GAS). Empty = code default
+  # (2^40); moot under GK_SIM_EXECUTOR=local where the SimProfile override wins.
+  gas: ""
+  # Per-segment committee deadline (GK_SHARD_SEGMENT_TIMEOUT_SECS) on the
+  # ROUTER. Sized for real-model segments (minutes of compute + the first
+  # segment's one-time mount verification), not the CI fixture.
+  segmentTimeoutSecs: 3600
   image:
     # Defaults to the node image — a worker is the node binary in shard-executor
     # mode (GK_SHARD_URL + GK_SHARD_OPERATOR_ID arm the segment loop + gate).

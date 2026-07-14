@@ -48,6 +48,12 @@ shard:
   enabled: true
   model: "qwen35"
   alignStages: true
+  # 4 workers in the example topology below.
+  k: 2
+  operators: 4
+  # A 20-layer 35B segment is ~minutes; the first also pays the one-time
+  # streaming-keccak mount verification over its slice files.
+  segmentTimeoutSecs: 7200
   # consumer: "0x..."   # GasKillerChat35Sharded address (optional; gate scopes to it)
   basePort: 4001
   resources:
@@ -78,4 +84,8 @@ shard:
       artifactSlice:
         baseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3.5-35b-a3b-onchain-v1"  # TODO: placeholder
         weightsFile: "weights.layers-20-39.bin"
+        # The overlay env triplet refuses weights-without-tokenizer (validator
+        # boot assert), and the slice manifest commits to BOTH files — so every
+        # group carries the (small) tokenizer.
+        tokenizerFile: "tokenizer.bin"
         manifest: "0x0000000000000000000000000000000000000000000000000000000000000000"  # TODO: per-slice manifest

@@ -3938,7 +3938,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Flocal-execution#d9ec740c91cb42b082babfe70ed0416bf6748f5b"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Flocal-execution#ac38dbdf516b66822aeb1128cac7018412acd5f6"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -3953,7 +3953,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Flocal-execution#d9ec740c91cb42b082babfe70ed0416bf6748f5b"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Flocal-execution#ac38dbdf516b66822aeb1128cac7018412acd5f6"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -3969,7 +3969,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Flocal-execution#d9ec740c91cb42b082babfe70ed0416bf6748f5b"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Flocal-execution#ac38dbdf516b66822aeb1128cac7018412acd5f6"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -3996,7 +3996,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Flocal-execution#d9ec740c91cb42b082babfe70ed0416bf6748f5b"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=ron%2Flocal-execution#ac38dbdf516b66822aeb1128cac7018412acd5f6"
 dependencies = [
  "alloy",
  "alloy-eips",
