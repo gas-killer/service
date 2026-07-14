@@ -1,0 +1,126 @@
+# 10-fresh-operator Qwen3-0.6B sharded-inference experiment env ("tenop").
+#
+# Fresh release in a fresh namespace: the eigenlayer-setup job creates 10 fresh
+# operator identities (keys on the shared-data PVC — secretManager OFF so the
+# live env's Secret Manager entries are never touched), deploys a FRESH AVS on
+# Sepolia (sidesteps the live quorum's maxOperatorCount=4), stakes + registers
+# all 10, and the 10 node Deployments come up as both signers and shard
+# segment executors.
+#
+# TOPOLOGY CONSTRAINT: sharedData is ReadWriteOnce and mounted by every pod, so
+# the WHOLE env must land on ONE VM. Run it on a dedicated Spot pool with a
+# single 16-vCPU machine (10 nodes x 1.5 CPU req + router fits):
+#
+#   gcloud container node-pools create tenop-pool --cluster gas-killer \
+#     --region us-east4 --machine-type n2-standard-16 --spot --num-nodes 1 \
+#     --node-labels role=tenop
+#
+# Bring-up:
+#   kubectl create namespace tenop
+#   kubectl -n tenop create secret docker-registry ghcr-pull-secret ...   # ghcr pull creds
+#   helm install gas-killer ./helm/gas-killer -n tenop \
+#     -f helm/gas-killer/tenop-0.6b-overrides.yaml \
+#     --set secrets.privateKey=0x... --set secrets.fundedKey=0x... \
+#     --set secrets.adminKey=...
+#
+# Post-install (not values-expressible; re-apply after any helm upgrade):
+#   - pin pods to the pool: kubectl -n tenop patch deploy ... nodeSelector role=tenop
+#   - arm sharding on the nodes (node-N <-> operator id N-1):
+#       for i in $(seq 1 10); do kubectl -n tenop set env deploy/gas-killer-node-$i \
+#         GK_SHARD_URL=http://gas-killer-router:8081 GK_SHARD_OPERATOR_ID=$((i-1)); done
+#   - deploy GasKillerChatSharded + Qwen3SegEngine (sdk
+#     script/DeployOnchainLLMShardedOverlay.s.sol) with
+#     REGISTRY_COORDINATOR_ADDRESS + AVS from the NEW avs_deploy.json
+#     (kubectl -n tenop exec any node -- cat /app/.nodes/avs_deploy.json), then
+#     set shard.consumer + GK_SHARD_CONSUMER on the nodes.
+#
+# QUORUM NOTE: an armed operator that executed ZERO segments of a pipeline
+# refuses to sign its fulfil() round (common/src/shard.rs verify_fulfil_task),
+# and settlement needs 2/3 of stake. The /shard/infer request MUST spread work
+# over all 10 operators: with the legacy rotation, committee units are
+# stages + argmax_shards, and slots (seed + unit*k + j) mod 10 — stages=5 +
+# argmax_shards=5 at k=2 covers every operator twice per token. Use the request
+# in the sdk's .context/tenop/shard06_req.template.json.
+
+global:
+  environment: TESTNET
+  nodeCount: 10
+  # setup on real Sepolia: 10 registrations + the ~15min allocation-config delay
+  initTimeout: 2400
+  simProfile: "unbounded-v1"   # 0.6B tier (xl is the 35B's 2^43)
+  simExecutor: "local"          # segments run in-process with the mmap overlay
+  overlayMmap: null             # code default (true under local)
+  simRpc: ""                    # HTTP_RPC (archive) is the lazy state backend
+
+imagePullSecrets:
+  - name: ghcr-pull-secret      # must exist in the tenop namespace
+
+secretManager:
+  enabled: false                # keys + avs_deploy.json live on the PVC only
+
+secrets:
+  privateKey: ""                # --set (deployer)
+  fundedKey: ""                 # --set (pays setup: ~0.24 ETH for 10 ops)
+  httpRpc: "https://sepolia.drpc.org"   # WS_RPC auto-derived (wss://)
+  adminKey: ""                  # --set (required: TESTNET + router ingress)
+
+orchestrator:
+  # Dev keypair (matches the default orchestrator.publicConfig g2 coords, so
+  # nodes and router agree). Throwaway env only.
+  routerPrivateKey: "21747297277459394737337554964532622739983285244437107194284923826011566394548"
+
+eigenlayer:
+  contracts:                    # EigenLayer Sepolia core
+    delegationManager: "0xD4A7E1Bd8015057293f0D0A557088c286942e84b"
+    strategyManager: "0x2E3D6c0744b10eb0A4e6F679F71554a39Ec47a5D"
+    lstContract: "0x00c71b0fcadE911B2feeE9912De4Fe19eB04ca56"
+    lstStrategy: "0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574"
+    allocationManager: "0x42583067658071247ec8CE0A516A58f682002d07"
+  quorum:
+    minimumStake: "1"           # register.sh stakes 1e14 wei of stETH per op
+    maxOperatorCount: 12
+
+overlay:
+  enabled: true                 # values defaults = qwen3-0.6b-onchain-v1 release
+                                # + manifest 0x23216cb9... (per-pod initContainer
+                                # download into emptyDir, verified at boot)
+
+shard:
+  enabled: true                 # arms router GK_SHARD_*; no worker pods
+  model: "qwen3-0.6b"
+  alignStages: true
+  consumer: ""                  # set after the consumer deploy
+  k: 2
+  operators: 10
+  segmentTimeoutSecs: 1800
+  workers: []
+
+node:
+  image:
+    tag: node-pr-321
+    pullPolicy: Always
+  resources:
+    requests: { memory: "3Gi", cpu: "1500m" }
+    limits: { memory: "6Gi", cpu: "2000m" }
+
+router:
+  image:
+    tag: router-pr-321
+    pullPolicy: Always
+  roundTimeout: "1800"
+  resources:
+    requests: { memory: "4Gi", cpu: "1000m" }
+    limits: { memory: "8Gi", cpu: "2000m" }
+
+sharedData:
+  accessMode: ReadWriteOnce     # single-VM topology (see header)
+  size: 1Gi                     # keys + avs_deploy.json only; overlay uses emptyDir
+
+l2: { enabled: false }
+bridge: { enabled: false, waitForBridge: false }
+deployTarget: { enabled: false }
+yieldDistribution: { enabled: false }
+monitoring: { enabled: false }
+loki: { enabled: false }
+alloy: { enabled: false }
+ingress: { enabled: false }     # cluster Ingress; use port-forward for /shard
