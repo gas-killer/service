@@ -2240,7 +2240,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-bindings"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -2255,11 +2255,10 @@ dependencies = [
 [[package]]
 name = "commonware-avs-core"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
 dependencies = [
  "alloy",
  "alloy-primitives",
- "alloy-signer",
  "anyhow",
  "ark-bn254",
  "ark-ec",
@@ -2284,7 +2283,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-eigenlayer"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
 dependencies = [
  "alloy-primitives",
  "alloy-provider",
@@ -2302,7 +2301,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-node"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
 dependencies = [
  "alloy",
  "alloy-network",
@@ -2350,7 +2349,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-router"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Fintegrate-aggregation-engine#a3d0c5944943e4a172f8753e54bce1171cf5b2c2"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=bagelface%2Frename-orchestrator-to-router#7aa93088e4f49b40dcf8a39522fbdef5a67552e6"
 dependencies = [
  "alloy",
  "alloy-primitives",

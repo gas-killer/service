@@ -25,11 +25,11 @@ axum = "0.7"
 bytes = "1.10.1"
 clap = "4.5.37"
 commonware-actor = "2026.5.0"
-commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/integrate-aggregation-engine" }
-commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/integrate-aggregation-engine" }
-commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/integrate-aggregation-engine" }
-commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/integrate-aggregation-engine" }
-commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/integrate-aggregation-engine" }
+commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/rename-orchestrator-to-router" }
+commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/rename-orchestrator-to-router" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/rename-orchestrator-to-router" }
+commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/rename-orchestrator-to-router" }
+commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "bagelface/rename-orchestrator-to-router" }
 commonware-codec = "2026.5.0"
 commonware-consensus = "2026.5.0"
 commonware-cryptography = "2026.5.0"
