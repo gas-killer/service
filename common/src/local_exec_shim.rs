@@ -1,40 +1,27 @@
 //! Executor selection (`GK_SIM_EXECUTOR=rpc|local`) and overlay-source
 //! preference (`GK_OVERLAY_MMAP=true|false`) for tracked-function analysis.
 //!
-//! gas-analyzer's local execution entry point
-//! (`call_to_encoded_state_updates_local`, gas-analyzer#169) is pinned by
-//! the workspace root `Cargo.toml` (branch `ron/local-execution`, a
-//! superset of `ron/unbounded-v2-code-overlays` — it is stacked on top of
-//! the UnboundedV1Xl and UNBOUNDED_V2 overlay commits). `gas_analyzer`
-//! already re-exports the real [`gas_analyzer::SimExecutor`] selector
+//! gas-analyzer's local execution entry points
+//! (`call_to_encoded_state_updates_local` and its file-backed twins
+//! `_local_files`/`_local_multi`, gas-analyzer#169/#172) are pinned by the
+//! workspace root `Cargo.toml` (branch `ron/local-execution`, a superset of
+//! `ron/unbounded-v2-code-overlays` — it is stacked on top of the
+//! UnboundedV1Xl and UNBOUNDED_V2 overlay commits). `gas_analyzer` already
+//! re-exports the real [`gas_analyzer::SimExecutor`] selector
 //! (`Rpc`/`Local`, with `parse`/`FromStr`/`Display`) and
 //! [`gas_analyzer::LocalStateCache`]; this module only adds the
 //! `GK_SIM_EXECUTOR`/`GK_OVERLAY_MMAP` env parsing, following the same
 //! fail-loud pattern as `sim_profile_from_env` in `validator.rs`.
 //!
-//! ## The one real gap: mmap overlay mounting isn't public yet
-//!
-//! `call_to_encoded_state_updates_local`'s `overlay` parameter is
-//! `Option<&OverlayEnv>` — the same in-RAM type the RPC path takes.
-//! Internally, `LocalStateCache::overlay_mount_for` and
-//! `OverlayMount::from_env` are the only things reachable from that public
-//! signature; both require the blob already materialized as an `OverlayEnv`
-//! (i.e. in RAM), even though `OverlayMount::from_files` — the mmap-backed
-//! constructor that is the whole point of `GK_OVERLAY_MMAP` for 35GB models
-//! — is `pub` on `gas_analyzer::OverlayMount` and used internally by
-//! `LocalStateCache`. There is currently no public function that turns an
-//! `OverlayMount::from_files` result into what `call_to_encoded_state_updates_local`
-//! accepts (confirmed by reading `crates/evmsketch/src/lib.rs` +
-//! `overlay_mount.rs` on `ron/local-execution` @ 81c642e: `overlay_mount_for`
-//! is `pub(crate)`, and no `_local_files`-style entry point exists).
-//!
-//! So `GK_OVERLAY_MMAP` is parsed and threaded here (env surface + helm
-//! surface are real and in place now), but [`prefer_mmap_overlay`] can only
-//! be *read* by the validator today; actually avoiding the in-RAM
-//! `OverlayEnv::from_blobs` read for the weights file requires one more
-//! public entry point on the analyzer side. See the `TODO(gas-analyzer#169)`
-//! on [`prefer_mmap_overlay`] for the exact one-line change once that
-//! lands.
+//! Under `GK_SIM_EXECUTOR=local` with mmap mode (the default), the
+//! validator keeps only artifact file paths + pinned manifests and the
+//! analyzer mounts them via `OverlayMount::from_files` — streaming-keccak
+//! manifest verification, lazy chunk materialization, never the full blob
+//! in heap. Multiple models (`GK_OVERLAY_WEIGHTS_2/...`, see
+//! `validator::overlay_files_from_env`) mount simultaneously through
+//! `call_to_encoded_state_updates_local_multi`: chunk addresses are derived
+//! per-manifest, so distinct models' address sets are disjoint and one
+//! composite lookup serves them all.
 
 use anyhow::{Result, anyhow};
 
@@ -74,16 +61,12 @@ fn parse_sim_executor(raw: &str) -> Result<SimExecutor> {
 /// regardless of this flag). Same fail-loud parsing as the other pinned-env
 /// knobs.
 ///
-/// TODO(gas-analyzer#169): `call_to_encoded_state_updates_local`'s `overlay`
-/// parameter is currently `Option<&OverlayEnv>` — there is no public path
-/// from `OverlayMount::from_files` into it yet (see module docs). Once the
-/// analyzer adds one (e.g. an `overlay_mount: Option<&OverlayMount>`
-/// parameter, or an `OverlaySource` enum wrapping both), swap
-/// `overlay_env_from_env`'s `OverlayEnv::from_blobs(&weights, &tokenizer)`
-/// call in `validator.rs` for `OverlayMount::from_files(weights_path,
-/// tokenizer_path, expected_manifest)` whenever
-/// `prefer_mmap_overlay(sim_executor) == true`, and pass the mount through
-/// the new parameter instead of `self.overlay_env.as_deref()`.
+/// When this returns `true`, `validator::overlay_files_from_env` keeps only
+/// artifact paths + manifests and analysis goes through the analyzer's
+/// file-backed entry point (`call_to_encoded_state_updates_local_multi`) —
+/// this is also the only mode that supports mounting MULTIPLE models
+/// (`GK_OVERLAY_WEIGHTS_2/...`); the in-RAM `OverlayEnv` path serves one
+/// model only and refuses indexed overlay slots at startup.
 pub fn prefer_mmap_overlay(executor: SimExecutor) -> bool {
     match std::env::var("GK_OVERLAY_MMAP") {
         Err(_) => executor == SimExecutor::Local,

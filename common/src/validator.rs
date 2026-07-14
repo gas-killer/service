@@ -22,7 +22,7 @@ use commonware_avs_router::wire;
 use alloy::rpc::types::TransactionRequest;
 use gas_analyzer::{
     EvmSketchExecutorCache, LocalStateCache, OverlayEnv, SimExecutor, SimProfile,
-    call_to_encoded_state_updates_local, call_to_encoded_state_updates_local_files,
+    call_to_encoded_state_updates_local, call_to_encoded_state_updates_local_multi,
     call_to_encoded_state_updates_with_evmsketch_env,
 };
 
@@ -140,14 +140,21 @@ pub struct GasKillerValidator {
     /// `Arc` because the mounted set is ~the size of the blobs (hundreds of MB)
     /// and the validator is cloned.
     overlay_env: Option<Arc<OverlayEnv>>,
-    /// mmap-mode overlay: the artifact FILE PATHS + pinned manifest, retained
-    /// instead of materializing `OverlayEnv::from_blobs` in RAM. Set when
+    /// mmap-mode overlays: one `(weights_path, tokenizer_path, manifest)`
+    /// artifact spec PER PINNED MODEL, retained instead of materializing
+    /// `OverlayEnv::from_blobs` in RAM. Populated when
     /// `GK_SIM_EXECUTOR=local` and `GK_OVERLAY_MMAP` (default true under
-    /// local) — the analyzer mounts via `OverlayMount::from_files`
+    /// local) — the analyzer mounts each spec via `OverlayMount::from_files`
     /// (streaming-keccak manifest verify + lazy chunk materialization), which
-    /// is what makes ~35GB artifacts servable. Mutually exclusive with
-    /// `overlay_env`.
-    overlay_files: Option<(String, String, alloy::primitives::B256)>,
+    /// is what makes ~35GB artifacts servable. Multiple models mount
+    /// simultaneously as ONE composite lookup: chunk addresses are derived
+    /// per-manifest, so distinct models' address sets are disjoint and every
+    /// on-chain consumer finds exactly its own model's chunks. Slot 1 comes
+    /// from the unsuffixed `GK_OVERLAY_WEIGHTS/TOKENIZER/MANIFEST` triplet;
+    /// additional models from `GK_OVERLAY_WEIGHTS_2/...` and up (see
+    /// [`overlay_files_from_env`]). Empty when unconfigured; mutually
+    /// exclusive with `overlay_env`.
+    overlay_files: Vec<(String, String, alloy::primitives::B256)>,
     /// Executor selection for tracked-function analysis (`GK_SIM_EXECUTOR=rpc|local`,
     /// gas-analyzer#169). `local` re-executes the call in-process inside the
     /// analyzer (`call_to_encoded_state_updates_local`) instead of delegating
@@ -269,30 +276,41 @@ fn overlay_env_from_env() -> Option<Arc<OverlayEnv>> {
     Some(Arc::new(env))
 }
 
-/// mmap-mode variant of [`overlay_env_from_env`]: returns the artifact file
-/// paths + parsed manifest WITHOUT reading the blobs (the analyzer's
-/// `OverlayMount::from_files` mmaps and verifies them lazily). Same
-/// fail-loud rules for partial configuration.
-fn overlay_files_from_env() -> Option<(String, String, alloy::primitives::B256)> {
-    let weights_path = std::env::var("GK_OVERLAY_WEIGHTS").unwrap_or_default();
-    let tokenizer_path = std::env::var("GK_OVERLAY_TOKENIZER").unwrap_or_default();
+/// One overlay slot's `(weights_path, tokenizer_path, manifest)` from
+/// `GK_OVERLAY_WEIGHTS{suffix}` / `GK_OVERLAY_TOKENIZER{suffix}` /
+/// `GK_OVERLAY_MANIFEST{suffix}` (suffix `""` for the historical slot-1
+/// triplet, `"_2"`, `"_3"`, ... for additional models). Returns `None` when
+/// the slot is entirely unconfigured; panics on any partial configuration —
+/// same fail-loud rules as [`overlay_env_from_env`].
+fn overlay_files_slot(suffix: &str) -> Option<(String, String, alloy::primitives::B256)> {
+    let weights_var = format!("GK_OVERLAY_WEIGHTS{suffix}");
+    let tokenizer_var = format!("GK_OVERLAY_TOKENIZER{suffix}");
+    let manifest_var = format!("GK_OVERLAY_MANIFEST{suffix}");
+    let weights_path = std::env::var(&weights_var).unwrap_or_default();
+    let tokenizer_path = std::env::var(&tokenizer_var).unwrap_or_default();
     if weights_path.is_empty() && tokenizer_path.is_empty() {
+        let manifest_hex = std::env::var(&manifest_var).unwrap_or_default();
+        assert!(
+            manifest_hex.trim().is_empty(),
+            "{manifest_var} is set but {weights_var}/{tokenizer_var} are not: \
+             partial overlay slot configuration"
+        );
         return None;
     }
     assert!(
         !weights_path.is_empty() && !tokenizer_path.is_empty(),
-        "GK_OVERLAY_WEIGHTS and GK_OVERLAY_TOKENIZER must be set together"
+        "{weights_var} and {tokenizer_var} must be set together"
     );
-    let manifest_hex = std::env::var("GK_OVERLAY_MANIFEST").unwrap_or_default();
+    let manifest_hex = std::env::var(&manifest_var).unwrap_or_default();
     assert!(
         !manifest_hex.is_empty(),
-        "GK_OVERLAY_MANIFEST must be set when overlay artifacts are configured: \
+        "{manifest_var} must be set when overlay artifacts are configured: \
          refusing to mount unverified bytes"
     );
     let expected: alloy::primitives::B256 = manifest_hex
         .trim()
         .parse()
-        .unwrap_or_else(|e| panic!("invalid GK_OVERLAY_MANIFEST {manifest_hex:?}: {e}"));
+        .unwrap_or_else(|e| panic!("invalid {manifest_var} {manifest_hex:?}: {e}"));
     for p in [&weights_path, &tokenizer_path] {
         assert!(
             std::path::Path::new(p).is_file(),
@@ -306,6 +324,95 @@ fn overlay_files_from_env() -> Option<(String, String, alloy::primitives::B256)>
         "overlay artifacts will be mmap-mounted at first analysis (OverlayMount::from_files)"
     );
     Some((weights_path, tokenizer_path, expected))
+}
+
+/// The indexed overlay slot numbers (`GK_OVERLAY_*_N`, N >= 2) present in
+/// the environment, sorted and deduped. Discovery scans the environment
+/// rather than probing sequentially, so a numbering gap (`_2` unset but `_3`
+/// set) cannot silently drop a configured model. Panics on a non-numeric
+/// suffix or on the reserved slots 0/1 (slot 1 is the unsuffixed triplet).
+fn indexed_overlay_slots() -> Vec<u32> {
+    indexed_overlay_slots_from(std::env::vars())
+}
+
+/// [`indexed_overlay_slots`] over an explicit variable set (unit-testable
+/// without mutating the process environment).
+fn indexed_overlay_slots_from(vars: impl Iterator<Item = (String, String)>) -> Vec<u32> {
+    let mut slots: Vec<u32> = vars
+        .filter_map(|(key, value)| {
+            let suffix = [
+                "GK_OVERLAY_WEIGHTS_",
+                "GK_OVERLAY_TOKENIZER_",
+                "GK_OVERLAY_MANIFEST_",
+            ]
+            .iter()
+            .find_map(|prefix| key.strip_prefix(prefix))?;
+            // GK_OVERLAY_MMAP starts with none of the three prefixes, so any
+            // match here is meant as an overlay slot; a malformed suffix is a
+            // config typo and must fail loudly, not be skipped.
+            if value.trim().is_empty() {
+                return None;
+            }
+            let slot: u32 = suffix.parse().unwrap_or_else(|_| {
+                panic!("invalid overlay slot suffix in {key:?}: expected an integer >= 2")
+            });
+            assert!(
+                slot >= 2,
+                "{key} uses reserved slot {slot}: the first model is configured on the \
+                 unsuffixed GK_OVERLAY_WEIGHTS/TOKENIZER/MANIFEST variables"
+            );
+            Some(slot)
+        })
+        .collect();
+    slots.sort_unstable();
+    slots.dedup();
+    slots
+}
+
+/// mmap-mode variant of [`overlay_env_from_env`]: returns each configured
+/// model's artifact file paths + parsed manifest WITHOUT reading the blobs
+/// (the analyzer's `OverlayMount::from_files` mmaps and verifies them
+/// lazily). Same fail-loud rules for partial configuration, applied per
+/// slot.
+///
+/// Multi-overlay: slot 1 is the historical unsuffixed
+/// `GK_OVERLAY_WEIGHTS/TOKENIZER/MANIFEST` triplet; each additional pinned
+/// model gets a suffixed triplet (`GK_OVERLAY_WEIGHTS_2`, ...). All slots
+/// mount simultaneously as one composite lookup — chunk addresses are
+/// derived per-manifest, so distinct models' address sets are disjoint.
+/// Duplicate manifests across slots are refused (the analyzer memoizes
+/// mounts by manifest, so the later slot's paths would silently lose), as
+/// are indexed slots without the base slot.
+fn overlay_files_from_env() -> Vec<(String, String, alloy::primitives::B256)> {
+    let mut specs = Vec::new();
+    if let Some(spec) = overlay_files_slot("") {
+        specs.push(spec);
+    }
+    for slot in indexed_overlay_slots() {
+        assert!(
+            !specs.is_empty(),
+            "GK_OVERLAY_*_{slot} is set but the base GK_OVERLAY_WEIGHTS/TOKENIZER/MANIFEST \
+             triplet is not: configure the first model on the unsuffixed variables"
+        );
+        let spec = overlay_files_slot(&format!("_{slot}"))
+            .unwrap_or_else(|| unreachable!("slot {slot} was discovered from a set variable"));
+        specs.push(spec);
+    }
+    let mut seen = HashSet::new();
+    for (_, _, manifest) in &specs {
+        assert!(
+            seen.insert(*manifest),
+            "duplicate overlay manifest {manifest} across GK_OVERLAY slots: \
+             every mounted model must have a distinct pinned manifest"
+        );
+    }
+    if specs.len() > 1 {
+        info!(
+            models = specs.len(),
+            "multi-overlay: all pinned models mount simultaneously as one composite lookup"
+        );
+    }
+    specs
 }
 
 impl GasKillerValidator {
@@ -353,6 +460,15 @@ impl GasKillerValidator {
                 if prefer_mmap_overlay(executor) {
                     None
                 } else {
+                    // The in-RAM/stateOverrides path mounts exactly one model;
+                    // silently ignoring an indexed slot here would fork the
+                    // quorum against mmap-mode operators serving both.
+                    assert!(
+                        indexed_overlay_slots().is_empty(),
+                        "GK_OVERLAY_*_N is configured but multi-overlay requires \
+                         GK_SIM_EXECUTOR=local with GK_OVERLAY_MMAP enabled (the default \
+                         under local); the in-RAM/stateOverrides path serves one model only"
+                    );
                     overlay_env_from_env()
                 }
             },
@@ -361,7 +477,7 @@ impl GasKillerValidator {
                 if prefer_mmap_overlay(executor) {
                     overlay_files_from_env()
                 } else {
-                    None
+                    Vec::new()
                 }
             },
             sim_executor: {
@@ -399,7 +515,7 @@ impl GasKillerValidator {
             shard: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
-            overlay_files: None,
+            overlay_files: Vec::new(),
             sim_executor: {
                 let executor = sim_executor_from_env();
                 let prefer_mmap = prefer_mmap_overlay(executor);
@@ -431,7 +547,7 @@ impl GasKillerValidator {
             shard: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
-            overlay_files: None,
+            overlay_files: Vec::new(),
             sim_executor: {
                 let executor = sim_executor_from_env();
                 let prefer_mmap = prefer_mmap_overlay(executor);
@@ -767,15 +883,19 @@ impl GasKillerValidator {
         // concurrent traces of the same block via `local_state_cache` (this
         // validator's counterpart to `executor_cache`).
         //
-        // TODO(gas-analyzer#169): the mmap-backed OverlayMount::from_files source
-        // (GK_OVERLAY_MMAP=true, the default under `local`) is not yet reachable
-        // from this public entry point — it only accepts `Option<&OverlayEnv>`,
-        // the same in-RAM type as the RPC path. overlay_env is currently always
-        // built from OverlayEnv::from_blobs (see overlay_env_from_env below)
-        // regardless of GK_OVERLAY_MMAP. Once the analyzer exposes a public path
-        // from OverlayMount::from_files into call_to_encoded_state_updates_local,
-        // branch here on `prefer_mmap_overlay(self.sim_executor)` to build the
-        // mmap mount instead — see local_exec_shim.rs for the exact shape.
+        // Multi-overlay (gas-analyzer#172): under GK_SIM_EXECUTOR=local with
+        // mmap mode (GK_OVERLAY_MMAP, default true under local), EVERY
+        // configured model's artifact spec in `overlay_files` mounts
+        // simultaneously via call_to_encoded_state_updates_local_multi.
+        // Chunk addresses are derived per-manifest
+        // (keccak("gaskiller.llm.overlay.v1"||manifest||u64be(i))[12:]), so
+        // distinct models' address sets are disjoint and the composite lookup
+        // serves each consumer exactly its own model's chunks. This replaces
+        // hosting a second model's chunks as anvil-fork setCode state, which
+        // raced reforking: a task pinned to a block that predated the fork's
+        // latest refork read the chunks through the fork's historical-state
+        // proxy (no chunks there), saw zero-length weights, and all
+        // participants deterministically signed an empty payload.
         //
         // Runtime-starvation fix (production incident, PR #319): under
         // GK_SIM_EXECUTOR=local, this call bottoms out in gas-analyzer's
@@ -829,39 +949,49 @@ impl GasKillerValidator {
                         )
                         .await
                         .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e)),
-                        SimExecutor::Local => match &overlay_files {
-                            // mmap mode: the analyzer mounts the artifact files directly
-                            // (streaming manifest verify + lazy chunk materialization) —
-                            // no blob bytes ever enter this process's heap.
-                            Some((weights, tokenizer, manifest)) => {
-                                call_to_encoded_state_updates_local_files(
+                        SimExecutor::Local => {
+                            if overlay_files.is_empty() {
+                                call_to_encoded_state_updates_local(
                                     &executor_cache,
                                     &local_state_cache,
                                     &rpc_url,
                                     tx_request,
                                     block_height,
                                     sim_profile,
-                                    weights,
-                                    tokenizer,
-                                    *manifest,
+                                    overlay_env.as_deref(),
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("Local gas analysis failed: {}", e))
+                            } else {
+                                // mmap mode: the analyzer mounts every configured
+                                // model's artifact files directly (streaming
+                                // manifest verify + lazy chunk materialization)
+                                // and consults them as one composite lookup —
+                                // no blob bytes ever enter this process's heap.
+                                // With a single spec this is byte-identical to
+                                // the historical single-model entry point (both
+                                // resolve through the same manifest-keyed mount
+                                // cache and shared extraction body).
+                                let models = overlay_files.len();
+                                call_to_encoded_state_updates_local_multi(
+                                    &executor_cache,
+                                    &local_state_cache,
+                                    &rpc_url,
+                                    tx_request,
+                                    block_height,
+                                    sim_profile,
+                                    &overlay_files,
                                 )
                                 .await
                                 .map_err(|e| {
-                                    anyhow::anyhow!("Local gas analysis (mmap) failed: {}", e)
+                                    anyhow::anyhow!(
+                                        "Local gas analysis (mmap, {} model(s)) failed: {}",
+                                        models,
+                                        e
+                                    )
                                 })
                             }
-                            None => call_to_encoded_state_updates_local(
-                                &executor_cache,
-                                &local_state_cache,
-                                &rpc_url,
-                                tx_request,
-                                block_height,
-                                sim_profile,
-                                overlay_env.as_deref(),
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Local gas analysis failed: {}", e)),
-                        },
+                        }
                     }
                 })
             })
@@ -1245,6 +1375,72 @@ mod tests {
         let hash2 = task_data.build_payload_hash(&[0x03, 0x04]);
 
         assert_ne!(hash1, hash2);
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Iterator<Item = (String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// Multi-overlay slot discovery: indexed `GK_OVERLAY_*_N` variables are
+    /// found by scanning (so numbering gaps cannot silently drop a model),
+    /// sorted, deduped across the three per-slot variables, and unrelated
+    /// variables — including `GK_OVERLAY_MMAP` and the unsuffixed slot-1
+    /// triplet — are ignored.
+    #[test]
+    fn test_indexed_overlay_slots_discovery() {
+        assert_eq!(
+            indexed_overlay_slots_from(vars(&[
+                ("GK_OVERLAY_WEIGHTS", "/overlay/weights.bin"),
+                ("GK_OVERLAY_TOKENIZER", "/overlay/tokenizer.bin"),
+                ("GK_OVERLAY_MANIFEST", "0xabc"),
+                ("GK_OVERLAY_MMAP", "true"),
+                ("HTTP_RPC", "http://x"),
+            ])),
+            Vec::<u32>::new(),
+            "slot-1 triplet and unrelated vars must not register as indexed slots"
+        );
+
+        assert_eq!(
+            indexed_overlay_slots_from(vars(&[
+                ("GK_OVERLAY_WEIGHTS_3", "/m3/weights.bin"),
+                ("GK_OVERLAY_TOKENIZER_3", "/m3/tokenizer.bin"),
+                ("GK_OVERLAY_MANIFEST_3", "0xdef"),
+                ("GK_OVERLAY_WEIGHTS_2", "/m2/weights.bin"),
+                ("GK_OVERLAY_TOKENIZER_2", "/m2/tokenizer.bin"),
+                ("GK_OVERLAY_MANIFEST_2", "0xabc"),
+            ])),
+            vec![2, 3],
+            "slots must come back sorted and deduped across the three variables"
+        );
+
+        // A gap in numbering still surfaces the configured slot — the
+        // partial-slot assertions in overlay_files_slot then judge it.
+        assert_eq!(
+            indexed_overlay_slots_from(vars(&[("GK_OVERLAY_MANIFEST_4", "0xabc")])),
+            vec![4],
+        );
+
+        // Empty values are "unset".
+        assert_eq!(
+            indexed_overlay_slots_from(vars(&[("GK_OVERLAY_WEIGHTS_2", "  ")])),
+            Vec::<u32>::new(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved slot")]
+    fn test_indexed_overlay_slots_reject_reserved_slot_one() {
+        indexed_overlay_slots_from(vars(&[("GK_OVERLAY_WEIGHTS_1", "/m1/weights.bin")]));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid overlay slot suffix")]
+    fn test_indexed_overlay_slots_reject_non_numeric_suffix() {
+        indexed_overlay_slots_from(vars(&[("GK_OVERLAY_WEIGHTS_QWEN", "/m/weights.bin")]));
     }
 
     /// Regression coverage for the runtime-starvation fix (PR #319).
