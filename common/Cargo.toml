@@ -19,14 +19,16 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
-commonware-avs-router = { workspace = true }
-commonware-avs-eigenlayer = { workspace = true }
-commonware-avs-bindings = { workspace = true }
 
-# Commonware (for codec and eigenlayer)
+# Commonware
+commonware-avs-bindings = { workspace = true }
+commonware-avs-core = { workspace = true }
+commonware-avs-eigenlayer = { workspace = true }
 commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
 
 # Config
 dotenv = { workspace = true }

@@ -43,6 +43,20 @@ services:
       - .env
     restart: unless-stopped
 
+  # Prepares the engine-journal volumes: fresh named volumes are root-owned,
+  # while the node/router images run as appuser (uid 1000). Chown once here so
+  # the aggregation engine can create its journal under STORAGE_DIR.
+  storage-init:
+    image: busybox:1.36
+    user: "0:0"
+    volumes:
+      - node-1-data:/data/node-1
+      - node-2-data:/data/node-2
+      - node-3-data:/data/node-3
+      - router-data:/data/router
+    command: chown -R 1000:1000 /data/node-1 /data/node-2 /data/node-3 /data/router
+    restart: "no"
+
   node-1:
     build:
       context: .
@@ -53,16 +67,20 @@ services:
         condition: service_completed_successfully
       ethereum:
         condition: service_started
+      storage-init:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
+      - STORAGE_DIR=/app/data
     volumes:
       - ./config/.nodes/operator_keys/testacc1.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
       - ./config/public_orchestrator.dev.json:/app/public_orchestrator.json:ro
+      - node-1-data:/app/data
     command:
       [
         "--key-file",
@@ -87,16 +105,20 @@ services:
         condition: service_completed_successfully
       ethereum:
         condition: service_started
+      storage-init:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
+      - STORAGE_DIR=/app/data
     volumes:
       - ./config/.nodes/operator_keys/testacc2.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
       - ./config/public_orchestrator.dev.json:/app/public_orchestrator.json:ro
+      - node-2-data:/app/data
     entrypoint: ["/bin/sh", "-c"]
     command:
       - "sleep 15 && exec gas-killer-node --key-file /app/key.json --port 3002 --orchestrator /app/public_orchestrator.json"
@@ -115,16 +137,20 @@ services:
         condition: service_completed_successfully
       ethereum:
         condition: service_started
+      storage-init:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
+      - STORAGE_DIR=/app/data
     volumes:
       - ./config/.nodes/operator_keys/testacc3.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
       - ./config/public_orchestrator.dev.json:/app/public_orchestrator.json:ro
+      - node-3-data:/app/data
     entrypoint: ["/bin/sh", "-c"]
     command:
       - "sleep 30 && exec gas-killer-node --key-file /app/key.json --port 3003 --orchestrator /app/public_orchestrator.json"
@@ -143,6 +169,8 @@ services:
         condition: service_completed_successfully
       ethereum:
         condition: service_started
+      storage-init:
+        condition: service_completed_successfully
       node-1:
         condition: service_started
       node-2:
@@ -155,8 +183,9 @@ services:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
-      # /app is owned by the non-root container user; /data is reserved for the Kubernetes
-      # PVC mount and is not writable here.
+      # Aggregation-engine journal directory (write-ahead log of acks/certificates).
+      - STORAGE_DIR=/app/data
+      # SQLite API-key store path (shares the router-data volume with the journal).
       - DATA_DIR=/app/data
       # Guards the /admin/keys endpoints used to mint the API keys that authenticate /trigger.
       # Defaults to a fixed value for the local/e2e harness; override by exporting ADMIN_KEY.
@@ -164,6 +193,7 @@ services:
     volumes:
       - ./config/.nodes:/app/.nodes:ro
       - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro
+      - router-data:/app/data
     entrypoint: ["/bin/sh", "-c"]
     command:
       - "sleep 45 && exec gas-killer-router --key-file /app/router_orchestrator.json --port 3000"
@@ -172,3 +202,13 @@ services:
       - "8080:8080"
       - "8081:8081"  # metrics / healthz
     restart: unless-stopped
+
+# Writable storage for the aggregation engine's journal (STORAGE_DIR). Named
+# volumes so certificates/acks survive container restarts; `docker compose
+# down -v` wipes them, which is also the manual recovery path for a height
+# wedged by split real/skip digests (see README "Failure modes and recovery").
+volumes:
+  node-1-data:
+  node-2-data:
+  node-3-data:
+  router-data:

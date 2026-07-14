@@ -1,12 +1,11 @@
-// Gas killer usecase implementations
-pub mod builder;
-pub mod creator;
+// Gas killer router: verifier-only certificate collector, task sequencer, and
+// on-chain submitter around the commonware aggregation engine.
 pub mod error;
 pub mod executor;
 pub mod factories;
 pub mod ingress;
 pub mod metrics;
-pub mod orchestrator;
+pub mod sequencer;
 pub mod store;
 
 // Re-export task_data from common crate
@@ -20,12 +19,10 @@ pub mod validator {
 }
 
 // Re-export main types for easy access
-pub use builder::GasKillerOrchestratorBuilder;
-pub use creator::GasKillerCreatorType;
+pub use commonware_avs_router::executor::ExecutionResult;
 pub use error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ErrorCode};
 pub use executor::GasKillerHandler;
 pub use gas_killer_common::GasKillerTaskData;
 pub use gas_killer_common::GasKillerValidator;
 pub use ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody, ValidationError};
-pub use orchestrator::GasKillerOrchestrator;
 pub use store::{ApiKeyMetadata, CreatedApiKey, SqliteStore, Task, TaskStatus};

@@ -41,6 +41,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "getrandom 0.3.4",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -2239,7 +2240,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-bindings"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -2254,9 +2255,10 @@ dependencies = [
 [[package]]
 name = "commonware-avs-core"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy",
+ "alloy-primitives",
  "anyhow",
  "ark-bn254",
  "ark-ec",
@@ -2265,9 +2267,11 @@ dependencies = [
  "async-trait",
  "bytes",
  "commonware-codec",
+ "commonware-consensus",
  "commonware-cryptography",
  "commonware-math",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "eigen-crypto-bn254",
@@ -2279,7 +2283,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-eigenlayer"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy-primitives",
  "alloy-provider",
@@ -2297,7 +2301,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-node"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy",
  "alloy-network",
@@ -2313,8 +2317,10 @@ dependencies = [
  "async-trait",
  "bytes",
  "clap",
+ "commonware-actor",
  "commonware-avs-core",
  "commonware-codec",
+ "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -2334,6 +2340,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml 0.9.34+deprecated",
+ "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",
  "url",
@@ -2342,51 +2349,46 @@ dependencies = [
 [[package]]
 name = "commonware-avs-router"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking#e23266df2ee9b59c7f717b68e6af695fb6b2a278"
 dependencies = [
  "alloy",
  "alloy-primitives",
  "alloy-provider",
- "alloy-signer",
- "alloy-signer-local",
  "anyhow",
- "ark-bn254",
- "ark-ec",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
  "async-trait",
- "axum 0.7.9",
  "bytes",
- "clap",
+ "commonware-actor",
  "commonware-avs-bindings",
  "commonware-avs-core",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-utils",
+ "eigen-crypto-bls",
+ "futures",
+ "rand_core 0.6.4",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "commonware-broadcast"
+version = "2026.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca9f35723f84c7f18e7832da263b86249aaa42e035f5b34d61896392fcc3a64"
+dependencies = [
+ "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
- "dotenv",
- "eigen-crypto-bls",
- "eigen-crypto-bn254",
- "eigen-logging",
- "futures",
- "futures-util",
- "governor",
- "hex",
- "num-bigint 0.4.6",
- "prost 0.13.5",
- "prost-build",
- "rand 0.9.2",
- "serde",
- "serde_json",
- "serde_yaml 0.9.34+deprecated",
- "tokio",
- "tower 0.4.13",
- "tower-http 0.5.2",
+ "thiserror 2.0.18",
  "tracing",
- "tracing-subscriber 0.3.23",
- "url",
 ]
 
 [[package]]
@@ -2402,6 +2404,60 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "commonware-coding"
+version = "2026.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0f4083138dd8c873165a2c0b4ae46a7530a6b2a49a8544153e61d12bbc215a"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-parallel",
+ "commonware-storage",
+ "commonware-utils",
+ "num-rational",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rayon",
+ "reed-solomon-simd",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "commonware-consensus"
+version = "2026.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2170a9a7f6fd97e102d17f4fa02306821a5b6b4a6707652b0bbeeb5e878348cd"
+dependencies = [
+ "bytes",
+ "cfg-if",
+ "commonware-actor",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-coding",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "pin-project",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rand_distr",
+ "rayon",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2532,6 +2588,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-resolver"
+version = "2026.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ac5a7f3bb4b4f6478d1bf3630b7dabad1e7f960b6f54189bc508572f55cdb5d"
+dependencies = [
+ "bytes",
+ "commonware-actor",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "rand 0.8.5",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-runtime"
 version = "2026.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2579,6 +2656,30 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "commonware-storage"
+version = "2026.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e295ccb2e7af312c82d3f2852e532f08c83cd848c96c0eb96e87fd30f863256a"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bytes",
+ "cfg-if",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "futures-util",
+ "thiserror 2.0.18",
+ "tracing",
+ "zstd",
 ]
 
 [[package]]
@@ -3948,11 +4049,13 @@ dependencies = [
  "async-trait",
  "bytes",
  "commonware-avs-bindings",
+ "commonware-avs-core",
  "commonware-avs-eigenlayer",
- "commonware-avs-router",
  "commonware-codec",
+ "commonware-consensus",
  "commonware-cryptography",
  "commonware-runtime",
+ "commonware-utils",
  "dotenv",
  "futures",
  "gas-analyzer-evmsketch",
@@ -3969,21 +4072,20 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
- "async-trait",
  "axum 0.7.9",
  "bytes",
  "clap",
+ "commonware-actor",
  "commonware-avs-core",
- "commonware-avs-eigenlayer",
  "commonware-avs-node",
  "commonware-codec",
+ "commonware-consensus",
  "commonware-cryptography",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
- "dotenv",
  "eigen-logging",
- "futures",
  "gas-killer-common",
  "governor",
  "serde",
@@ -4004,37 +4106,31 @@ dependencies = [
  "alloy-signer-local",
  "anyhow",
  "ark-bn254",
- "ark-ec",
  "ark-ff 0.5.0",
  "ark-serialize 0.5.0",
  "async-trait",
  "axum 0.7.9",
  "bytes",
  "clap",
+ "commonware-actor",
+ "commonware-avs-bindings",
  "commonware-avs-core",
  "commonware-avs-eigenlayer",
  "commonware-avs-router",
  "commonware-codec",
+ "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "dotenv",
- "eigen-client-avsregistry",
- "eigen-common",
- "eigen-crypto-bls",
- "eigen-crypto-bn254",
  "eigen-logging",
- "eigen-services-operatorsinfo",
- "eigen-utils",
- "futures",
- "futures-util",
  "gas-analyzer-evmsketch",
  "gas-killer-common",
  "governor",
  "hex",
- "num-bigint 0.4.6",
  "prost 0.13.5",
  "prost-build",
  "rand 0.9.2",
@@ -4892,14 +4988,14 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.17"
+version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f02ab6bace2054fb888a3c16f990117b579d14a3088e472d63c6011fa185c9d3"
+checksum = "c943259e342f1e06ff2da7a83eabdfe7f92ce10262688dbf1895ff0b3e6e4652"
 dependencies = [
  "bitflags",
  "libc",
  "plain",
- "redox_syscall 0.8.1",
+ "redox_syscall 0.9.0",
 ]
 
 [[package]]
@@ -5298,7 +5394,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.1.3",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6462,7 +6558,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "once_cell",
@@ -6482,7 +6578,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6495,7 +6591,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -6733,6 +6829,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "readme-rustdocifier"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
+
+[[package]]
 name = "recvmsg"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6749,11 +6851,23 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.8.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b44b894f2a6e36457d665d1e08c3866add6ed5e70050c1b4ba8a8ddedb02ce7"
+checksum = "c5102a6aaa05aa011a238e178e6bca86d2cb56fc9f586d37cb80f5bca6e07759"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "reed-solomon-simd"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffef0520d30fbd4151fb20e262947ae47fb0ab276a744a19b6398438105a072"
+dependencies = [
+ "cpufeatures",
+ "fixedbitset",
+ "once_cell",
+ "readme-rustdocifier",
 ]
 
 [[package]]
@@ -8023,7 +8137,6 @@ dependencies = [
  "ark-bn254",
  "ark-ec",
  "ark-ff 0.5.0",
- "commonware-avs-core",
  "dotenv",
  "gas-analyzer-evmsketch",
  "gas-killer-common",
@@ -10153,7 +10266,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

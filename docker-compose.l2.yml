@@ -179,6 +179,9 @@ services:
   # HTTP_RPC/WS_RPC stay on Sepolia Anvil (from base file) so EigenStakingClient
   # can scan operator registration events and resolve BLS public keys.
   # L2_HTTP_RPC enables GasKillerValidator to simulate tasks on the L2 chain.
+  # STORAGE_DIR and the per-service engine-journal volumes (node-N-data,
+  # router-data → /app/data) are inherited from the base file: compose merges
+  # `environment` by key and `volumes` by mount target, so they apply here too.
   node-1:
     depends_on:
       bridge:

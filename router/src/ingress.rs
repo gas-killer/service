@@ -1,6 +1,6 @@
-use crate::creator::{TaskQueueDepth, TaskSender};
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ApiQuery, ErrorCode};
 use crate::metrics::MetricsCollector;
+use crate::sequencer::{TaskQueueDepth, TaskSender};
 use crate::store::{ApiKeyMetadata, CreatedApiKey, SqliteStore, Task, TaskStatus};
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
@@ -1166,9 +1166,9 @@ mod tests {
         use axum::http::{Method, Request, StatusCode};
         use tower::util::ServiceExt; // for `oneshot`
 
-        fn make_app() -> (Router, crate::creator::TaskReceiver) {
-            let (sender, receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+        fn make_app() -> (Router, crate::sequencer::TaskReceiver) {
+            let (sender, receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let state = IngressState::without_metrics(sender, queue_depth);
             let app = build_app().with_state(state);
             (app, receiver)
@@ -1179,9 +1179,9 @@ mod tests {
         /// tasks have somewhere to land (a dropped receiver would make `/trigger` fail on send).
         async fn make_app_with_store(
             admin_key: Option<&str>,
-        ) -> (Router, SqliteStore, crate::creator::TaskReceiver) {
-            let (sender, receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+        ) -> (Router, SqliteStore, crate::sequencer::TaskReceiver) {
+            let (sender, receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let store = SqliteStore::connect_in_memory()
                 .await
                 .expect("in-memory store should open");
@@ -1642,8 +1642,8 @@ mod tests {
         async fn test_no_store_without_opt_in_fails_closed() {
             // Mirrors the production posture: a state with no store and no unauthenticated
             // opt-in must reject task submission rather than serving an open endpoint.
-            let (sender, _receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let mut state = IngressState::without_metrics(sender, queue_depth);
             state.allow_unauthenticated = false;
             let app = build_app().with_state(state);
@@ -1666,8 +1666,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_avs_metadata_returns_200_with_valid_json() {
-            let (sender, _receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let mut state = IngressState::without_metrics(sender, queue_depth);
             state.avs_metadata = AvsMetadata {
                 name: "Gas Killer".to_string(),
@@ -1970,8 +1970,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_full_queue_returns_503() {
-            let (sender, _receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let mut state = IngressState::without_metrics(sender, queue_depth.clone());
             state.max_queue_depth = 1;
             queue_depth.store(1, std::sync::atomic::Ordering::Relaxed);
@@ -1986,8 +1986,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_full_queue_increments_at_capacity_metric() {
-            let (sender, _receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let metrics = Arc::new(MetricsCollector::new());
             let mut state = IngressState::without_metrics(sender, queue_depth.clone());
             state.metrics = Some(Arc::clone(&metrics));
@@ -2003,8 +2003,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_queue_one_below_limit_still_accepts() {
-            let (sender, _receiver) = crate::creator::task_channel();
-            let queue_depth = crate::creator::task_queue_depth();
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
             let store = SqliteStore::connect_in_memory()
                 .await
                 .expect("in-memory store should open");

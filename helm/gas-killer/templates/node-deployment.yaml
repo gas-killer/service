@@ -236,6 +236,16 @@ spec:
               value: {{ $root.Values.node.p2pMessageBacklog | quote }}
             - name: P2P_MESSAGES_PER_SECOND
               value: {{ $root.Values.node.p2pMessagesPerSecond | quote }}
+            # Shared with the router (values.router.*): the node automaton's
+            # validation-retry budget must give up in lockstep with the router's
+            # Announce->Skip switch, or a transient RPC error on one node converts
+            # into a skip-vs-real digest split at 3-of-3 quorum.
+            - name: ROUND_TIMEOUT
+              value: {{ $root.Values.router.roundTimeout | quote }}
+            - name: REBROADCAST_INTERVAL
+              value: {{ $root.Values.router.rebroadcastInterval | quote }}
+            - name: STORAGE_DIR
+              value: {{ $root.Values.node.storageDir | quote }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}
@@ -261,6 +271,8 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+            - name: engine-journal
+              mountPath: {{ $root.Values.node.storageDir | quote }}
             {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
             - name: node-secrets
               mountPath: /app/secrets
@@ -279,6 +291,11 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" $root }}
+        # Writable storage for the aggregation engine's journal (STORAGE_DIR).
+        # emptyDir survives container restarts but not pod deletion — wiping it
+        # (delete the node pods) is the manual recovery for a wedged height.
+        - name: engine-journal
+          emptyDir: {}
         {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
         - name: node-secrets
           emptyDir: {}

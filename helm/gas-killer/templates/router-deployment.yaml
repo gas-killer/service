@@ -347,6 +347,10 @@ spec:
               value: {{ .Values.router.p2pMessageBacklog | quote }}
             - name: P2P_MESSAGES_PER_SECOND
               value: {{ .Values.router.p2pMessagesPerSecond | quote }}
+            # Engine journal shares the persistent router-data volume with the
+            # SQLite store (DATA_DIR), so it points at the same mount path.
+            - name: STORAGE_DIR
+              value: {{ .Values.router.persistence.mountPath | quote }}
             - name: PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
@@ -380,6 +384,8 @@ spec:
             - name: shared-data
               mountPath: /app/.nodes
               readOnly: true
+            # Holds both the SQLite API-key store (DATA_DIR) and the aggregation
+            # engine's certificate journal (STORAGE_DIR), which are set to this path.
             - name: router-data
               mountPath: {{ .Values.router.persistence.mountPath }}
             {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
@@ -400,6 +406,10 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" . }}
+        # Writable storage for the SQLite API-key store (DATA_DIR) and the
+        # aggregation engine's certificate journal (STORAGE_DIR). PVC-backed when
+        # persistence is enabled; the router is verifier-only so an emptyDir fallback
+        # (journal loss on reschedule) is safe — the tip is re-read from the network.
         - name: router-data
           {{- if .Values.router.persistence.enabled }}
           persistentVolumeClaim:
