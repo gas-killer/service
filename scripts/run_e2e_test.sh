@@ -124,9 +124,13 @@ echo -e "${YELLOW}Step 6: Waiting for EigenLayer setup to complete...${NC}"
 timeout=500
 elapsed=0
 
+# Operator-count-agnostic: the LAST operator's registration line signals
+# completion. GK_E2E_NODES matches TEST_ACCOUNTS (see scripts/gen_operator_fleet.py
+# for running the harness with a larger fleet).
+GK_E2E_NODES="${GK_E2E_NODES:-3}"
 while [ $elapsed -lt $timeout ]; do
     # Check if eigenlayer container has completed setup
-    if docker compose logs eigenlayer 2>/dev/null | grep -q "Operator 3 weight in quorum" && [ -f config/.nodes/avs_deploy.json ]; then
+    if docker compose logs eigenlayer 2>/dev/null | grep -q "Operator ${GK_E2E_NODES} weight in quorum" && [ -f config/.nodes/avs_deploy.json ]; then
         echo -e "${GREEN}EigenLayer setup completed successfully${NC}"
         break
     fi
@@ -376,7 +380,7 @@ if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm-sharded" ]; then
           n_layers: $n_layers, kvd: $kvd, dim: $dim, vocab: $vocab,
           stop0: $stop0, stop1: $stop1, seq_cap: $seq_cap,
           prompt_ids: $prompt_ids, max_new: $max_new,
-          stages: 2, argmax_shards: 2}')
+          stages: '"${GK_E2E_STAGES:-2}"', argmax_shards: '"${GK_E2E_ARGMAX:-2}"'}')
     echo "shard/infer request: $SHARD_REQ"
     SHARD_RESP=$(curl -sf --max-time 600 -X POST -H 'Content-Type: application/json' \
         -d "$SHARD_REQ" http://localhost:${ROUTER_INTERNAL_PORT}/shard/infer)
@@ -508,7 +512,7 @@ if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm-sharded" ]; then
     echo -e "${GREEN}✅ Committee agreement on all $SHARD_SEGMENTS segments (k=2 replicas byte-identical)${NC}"
 
     TOTAL_EXEC=0
-    for n in 1 2 3; do
+    for n in $(seq 1 "$GK_E2E_NODES"); do
         EXEC_N=$(docker compose logs node-$n 2>/dev/null | grep -c "shard: executed segment" || true)
         GATE_N=$(docker compose logs node-$n 2>/dev/null | grep -c "shard gate: verified commit chain" || true)
         echo "node-$n: executed $EXEC_N/$SHARD_SEGMENTS segments, gate verifications: $GATE_N"
