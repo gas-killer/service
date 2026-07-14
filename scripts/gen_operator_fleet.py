@@ -31,7 +31,13 @@ NODE_TMPL = """  node-{i}:
     build:
       context: .
       dockerfile: node/Dockerfile
-    platform: linux/amd64
+    # NO platform pin: build host-native. On Apple-silicon hosts, linux/amd64
+    # under Rosetta 2 MISCOMPUTES ChaCha20-Poly1305 AEAD for inputs >=512B in
+    # aws-lc-rs (handshakes and pings pass; every data broadcast fails with
+    # DecryptionFailed) — the same reason docker-compose.override.yml re-pins
+    # router+node-1..3 to arm64. Explicit COMPOSE_FILE lists disable that
+    # automatic override, so always include it:
+    #   COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.fleet.yml
     depends_on:
       eigenlayer:
         condition: service_completed_successfully
@@ -129,5 +135,5 @@ with open("config/config.fleet.json", "w") as f:
     json.dump(config, f, indent=4)
 
 print(f"wrote docker-compose.fleet.yml + config/config.fleet.json for {N} operators")
-print(f"run with: export COMPOSE_FILE=docker-compose.yml:docker-compose.fleet.yml")
+print(f"run with: export COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.fleet.yml")
 print(f"          export TEST_ACCOUNTS={N} GK_SHARD_OPERATORS={N} GK_E2E_NODES={N}")
