@@ -751,7 +751,10 @@ impl<'a> StageWorker<'a> {
     /// REPLACE the running snapshot (it is position-count-defined, not additive).
     fn fold_state(&mut self, pos_n: u64, state_append: &[u8]) -> Result<()> {
         let (lo, hi) = self.bounds;
-        let kv_side = self.co.spec.full_kv_side_bytes(pos_n); // per K or V side
+        // Per K or V side. The REQUEST's kvd is authoritative for the DAG (the
+        // spec's kvd describes the default real model and diverges for e.g. the
+        // CI fixture, whose kvd is 32 — caught by the fleet e2e).
+        let kv_side = (pos_n * self.req.kvd * 4) as usize;
         let snap = self.co.spec.delta_snapshot_bytes();
 
         let expected: usize = (lo..hi)
