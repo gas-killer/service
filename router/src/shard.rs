@@ -291,23 +291,26 @@ impl ShardCoordinator {
         let s = plan.s;
         let m = req.argmax_shards.clamp(1, req.vocab);
 
-        // PIPELINE WAVEFRONT: one worker per stage, connected by channels.
-        // The dependency structure of segmented inference is a 2D pipeline —
-        // segment (pos, stage) needs xOut of (pos, stage-1) and the folded
-        // boundary state of (pos-1, stage) — so stage 1 can run position p
-        // while stage 0 runs position p+1. Each worker OWNS its layer range's
-        // accumulators (layers belong to exactly one stage), executes its
-        // positions strictly in arrival order (the recurrent-state chain), and
-        // records its chain entries locally. Segment ids are assigned by the
-        // deterministic formulas below — byte-identical to the sequential
-        // dispatch order, so the assembled commit chain (and thus
-        // pipelineRoot) is unchanged from the pre-wavefront coordinator.
+        // STAGE PIPELINE: one worker per contiguous-layer stage, connected by
+        // channels. Each worker OWNS its layer range's boundary-state
+        // accumulators (layers belong to exactly one stage) and records its
+        // chain entries locally.
         //
-        //   prefill (pos p, stage s)         -> p*S + s
-        //   argmax round 0, shard j          -> P*S + j
-        //   decode round r>=1 forward stage s -> P*S + M + (r-1)*(S+M) + s
-        //   decode round r>=1 argmax shard j  -> P*S + M + (r-1)*(S+M) + S + j
-        let cap = p_len as usize + 2;
+        // BATCHED PREFILL: the whole prompt is one pass — a single message
+        // (pos_lo=0, pos_hi=P) flows stage 0 -> 1 -> ... -> S-1, each running
+        // ONE forwardRange over all P positions. This amortizes every layer's
+        // weight read across the prompt (vs a per-position wavefront that
+        // re-faults the 34GB overlay P times) — the dominant cost measured on
+        // the live 35B. Decode is inherently serial (token r needs argmax of
+        // r-1), one position per pass.
+        //
+        // Deterministic segment ids (coordinator and every operator agree, so
+        // the commit chain re-derives identically):
+        //   prefill stage s                   -> s
+        //   argmax round 0 shard j            -> S + j
+        //   decode round r>=1 forward stage s -> S + M + (r-1)*(S+M) + s
+        //   decode round r>=1 argmax shard j  -> S + M + (r-1)*(S+M) + S + j
+        let cap = 2usize;
         let (tx0, mut rx_prev) = tokio::sync::mpsc::channel::<StageMsg>(cap);
         let mut worker_futs = Vec::with_capacity(s as usize);
         let mut rx_last = None;
@@ -336,38 +339,31 @@ impl ShardCoordinator {
                 }
             };
 
-            // Prefill: feed every prompt position into stage 0 up-front (the
-            // channel capacity covers the whole prompt, so this never blocks
-            // on a slow pipeline), then drain the final stage's outputs in
-            // order, keeping the last position's vector.
-            for pos in 0..p_len {
-                send(
-                    &tx0,
-                    StageMsg {
-                        seg_base: pos * s,
-                        pos,
-                        tokens: vec![req.prompt_ids[pos as usize]],
-                        x: Vec::new(),
-                    },
-                )
-                .await?;
-            }
-            let mut last_x = Vec::new();
-            for _ in 0..p_len {
-                let out = rx_last
-                    .recv()
-                    .await
-                    .ok_or_else(|| anyhow::anyhow!("pipeline ended during prefill"))?;
-                last_x = out.x;
-            }
+            // Prefill: ONE batched pass over the whole prompt [0, P).
+            send(
+                &tx0,
+                StageMsg {
+                    seg_base: 0,
+                    pos_lo: 0,
+                    pos_hi: p_len,
+                    tokens: req.prompt_ids.clone(),
+                    x: Vec::new(),
+                },
+            )
+            .await?;
+            let last_x = rx_last
+                .recv()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("pipeline ended during prefill"))?
+                .x;
 
-            // First generated token from the last prompt position's final
-            // vector; then the decode relay, replaying Qwen3.generate's loop
-            // (inherently serial: token r depends on argmax of round r-1).
+            // First generated token from the LAST prompt position's final
+            // vector (the batched xOut carries all P positions; the last
+            // dim-word slice is position P-1); then the decode relay.
             let dim_bytes = (req.dim * 32) as usize;
             let xb = last_x[last_x.len() - dim_bytes..].to_vec();
             let mut driver_entries = Vec::new();
-            let (tok0, entries0) = plan.argmax_round(p_len * s, xb).await?;
+            let (tok0, entries0) = plan.argmax_round(s, xb).await?;
             driver_entries.extend(entries0);
             let mut generated: Vec<u32> = vec![tok0];
             let mut pos = p_len;
@@ -377,12 +373,13 @@ impl ShardCoordinator {
                 && generated.last() != Some(&req.stop1)
             {
                 let token = *generated.last().expect("generated is non-empty");
-                let seg_base = p_len * s + m + (round - 1) * (s + m);
+                let seg_base = s + m + (round - 1) * (s + m);
                 send(
                     &tx0,
                     StageMsg {
                         seg_base,
-                        pos,
+                        pos_lo: pos,
+                        pos_hi: pos + 1,
                         tokens: vec![token],
                         x: Vec::new(),
                     },
@@ -541,13 +538,20 @@ impl ShardCoordinator {
 /// A message flowing through the stage pipeline: one position's activation
 /// entering (from the driver or the previous stage) or leaving a stage.
 struct StageMsg {
-    /// Deterministic id base for this position's forward pass: the segment
-    /// executed by stage `s` for this message gets `seg_base + s`.
+    /// Deterministic id base for this pass: the segment executed by stage `s`
+    /// for this message gets `seg_base + s`.
     seg_base: u64,
-    pos: u64,
-    /// Token ids for stage 0 (embedding); empty for later stages.
+    /// Position range `[pos_lo, pos_hi)` this pass covers. Prefill batches the
+    /// WHOLE prompt in one pass (`pos_lo=0, pos_hi=p_len`), so each stage runs a
+    /// single `forwardRange` over all positions — amortizing each layer's weight
+    /// read across the prompt instead of re-faulting the 34GB overlay once per
+    /// position. Decode is inherently serial: one position per pass.
+    pos_lo: u64,
+    pos_hi: u64,
+    /// Token ids for stage 0 (embedding); empty for later stages. One id per
+    /// position in `[pos_lo, pos_hi)`.
     tokens: Vec<u32>,
-    /// xIn for this stage (xOut of the previous); empty for stage 0.
+    /// xIn for this stage (xOut of the previous, ALL positions); empty for stage 0.
     x: Vec<u8>,
 }
 
@@ -716,12 +720,19 @@ impl<'a> StageWorker<'a> {
     ) -> Result<Vec<ChainEntry>> {
         while let Some(msg) = rx.recv().await {
             let x_out = self
-                .forward_segment(msg.seg_base + self.stage, msg.pos, msg.tokens, msg.x)
+                .forward_segment(
+                    msg.seg_base + self.stage,
+                    msg.pos_lo,
+                    msg.pos_hi,
+                    msg.tokens,
+                    msg.x,
+                )
                 .await?;
             if tx
                 .send(StageMsg {
                     seg_base: msg.seg_base,
-                    pos: msg.pos,
+                    pos_lo: msg.pos_lo,
+                    pos_hi: msg.pos_hi,
                     tokens: Vec::new(),
                     x: x_out,
                 })
@@ -802,12 +813,12 @@ impl<'a> StageWorker<'a> {
     async fn forward_segment(
         &mut self,
         seg_id: u64,
-        pos: u64,
+        pos_lo: u64,
+        pos_hi: u64,
         token_ids: Vec<u32>,
         x_in: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let (lo, hi) = self.bounds;
-        let (pos_lo, pos_hi) = (pos, pos + 1);
         let state_in = self.state_in();
         let calldata = self.co.spec.encode_forward(&ForwardArgs {
             weights_root: self.req.weights_root,
