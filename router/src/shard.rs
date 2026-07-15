@@ -164,6 +164,12 @@ pub struct PrefixWarmResponse {
     pub prefix_len: u64,
     pub stage_state_commitments: Vec<B256>,
     pub segments: u64,
+    /// Ready-to-submit `settlePrefix(prefixIds, prefixRoot)` calldata. Submit it
+    /// through the normal round path (like `fulfil` calldata) to admit
+    /// `prefix_root` into the consumer's `settledRoots`, so a later
+    /// `fulfilResumed` may thread from it. Every node's validator gate verifies
+    /// the warm chain (own executed share + prefill-only shape) before signing.
+    pub settle_calldata: alloy_primitives::Bytes,
 }
 
 /// A stage's boundary-state accumulators captured at a prefix boundary — the
@@ -511,11 +517,14 @@ impl ShardCoordinator {
             elapsed_s = started.elapsed().as_secs_f32(),
             "shard: prefix warmed — terminal per-stage state cached for resume"
         );
+        let settle_calldata =
+            gas_killer_common::shard::encode_settle_prefix(&req.prompt_ids, prefix_root).into();
         Ok(PrefixWarmResponse {
             prefix_root,
             prefix_len: p_len,
             stage_state_commitments: stage_commitments,
             segments,
+            settle_calldata,
         })
     }
 
@@ -1444,7 +1453,9 @@ mod tests {
     use crate::model::ModelId;
     use alloy::sol_types::SolCall;
     use alloy_primitives::{Bytes, U256};
-    use gas_killer_common::shard::{ShardState, argmaxRangeCall, forwardRangeCall};
+    use gas_killer_common::shard::{
+        ShardState, argmaxRangeCall, forwardRangeCall, settlePrefixCall,
+    };
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -1814,6 +1825,40 @@ mod tests {
             sum(&resume_spans),
             sum(&fresh_spans)
         );
+    }
+
+    #[tokio::test]
+    async fn warm_emits_settle_prefix_calldata_and_prefill_only_chain() {
+        let (dim, kvd, vocab, n_layers) = (2u64, 8u64, 32u64, 4u64);
+        let h = Harness::start(ModelSpec::qwen3_06b(), dim, kvd);
+        let prefix = vec![5u32, 9, 2, 7];
+        let warm =
+            h.co.warm_prefix(mock_req(prefix.clone(), 0, None, dim, kvd, vocab, n_layers))
+                .await
+                .expect("warm");
+        let co = Arc::clone(&h.co);
+        h.stop().await;
+
+        // The emitted settlePrefix calldata decodes to (prefixIds, prefixRoot).
+        let call = settlePrefixCall::abi_decode(&warm.settle_calldata)
+            .expect("settle_calldata is settlePrefix()");
+        assert_eq!(call.prefixRoot, warm.prefix_root);
+        assert_eq!(call.prefixIds, prefix);
+
+        // The served warm chain has the prefill-only shape the gate requires:
+        // only Forward segments, no answer ids, per-stage terminal commitments,
+        // and no prefix_root of its own.
+        let chain = co.chain(warm.prefix_root).expect("warm chain served");
+        assert!(
+            chain.answer_ids.is_empty(),
+            "warm chain must carry no answer"
+        );
+        assert!(
+            chain.entries.iter().all(|e| e.kind == SegKind::Forward),
+            "warm chain must be prefill-only (no argmax/decode)"
+        );
+        assert_eq!(chain.stage_state_commitments.len(), 2);
+        assert!(chain.prefix_root.is_none());
     }
 
     #[tokio::test]

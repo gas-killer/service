@@ -96,13 +96,35 @@ sol! {
     ) external;
 
     /// Mirror of `GasKillerChatSharded.settledRoots` (solidity-sdk) — the
-    /// on-chain set of pipeline roots settled by a prior `fulfil`/`fulfilResumed`.
-    /// The consumer contract enforces that a `fulfilResumed`'s `prefixRoot` is a
-    /// member (a first-token-only run never enters this set); the validator gate
-    /// can additionally read it as a complementary check, but the mandatory
-    /// binding is the actual per-stage terminal state (see
+    /// on-chain set of pipeline roots settled by a prior
+    /// `fulfil`/`fulfilResumed`/`settlePrefix`. The consumer contract enforces
+    /// that a `fulfilResumed`'s `prefixRoot` is a member; the validator gate can
+    /// additionally read it as a complementary check, but the mandatory binding
+    /// is the actual per-stage terminal state (see
     /// [`ShardState::verify_resume_lineage`]). Selector 0x56408a4f.
     function settledRoots(bytes32 root) external view returns (bool settled);
+
+    /// Mirror of `GasKillerChatSharded.settlePrefix` (solidity-sdk, consumer
+    /// commit 2a2071c) — a pure-commit round that admits a committee-executed,
+    /// PREFILL-ONLY prefix chain's root into `settledRoots`, so a later
+    /// `fulfilResumed` may thread from it. The validator gate verifies the warm
+    /// chain (own executed share + the prefill-only shape — no decode/argmax,
+    /// no answer) before signing; that "I verified + I executed my share" of a
+    /// run that STOPPED at the prefix is what makes admitting the root
+    /// trustworthy. Selector 0x7e8de12c; emits
+    /// `PrefixSettled(uint256 indexed transitionIndex, bytes32 indexed prefixRoot, uint32[] prefixIds)`.
+    function settlePrefix(uint32[] prefixIds, bytes32 prefixRoot) external;
+}
+
+/// Build `settlePrefix(prefixIds, prefixRoot)` calldata — the settlement a
+/// warm-prefix run submits through the normal round path (exactly as the
+/// harness submits `fulfil` calldata) to admit `prefixRoot` into `settledRoots`.
+pub fn encode_settle_prefix(prefix_ids: &[u32], prefix_root: B256) -> Vec<u8> {
+    settlePrefixCall {
+        prefixIds: prefix_ids.to_vec(),
+        prefixRoot: prefix_root,
+    }
+    .abi_encode()
 }
 
 /// Engine-v3 (Qwen3.5-35B-A3B, `Qwen35SegEngine`) segment ABI. Kept in its own
@@ -362,12 +384,14 @@ impl ShardState {
     }
 
     /// Whether this task is a sharded-settlement round this node must gate:
-    /// calldata is a `fulfil(...)` or `fulfilResumed(...)` call and (when a
-    /// consumer allowlist is configured) it targets that consumer.
+    /// calldata is a `fulfil(...)`, `fulfilResumed(...)`, or `settlePrefix(...)`
+    /// call and (when a consumer allowlist is configured) it targets that
+    /// consumer.
     pub fn gates(&self, target: Address, call_data: &[u8]) -> bool {
         let sel_matches = call_data.len() >= 4
             && (call_data[0..4] == fulfilCall::SELECTOR
-                || call_data[0..4] == fulfilResumedCall::SELECTOR);
+                || call_data[0..4] == fulfilResumedCall::SELECTOR
+                || call_data[0..4] == settlePrefixCall::SELECTOR);
         sel_matches && self.consumer.map(|c| c == target).unwrap_or(true)
     }
 
@@ -403,11 +427,21 @@ impl ShardState {
     ///
     /// Any failure returns Err — the caller must refuse to sign.
     pub async fn verify_fulfil_task(&self, call_data: &[u8]) -> Result<()> {
-        let is_resumed = call_data.len() >= 4 && call_data[0..4] == fulfilResumedCall::SELECTOR;
+        let sel = if call_data.len() >= 4 {
+            &call_data[0..4]
+        } else {
+            bail!("shard gate: calldata too short for a settlement selector");
+        };
+        let is_resumed = sel == fulfilResumedCall::SELECTOR;
+        let is_settle_prefix = sel == settlePrefixCall::SELECTOR;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .context("shard gate: building HTTP client")?;
+
+        if is_settle_prefix {
+            return self.verify_settle_prefix_task(&client, call_data).await;
+        }
 
         if is_resumed {
             let call = fulfilResumedCall::abi_decode(call_data)
@@ -636,6 +670,87 @@ impl ShardState {
                     entry.seg_id
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Gate a `settlePrefix` round: the pure-commit settlement that admits a
+    /// PREFILL-ONLY prefix chain's root into `settledRoots`. Applies the same
+    /// "I verified the chain AND executed my share" guarantee as `fulfil` to the
+    /// WARM chain, PLUS confirms the chain STOPPED at the prefix (no
+    /// decode/argmax, no answer) — so the root admitted into `settledRoots`
+    /// represents a pure prefix terminal state a later `fulfilResumed` may
+    /// thread from.
+    async fn verify_settle_prefix_task(
+        &self,
+        client: &reqwest::Client,
+        call_data: &[u8],
+    ) -> Result<()> {
+        let call = settlePrefixCall::abi_decode(call_data)
+            .context("shard gate: calldata is not settlePrefix()")?;
+        let root = call.prefixRoot;
+        if root == B256::ZERO {
+            bail!("shard gate: settlePrefix with zero prefix root");
+        }
+        let chain = self.fetch_chain(client, root).await?;
+
+        // Committee verification: re-derive the root from the served chain.
+        let derived = chain.derive_root();
+        if derived != root || chain.pipeline_root != root {
+            bail!(
+                "shard gate: prefix root mismatch (calldata {root}, served {}, derived {derived})",
+                chain.pipeline_root
+            );
+        }
+        // The settled prefix ids must be exactly the warm chain's prompt ids.
+        if chain.prompt_ids != call.prefixIds {
+            bail!("shard gate: settlePrefix prefix ids != warm chain prompt ids");
+        }
+        // PREFILL-ONLY shape: it stopped at the prefix.
+        Self::verify_prefill_only(&chain)?;
+        // "I executed my share" — same anchor as fulfil.
+        let own = self.verify_own_segments(&chain)?;
+        if own == 0 {
+            bail!(
+                "shard gate: I executed no segment of prefix {root} — refusing to attest a prefix I never helped compute"
+            );
+        }
+        info!(
+            prefix_root = %root,
+            prefix_len = chain.prompt_ids.len(),
+            segments = chain.entries.len(),
+            "shard gate: verified settlePrefix — prefill-only warm chain, my executed segments match"
+        );
+        Ok(())
+    }
+
+    /// A warm/prefix chain must have STOPPED at the prefix: only `Forward`
+    /// segments (no decode/argmax), no answer ids, per-stage terminal state
+    /// commitments recorded, and no `prefix_root` of its own. This is what
+    /// distinguishes a resumable prefix (a pure prefill terminal state) from a
+    /// full answer that decoded past the prefix (whose DeltaNet REPLACE
+    /// snapshot cannot be truncated back to the prefix).
+    fn verify_prefill_only(chain: &ShardChain) -> Result<()> {
+        if !chain.answer_ids.is_empty() {
+            bail!(
+                "shard gate: not prefill-only — prefix chain carries {} answer id(s)",
+                chain.answer_ids.len()
+            );
+        }
+        if let Some(bad) = chain.entries.iter().find(|e| e.kind != SegKind::Forward) {
+            bail!(
+                "shard gate: not prefill-only — prefix chain segment {} is {:?} (a decode/argmax segment)",
+                bad.seg_id,
+                bad.kind
+            );
+        }
+        if chain.stage_state_commitments.is_empty() {
+            bail!("shard gate: prefix chain carries no per-stage terminal state commitments");
+        }
+        if chain.prefix_root.is_some() {
+            bail!(
+                "shard gate: prefix chain unexpectedly declares its own prefix_root (a resumed run, not a warm)"
+            );
         }
         Ok(())
     }
@@ -1194,6 +1309,54 @@ mod tests {
             .verify_resume_lineage(&resumed, &prefix, prefix.pipeline_root)
             .unwrap_err();
         assert!(err.to_string().contains("threads from"), "{err}");
+    }
+
+    #[test]
+    fn settle_prefix_accepts_prefill_only_warm_chain() {
+        // A warm chain the coordinator produces: only Forward segments, no
+        // answer ids, per-stage terminal commitments, no prefix_root of its own.
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits);
+        ShardState::verify_prefill_only(&prefix).expect("honest warm chain is prefill-only");
+    }
+
+    #[test]
+    fn settle_prefix_rejects_chain_with_answer_ids() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let mut prefix = prefix_chain(vec![1, 2, 3], commits);
+        prefix.answer_ids = vec![42]; // decoded past the prefix
+        let err = ShardState::verify_prefill_only(&prefix).unwrap_err();
+        assert!(err.to_string().contains("prefill-only"), "{err}");
+    }
+
+    #[test]
+    fn settle_prefix_rejects_chain_with_argmax_segment() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let mut prefix = prefix_chain(vec![1, 2, 3], commits);
+        // Splice in an argmax segment — evidence the run decoded, not prefill-only.
+        prefix.entries.push(ChainEntry {
+            seg_id: 2,
+            kind: SegKind::Argmax,
+            committee: vec![0],
+            chk: commit(0x40),
+            returndata_hash: commit(0x41),
+            expect_state_in: B256::ZERO,
+        });
+        prefix.pipeline_root = prefix.derive_root();
+        let err = ShardState::verify_prefill_only(&prefix).unwrap_err();
+        assert!(err.to_string().contains("prefill-only"), "{err}");
+    }
+
+    #[test]
+    fn settle_prefix_rejects_resumed_chain_as_prefix() {
+        // A resumed run (declares its own prefix_root) must not pose as a warm.
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        let resumed = resumed_chain(vec![1, 2, 3, 4], 3, prefix.pipeline_root, commits);
+        let err = ShardState::verify_prefill_only(&resumed).unwrap_err();
+        // The resumed chain has an argmax segment AND a prefix_root — either
+        // disqualifies it; the argmax check fires first.
+        assert!(err.to_string().contains("prefill-only"), "{err}");
     }
 
     #[test]
