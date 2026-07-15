@@ -806,6 +806,153 @@ fn shard_poll_interval() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// The Phase-4 fast path: execute the segment through the `gk-fast-view` sidecar
+/// (revm-41 + revmc AOT/JIT), returning byte-identical returndata to
+/// [`local_view_call`]'s interpreter path but on the compiled engine artifact.
+///
+/// ## Why a sidecar (the co-link blocker)
+///
+/// `gk-fast-view` is on revm-41 + revmc; this service is pinned to revm-31 via
+/// the SP1/reth entanglement. Two revm majors export incompatible copies of the
+/// same types (`AccountInfo`, `Bytecode`, `ExecutionResult`, the `Database`
+/// traits) and cannot be linked into one binary, so the fast executor lives in a
+/// standalone crate with its own `Cargo.lock` and is invoked out-of-process.
+///
+/// ## What is passed
+///
+/// An overlay-mode seg-engine view call (`rootDirectory == address(0)`) reads
+/// only (a) the engine contract's own code and (b) overlay chunk accounts served
+/// from the mounted weights. So the base state the sidecar needs is just the
+/// engine bytecode, fetched here via `eth_getCode` and handed over inline; the
+/// multi-gigabyte weights come from the same local `overlay_files` this validator
+/// already mmap-mounts. The sidecar issues no RPC of its own.
+///
+/// `GK_FAST_VIEW_BIN` overrides the binary path (default `gk-fast-view` on
+/// `PATH`); `GK_FAST_VIEW_SPEC` overrides the hardfork the engine is compiled +
+/// executed under (default `CANCUN`) and MUST match the chain's spec.
+async fn fast_view_call(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    ctx: &LocalViewCtx,
+    job: &ShardJob,
+) -> Result<Vec<u8>> {
+    use std::fmt::Write as _;
+
+    let engine_code = eth_get_code(client, rpc_url, job.to).await?;
+    if engine_code.is_empty() {
+        bail!(
+            "seg engine {} has no code at head; gk-fast-view cannot compile it",
+            job.to
+        );
+    }
+    let spec = std::env::var("GK_FAST_VIEW_SPEC").unwrap_or_else(|_| "CANCUN".to_string());
+    let profile = match ctx.sim_profile {
+        SimProfile::Chain => "Chain",
+        SimProfile::UnboundedV1 => "UnboundedV1",
+        SimProfile::UnboundedV1Xl => "UnboundedV1Xl",
+    };
+
+    // Build the `gk_fast_view::job` text format. `from` is the zero address —
+    // the interpreter path builds its tx with no `from` (defaults to zero), so
+    // matching it keeps CALLER identical.
+    let mut jt = String::new();
+    let _ = writeln!(jt, "spec {spec}");
+    let _ = writeln!(jt, "profile {profile}");
+    let _ = writeln!(jt, "from {}", "0".repeat(40));
+    let _ = writeln!(jt, "to {}", hex::encode(job.to.as_slice()));
+    let _ = writeln!(jt, "input {}", hex::encode(&job.data));
+    let _ = writeln!(jt, "gas {}", job.gas);
+    let _ = writeln!(
+        jt,
+        "account {} {}",
+        hex::encode(job.to.as_slice()),
+        hex::encode(&engine_code)
+    );
+    for (weights, tokenizer, manifest) in &ctx.overlay_files {
+        let _ = writeln!(
+            jt,
+            "mount_files {weights} {tokenizer} {}",
+            hex::encode(manifest.as_slice())
+        );
+    }
+
+    let bin = std::env::var("GK_FAST_VIEW_BIN").unwrap_or_else(|_| "gk-fast-view".to_string());
+    let seg_id = job.seg_id;
+    let returndata = tokio::task::spawn_blocking(move || run_fast_view_sidecar(&bin, &jt))
+        .await
+        .context("gk-fast-view sidecar task panicked")??;
+    debug!(seg_id, bytes = returndata.len(), "gk-fast-view fast path served segment");
+    Ok(returndata)
+}
+
+/// Run the `gk-fast-view` binary with `job_text` on stdin, returning the
+/// returndata parsed from its stdout (one lowercase-hex line). Blocking — call
+/// from `spawn_blocking`.
+fn run_fast_view_sidecar(bin: &str, job_text: &str) -> Result<Vec<u8>> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn gk-fast-view binary `{bin}` (set GK_FAST_VIEW_BIN?)"))?;
+    child
+        .stdin
+        .take()
+        .context("gk-fast-view: no stdin handle")?
+        .write_all(job_text.as_bytes())
+        .context("gk-fast-view: write job to stdin")?;
+    let output = child
+        .wait_with_output()
+        .context("gk-fast-view: wait for sidecar")?;
+    if !output.status.success() {
+        bail!(
+            "gk-fast-view exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let hex_line = stdout
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .context("gk-fast-view: empty stdout")?
+        .trim();
+    hex::decode(hex_line.trim_start_matches("0x")).context("gk-fast-view: stdout not hex returndata")
+}
+
+/// Fetch a contract's deployed bytecode at head via JSON-RPC `eth_getCode` — the
+/// engine bytecode the fast-view sidecar compiles and runs the segment on.
+async fn eth_get_code(client: &reqwest::Client, rpc_url: &str, addr: Address) -> Result<Vec<u8>> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_getCode",
+        "params": [format!("{addr}"), "latest"],
+    });
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("eth_getCode POST {rpc_url}"))?
+        .error_for_status()?
+        .json()
+        .await
+        .context("eth_getCode: decoding JSON-RPC response")?;
+    if let Some(err) = resp.get("error") {
+        bail!("eth_getCode error: {err}");
+    }
+    let hex_str = resp
+        .get("result")
+        .and_then(|r| r.as_str())
+        .context("eth_getCode: missing result")?;
+    hex::decode(hex_str.trim_start_matches("0x")).context("eth_getCode: result not hex")
+}
+
 /// Executes one pre-encoded view call via plain JSON-RPC `eth_call` with an
 /// explicit gas override (segments run under the lifted simulation gas budget,
 /// exactly like tracked-function analysis; they are `view`, so no state risk).
@@ -891,6 +1038,29 @@ async fn local_view_call(
     ctx: &LocalViewCtx,
     job: &ShardJob,
 ) -> Result<Vec<u8>> {
+    // Phase-4 fast executor (opt-in): when `GK_SHARD_FAST_EXECUTOR=1`, dispatch
+    // the segment to the revm-41 + revmc `gk-fast-view` sidecar (compile the
+    // fixed engine bytecode once, run the view call on the compiled artifact —
+    // the biggest per-segment latency lever). It CANNOT be linked in-process
+    // (the service is pinned to revm-31 via the SP1/reth entanglement; the fast
+    // path needs revm-41 + revmc + LLVM — two revm majors cannot co-link), so it
+    // runs as a separate binary the node shells out to. The consensus contract
+    // is upheld by `gk-fast-view`'s differential test: its returndata is
+    // byte-identical to this interpreter path's. ANY fast-path failure (binary
+    // missing, RPC hiccup, mismatch) falls back to the interpreter below, so the
+    // default build/behaviour is never at risk.
+    if std::env::var("GK_SHARD_FAST_EXECUTOR").as_deref() == Ok("1") {
+        match fast_view_call(client, rpc_url, ctx, job).await {
+            Ok(out) => return Ok(out),
+            Err(e) => warn!(
+                error = %e,
+                seg_id = job.seg_id,
+                to = %job.to,
+                "gk-fast-view fast executor failed; falling back to revm-31 interpreter",
+            ),
+        }
+    }
+
     let block_number = eth_block_number(client, rpc_url).await?;
     let tx_request = TransactionRequest::default()
         .to(job.to)
