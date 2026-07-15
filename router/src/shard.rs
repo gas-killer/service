@@ -112,6 +112,11 @@ pub struct InferRequest {
     pub seq_cap: u64,
     pub prompt_ids: Vec<u32>,
     pub max_new: u64,
+    /// Model family for THIS request ("qwen3-0.6b" / "qwen35"). Absent =
+    /// the coordinator's env-configured default (`GK_SHARD_MODEL`), so one
+    /// router serves every pinned model without an env flip + restart.
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default = "default_stages")]
     pub stages: u64,
     #[serde(default = "default_argmax_shards")]
@@ -561,6 +566,9 @@ struct InferPlan<'a> {
     co: &'a ShardCoordinator,
     infer_id: String,
     req: &'a InferRequest,
+    /// Per-request model spec (req.model, falling back to the coordinator's
+    /// env default) — DAG shape and ABI encode/decode all hang off this.
+    spec: ModelSpec,
     /// Effective stage count (requested, clamped to n_layers).
     s: u64,
     /// Stage layer bounds: bounds[i] = (layerLo, layerHi).
@@ -574,12 +582,14 @@ impl<'a> InferPlan<'a> {
         if req.n_layers == 0 || req.kvd == 0 || req.dim == 0 || req.vocab == 0 {
             bail!("bad model config");
         }
+        let spec = match &req.model {
+            Some(name) => ModelSpec::from_name(name)?,
+            None => co.spec.clone(),
+        };
         // Stage bounds come from the model spec: even split for 0.6B (unchanged),
         // full-attention-boundary-aligned for the 35B hybrid (keeps costly
         // DeltaNet snapshots off stage cuts — see ModelSpec::stage_bounds).
-        let bounds = co
-            .spec
-            .stage_bounds(req.n_layers, req.stages, co.align_stages);
+        let bounds = spec.stage_bounds(req.n_layers, req.stages, co.align_stages);
         let s = bounds.len() as u64;
         let max_pos = (req.prompt_ids.len() as u64 + req.max_new).min(req.seq_cap);
         let seed_bytes = keccak256(format!("{infer_id}:{}", req.consumer).as_bytes());
@@ -588,6 +598,7 @@ impl<'a> InferPlan<'a> {
             co,
             infer_id: infer_id.to_string(),
             req,
+            spec,
             s,
             bounds,
             max_pos,
@@ -615,7 +626,7 @@ impl<'a> InferPlan<'a> {
                     (j + 1) * step
                 },
             );
-            let calldata = self.co.spec.encode_argmax(&ArgmaxArgs {
+            let calldata = self.spec.encode_argmax(&ArgmaxArgs {
                 weights_root: self.req.weights_root,
                 manifest: self.req.manifest,
                 packed_config: self.req.packed_config,
@@ -647,7 +658,7 @@ impl<'a> InferPlan<'a> {
                     calldata,
                 )
                 .await?;
-            let (score, id) = self.co.spec.decode_argmax_returns(&rd)?;
+            let (score, id) = self.spec.decode_argmax_returns(&rd)?;
             Ok::<_, anyhow::Error>((score, id, entry))
         });
         let results = futures::future::try_join_all(shard_futs).await?;
@@ -676,6 +687,8 @@ impl<'a> InferPlan<'a> {
 struct StageWorker<'a> {
     co: &'a ShardCoordinator,
     req: &'a InferRequest,
+    /// Per-request model spec (shared shape with InferPlan).
+    spec: ModelSpec,
     infer_id: String,
     stage: u64,
     bounds: (u64, u64),
@@ -698,6 +711,7 @@ impl<'a> StageWorker<'a> {
         Self {
             co: plan.co,
             req: plan.req,
+            spec: plan.spec.clone(),
             infer_id: plan.infer_id.clone(),
             stage,
             bounds,
@@ -754,7 +768,7 @@ impl<'a> StageWorker<'a> {
         let mut out = Vec::new();
         for l in lo..hi {
             let i = (l - lo) as usize;
-            if self.co.spec.is_full_attention(l) {
+            if self.spec.is_full_attention(l) {
                 out.extend_from_slice(&self.k_acc[i]);
                 out.extend_from_slice(&self.v_acc[i]);
             } else {
@@ -773,11 +787,11 @@ impl<'a> StageWorker<'a> {
         // spec's kvd describes the default real model and diverges for e.g. the
         // CI fixture, whose kvd is 32 — caught by the fleet e2e).
         let kv_side = (pos_n * self.req.kvd * 4) as usize;
-        let snap = self.co.spec.delta_snapshot_bytes();
+        let snap = self.spec.delta_snapshot_bytes();
 
         let expected: usize = (lo..hi)
             .map(|l| {
-                if self.co.spec.is_full_attention(l) {
+                if self.spec.is_full_attention(l) {
                     2 * kv_side
                 } else {
                     snap
@@ -794,7 +808,7 @@ impl<'a> StageWorker<'a> {
         let mut at = 0usize;
         for l in lo..hi {
             let i = (l - lo) as usize;
-            if self.co.spec.is_full_attention(l) {
+            if self.spec.is_full_attention(l) {
                 self.k_acc[i].extend_from_slice(&state_append[at..at + kv_side]);
                 at += kv_side;
                 self.v_acc[i].extend_from_slice(&state_append[at..at + kv_side]);
@@ -820,7 +834,7 @@ impl<'a> StageWorker<'a> {
     ) -> Result<Vec<u8>> {
         let (lo, hi) = self.bounds;
         let state_in = self.state_in();
-        let calldata = self.co.spec.encode_forward(&ForwardArgs {
+        let calldata = self.spec.encode_forward(&ForwardArgs {
             weights_root: self.req.weights_root,
             manifest: self.req.manifest,
             packed_config: self.req.packed_config,
@@ -859,7 +873,7 @@ impl<'a> StageWorker<'a> {
             )
             .await?;
         self.entries.push(entry);
-        let (x_out, state_append) = self.co.spec.decode_forward_returns(&rd)?;
+        let (x_out, state_append) = self.spec.decode_forward_returns(&rd)?;
         self.fold_state(pos_hi - pos_lo, &state_append)?;
         Ok(x_out)
     }

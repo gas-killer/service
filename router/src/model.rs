@@ -126,15 +126,21 @@ impl ModelSpec {
 
     /// Select the spec from `GK_SHARD_MODEL` (default `qwen3-0.6b`).
     pub fn from_env() -> Result<Self> {
-        match std::env::var("GK_SHARD_MODEL")
-            .unwrap_or_else(|_| "qwen3-0.6b".to_string())
-            .as_str()
-        {
+        Self::from_name(
+            &std::env::var("GK_SHARD_MODEL").unwrap_or_else(|_| "qwen3-0.6b".to_string()),
+        )
+    }
+
+    /// Resolve a spec by model name — used for per-request selection
+    /// (`InferRequest.model`), so one coordinator serves every pinned model
+    /// without an env flip + restart.
+    pub fn from_name(name: &str) -> Result<Self> {
+        match name {
             "qwen3-0.6b" | "qwen3-0.6B" | "0.6b" => Ok(Self::qwen3_06b()),
             "qwen35" | "qwen3.5" | "qwen3.5-35b" => Ok(Self::qwen35()),
-            other => bail!(
-                "GK_SHARD_MODEL={other:?} is not a known model (expected \"qwen3-0.6b\" or \"qwen35\")"
-            ),
+            other => {
+                bail!("{other:?} is not a known model (expected \"qwen3-0.6b\" or \"qwen35\")")
+            }
         }
     }
 
