@@ -106,6 +106,24 @@ async fn shard_infer_handler(
     }
 }
 
+/// Prefix WARM entrypoint: runs a PREFILL-ONLY pass over the request's
+/// `prompt_ids` (the fixed chat-template prefix), caches each stage's terminal
+/// boundary state keyed `(model, keccak(prefix_ids))`, and returns the
+/// committee-verified `prefix_root`. A later `/shard/infer` with `prefix_len`
+/// set then reuses that state and only prefills the NEW tokens.
+async fn shard_prefix_handler(
+    State(s): State<HealthState>,
+    Json(req): Json<InferRequest>,
+) -> axum::response::Response {
+    match s.shard.warm_prefix(req).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "shard: prefix warm failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response()
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct ShardWorkQuery {
     operator: u32,
@@ -462,6 +480,7 @@ fn main() {
                 .route("/metrics", get(metrics_handler))
                 .route("/prewarm", get(prewarm_handler))
                 .route("/shard/infer", post(shard_infer_handler))
+                .route("/shard/prefix", post(shard_prefix_handler))
                 .route("/shard/work", get(shard_work_handler))
                 .route("/shard/result", post(shard_result_handler))
                 .route("/shard/chain/:root", get(shard_chain_handler))

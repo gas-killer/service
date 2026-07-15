@@ -72,13 +72,37 @@ sol! {
     /// pure-commit settlement function whose calldata the validator gate decodes.
     /// Shared by the 0.6B (`GasKillerChatSharded`) and 35B
     /// (`GasKillerChat35Sharded`) consumers: identical signature/selector, only
-    /// the CHAT_DOMAIN differs, so one gate decoder serves both.
+    /// the CHAT_DOMAIN differs, so one gate decoder serves both. Selector
+    /// 0x9c98c06e (pinned in `common/tests/shard_selectors.rs`).
     function fulfil(
         uint32[] promptIds,
         uint256 maxNewTokens,
         uint32[] answerIds,
         bytes32 pipelineRoot
     ) external;
+
+    /// Mirror of `GasKillerChatSharded.fulfilResumed` (solidity-sdk, consumer
+    /// commit 2a2071c) — settles a resumed answer that reused a warmed prefix's
+    /// per-stage boundary state. `prefixRoot` binds the settled prefix pipeline
+    /// this run threaded from; the validator gate re-derives the resumed chain,
+    /// fetches the prefix chain, and binds the actual per-stage terminal state
+    /// (see [`ShardState::verify_resume_lineage`]). Selector 0x6c4d43bc.
+    function fulfilResumed(
+        uint32[] promptIds,
+        uint256 maxNewTokens,
+        uint32[] answerIds,
+        bytes32 pipelineRoot,
+        bytes32 prefixRoot
+    ) external;
+
+    /// Mirror of `GasKillerChatSharded.settledRoots` (solidity-sdk) — the
+    /// on-chain set of pipeline roots settled by a prior `fulfil`/`fulfilResumed`.
+    /// The consumer contract enforces that a `fulfilResumed`'s `prefixRoot` is a
+    /// member (a first-token-only run never enters this set); the validator gate
+    /// can additionally read it as a complementary check, but the mandatory
+    /// binding is the actual per-stage terminal state (see
+    /// [`ShardState::verify_resume_lineage`]). Selector 0x56408a4f.
+    function settledRoots(bytes32 root) external view returns (bool settled);
 }
 
 /// Engine-v3 (Qwen3.5-35B-A3B, `Qwen35SegEngine`) segment ABI. Kept in its own
@@ -204,6 +228,16 @@ pub struct ChainEntry {
     pub committee: Vec<u32>,
     pub chk: B256,
     pub returndata_hash: B256,
+    /// For a `Forward` segment: the `keccak256(stateIn)` commitment of the
+    /// boundary state this segment threaded FROM (the engine verifies
+    /// `keccak(stateIn) == expectStateIn` in-engine). Zero for argmax segments
+    /// and for a forward segment that threaded from empty state. The resume
+    /// lineage gate binds a resumed run's first-pass forward segments to the
+    /// prefix run's terminal state through this field. Not folded into
+    /// `pipeline_root` (see [`ShardChain::derive_root`]) — it is gate metadata
+    /// anchored per-node by the executed-segment digest check.
+    #[serde(default)]
+    pub expect_state_in: B256,
 }
 
 /// The full commit chain for one sharded inference. `pipeline_root` is the
@@ -218,6 +252,26 @@ pub struct ShardChain {
     pub answer_ids: Vec<u32>,
     pub pipeline_root: B256,
     pub entries: Vec<ChainEntry>,
+    /// Set on a RESUMED run: the settled prefix pipeline root this run threaded
+    /// from (matches the `prefixRoot` of `fulfilResumed`). `None` for a fresh
+    /// (non-resumed) run and for a prefix warm chain itself.
+    #[serde(default)]
+    pub prefix_root: Option<B256>,
+    /// Number of leading prompt positions supplied by a warmed prefix. On a
+    /// PREFIX warm chain this is the prefix length (== `prompt_ids.len()`); on a
+    /// RESUMED run it is how many positions of `prompt_ids` were skipped (the
+    /// first prefill pass covers `[prefix_len, prompt_ids.len())`). Zero for a
+    /// fresh run.
+    #[serde(default)]
+    pub prefix_len: u64,
+    /// Per-stage terminal boundary-state commitment (`keccak256(state_in)`),
+    /// indexed by stage. On a PREFIX warm chain: the state after prefilling
+    /// `[0, prefix_len)` — exactly the `expectStateIn` a resume must thread
+    /// from. On a RESUMED run: the commitment its first-pass forward segments
+    /// threaded from (equal, by construction, to the prefix chain's). Empty for
+    /// a fresh run.
+    #[serde(default)]
+    pub stage_state_commitments: Vec<B256>,
 }
 
 impl ShardChain {
@@ -240,6 +294,13 @@ impl ShardChain {
 pub struct ExecutedSeg {
     pub returndata_hash: B256,
     pub chk: B256,
+    /// For a `Forward` segment, the `expectStateIn` this node's engine verified
+    /// (`keccak(stateIn) == expectStateIn`), extracted from the segment
+    /// calldata. Zero for argmax. The resume lineage gate cross-checks a
+    /// resumed first-pass segment's chain `expect_state_in` against this
+    /// engine-anchored value, so the state binding is grounded in execution —
+    /// not merely in coordinator-served metadata.
+    pub expect_state_in: B256,
 }
 
 /// Node-side shard state, shared between the poll/execute loop (writer) and the
@@ -301,11 +362,13 @@ impl ShardState {
     }
 
     /// Whether this task is a sharded-settlement round this node must gate:
-    /// calldata is a `fulfil(...)` call and (when a consumer allowlist is
-    /// configured) it targets that consumer.
+    /// calldata is a `fulfil(...)` or `fulfilResumed(...)` call and (when a
+    /// consumer allowlist is configured) it targets that consumer.
     pub fn gates(&self, target: Address, call_data: &[u8]) -> bool {
-        let is_fulfil = call_data.len() >= 4 && call_data[0..4] == fulfilCall::SELECTOR;
-        is_fulfil && self.consumer.map(|c| c == target).unwrap_or(true)
+        let sel_matches = call_data.len() >= 4
+            && (call_data[0..4] == fulfilCall::SELECTOR
+                || call_data[0..4] == fulfilResumedCall::SELECTOR);
+        sel_matches && self.consumer.map(|c| c == target).unwrap_or(true)
     }
 
     pub fn record(&self, infer_id: &str, seg_id: u64, seg: ExecutedSeg) {
@@ -323,8 +386,15 @@ impl ShardState {
             .copied()
     }
 
-    /// The validator gate. Decodes `fulfil` calldata, fetches the commit chain
-    /// for its pipeline root from the router, and verifies:
+    /// The validator gate. Dispatches on the settlement selector:
+    ///
+    /// - `fulfil(...)`         — a fresh (non-resumed) answer.
+    /// - `fulfilResumed(...)`  — an answer that reused a warmed prefix; the
+    ///   base checks below PLUS the resume LINEAGE binding (see
+    ///   [`Self::verify_resume_lineage`]).
+    ///
+    /// In both cases the base verification fetches the commit chain for the
+    /// calldata's `pipelineRoot` from the router and verifies:
     /// 1. the chain's derived root matches both the served and calldata roots,
     /// 2. the chain's answer/prompt ids match the calldata,
     /// 3. every entry whose committee includes this operator matches the
@@ -333,20 +403,72 @@ impl ShardState {
     ///
     /// Any failure returns Err — the caller must refuse to sign.
     pub async fn verify_fulfil_task(&self, call_data: &[u8]) -> Result<()> {
-        let call = fulfilCall::abi_decode(call_data).context(
-            "shard gate: task targets the sharded consumer but calldata is not fulfil()",
-        )?;
-        let root = call.pipelineRoot;
-        if root == B256::ZERO {
-            bail!("shard gate: zero pipeline root");
-        }
-
-        let url = format!("{}/shard/chain/{root}", self.router_base);
+        let is_resumed = call_data.len() >= 4 && call_data[0..4] == fulfilResumedCall::SELECTOR;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .context("shard gate: building HTTP client")?;
-        let chain: ShardChain = client
+
+        if is_resumed {
+            let call = fulfilResumedCall::abi_decode(call_data)
+                .context("shard gate: calldata is not fulfilResumed()")?;
+            let root = call.pipelineRoot;
+            let prefix_root = call.prefixRoot;
+            if root == B256::ZERO {
+                bail!("shard gate: zero pipeline root");
+            }
+            if prefix_root == B256::ZERO {
+                bail!("shard gate: fulfilResumed with zero prefix root");
+            }
+            let resumed = self.fetch_chain(&client, root).await?;
+            self.verify_base_chain(&resumed, &call.promptIds, &call.answerIds, root)?;
+
+            // The prefix pipeline this run threaded from must itself be a
+            // committee-verified chain (re-derived from its own entries). Do NOT
+            // trust settledRoots[prefixRoot] alone — bind the ACTUAL per-stage
+            // terminal state below.
+            let prefix = self.fetch_chain(&client, prefix_root).await?;
+            let derived = prefix.derive_root();
+            if derived != prefix_root || prefix.pipeline_root != prefix_root {
+                bail!(
+                    "shard gate: prefix root mismatch (calldata {prefix_root}, served {}, derived {derived})",
+                    prefix.pipeline_root
+                );
+            }
+            // If this node executed any of the prefix's own segments, they must
+            // match too (same anchor as the resumed chain).
+            self.verify_own_segments(&prefix)?;
+            self.verify_resume_lineage(&resumed, &prefix, prefix_root)?;
+            info!(
+                pipeline_root = %root,
+                prefix_root = %prefix_root,
+                prefix_len = resumed.prefix_len,
+                "shard gate: verified RESUMED commit chain — prefix ids + per-stage terminal state bound"
+            );
+            Ok(())
+        } else {
+            let call = fulfilCall::abi_decode(call_data).context(
+                "shard gate: task targets the sharded consumer but calldata is not fulfil()",
+            )?;
+            let root = call.pipelineRoot;
+            if root == B256::ZERO {
+                bail!("shard gate: zero pipeline root");
+            }
+            let chain = self.fetch_chain(&client, root).await?;
+            self.verify_base_chain(&chain, &call.promptIds, &call.answerIds, root)?;
+            info!(
+                pipeline_root = %root,
+                total_segments = chain.entries.len(),
+                "shard gate: verified commit chain — my executed segments match, root and answer ids check out"
+            );
+            Ok(())
+        }
+    }
+
+    /// Fetch the commit chain for `root` from the router's `/shard/chain/<root>`.
+    async fn fetch_chain(&self, client: &reqwest::Client, root: B256) -> Result<ShardChain> {
+        let url = format!("{}/shard/chain/{root}", self.router_base);
+        client
             .get(&url)
             .send()
             .await
@@ -355,8 +477,19 @@ impl ShardState {
             .with_context(|| format!("shard gate: GET {url}"))?
             .json()
             .await
-            .context("shard gate: decoding chain")?;
+            .context("shard gate: decoding chain")
+    }
 
+    /// Base checks common to `fulfil` and `fulfilResumed`: root re-derivation,
+    /// answer/prompt id equality, own-segment digest match, and non-empty own
+    /// participation.
+    fn verify_base_chain(
+        &self,
+        chain: &ShardChain,
+        prompt_ids: &[u32],
+        answer_ids: &[u32],
+        root: B256,
+    ) -> Result<()> {
         let derived = chain.derive_root();
         if derived != root || chain.pipeline_root != root {
             bail!(
@@ -364,17 +497,30 @@ impl ShardState {
                 chain.pipeline_root
             );
         }
-        if chain.answer_ids != call.answerIds {
+        if chain.answer_ids != answer_ids {
             bail!(
                 "shard gate: answer ids mismatch (chain {:?}, calldata {:?})",
                 chain.answer_ids,
-                call.answerIds
+                answer_ids
             );
         }
-        if chain.prompt_ids != call.promptIds {
+        if chain.prompt_ids != prompt_ids {
             bail!("shard gate: prompt ids mismatch");
         }
+        let own = self.verify_own_segments(chain)?;
+        if own == 0 {
+            bail!(
+                "shard gate: I executed no segment of pipeline {root} — refusing to attest work I never saw"
+            );
+        }
+        Ok(())
+    }
 
+    /// Verify every chain entry whose committee includes this operator against
+    /// the digest this node computed when it executed that segment. Returns the
+    /// count of own segments. Does NOT require own participation (the caller
+    /// decides): a node may not have executed any of a *prefix* chain's segments.
+    fn verify_own_segments(&self, chain: &ShardChain) -> Result<usize> {
         let mut own = 0usize;
         for entry in &chain.entries {
             if !entry.committee.contains(&self.operator_id) {
@@ -395,19 +541,102 @@ impl ShardState {
                     entry.chk
                 );
             }
+            // For a resumed first-pass forward segment, the chain's claimed
+            // threaded-from commitment must equal the one THIS node's engine
+            // verified (`keccak(stateIn) == expectStateIn`) — grounding the
+            // lineage binding in execution, not coordinator-served metadata.
+            if entry.expect_state_in != B256::ZERO
+                && mine.expect_state_in != B256::ZERO
+                && mine.expect_state_in != entry.expect_state_in
+            {
+                bail!(
+                    "shard gate: segment {} expectStateIn mismatch (mine {} vs chain {})",
+                    entry.seg_id,
+                    mine.expect_state_in,
+                    entry.expect_state_in
+                );
+            }
             own += 1;
         }
-        if own == 0 {
+        Ok(own)
+    }
+
+    /// Resume LINEAGE verification (the mandatory correctness fix for the resume
+    /// path). Given a RESUMED chain and the PREFIX chain it claims to have
+    /// threaded from, binds them so a resumed answer cannot silently smuggle a
+    /// different prefix:
+    ///
+    /// (a) **Prompt-prefix equality** — the resumed run's leading `prefix_len`
+    ///     prompt ids equal the prefix run's prompt ids (the prefix content).
+    /// (b) **Per-stage terminal-state binding** — the resumed run's first-pass
+    ///     forward segments thread from EXACTLY the prefix run's per-stage
+    ///     terminal state commitments (`stage_state_commitments`), which are
+    ///     the `expectStateIn` an honest resume must use. This is bound both as
+    ///     the whole-vector equality AND per first-pass segment, and (via
+    ///     [`Self::verify_own_segments`]) anchored to what this node's engine
+    ///     actually verified for segments it executed.
+    ///
+    /// The prefix chain's own root re-derivation (committee verification) is
+    /// checked by the caller before this runs.
+    pub fn verify_resume_lineage(
+        &self,
+        resumed: &ShardChain,
+        prefix: &ShardChain,
+        prefix_root: B256,
+    ) -> Result<()> {
+        // The resumed chain must declare it resumed from this prefix root.
+        match resumed.prefix_root {
+            Some(r) if r == prefix_root => {}
+            other => bail!(
+                "shard gate: resumed chain prefix_root {other:?} != calldata prefixRoot {prefix_root}"
+            ),
+        }
+        let prefix_len = resumed.prefix_len;
+        if prefix_len == 0 {
+            bail!("shard gate: resumed chain declares zero prefix_len");
+        }
+        // (a) prompt-prefix equality — the prefix chain IS the cached prefix.
+        if prefix.prompt_ids.len() as u64 != prefix_len {
             bail!(
-                "shard gate: I executed no segment of pipeline {root} — refusing to attest work I never saw"
+                "shard gate: prefix chain length {} != resumed prefix_len {prefix_len}",
+                prefix.prompt_ids.len()
             );
         }
-        info!(
-            pipeline_root = %root,
-            own_segments = own,
-            total_segments = chain.entries.len(),
-            "shard gate: verified commit chain — my {own} executed segments match, root and answer ids check out"
-        );
+        if (resumed.prompt_ids.len() as u64) < prefix_len {
+            bail!("shard gate: resumed prompt shorter than declared prefix_len {prefix_len}");
+        }
+        if resumed.prompt_ids[..prefix_len as usize] != prefix.prompt_ids[..] {
+            bail!("shard gate: resumed prompt prefix != cached prefix ids");
+        }
+        // (b) per-stage terminal-state binding.
+        let commits = &prefix.stage_state_commitments;
+        if commits.is_empty() {
+            bail!("shard gate: prefix chain carries no per-stage terminal state commitments");
+        }
+        if resumed.stage_state_commitments != *commits {
+            bail!(
+                "shard gate: resumed run's threaded-from state commitments do not match the prefix's terminal state"
+            );
+        }
+        // Bind each first-pass forward segment (seg_id 0..stages) to the prefix
+        // terminal state for its stage. The first prefill pass numbers its
+        // forward segments 0..S by stage (see the coordinator's deterministic
+        // seg-id formulas), so seg_id doubles as the stage index here.
+        let stages = commits.len() as u64;
+        for entry in &resumed.entries {
+            if entry.kind != SegKind::Forward || entry.seg_id >= stages {
+                continue;
+            }
+            let want = commits[entry.seg_id as usize];
+            if entry.expect_state_in != want {
+                bail!(
+                    "shard gate: resumed first-pass segment {} threads from {} but the prefix's stage-{} terminal state is {want}",
+                    entry.seg_id,
+                    entry.expect_state_in,
+                    entry.seg_id
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -431,6 +660,25 @@ pub fn seg_chk(kind: SegKind, job_data: &[u8], returndata: &[u8]) -> Result<B256
             Ok(keccak256(&buf))
         }
     }
+}
+
+/// Extract the `expectStateIn` commitment a `Forward` segment threads FROM,
+/// from its pre-encoded calldata. Model-agnostic: tries the 0.6B ABI
+/// (`expectKvIn`) then the 35B ABI (`expectStateIn`) — the node executes
+/// segments without knowing the model family. Returns zero for argmax jobs or
+/// calldata that matches neither forward ABI (the gate treats a zero here as
+/// "no threaded-from binding recorded").
+pub fn forward_expect_state_in(kind: SegKind, job_data: &[u8]) -> B256 {
+    if kind != SegKind::Forward {
+        return B256::ZERO;
+    }
+    if let Ok(call) = forwardRangeCall::abi_decode(job_data) {
+        return call.q.expectKvIn;
+    }
+    if let Ok(call) = seg35::forwardRangeCall::abi_decode(job_data) {
+        return call.q.expectStateIn;
+    }
+    B256::ZERO
 }
 
 /// Poll interval for the node's shard loop (`GK_SHARD_POLL_MS`, default 500).
@@ -659,6 +907,9 @@ pub async fn run_shard_loop(
                                         ExecutedSeg {
                                             returndata_hash: rd_hash,
                                             chk,
+                                            expect_state_in: forward_expect_state_in(
+                                                job.kind, &job.data,
+                                            ),
                                         },
                                     );
                                     info!(
@@ -757,6 +1008,7 @@ mod tests {
             committee,
             chk: B256::from([chk_byte; 32]),
             returndata_hash: B256::from([chk_byte ^ 0xFF; 32]),
+            expect_state_in: B256::ZERO,
         }
     }
 
@@ -769,6 +1021,9 @@ mod tests {
             answer_ids: vec![196, 73, 233],
             pipeline_root: B256::ZERO,
             entries,
+            prefix_root: None,
+            prefix_len: 0,
+            stage_state_commitments: Vec::new(),
         };
         c.pipeline_root = c.derive_root();
         c
@@ -789,10 +1044,14 @@ mod tests {
         fulfil.extend_from_slice(&[0u8; 32]);
         let not_fulfil = vec![0xAA, 0xBB, 0xCC, 0xDD, 0x00];
 
-        // No allowlist: any fulfil call is gated, non-fulfil is not.
+        let mut resumed = fulfilResumedCall::SELECTOR.to_vec();
+        resumed.extend_from_slice(&[0u8; 32]);
+
+        // No allowlist: any fulfil / fulfilResumed call is gated, non-fulfil is not.
         let any = ShardState::new(0, None, "http://r".into());
         assert!(any.gates(addr, &fulfil));
         assert!(any.gates(other, &fulfil));
+        assert!(any.gates(addr, &resumed));
         assert!(!any.gates(addr, &not_fulfil));
 
         // Allowlist: only the configured consumer's fulfil calls.
@@ -818,6 +1077,123 @@ mod tests {
         let c = seg_chk(SegKind::Argmax, b"job1", b"res2").unwrap();
         assert_ne!(a, b);
         assert_ne!(a, c);
+    }
+
+    fn commit(b: u8) -> B256 {
+        B256::from([b; 32])
+    }
+
+    fn prefix_chain(prompt: Vec<u32>, commits: Vec<B256>) -> ShardChain {
+        let stages = commits.len() as u64;
+        let entries: Vec<ChainEntry> = (0..stages)
+            .map(|s| entry(s, 0x10 + s as u8, vec![0]))
+            .collect();
+        let mut c = ShardChain {
+            infer_id: "prefix-1".into(),
+            consumer: Address::from([9u8; 20]),
+            prompt_ids: prompt.clone(),
+            max_new: 0,
+            answer_ids: vec![],
+            pipeline_root: B256::ZERO,
+            entries,
+            prefix_root: None,
+            prefix_len: prompt.len() as u64,
+            stage_state_commitments: commits,
+        };
+        c.pipeline_root = c.derive_root();
+        c
+    }
+
+    fn resumed_chain(
+        prompt: Vec<u32>,
+        prefix_len: u64,
+        prefix_root: B256,
+        commits: Vec<B256>,
+    ) -> ShardChain {
+        let stages = commits.len() as u64;
+        let mut entries: Vec<ChainEntry> = (0..stages)
+            .map(|s| {
+                let mut e = entry(s, 0x20 + s as u8, vec![0]);
+                e.expect_state_in = commits[s as usize];
+                e
+            })
+            .collect();
+        // A decode-round argmax segment (id beyond the first prefill pass).
+        entries.push(ChainEntry {
+            seg_id: stages,
+            kind: SegKind::Argmax,
+            committee: vec![0],
+            chk: commit(0x30),
+            returndata_hash: commit(0x31),
+            expect_state_in: B256::ZERO,
+        });
+        let mut c = ShardChain {
+            infer_id: "resume-1".into(),
+            consumer: Address::from([9u8; 20]),
+            prompt_ids: prompt,
+            max_new: 4,
+            answer_ids: vec![50, 60],
+            pipeline_root: B256::ZERO,
+            entries,
+            prefix_root: Some(prefix_root),
+            prefix_len,
+            stage_state_commitments: commits,
+        };
+        c.pipeline_root = c.derive_root();
+        c
+    }
+
+    #[test]
+    fn resume_lineage_accepts_matching_prefix() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        let resumed = resumed_chain(vec![1, 2, 3, 4, 5], 3, prefix.pipeline_root, commits);
+        let node = ShardState::new(7, None, "http://r".into());
+        node.verify_resume_lineage(&resumed, &prefix, prefix.pipeline_root)
+            .expect("honest resume must verify");
+    }
+
+    #[test]
+    fn resume_lineage_rejects_prompt_prefix_mismatch() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        // Resumed prompt's first `prefix_len` ids differ from the cached prefix.
+        let resumed = resumed_chain(vec![1, 9, 3, 4, 5], 3, prefix.pipeline_root, commits);
+        let node = ShardState::new(7, None, "http://r".into());
+        let err = node
+            .verify_resume_lineage(&resumed, &prefix, prefix.pipeline_root)
+            .unwrap_err();
+        assert!(err.to_string().contains("prefix"), "{err}");
+    }
+
+    #[test]
+    fn resume_lineage_rejects_state_commitment_mismatch() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let mut prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        // The prefix's terminal state is tampered — no longer what the resumed
+        // run threaded from.
+        prefix.stage_state_commitments[0] = commit(0xCC);
+        let resumed = resumed_chain(vec![1, 2, 3, 4, 5], 3, prefix.pipeline_root, commits);
+        let node = ShardState::new(7, None, "http://r".into());
+        let err = node
+            .verify_resume_lineage(&resumed, &prefix, prefix.pipeline_root)
+            .unwrap_err();
+        assert!(err.to_string().contains("state"), "{err}");
+    }
+
+    #[test]
+    fn resume_lineage_rejects_segment_threaded_from_mismatch() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        let mut resumed = resumed_chain(vec![1, 2, 3, 4, 5], 3, prefix.pipeline_root, commits);
+        // A first-pass forward segment claims to thread from the wrong state
+        // (while the whole-vector commitments still match) — caught per-segment.
+        resumed.entries[0].expect_state_in = commit(0xEE);
+        let node = ShardState::new(7, None, "http://r".into());
+        let err = node
+            .verify_resume_lineage(&resumed, &prefix, prefix.pipeline_root)
+            .unwrap_err();
+        assert!(err.to_string().contains("threads from"), "{err}");
     }
 
     #[test]

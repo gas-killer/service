@@ -121,6 +121,15 @@ pub struct InferRequest {
     pub stages: u64,
     #[serde(default = "default_argmax_shards")]
     pub argmax_shards: u64,
+    /// Opt-in prefix RESUME. When `Some(pl)`, the coordinator looks up the
+    /// warmed prefix cached under `(model, keccak(prompt_ids[..pl]))` (see
+    /// [`ShardCoordinator::warm_prefix`]), seeds every stage's boundary-state
+    /// accumulators from it, and runs the batched prefill over only the NEW
+    /// positions `[pl, prompt_ids.len())`. The prefix MUST have been warmed
+    /// first (prefill-only) — a missing cache entry is an error, never a silent
+    /// full recompute. Absent/`None` = a fresh from-scratch inference.
+    #[serde(default)]
+    pub prefix_len: Option<u64>,
 }
 
 fn default_stages() -> u64 {
@@ -137,6 +146,94 @@ pub struct InferResponse {
     pub answer_ids: Vec<u32>,
     pub pipeline_root: B256,
     pub segments: u64,
+    /// Set when the run RESUMED from a warmed prefix: the prefix pipeline root
+    /// threaded from (this becomes `fulfilResumed`'s `prefixRoot`). `None` for a
+    /// fresh run.
+    #[serde(default)]
+    pub prefix_root: Option<B256>,
+}
+
+/// `POST /shard/prefix` response — the committee-verified pipeline root of a
+/// prefill-only prefix warm, plus the per-stage terminal state commitments a
+/// later resume threads from. The `prefix_root` is what a subsequent
+/// [`InferRequest`] carries implicitly (via `prefix_len`) and what
+/// `fulfilResumed` binds as `prefixRoot`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrefixWarmResponse {
+    pub prefix_root: B256,
+    pub prefix_len: u64,
+    pub stage_state_commitments: Vec<B256>,
+    pub segments: u64,
+}
+
+/// A stage's boundary-state accumulators captured at a prefix boundary — the
+/// per-layer full-attention `K`/`V` (append semantics) and DeltaNet recurrent
+/// snapshots (replace semantics), indexed by `layer - layer_lo`. Seeds a
+/// resumed [`StageWorker`] so the resume's first forward segment threads from
+/// exactly the prefix's terminal state.
+#[derive(Debug, Clone)]
+struct StageAccum {
+    bounds: (u64, u64),
+    k_acc: Vec<Vec<u8>>,
+    v_acc: Vec<Vec<u8>>,
+    delta_acc: Vec<Vec<u8>>,
+}
+
+impl StageAccum {
+    /// The stage's boundary-state blob in the on-wire layer-major format (see
+    /// [`StageWorker::state_in`]) and its `keccak256` commitment.
+    fn state_bytes(&self, spec: &ModelSpec) -> Vec<u8> {
+        let (lo, hi) = self.bounds;
+        let mut out = Vec::new();
+        for l in lo..hi {
+            let i = (l - lo) as usize;
+            if spec.is_full_attention(l) {
+                out.extend_from_slice(&self.k_acc[i]);
+                out.extend_from_slice(&self.v_acc[i]);
+            } else {
+                out.extend_from_slice(&self.delta_acc[i]);
+            }
+        }
+        out
+    }
+
+    fn commitment(&self, spec: &ModelSpec) -> B256 {
+        keccak256(self.state_bytes(spec))
+    }
+}
+
+/// A warmed prefix held in the coordinator cache. The lineage invariant: this
+/// was captured from a run that STOPPED at the prefix (prefill-only, no
+/// decode) — a DeltaNet REPLACE snapshot cannot be truncated back once a later
+/// position folds into it, so a run that decoded past the prefix can NEVER be
+/// cached here.
+#[derive(Debug, Clone)]
+struct PrefixCacheEntry {
+    prefix_ids: Vec<u32>,
+    prefix_root: B256,
+    stages: u64,
+    bounds: Vec<(u64, u64)>,
+    /// Per-stage terminal accumulators, indexed by stage — seed a resumed run.
+    stage_accums: Vec<StageAccum>,
+    /// Per-stage terminal state commitments (`keccak256(state_bytes)`) — the
+    /// `expectStateIn` an honest resume threads from, and what the gate binds.
+    stage_commitments: Vec<B256>,
+}
+
+/// Cache key: `(model_name, keccak(prompt_ids packed as 4-byte big-endian))`.
+/// The packed hash mirrors the consumer's `keccak256(abi.encodePacked(promptIds))`.
+fn prefix_key(model_name: &str, ids: &[u32]) -> (String, B256) {
+    (model_name.to_string(), packed_ids_hash(ids))
+}
+
+/// `keccak256(abi.encodePacked(promptIds))` for a `uint32[]` — each id packed as
+/// its 4-byte big-endian representation.
+fn packed_ids_hash(ids: &[u32]) -> B256 {
+    let mut buf = Vec::with_capacity(ids.len() * 4);
+    for id in ids {
+        buf.extend_from_slice(&id.to_be_bytes());
+    }
+    keccak256(&buf)
 }
 
 /// Shared coordinator state behind the internal HTTP endpoints.
@@ -162,6 +259,10 @@ pub struct ShardCoordinator {
     /// advertisements on the work poll. Empty => no weight-sharding => legacy
     /// unrestricted committee rotation (today's 0.6B behavior).
     workers: Mutex<HashMap<u32, WorkerCaps>>,
+    /// Warmed-prefix cache keyed `(model_name, keccak(prefix_ids))`. Populated
+    /// by [`ShardCoordinator::warm_prefix`] (a prefill-only run) and consumed by
+    /// a resume ([`InferRequest::prefix_len`]).
+    prefixes: Mutex<HashMap<(String, B256), PrefixCacheEntry>>,
 }
 
 impl ShardCoordinator {
@@ -195,6 +296,7 @@ impl ShardCoordinator {
             results: Mutex::new(HashMap::new()),
             chains: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            prefixes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -282,8 +384,148 @@ impl ShardCoordinator {
             .cloned()
     }
 
+    /// Warm a fixed prefix: a PREFILL-ONLY run over `[0, prompt_ids.len())` that
+    /// captures each stage's TERMINAL boundary-state accumulators plus a
+    /// committee-verified `prefixRoot`, caching them under
+    /// `(model, keccak(prefix_ids))` for later resume (`POST /shard/prefix`).
+    ///
+    /// LINEAGE INVARIANT (do not violate): this run STOPS at the prefix — no
+    /// decode, no argmax. A DeltaNet REPLACE snapshot cannot be truncated back
+    /// once a later position folds into it, so only a run that halted exactly at
+    /// the prefix may be cached as a resumable prefix.
+    pub async fn warm_prefix(&self, req: InferRequest) -> Result<PrefixWarmResponse> {
+        let started = Instant::now();
+        let infer_id = format!("prefix-{}", self.seq.fetch_add(1, Ordering::SeqCst));
+        let plan = InferPlan::new(self, &infer_id, &req)?;
+
+        let p_len = req.prompt_ids.len() as u64;
+        if p_len == 0 {
+            bail!("empty prefix");
+        }
+        let s = plan.s;
+
+        let cap = 2usize;
+        let (tx0, mut rx_prev) = tokio::sync::mpsc::channel::<StageMsg>(cap);
+        let mut worker_futs = Vec::with_capacity(s as usize);
+        let mut rx_last = None;
+        for stage in 0..s {
+            let (tx_next, rx_next) = tokio::sync::mpsc::channel::<StageMsg>(cap);
+            let worker = StageWorker::new(&plan, stage);
+            let rx = std::mem::replace(&mut rx_prev, rx_next);
+            worker_futs.push(worker.run(rx, tx_next));
+            if stage + 1 == s {
+                rx_last = Some(std::mem::replace(
+                    &mut rx_prev,
+                    tokio::sync::mpsc::channel::<StageMsg>(1).1,
+                ));
+            }
+        }
+        let mut rx_last = rx_last.expect("s >= 1");
+
+        let driver = async {
+            let tx0 = Some(tx0);
+            // ONE batched prefill pass over the whole prefix [0, P). No decode.
+            tx0.as_ref()
+                .expect("tx0 alive")
+                .send(StageMsg {
+                    seg_base: 0,
+                    pos_lo: 0,
+                    pos_hi: p_len,
+                    tokens: req.prompt_ids.clone(),
+                    x: Vec::new(),
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("stage pipeline closed unexpectedly"))?;
+            // Drain the last stage's xOut (we never argmax it — prefill only).
+            rx_last
+                .recv()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("pipeline ended during prefix prefill"))?;
+            drop(tx0); // close pipeline; workers return (entries, terminal accum).
+            Ok::<_, anyhow::Error>(())
+        };
+
+        let (worker_out, ()) =
+            tokio::try_join!(futures::future::try_join_all(worker_futs), driver)?;
+
+        // worker_out is stage-ordered (try_join_all preserves future order).
+        let mut entries: Vec<ChainEntry> = Vec::new();
+        let mut stage_accums: Vec<StageAccum> = Vec::with_capacity(s as usize);
+        for (stage_entries, accum) in worker_out {
+            entries.extend(stage_entries);
+            stage_accums.push(accum);
+        }
+        entries.sort_by_key(|e| e.seg_id);
+        for (i, e) in entries.iter().enumerate() {
+            if e.seg_id != i as u64 {
+                bail!(
+                    "prefix chain assembly bug: segment ids not contiguous at {} (got {})",
+                    i,
+                    e.seg_id
+                );
+            }
+        }
+        let stage_commitments: Vec<B256> = stage_accums
+            .iter()
+            .map(|a| a.commitment(&plan.spec))
+            .collect();
+
+        let segments = entries.len() as u64;
+        let mut chain = ShardChain {
+            infer_id: infer_id.clone(),
+            consumer: req.consumer,
+            prompt_ids: req.prompt_ids.clone(),
+            max_new: 0,
+            answer_ids: Vec::new(),
+            pipeline_root: B256::ZERO,
+            entries,
+            prefix_root: None,
+            prefix_len: p_len,
+            stage_state_commitments: stage_commitments.clone(),
+        };
+        chain.pipeline_root = chain.derive_root();
+        let prefix_root = chain.pipeline_root;
+        self.chains
+            .lock()
+            .expect("shard chains lock poisoned")
+            .insert(prefix_root, chain);
+
+        let entry = PrefixCacheEntry {
+            prefix_ids: req.prompt_ids.clone(),
+            prefix_root,
+            stages: s,
+            bounds: plan.bounds.clone(),
+            stage_accums,
+            stage_commitments: stage_commitments.clone(),
+        };
+        self.prefixes
+            .lock()
+            .expect("shard prefixes lock poisoned")
+            .insert(prefix_key(plan.spec.name, &req.prompt_ids), entry);
+
+        info!(
+            infer_id = %infer_id,
+            prefix_root = %prefix_root,
+            prefix_len = p_len,
+            segments,
+            elapsed_s = started.elapsed().as_secs_f32(),
+            "shard: prefix warmed — terminal per-stage state cached for resume"
+        );
+        Ok(PrefixWarmResponse {
+            prefix_root,
+            prefix_len: p_len,
+            stage_state_commitments: stage_commitments,
+            segments,
+        })
+    }
+
     /// Runs one full sharded inference to completion. Mirrors
-    /// `sharded_infer.py::ShardedRunner.generate`.
+    /// `sharded_infer.py::ShardedRunner.generate`. When `req.prefix_len` is set,
+    /// RESUMES from a warmed prefix: each stage's accumulators are seeded from
+    /// the cache and the batched prefill covers only the NEW positions
+    /// `[prefix_len, P)` — the decode/argmax/chain arithmetic is otherwise
+    /// identical, so a resumed run's answer is bit-exact with a fresh run over
+    /// the same full prompt.
     pub async fn run_inference(&self, req: InferRequest) -> Result<InferResponse> {
         let started = Instant::now();
         let infer_id = format!("inf-{}", self.seq.fetch_add(1, Ordering::SeqCst));
@@ -296,18 +538,68 @@ impl ShardCoordinator {
         let s = plan.s;
         let m = req.argmax_shards.clamp(1, req.vocab);
 
+        // Resume seed: opt-in via req.prefix_len. Look up and validate the
+        // warmed prefix so seeded accumulators line up with THIS plan.
+        let resume: Option<PrefixCacheEntry> = match req.prefix_len {
+            Some(pl) if pl > 0 => {
+                if pl >= p_len {
+                    bail!(
+                        "resume: prefix_len {pl} >= prompt length {p_len} — nothing new to prefill \
+                         (a resume must add at least one new token)"
+                    );
+                }
+                let key = prefix_key(plan.spec.name, &req.prompt_ids[..pl as usize]);
+                let entry = self
+                    .prefixes
+                    .lock()
+                    .expect("shard prefixes lock poisoned")
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "resume: no warmed prefix cached for model {} at prefix_len {pl} — \
+                             warm it via POST /shard/prefix first (opt-in resume never silently \
+                             falls back to a full recompute)",
+                            plan.spec.name
+                        )
+                    })?;
+                if entry.prefix_ids.as_slice() != &req.prompt_ids[..pl as usize] {
+                    bail!(
+                        "resume: cached prefix ids differ from prompt_ids[..{pl}] \
+                         (prefix_len mismatch or hash collision)"
+                    );
+                }
+                if entry.stages != s || entry.bounds != plan.bounds {
+                    bail!(
+                        "resume: cached prefix stage layout (s={}, bounds={:?}) != current plan \
+                         (s={s}, bounds={:?}) — re-warm with matching stages/n_layers",
+                        entry.stages,
+                        entry.bounds,
+                        plan.bounds
+                    );
+                }
+                Some(entry)
+            }
+            _ => None,
+        };
+        let start_pos = resume
+            .as_ref()
+            .map(|e| e.prefix_ids.len() as u64)
+            .unwrap_or(0);
+
         // STAGE PIPELINE: one worker per contiguous-layer stage, connected by
         // channels. Each worker OWNS its layer range's boundary-state
         // accumulators (layers belong to exactly one stage) and records its
-        // chain entries locally.
+        // chain entries locally. On resume, a worker is SEEDED with its stage's
+        // cached terminal accumulators so its first forward segment threads from
+        // the prefix's terminal state (exactly the segment-to-segment threading
+        // that already works between contiguous layer stages).
         //
-        // BATCHED PREFILL: the whole prompt is one pass — a single message
-        // (pos_lo=0, pos_hi=P) flows stage 0 -> 1 -> ... -> S-1, each running
-        // ONE forwardRange over all P positions. This amortizes every layer's
-        // weight read across the prompt (vs a per-position wavefront that
-        // re-faults the 34GB overlay P times) — the dominant cost measured on
-        // the live 35B. Decode is inherently serial (token r needs argmax of
-        // r-1), one position per pass.
+        // BATCHED PREFILL: one pass — a single message (pos_lo=start_pos,
+        // pos_hi=P) flows stage 0 -> 1 -> ... -> S-1, each running ONE
+        // forwardRange over all NEW positions. Fresh: start_pos=0. Resume:
+        // start_pos=prefix_len, so the prefix's positions are never re-executed.
+        // Decode is inherently serial (token r needs argmax of r-1).
         //
         // Deterministic segment ids (coordinator and every operator agree, so
         // the commit chain re-derives identically):
@@ -321,7 +613,10 @@ impl ShardCoordinator {
         let mut rx_last = None;
         for stage in 0..s {
             let (tx_next, rx_next) = tokio::sync::mpsc::channel::<StageMsg>(cap);
-            let worker = StageWorker::new(&plan, stage);
+            let worker = match &resume {
+                Some(e) => StageWorker::new_seeded(&plan, stage, &e.stage_accums[stage as usize]),
+                None => StageWorker::new(&plan, stage),
+            };
             let rx = std::mem::replace(&mut rx_prev, rx_next);
             worker_futs.push(worker.run(rx, tx_next));
             if stage + 1 == s {
@@ -344,14 +639,14 @@ impl ShardCoordinator {
                 }
             };
 
-            // Prefill: ONE batched pass over the whole prompt [0, P).
+            // Prefill: ONE batched pass over the NEW positions [start_pos, P).
             send(
                 &tx0,
                 StageMsg {
                     seg_base: 0,
-                    pos_lo: 0,
+                    pos_lo: start_pos,
                     pos_hi: p_len,
-                    tokens: req.prompt_ids.clone(),
+                    tokens: req.prompt_ids[start_pos as usize..].to_vec(),
                     x: Vec::new(),
                 },
             )
@@ -363,7 +658,7 @@ impl ShardCoordinator {
                 .x;
 
             // First generated token from the LAST prompt position's final
-            // vector (the batched xOut carries all P positions; the last
+            // vector (the batched xOut carries all NEW positions; the last
             // dim-word slice is position P-1); then the decode relay.
             let dim_bytes = (req.dim * 32) as usize;
             let xb = last_x[last_x.len() - dim_bytes..].to_vec();
@@ -405,12 +700,12 @@ impl ShardCoordinator {
             Ok::<_, anyhow::Error>((generated, driver_entries))
         };
 
-        let (worker_entries, (generated, driver_entries)) =
+        let (worker_out, (generated, driver_entries)) =
             tokio::try_join!(futures::future::try_join_all(worker_futs), driver)?;
 
-        let mut entries: Vec<ChainEntry> = worker_entries
+        let mut entries: Vec<ChainEntry> = worker_out
             .into_iter()
-            .flatten()
+            .flat_map(|(stage_entries, _accum)| stage_entries)
             .chain(driver_entries)
             .collect();
         entries.sort_by_key(|e| e.seg_id);
@@ -424,6 +719,15 @@ impl ShardCoordinator {
             }
         }
 
+        let (prefix_root, prefix_len_field, stage_commitments) = match &resume {
+            Some(e) => (
+                Some(e.prefix_root),
+                e.prefix_ids.len() as u64,
+                e.stage_commitments.clone(),
+            ),
+            None => (None, 0, Vec::new()),
+        };
+
         let segments = entries.len() as u64;
         let mut chain = ShardChain {
             infer_id: infer_id.clone(),
@@ -433,6 +737,9 @@ impl ShardCoordinator {
             answer_ids: generated.clone(),
             pipeline_root: B256::ZERO,
             entries,
+            prefix_root,
+            prefix_len: prefix_len_field,
+            stage_state_commitments: stage_commitments,
         };
         chain.pipeline_root = chain.derive_root();
         let root = chain.pipeline_root;
@@ -444,6 +751,8 @@ impl ShardCoordinator {
         info!(
             infer_id = %infer_id,
             pipeline_root = %root,
+            prefix_root = ?prefix_root,
+            prefix_len = start_pos,
             segments,
             answer_ids = ?generated,
             elapsed_s = started.elapsed().as_secs_f32(),
@@ -454,6 +763,7 @@ impl ShardCoordinator {
             answer_ids: generated,
             pipeline_root: root,
             segments,
+            prefix_root,
         })
     }
 
@@ -535,6 +845,9 @@ impl ShardCoordinator {
                 committee,
                 chk,
                 returndata_hash: keccak256(first),
+                // Forward segments overwrite this with keccak256(state_in) in
+                // StageWorker::forward_segment; argmax leaves it zero.
+                expect_state_in: B256::ZERO,
             },
         ))
     }
@@ -724,14 +1037,29 @@ impl<'a> StageWorker<'a> {
         }
     }
 
+    /// Like [`Self::new`], but SEEDED with a warmed prefix's terminal
+    /// accumulators for this stage (a resume). The first forward segment then
+    /// threads from exactly this state — its `state_in()` blob (and hence its
+    /// `expectStateIn` commitment) equals the cached prefix's stage commitment.
+    fn new_seeded(plan: &InferPlan<'a>, stage: u64, accum: &StageAccum) -> Self {
+        let mut w = Self::new(plan, stage);
+        debug_assert_eq!(w.bounds, accum.bounds, "seeded accumulator bounds mismatch");
+        w.k_acc = accum.k_acc.clone();
+        w.v_acc = accum.v_acc.clone();
+        w.delta_acc = accum.delta_acc.clone();
+        w
+    }
+
     /// Receives positions in order, executes this stage's segment for each,
-    /// forwards xOut downstream. Returns the stage's chain entries once the
-    /// upstream closes (end of inference).
+    /// forwards xOut downstream. Returns the stage's chain entries AND its
+    /// TERMINAL accumulators once the upstream closes. The terminal accumulators
+    /// are what a prefix warm caches (and a resume ignores). Moving them out
+    /// costs nothing; a normal run just drops them.
     async fn run(
         mut self,
         mut rx: tokio::sync::mpsc::Receiver<StageMsg>,
         tx: tokio::sync::mpsc::Sender<StageMsg>,
-    ) -> Result<Vec<ChainEntry>> {
+    ) -> Result<(Vec<ChainEntry>, StageAccum)> {
         while let Some(msg) = rx.recv().await {
             let x_out = self
                 .forward_segment(
@@ -756,7 +1084,13 @@ impl<'a> StageWorker<'a> {
                 bail!("stage {}: downstream closed", self.stage);
             }
         }
-        Ok(self.entries)
+        let accum = StageAccum {
+            bounds: self.bounds,
+            k_acc: self.k_acc,
+            v_acc: self.v_acc,
+            delta_acc: self.delta_acc,
+        };
+        Ok((self.entries, accum))
     }
 
     /// This stage's resume boundary state, layer-major per the wire format:
@@ -861,7 +1195,7 @@ impl<'a> StageWorker<'a> {
                 needs_classifier: false,
             },
         )?;
-        let (rd, entry) = self
+        let (rd, mut entry) = self
             .co
             .exec_segment(
                 &self.infer_id,
@@ -872,6 +1206,11 @@ impl<'a> StageWorker<'a> {
                 calldata,
             )
             .await?;
+        // Record the commitment of the boundary state this segment threaded
+        // FROM (matches the engine-verified `expectStateIn`). For a resume's
+        // first forward segment this equals the cached prefix's stage terminal
+        // commitment — the anchor the validator gate binds.
+        entry.expect_state_in = keccak256(&state_in);
         self.entries.push(entry);
         let (x_out, state_append) = self.spec.decode_forward_returns(&rd)?;
         self.fold_state(pos_hi - pos_lo, &state_append)?;
@@ -904,6 +1243,7 @@ mod tests {
             results: Mutex::new(HashMap::new()),
             chains: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            prefixes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1087,5 +1427,463 @@ mod tests {
         };
         let err = co.plan_committee(0, 0, &req).unwrap_err();
         assert!(err.to_string().contains("layer-affinity"), "{err}");
+    }
+
+    // ---- Prefix warm + resume, driven end-to-end through a mock EVM engine ----
+    //
+    // The mock is a faithful stand-in for the seg engine's boundary-state
+    // threading: it maintains a per-position running carry chained over the
+    // tokens seen so far, threaded FORWARD through the batched activation (x)
+    // and ACROSS positions through the boundary state (KV append for attention
+    // layers, snapshot REPLACE for DeltaNet layers) exactly as the real engine
+    // composes segment-to-segment. That composition is what makes a resume
+    // (warm `[0, pl)` then prefill `[pl, P)`) bit-exact with a fresh batched
+    // prefill `[0, P)`: the carry at position P-1 is a pure function of the
+    // token prefix `[0..P)` regardless of how the prefill was split.
+
+    use crate::model::ModelId;
+    use alloy::sol_types::SolCall;
+    use alloy_primitives::{Bytes, U256};
+    use gas_killer_common::shard::{ShardState, argmaxRangeCall, forwardRangeCall};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    /// Per-inference log of forward spans `(pos_lo, pos_hi, layer_lo)`, keyed by
+    /// infer id — lets a test see exactly which positions a run executed.
+    type ForwardLog = Arc<Mutex<HashMap<String, Vec<(u64, u64, u64)>>>>;
+
+    fn coordinator_spec(k: u64, n: u64, spec: ModelSpec) -> ShardCoordinator {
+        ShardCoordinator {
+            k,
+            n_operators: n,
+            gas: 1 << 40,
+            spec,
+            align_stages: true,
+            seq: AtomicU64::new(0),
+            queues: Mutex::new(HashMap::new()),
+            results: Mutex::new(HashMap::new()),
+            chains: Mutex::new(HashMap::new()),
+            workers: Mutex::new(HashMap::new()),
+            prefixes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// A tiny hybrid spec (2 DeltaNet + 2 full-attention layers) whose DeltaNet
+    /// snapshot is 64 bytes — exercises the REPLACE-semantics boundary the
+    /// lineage constraint is about, while staying fast. Uses the 0.6B call ABI
+    /// (a container; layer semantics come from `full_attention_interval`).
+    fn hybrid_spec() -> ModelSpec {
+        ModelSpec {
+            id: ModelId::Qwen3_06B,
+            name: "qwen3-0.6b",
+            n_layers: 4,
+            full_attention_interval: Some(2),
+            dim: 2,
+            kvd: 8,
+            vocab: 32,
+            packed_config_words: 3,
+            conv_dim: 0,
+            conv_k: 1,
+            n_v_heads: 1,
+            d_k: 4,
+            d_v: 4,
+        }
+    }
+
+    fn mock_req(
+        prompt: Vec<u32>,
+        max_new: u64,
+        prefix_len: Option<u64>,
+        dim: u64,
+        kvd: u64,
+        vocab: u64,
+        n_layers: u64,
+    ) -> InferRequest {
+        InferRequest {
+            consumer: Address::from([7u8; 20]),
+            seg_engine: Address::from([8u8; 20]),
+            weights_root: Address::from([9u8; 20]),
+            manifest: B256::ZERO,
+            packed_config: [B256::ZERO; 3],
+            packed_config_w3: None,
+            n_layers,
+            kvd,
+            dim,
+            vocab,
+            stop0: u32::MAX,
+            stop1: u32::MAX - 1,
+            seq_cap: 4096,
+            prompt_ids: prompt,
+            max_new,
+            model: None,
+            stages: 2,
+            argmax_shards: 1,
+            prefix_len,
+        }
+    }
+
+    /// Repeat a 32-byte word to fill `len` (32-aligned) bytes.
+    fn fill(word: B256, len: usize) -> Vec<u8> {
+        assert_eq!(len % 32, 0, "fill len must be 32-aligned");
+        let mut v = Vec::with_capacity(len);
+        for _ in 0..(len / 32) {
+            v.extend_from_slice(word.as_slice());
+        }
+        v
+    }
+
+    fn mock_forward(
+        spec: &ModelSpec,
+        dim: u64,
+        kvd: u64,
+        job: &ShardJob,
+        log: &ForwardLog,
+    ) -> Vec<u8> {
+        let call = forwardRangeCall::abi_decode(&job.data).expect("mock: decode forward calldata");
+        let sp = &call.q.span;
+        let pos_lo = sp.posLo.to::<u64>();
+        let pos_hi = sp.posHi.to::<u64>();
+        let layer_lo = sp.layerLo.to::<u64>();
+        let layer_hi = sp.layerHi.to::<u64>();
+        let tokens = &call.q.tokenIds;
+        let x_in = call.q.xIn.as_ref();
+        let state_in = call.q.kvIn.as_ref();
+        let dim = dim as usize;
+        let kvd = kvd as usize;
+        let pos_n = (pos_hi - pos_lo) as usize;
+
+        log.lock()
+            .unwrap()
+            .entry(job.infer_id.clone())
+            .or_default()
+            .push((pos_lo, pos_hi, layer_lo));
+
+        // Carry threaded in from the boundary state = its last 32 bytes (each
+        // layer's terminal contribution ends with the carry; empty = ZERO).
+        let carry_in = if state_in.is_empty() {
+            B256::ZERO
+        } else {
+            B256::from_slice(&state_in[state_in.len() - 32..])
+        };
+
+        let mut carries: Vec<B256> = Vec::with_capacity(pos_n);
+        let mut c = carry_in;
+        for p in 0..pos_n {
+            let in_p: B256 = if layer_lo == 0 {
+                keccak256(tokens[p].to_be_bytes())
+            } else {
+                B256::from_slice(&x_in[p * dim * 32..p * dim * 32 + 32])
+            };
+            let mut buf = Vec::with_capacity(80);
+            buf.extend_from_slice(c.as_slice());
+            buf.extend_from_slice(in_p.as_slice());
+            buf.extend_from_slice(&layer_lo.to_be_bytes());
+            buf.extend_from_slice(&layer_hi.to_be_bytes());
+            c = keccak256(&buf);
+            carries.push(c);
+        }
+
+        let mut x_out = Vec::with_capacity(pos_n * dim * 32);
+        for &carry in &carries {
+            x_out.extend_from_slice(&fill(carry, dim * 32));
+        }
+
+        // Boundary state in the coordinator's wire format (see fold_state):
+        // attention layers append per-position K||V; DeltaNet layers REPLACE
+        // their snapshot with the terminal carry.
+        let snap = spec.delta_snapshot_bytes();
+        let mut sa = Vec::new();
+        for l in layer_lo..layer_hi {
+            if spec.is_full_attention(l) {
+                for &carry in &carries {
+                    sa.extend_from_slice(&fill(carry, kvd * 4));
+                }
+                for &carry in &carries {
+                    sa.extend_from_slice(&fill(carry, kvd * 4));
+                }
+            } else {
+                sa.extend_from_slice(&fill(carries[pos_n - 1], snap));
+            }
+        }
+
+        let mut chkbuf = Vec::with_capacity(x_out.len() + sa.len());
+        chkbuf.extend_from_slice(&x_out);
+        chkbuf.extend_from_slice(&sa);
+        let chk = keccak256(&chkbuf);
+
+        forwardRangeCall::abi_encode_returns_tuple(&(Bytes::from(x_out), Bytes::from(sa), chk))
+    }
+
+    fn mock_argmax(job: &ShardJob) -> Vec<u8> {
+        let call = argmaxRangeCall::abi_decode(&job.data).expect("mock: decode argmax calldata");
+        let xb = call.xbFinal.as_ref();
+        let vocab_lo = call.vocabLo.to::<u64>();
+        let vocab_hi = call.vocabHi.to::<u64>();
+        // The final position's carry (= xOut[P-1]'s first word) picks the token.
+        let carry = B256::from_slice(&xb[0..32]);
+        let mut best: Option<(u64, u64)> = None;
+        for id in vocab_lo..vocab_hi {
+            let mut buf = [0u8; 40];
+            buf[..32].copy_from_slice(carry.as_slice());
+            buf[32..].copy_from_slice(&id.to_be_bytes());
+            let h = keccak256(buf);
+            let score = u64::from_be_bytes(h[0..8].try_into().unwrap());
+            best = match best {
+                None => Some((score, id)),
+                Some((bs, bi)) if score > bs || (score == bs && id < bi) => Some((score, id)),
+                Some(b) => Some(b),
+            };
+        }
+        let (score, id) = best.expect("non-empty vocab range");
+        argmaxRangeCall::abi_encode_returns_tuple(&(
+            I256::try_from(U256::from(score)).unwrap(),
+            U256::from(id),
+        ))
+    }
+
+    async fn mock_engine(
+        co: Arc<ShardCoordinator>,
+        dim: u64,
+        kvd: u64,
+        log: ForwardLog,
+        stop: Arc<AtomicBool>,
+    ) {
+        let spec = co.spec.clone();
+        while !stop.load(Ordering::Relaxed) {
+            let jobs = co.take_work(0);
+            for job in jobs {
+                let rd = match job.kind {
+                    SegKind::Forward => mock_forward(&spec, dim, kvd, &job, &log),
+                    SegKind::Argmax => mock_argmax(&job),
+                };
+                co.put_result(ShardResultMsg {
+                    infer_id: job.infer_id,
+                    seg_id: job.seg_id,
+                    operator: 0,
+                    returndata: rd,
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    struct Harness {
+        co: Arc<ShardCoordinator>,
+        log: ForwardLog,
+        stop: Arc<AtomicBool>,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl Harness {
+        fn start(spec: ModelSpec, dim: u64, kvd: u64) -> Self {
+            let co = Arc::new(coordinator_spec(1, 1, spec));
+            let log: ForwardLog = Arc::new(Mutex::new(HashMap::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let handle = tokio::spawn(mock_engine(
+                Arc::clone(&co),
+                dim,
+                kvd,
+                Arc::clone(&log),
+                Arc::clone(&stop),
+            ));
+            Self {
+                co,
+                log,
+                stop,
+                handle,
+            }
+        }
+
+        async fn stop(self) {
+            self.stop.store(true, Ordering::Relaxed);
+            let _ = self.handle.await;
+        }
+
+        fn spans(&self, infer_id: &str) -> Vec<(u64, u64, u64)> {
+            self.log
+                .lock()
+                .unwrap()
+                .get(infer_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_matches_non_resume_bit_exact() {
+        let (dim, kvd, vocab, n_layers) = (2u64, 8u64, 32u64, 4u64);
+        let h = Harness::start(ModelSpec::qwen3_06b(), dim, kvd);
+        let prompt = vec![5u32, 9, 2, 7, 3];
+
+        let fresh =
+            h.co.run_inference(mock_req(prompt.clone(), 4, None, dim, kvd, vocab, n_layers))
+                .await
+                .expect("fresh inference");
+
+        let warm =
+            h.co.warm_prefix(mock_req(
+                prompt[..3].to_vec(),
+                0,
+                None,
+                dim,
+                kvd,
+                vocab,
+                n_layers,
+            ))
+            .await
+            .expect("prefix warm");
+        let resume =
+            h.co.run_inference(mock_req(
+                prompt.clone(),
+                4,
+                Some(3),
+                dim,
+                kvd,
+                vocab,
+                n_layers,
+            ))
+            .await
+            .expect("resumed inference");
+        h.stop().await;
+
+        assert!(
+            !fresh.answer_ids.is_empty(),
+            "sanity: some tokens generated"
+        );
+        assert_eq!(
+            fresh.answer_ids, resume.answer_ids,
+            "resume must produce the SAME answer ids as a fresh run over the full prompt"
+        );
+        assert_eq!(resume.prefix_root, Some(warm.prefix_root));
+        assert_eq!(fresh.prefix_root, None);
+    }
+
+    #[tokio::test]
+    async fn resume_skips_prefix_positions() {
+        let (dim, kvd, vocab, n_layers) = (2u64, 8u64, 32u64, 4u64);
+        let h = Harness::start(ModelSpec::qwen3_06b(), dim, kvd);
+        let prompt = vec![1u32, 2, 3, 4, 5, 6];
+
+        let fresh =
+            h.co.run_inference(mock_req(prompt.clone(), 3, None, dim, kvd, vocab, n_layers))
+                .await
+                .expect("fresh");
+        h.co.warm_prefix(mock_req(
+            prompt[..4].to_vec(),
+            0,
+            None,
+            dim,
+            kvd,
+            vocab,
+            n_layers,
+        ))
+        .await
+        .expect("warm");
+        let resume =
+            h.co.run_inference(mock_req(
+                prompt.clone(),
+                3,
+                Some(4),
+                dim,
+                kvd,
+                vocab,
+                n_layers,
+            ))
+            .await
+            .expect("resume");
+
+        let resume_spans = h.spans(&resume.infer_id);
+        let fresh_spans = h.spans(&fresh.infer_id);
+        h.stop().await;
+
+        // The resumed inference never re-executes any prefix position: its
+        // earliest forward pos_lo is prefix_len (4), not 0.
+        let resume_min = resume_spans.iter().map(|(lo, ..)| *lo).min().unwrap();
+        assert_eq!(
+            resume_min, 4,
+            "resume must start prefill at prefix_len, skipping [0,4)"
+        );
+        let fresh_min = fresh_spans.iter().map(|(lo, ..)| *lo).min().unwrap();
+        assert_eq!(fresh_min, 0, "fresh run prefills from position 0");
+
+        // And it processes strictly fewer forward positions overall.
+        let sum = |v: &[(u64, u64, u64)]| -> u64 { v.iter().map(|(lo, hi, _)| hi - lo).sum() };
+        assert!(
+            sum(&resume_spans) < sum(&fresh_spans),
+            "resume forward positions {} should be fewer than fresh {}",
+            sum(&resume_spans),
+            sum(&fresh_spans)
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_requires_a_warmed_prefix() {
+        // Opt-in resume with no warmed prefix errors immediately (never a silent
+        // full recompute) — no mock needed; it fails before dispatch.
+        let co = coordinator_spec(1, 1, ModelSpec::qwen3_06b());
+        let err = co
+            .run_inference(mock_req(vec![1, 2, 3, 4], 2, Some(3), 2, 8, 32, 4))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no warmed prefix"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resume_lineage_binds_coordinator_output_hybrid() {
+        // Hybrid (DeltaNet REPLACE + attention APPEND) end-to-end: bit-exact
+        // resume AND the node gate accepts the real coordinator-assembled chains.
+        let (dim, kvd, vocab, n_layers) = (2u64, 8u64, 32u64, 4u64);
+        let h = Harness::start(hybrid_spec(), dim, kvd);
+        let prompt = vec![3u32, 1, 4, 1, 5, 9];
+
+        let fresh =
+            h.co.run_inference(mock_req(prompt.clone(), 3, None, dim, kvd, vocab, n_layers))
+                .await
+                .expect("fresh");
+        let warm =
+            h.co.warm_prefix(mock_req(
+                prompt[..4].to_vec(),
+                0,
+                None,
+                dim,
+                kvd,
+                vocab,
+                n_layers,
+            ))
+            .await
+            .expect("warm");
+        let resume =
+            h.co.run_inference(mock_req(
+                prompt.clone(),
+                3,
+                Some(4),
+                dim,
+                kvd,
+                vocab,
+                n_layers,
+            ))
+            .await
+            .expect("resume");
+        let co = Arc::clone(&h.co);
+        h.stop().await;
+
+        assert_eq!(
+            fresh.answer_ids, resume.answer_ids,
+            "DeltaNet REPLACE snapshot must compose across the prefix split"
+        );
+
+        // The gate's lineage verifier accepts the coordinator's actual chains.
+        let prefix_chain = co.chain(warm.prefix_root).expect("prefix chain served");
+        let resumed_chain = co
+            .chain(resume.pipeline_root)
+            .expect("resumed chain served");
+        assert_eq!(resumed_chain.prefix_root, Some(warm.prefix_root));
+        assert_eq!(
+            resumed_chain.stage_state_commitments, prefix_chain.stage_state_commitments,
+            "resumed run threads from the prefix's terminal state commitments"
+        );
+        let node = ShardState::new(0, None, "http://router".into());
+        node.verify_resume_lineage(&resumed_chain, &prefix_chain, warm.prefix_root)
+            .expect("gate must accept honest coordinator-assembled resume lineage");
     }
 }
