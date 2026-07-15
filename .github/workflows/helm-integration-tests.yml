@@ -595,7 +595,7 @@ jobs:
           BODY=$(echo "$RESPONSE" | head -1)
           echo "Router response ($HTTP_CODE): $BODY"
 
-          if [ "$HTTP_CODE" != "200" ]; then
+          if [ "$HTTP_CODE" != "202" ] && [ "$HTTP_CODE" != "200" ]; then
             echo "Router rejected the trigger request"
             echo "=== Router logs ==="
             kubectl logs -l app.kubernetes.io/component=router --tail 50
