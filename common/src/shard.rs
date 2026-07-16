@@ -868,6 +868,36 @@ async fn fast_view_call(
         hex::encode(job.to.as_slice()),
         hex::encode(&engine_code)
     );
+    // Base contracts the engine calls INTO beyond itself. The 35B engine
+    // STATICCALLs a separately-deployed `Qwen35SegForward` (EIP-170 split);
+    // without its code inlined the fast executor sees an empty account there
+    // and the segment reverts after burning ~236B gas (observed live), while
+    // the interpreter — which reads the full fork state — succeeds. The
+    // sidecar's base state is EmptyDB + these explicit accounts, so every
+    // dependency must be listed: GK_FAST_VIEW_EXTRA_ACCOUNTS, comma-separated
+    // addresses, each fetched at head exactly like the engine. A configured
+    // address with no code is a loud error (misconfig must not silently
+    // degrade to the interpreter).
+    if let Ok(extra) = std::env::var("GK_FAST_VIEW_EXTRA_ACCOUNTS") {
+        for addr_s in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let addr: Address = addr_s
+                .parse()
+                .with_context(|| format!("GK_FAST_VIEW_EXTRA_ACCOUNTS: bad address {addr_s:?}"))?;
+            let code = eth_get_code(client, rpc_url, addr).await?;
+            if code.is_empty() {
+                bail!(
+                    "GK_FAST_VIEW_EXTRA_ACCOUNTS address {addr} has no code at head \
+                     (is the fork missing it?)"
+                );
+            }
+            let _ = writeln!(
+                jt,
+                "account {} {}",
+                hex::encode(addr.as_slice()),
+                hex::encode(&code)
+            );
+        }
+    }
     for (weights, tokenizer, manifest) in &ctx.overlay_files {
         let _ = writeln!(
             jt,
