@@ -1,0 +1,190 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: gk-shard-bridge
+  name: gk-shard-bridge
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: gk-shard-bridge
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: '2026-07-16T15:15:38-04:00'
+      labels:
+        app: gk-shard-bridge
+    spec:
+      containers:
+      - command:
+        - python
+        - /app/bridge.py
+        env:
+        - name: GK_KEY
+          valueFrom:
+            secretKeyRef:
+              key: GK_KEY
+              name: gk-bridge-key
+        - name: ROUTER_SHARD
+          value: http://gas-killer-router:8081
+        - name: ROUTER_API
+          value: http://gas-killer-router:8080
+        - name: RPC_URL
+          value: https://ethereum-sepolia-rpc.publicnode.com
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        name: bridge
+        ports:
+        - containerPort: 8090
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /bridge/healthz
+            port: 8090
+            scheme: HTTP
+          initialDelaySeconds: 3
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /app
+          name: script
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: gk-bridge-script
+        name: script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gk-shard-bridge
+  namespace: default
+spec:
+  clusterIP: 10.2.10.63
+  clusterIPs:
+  - 10.2.10.63
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - port: 8090
+    protocol: TCP
+    targetPort: 8090
+  selector:
+    app: gk-shard-bridge
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gk-shard-bridge
+  namespace: default
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: testnet.gaskiller.xyz
+    http:
+      paths:
+      - backend:
+          service:
+            name: gk-shard-bridge
+            port:
+              number: 8090
+        path: /bridge
+        pathType: Prefix
+  - host: 8-228-87-183.nip.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: gk-shard-bridge
+            port:
+              number: 8090
+        path: /bridge
+        pathType: Prefix
+---
+apiVersion: v1
+data:
+  bridge.py: '# generated: kubectl create configmap gk-bridge-script --from-file=bridge.py=bridge/bridge.py'
+kind: ConfigMap
+metadata:
+  name: gk-bridge-script
+  namespace: default
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  labels:
+    app: qwen-fork-refresh
+  name: qwen-fork-refresh
+  namespace: default
+spec:
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata: {}
+    spec:
+      activeDeadlineSeconds: 120
+      backoffLimit: 2
+      template:
+        metadata: {}
+        spec:
+          containers:
+          - args:
+            - -sf
+            - -m
+            - '60'
+            - -X
+            - POST
+            - -H
+            - 'Content-Type: application/json'
+            - -d
+            - '{"jsonrpc":"2.0","id":1,"method":"anvil_reset","params":[{"forking":{"jsonRpcUrl":"https://ethereum-sepolia-rpc.publicnode.com"}}]}'
+            - http://qwen-sim-fork:8547
+            image: curlimages/curl:8.10.1
+            imagePullPolicy: IfNotPresent
+            name: refresh
+            resources:
+              limits:
+                cpu: 100m
+                memory: 64Mi
+              requests:
+                cpu: 10m
+                memory: 16Mi
+            terminationMessagePath: /dev/termination-log
+            terminationMessagePolicy: File
+          dnsPolicy: ClusterFirst
+          restartPolicy: Never
+          schedulerName: default-scheduler
+          securityContext: {}
+          terminationGracePeriodSeconds: 30
+  schedule: '*/8 * * * *'
+  successfulJobsHistoryLimit: 2
+  suspend: false
