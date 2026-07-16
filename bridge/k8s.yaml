@@ -188,3 +188,67 @@ spec:
   schedule: '*/8 * * * *'
   successfulJobsHistoryLimit: 2
   suspend: false
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: demo-expiry
+  namespace: default
+spec:
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    metadata: {}
+    spec:
+      activeDeadlineSeconds: 3600
+      backoffLimit: 2
+      template:
+        metadata: {}
+        spec:
+          containers:
+          - args:
+            - "set -x\nPROJ=gas-killer-testnet; LOC=us-east4; CLUSTER=gas-killer\n\
+              API=\"https://container.googleapis.com/v1/projects/$PROJ/locations/$LOC/clusters/$CLUSTER\"\
+              \ntok() { curl -s -H \"Metadata-Flavor: Google\" \\\n  \"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token\"\
+              \ \\\n  | sed -n 's/.*\"access_token\":\"\\([^\"]*\\)\".*/\\1/p'; }\n\
+              # 1. demo workloads\nkubectl delete deploy qwen-sim-fork qwen-overlay-ensurer\
+              \ gk-sim-proxy -n default --ignore-not-found\nkubectl delete svc qwen-sim-fork\
+              \ gk-sim-proxy -n default --ignore-not-found\nkubectl delete configmap\
+              \ gk-sim-proxy-src -n default --ignore-not-found\n# 2. unpin operators\
+              \ so they can reschedule after the node shrink\nfor d in gas-killer-node-1\
+              \ gas-killer-node-2 gas-killer-node-3 gas-killer-router; do\n  kubectl\
+              \ patch deploy $d -n default --type json \\\n    -p '[{\"op\":\"remove\"\
+              ,\"path\":\"/spec/template/spec/nodeSelector\"}]' || true\ndone\n# 3.\
+              \ delete the sim + operators node pools, waiting out any running cluster\
+              \ op\nfor POOL in sim-pool-c4 ops-highmem; do\n  for i in $(seq 1 60);\
+              \ do\n    OUT=$(curl -s -X DELETE -H \"Authorization: Bearer $(tok)\"\
+              \ \"$API/nodePools/$POOL\")\n    echo \"$OUT\" | grep -q '\"name\"'\
+              \ && break\n    echo \"$OUT\" | grep -qi \"notFound\" && break\n   \
+              \ sleep 60\n  done\ndone\n# 4. shrink default pool to 1 node (retry\
+              \ until the delete op clears)\nfor i in $(seq 1 60); do\n  OUT=$(curl\
+              \ -s -X POST -H \"Authorization: Bearer $(tok)\" \\\n    -H \"Content-Type:\
+              \ application/json\" -d '{\"nodeCount\":1}' \\\n    \"$API/nodePools/default-pool:setSize\"\
+              )\n  echo \"$OUT\" | grep -q '\"name\"' && break\n  sleep 60\ndone\n\
+              # 5. one-shot: suspend this cronjob\nkubectl patch cronjob demo-expiry\
+              \ -n default -p '{\"spec\":{\"suspend\":true}}'\necho \"EXPIRY COMPLETE\"\
+              \n"
+            command:
+            - /bin/bash
+            - -c
+            image: bitnami/kubectl:latest
+            imagePullPolicy: Always
+            name: expire
+            resources: {}
+            terminationMessagePath: /dev/termination-log
+            terminationMessagePolicy: File
+          dnsPolicy: ClusterFirst
+          restartPolicy: Never
+          schedulerName: default-scheduler
+          securityContext: {}
+          serviceAccount: demo-expiry
+          serviceAccountName: demo-expiry
+          terminationGracePeriodSeconds: 30
+  schedule: 0 12 21 7 *
+  successfulJobsHistoryLimit: 3
+  suspend: false
+  timeZone: Etc/UTC
