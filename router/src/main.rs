@@ -172,6 +172,13 @@ async fn shard_result_handler(
     StatusCode::OK
 }
 
+/// Live progress feed for in-flight sharded inferences — segments done vs the
+/// plan's total, per run. Polled by the bridge to enrich ask status with REAL
+/// progress; returns `{"active": []}` when idle.
+async fn shard_active_handler(State(s): State<HealthState>) -> axum::response::Response {
+    Json(s.shard.active_snapshot()).into_response()
+}
+
 /// Commit chain lookup by pipeline root, for the node validator gate.
 async fn shard_chain_handler(
     State(s): State<HealthState>,
@@ -483,6 +490,7 @@ fn main() {
                 .route("/shard/prefix", post(shard_prefix_handler))
                 .route("/shard/work", get(shard_work_handler))
                 .route("/shard/result", post(shard_result_handler))
+                .route("/shard/active", get(shard_active_handler))
                 .route("/shard/chain/:root", get(shard_chain_handler))
                 // Sharded 35B segments thread DeltaNet boundary snapshots
                 // (~2.2MB/layer, ~20MB per 12-layer segment, ~40MB hex-JSON):

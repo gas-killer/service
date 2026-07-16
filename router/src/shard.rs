@@ -15,7 +15,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,32 @@ pub struct PrefixWarmResponse {
     pub settle_calldata: alloy_primitives::Bytes,
 }
 
+/// One in-flight inference's live progress, as served by `GET /shard/active` —
+/// the bridge polls this to report REAL segment progress instead of guessing.
+/// `total_segments` is the plan's deterministic upper bound (`T*(S+M)` for `T`
+/// plannable tokens, `S` stages, `M` argmax shards); an early stop-token exit
+/// finishes below it, so treat `segments_done/total_segments` as "of planned".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveInference {
+    pub infer_id: String,
+    pub consumer: Address,
+    /// Model family name resolved for the request ("qwen3-0.6b" / "qwen35").
+    pub model: String,
+    pub total_segments: u64,
+    pub segments_done: u64,
+    pub started_unix_ms: u64,
+    pub elapsed_ms: u64,
+    /// Coarse phase hint from the last committee-agreed segment id:
+    /// "prefill" until the batched prefill stages complete, then "decode".
+    pub phase: String,
+}
+
+/// `GET /shard/active` response envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveInferences {
+    pub active: Vec<ActiveInference>,
+}
+
 /// A stage's boundary-state accumulators captured at a prefix boundary — the
 /// per-layer full-attention `K`/`V` (append semantics) and DeltaNet recurrent
 /// snapshots (replace semantics), indexed by `layer - layer_lo`. Seeds a
@@ -242,6 +268,40 @@ fn packed_ids_hash(ids: &[u32]) -> B256 {
     keccak256(&buf)
 }
 
+/// Registry entry for one in-flight inference (see [`ActiveInference`] for
+/// the served snapshot). Mutated only under the `active` mutex.
+#[derive(Debug)]
+struct ActiveEntry {
+    consumer: Address,
+    model: String,
+    total_segments: u64,
+    segments_done: u64,
+    /// Segment ids below this are the batched-prefill stages — the phase hint
+    /// flips to "decode" once a later segment agrees.
+    prefill_segments: u64,
+    started: Instant,
+    started_unix_ms: u64,
+    phase: &'static str,
+}
+
+/// Removes an inference's `/shard/active` registry entry when dropped, so
+/// EVERY exit path of a run (completion, error `?`, panic) cleans up and the
+/// feed only ever reports in-flight runs.
+struct ActiveGuard<'a> {
+    co: &'a ShardCoordinator,
+    infer_id: String,
+}
+
+impl Drop for ActiveGuard<'_> {
+    fn drop(&mut self) {
+        // Never panic in Drop (a poisoned lock during an unwind would double
+        // panic); a poisoned registry just stops serving progress.
+        if let Ok(mut active) = self.co.active.lock() {
+            active.remove(&self.infer_id);
+        }
+    }
+}
+
 /// Shared coordinator state behind the internal HTTP endpoints.
 pub struct ShardCoordinator {
     /// Committee size per segment (`GK_SHARD_K`, default 2).
@@ -269,6 +329,10 @@ pub struct ShardCoordinator {
     /// by [`ShardCoordinator::warm_prefix`] (a prefill-only run) and consumed by
     /// a resume ([`InferRequest::prefix_len`]).
     prefixes: Mutex<HashMap<(String, B256), PrefixCacheEntry>>,
+    /// In-flight inference progress keyed by infer id, served at
+    /// `GET /shard/active`. Entries live exactly as long as their run
+    /// (registered at plan time, removed by [`ActiveGuard`] on any exit).
+    active: Mutex<HashMap<String, ActiveEntry>>,
 }
 
 impl ShardCoordinator {
@@ -303,6 +367,7 @@ impl ShardCoordinator {
             chains: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             prefixes: Mutex::new(HashMap::new()),
+            active: Mutex::new(HashMap::new()),
         }
     }
 
@@ -390,6 +455,82 @@ impl ShardCoordinator {
             .cloned()
     }
 
+    /// Registers an in-flight run for the `/shard/active` progress feed. The
+    /// returned guard removes the entry when dropped — hold it for the run's
+    /// whole scope so every exit path (completion, error, panic) cleans up.
+    fn register_active(
+        &self,
+        infer_id: &str,
+        consumer: Address,
+        model: &str,
+        total_segments: u64,
+        prefill_segments: u64,
+    ) -> ActiveGuard<'_> {
+        let started_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.active
+            .lock()
+            .expect("shard active lock poisoned")
+            .insert(
+                infer_id.to_string(),
+                ActiveEntry {
+                    consumer,
+                    model: model.to_string(),
+                    total_segments,
+                    segments_done: 0,
+                    prefill_segments,
+                    started: Instant::now(),
+                    started_unix_ms,
+                    phase: "prefill",
+                },
+            );
+        ActiveGuard {
+            co: self,
+            infer_id: infer_id.to_string(),
+        }
+    }
+
+    /// Bumps an in-flight run's progress after a committee agreed on one
+    /// segment. No-op for unregistered ids (e.g. direct `exec_segment` tests).
+    fn note_segment_done(&self, infer_id: &str, seg_id: u64) {
+        let mut active = self.active.lock().expect("shard active lock poisoned");
+        if let Some(e) = active.get_mut(infer_id) {
+            e.segments_done += 1;
+            e.phase = if seg_id < e.prefill_segments {
+                "prefill"
+            } else {
+                "decode"
+            };
+        }
+    }
+
+    /// Snapshot of every in-flight inference (`GET /shard/active`), ordered by
+    /// start time then id for a stable feed.
+    pub fn active_snapshot(&self) -> ActiveInferences {
+        let active = self.active.lock().expect("shard active lock poisoned");
+        let mut list: Vec<ActiveInference> = active
+            .iter()
+            .map(|(id, e)| ActiveInference {
+                infer_id: id.clone(),
+                consumer: e.consumer,
+                model: e.model.clone(),
+                total_segments: e.total_segments,
+                segments_done: e.segments_done,
+                started_unix_ms: e.started_unix_ms,
+                elapsed_ms: e.started.elapsed().as_millis() as u64,
+                phase: e.phase.to_string(),
+            })
+            .collect();
+        list.sort_by(|a, b| {
+            a.started_unix_ms
+                .cmp(&b.started_unix_ms)
+                .then_with(|| a.infer_id.cmp(&b.infer_id))
+        });
+        ActiveInferences { active: list }
+    }
+
     /// Warm a fixed prefix: a PREFILL-ONLY run over `[0, prompt_ids.len())` that
     /// captures each stage's TERMINAL boundary-state accumulators plus a
     /// committee-verified `prefixRoot`, caching them under
@@ -403,6 +544,9 @@ impl ShardCoordinator {
         let started = Instant::now();
         let infer_id = format!("prefix-{}", self.seq.fetch_add(1, Ordering::SeqCst));
         let plan = InferPlan::new(self, &infer_id, &req)?;
+        // Progress feed entry for the warm: one batched prefill pass = S
+        // stage segments. The guard removes it on every exit path.
+        let _active = self.register_active(&infer_id, req.consumer, plan.spec.name, plan.s, plan.s);
 
         let p_len = req.prompt_ids.len() as u64;
         if p_len == 0 {
@@ -539,6 +683,15 @@ impl ShardCoordinator {
         let started = Instant::now();
         let infer_id = format!("inf-{}", self.seq.fetch_add(1, Ordering::SeqCst));
         let plan = InferPlan::new(self, &infer_id, &req)?;
+        // Progress feed entry (`GET /shard/active`); the guard removes it on
+        // every exit path — completion, any `?` below, or a panic.
+        let _active = self.register_active(
+            &infer_id,
+            req.consumer,
+            plan.spec.name,
+            plan.total_segments(),
+            plan.s,
+        );
 
         let p_len = req.prompt_ids.len() as u64;
         if p_len == 0 {
@@ -838,6 +991,7 @@ impl ShardCoordinator {
             }
         }
         let chk = seg_chk(kind, &calldata, first)?;
+        self.note_segment_done(infer_id, seg_id);
         info!(
             infer_id,
             seg_id,
@@ -926,6 +1080,21 @@ impl<'a> InferPlan<'a> {
             max_pos,
             seed,
         })
+    }
+
+    /// The plan's deterministic total segment count, assuming no early
+    /// stop-token exit: the batched prefill is S stage segments, every
+    /// generated token costs one M-way argmax round, and every token after the
+    /// first additionally costs S decode forwards — `T*(S+M)` for `T =
+    /// max_pos - p_len` plannable tokens. `max_new = 0` still argmaxes the
+    /// prefill output once, hence the `max(1)`.
+    fn total_segments(&self) -> u64 {
+        let m = self.req.argmax_shards.clamp(1, self.req.vocab);
+        let t = self
+            .max_pos
+            .saturating_sub(self.req.prompt_ids.len() as u64)
+            .max(1);
+        t * (self.s + m)
     }
 
     /// M-way vocab-sharded argmax, shards dispatched CONCURRENTLY and merged
@@ -1253,6 +1422,7 @@ mod tests {
             chains: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             prefixes: Mutex::new(HashMap::new()),
+            active: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1476,6 +1646,7 @@ mod tests {
             chains: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
             prefixes: Mutex::new(HashMap::new()),
+            active: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1930,5 +2101,113 @@ mod tests {
         let node = ShardState::new(0, None, "http://router".into());
         node.verify_resume_lineage(&resumed_chain, &prefix_chain, warm.prefix_root)
             .expect("gate must accept honest coordinator-assembled resume lineage");
+    }
+
+    // ---- /shard/active progress registry ----
+
+    #[test]
+    fn active_registry_unit_and_json_shape() {
+        let co = coordinator(2, 3);
+        assert!(co.active_snapshot().active.is_empty());
+
+        let guard = co.register_active("inf-9", Address::from([7u8; 20]), "qwen3-0.6b", 12, 2);
+        co.note_segment_done("inf-9", 0); // a prefill stage segment
+        co.note_segment_done("inf-9", 5); // a decode-round segment
+        co.note_segment_done("unknown", 1); // unregistered id: no-op
+
+        let snap = co.active_snapshot();
+        assert_eq!(snap.active.len(), 1);
+        let v = serde_json::to_value(&snap).expect("snapshot serializes");
+        let e = &v["active"][0];
+        assert_eq!(e["infer_id"], "inf-9");
+        assert_eq!(e["total_segments"], 12);
+        assert_eq!(e["segments_done"], 2);
+        assert_eq!(e["phase"], "decode", "seg 5 >= 2 prefill stages");
+        assert!(
+            e["consumer"]
+                .as_str()
+                .expect("hex address")
+                .starts_with("0x"),
+            "consumer must serialize as a 0x hex string for the bridge match"
+        );
+        assert!(e["elapsed_ms"].is_u64());
+        assert!(e["started_unix_ms"].is_u64());
+
+        drop(guard);
+        assert!(
+            co.active_snapshot().active.is_empty(),
+            "guard drop must remove the entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_registry_tracks_a_real_run_and_clears() {
+        let (dim, kvd, vocab, n_layers) = (2u64, 8u64, 32u64, 4u64);
+        let h = Harness::start(ModelSpec::qwen3_06b(), dim, kvd);
+        let prompt = vec![5u32, 9, 2];
+        let max_new = 4u64;
+        // mock_req: stages=2, argmax_shards=1, no stop token ever generated
+        // (stop ids are u32::MAX), so the run emits the full plan:
+        // T*(S+M) = 4*(2+1) = 12 segments.
+        let expected_total = max_new * (2 + 1);
+
+        let co = Arc::clone(&h.co);
+        let req = mock_req(prompt.clone(), max_new, None, dim, kvd, vocab, n_layers);
+        let run = tokio::spawn(async move { co.run_inference(req).await });
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seen_total = 0u64;
+        let mut max_done = 0u64;
+        let mut last_done = 0u64;
+        while !run.is_finished() {
+            if let Some(e) = h.co.active_snapshot().active.first() {
+                assert!(e.infer_id.starts_with("inf-"));
+                assert_eq!(e.consumer, Address::from([7u8; 20]));
+                assert!(
+                    e.segments_done >= last_done,
+                    "progress must be monotonic ({} < {last_done})",
+                    e.segments_done
+                );
+                assert!(e.segments_done <= e.total_segments);
+                seen_total = e.total_segments;
+                last_done = e.segments_done;
+                max_done = max_done.max(e.segments_done);
+            }
+            assert!(Instant::now() < deadline, "inference did not finish");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let resp = run.await.expect("join").expect("inference");
+        let co = Arc::clone(&h.co);
+        h.stop().await;
+
+        assert_eq!(seen_total, expected_total, "total derived from the plan");
+        assert_eq!(
+            resp.segments, expected_total,
+            "sanity: the run really executed the planned segment count"
+        );
+        assert!(
+            max_done >= 1,
+            "committee agreements must increment segments_done while in flight"
+        );
+        assert!(
+            co.active_snapshot().active.is_empty(),
+            "registry must be empty after completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_registry_clears_on_error() {
+        // Opt-in resume with no warmed prefix errors AFTER registration — the
+        // guard must still remove the entry on the error path.
+        let co = coordinator_spec(1, 1, ModelSpec::qwen3_06b());
+        let err = co
+            .run_inference(mock_req(vec![1, 2, 3, 4], 2, Some(3), 2, 8, 32, 4))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no warmed prefix"), "{err}");
+        assert!(
+            co.active_snapshot().active.is_empty(),
+            "error exit must clean the registry"
+        );
     }
 }

@@ -132,6 +132,23 @@ def encode_fulfil(prompt_ids, max_new, answer_ids, root_hex) -> bytes:
     return bytes.fromhex(SEL_FULFIL + head + tail_a + tail_c)
 
 
+def infer_progress(model):
+    """Best-effort live progress for an in-flight inference: match the shard
+    coordinator's /shard/active entry to this ask's model consumer. Never
+    raises and never persists — recomputed on every status poll."""
+    try:
+        consumer = MODELS[model]["consumer"].lower()
+        active = http_json(f"{SHARD}/shard/active", timeout=5).get("active", [])
+        for e in active:
+            if str(e.get("consumer", "")).lower() == consumer:
+                return {"segments_done": e.get("segments_done"),
+                        "segments_total": e.get("total_segments"),
+                        "infer_elapsed_ms": e.get("elapsed_ms")}
+    except Exception:  # noqa: BLE001 - progress is best-effort
+        pass
+    return {}
+
+
 def run_ask(ask_id, model, prompt_ids, max_new):
     cfg = MODELS[model]
     st = ASKS[ask_id]
@@ -187,7 +204,12 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/bridge/ask/"):
             ask_id = self.path.rsplit("/", 1)[-1]
             st = ASKS.get(ask_id)
-            return self._send(200 if st else 404, st or {"error": "unknown ask_id"})
+            if not st:
+                return self._send(404, {"error": "unknown ask_id"})
+            out = dict(st)  # copy: progress is merged per poll, never stored
+            if out.get("state") == "inferring":
+                out.update(infer_progress(out["model"]))
+            return self._send(200, out)
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
