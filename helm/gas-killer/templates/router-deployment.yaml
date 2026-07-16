@@ -35,6 +35,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.router.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.secretManager.enabled }}
       serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" .) .Values.secretManager.serviceAccountName }}
       {{- end }}
@@ -462,6 +466,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: PRIVATE_KEY
+            {{- with .Values.router.extraEnv }}
+            # Generic env passthrough (router.extraEnv): appended verbatim so any
+            # env drift is values-expressible without a chart change. Later
+            # entries win on name collision (Kubernetes env semantics), so these
+            # can also override the chart-rendered vars above.
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: router
               containerPort: {{ .Values.router.port }}

@@ -85,9 +85,6 @@ metadata:
   name: gk-shard-bridge
   namespace: default
 spec:
-  clusterIP: 10.2.10.63
-  clusterIPs:
-  - 10.2.10.63
   internalTrafficPolicy: Cluster
   ipFamilies:
   - IPv4
@@ -129,14 +126,6 @@ spec:
               number: 8090
         path: /bridge
         pathType: Prefix
----
-apiVersion: v1
-data:
-  bridge.py: '# generated: kubectl create configmap gk-bridge-script --from-file=bridge.py=bridge/bridge.py'
-kind: ConfigMap
-metadata:
-  name: gk-bridge-script
-  namespace: default
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -250,5 +239,5 @@ spec:
           terminationGracePeriodSeconds: 30
   schedule: 0 12 21 7 *
   successfulJobsHistoryLimit: 3
-  suspend: false
+  suspend: true
   timeZone: Etc/UTC

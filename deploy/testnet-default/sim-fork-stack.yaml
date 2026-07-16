@@ -1,0 +1,371 @@
+# Live unmanaged sim-fork stack — exported READ-ONLY from the default namespace
+# on 2026-07-16 (kubectl get ... -o yaml, runtime fields stripped, secrets
+# scrubbed). NOT part of the gas-killer Helm chart; see README.md in this dir.
+# SCRUBBED: the Alchemy Sepolia RPC URL (embeds an API key) was replaced with
+# secretKeyRef placeholders — create the gk-sim-upstream secret before applying.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: qwen-sim-fork
+  name: qwen-sim-fork
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: qwen-sim-fork
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: qwen-sim-fork
+    spec:
+      containers:
+      - args:
+        - |
+          anvil --fork-url $FORK_URL --host 0.0.0.0 --port 8547 \
+            --code-size-limit 65536 --timeout 120000 --retries 5 \
+            --compute-units-per-second 300 --disable-block-gas-limit
+        command:
+        - /bin/sh
+        - -c
+        env:
+        - name: FORK_URL
+          value: https://ethereum-sepolia-rpc.publicnode.com
+        image: ghcr.io/breadchaincoop/ethereum:latest
+        imagePullPolicy: Always
+        name: anvil
+        ports:
+        - containerPort: 8547
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 7500m
+            memory: 12Gi
+          requests:
+            cpu: '5'
+            memory: 4Gi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+      - name: ghcr-pull-secret
+      nodeSelector:
+        role: sim
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-sim-fork
+  namespace: default
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - port: 8547
+    protocol: TCP
+    targetPort: 8547
+  selector:
+    app: qwen-sim-fork
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: gk-sim-proxy
+  name: gk-sim-proxy
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: gk-sim-proxy
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: gk-sim-proxy
+    spec:
+      containers:
+      - command:
+        - python3
+        - /app/proxy.py
+        env:
+        - name: FORK_URL
+          value: http://qwen-sim-fork:8547
+        # SCRUBBED: live value is an API-keyed Alchemy Sepolia RPC URL
+        # (https://eth-sepolia.g.alchemy.com/v2/<KEY>). Recreate as a secret:
+        #   kubectl create secret generic gk-sim-upstream \
+        #     --from-literal=url='https://eth-sepolia.g.alchemy.com/v2/<KEY>'
+        - name: UPSTREAM_URL
+          valueFrom:
+            secretKeyRef:
+              name: gk-sim-upstream
+              key: url
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        name: proxy
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /app
+          name: src
+      dnsPolicy: ClusterFirst
+      nodeSelector:
+        role: sim
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - key: role
+        operator: Exists
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: gk-sim-proxy-src
+        name: src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gk-sim-proxy
+  namespace: default
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - port: 8545
+    protocol: TCP
+    targetPort: 8545
+  selector:
+    app: gk-sim-proxy
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: v1
+data:
+  proxy.py: |
+    import json, os, threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import urllib.request
+
+    FORK = os.environ["FORK_URL"]
+    UPSTREAM = os.environ["UPSTREAM_URL"]
+    # overlay-mode consumers: their traces must run on the fork
+    FORK_TARGETS = {"0x4223fca00ad3feabb59c0d3dec0067f05ee31cf8",
+                    "0x1d28318f8488633ea80285ca3bb25e7e1dadb886"}
+    inflight = 0
+    lock = threading.Lock()
+
+    def post(url, data, timeout):
+        req = urllib.request.Request(url, data=data, headers={"Content-Type":"application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+
+    def fork_head():
+        try:
+            r = post(FORK, b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}', 10)
+            return int(json.loads(r)["result"], 16)
+        except Exception:
+            return None
+
+    def wants_fork(body):
+        for m in (body if isinstance(body, list) else [body]):
+            if m.get("method") == "debug_traceCall":
+                p = m.get("params") or [{}]
+                to = (p[0] or {}).get("to", "")
+                if isinstance(to, str) and to.lower() in FORK_TARGETS:
+                    return True
+        return False
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def log_message(self, *a): pass
+        def _send(self, code, payload):
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        def do_OPTIONS(self): self._send(204, b"")
+        def do_GET(self):
+            if self.path == "/forkhead":
+                self._send(200, json.dumps({"forkHead": fork_head()}).encode())
+            elif self.path in ("/status", "/healthz"):
+                self._send(200, json.dumps({"inflight": inflight, "forkHead": fork_head()}).encode())
+            else:
+                self._send(404, b"{}")
+        def do_POST(self):
+            global inflight
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                body = json.loads(raw)
+            except Exception:
+                return self._send(400, b'{"error":"bad json"}')
+            to_fork = wants_fork(body)
+            if to_fork:
+                with lock: inflight += 1
+            try:
+                self._send(200, post(FORK if to_fork else UPSTREAM, raw, 7200))
+            except Exception as e:
+                self._send(502, json.dumps({"jsonrpc":"2.0","id":None,
+                    "error":{"code":-32000,"message":"proxy: "+str(e)[:120]}}).encode())
+            finally:
+                if to_fork:
+                    with lock: inflight -= 1
+
+    print("sim proxy on :8545 fork=%s" % FORK, flush=True)
+    ThreadingHTTPServer(("0.0.0.0", 8545), H).serve_forever()
+kind: ConfigMap
+metadata:
+  name: gk-sim-proxy-src
+  namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: qwen-overlay-ensurer
+  name: qwen-overlay-ensurer
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: qwen-overlay-ensurer
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: qwen-overlay-ensurer
+    spec:
+      containers:
+      - args:
+        - |
+          pip -q install pycryptodome requests 2>/dev/null
+          cd /tmp
+          cat > ensure.py <<'PY'
+          import requests, time, os
+          from Crypto.Hash import keccak
+          URL="http://qwen-sim-fork:8547"
+          PROXY="http://gk-sim-proxy:8545"
+          UP=os.environ["UPSTREAM"]
+          REL="https://github.com/gas-killer/solidity-sdk/releases/download/qwen3-0.6b-onchain-v1"
+          EXPECT="23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
+          REFRESH_AT=150   # blocks of drift before refork (window is 300)
+          def k(b):
+              h=keccak.new(digest_bits=256); h.update(b); return h.digest()
+          def fetch(f):
+              p=f"/tmp/{f}"
+              if os.path.exists(p) and os.path.getsize(p)>0: return p
+              with requests.get(f"{REL}/{f}", stream=True, timeout=900) as r:
+                  r.raise_for_status()
+                  with open(p,"wb") as o:
+                      for c in r.iter_content(1<<22): o.write(c)
+              return p
+          w=open(fetch("weights.bin"),"rb").read(); t=open(fetch("tokenizer.bin"),"rb").read()
+          assert k(k(w)+k(t)).hex()==EXPECT, "manifest mismatch"
+          addrs=open(fetch("overlay_addresses.txt")).read().split()
+          CH=24575; chunks=[]
+          for blob in (w,t):
+              for at in range(0,len(blob),CH): chunks.append(blob[at:at+CH])
+          assert len(chunks)==len(addrs)
+          def rpc(url,m,p,timeout=60):
+              return requests.post(url,json={"jsonrpc":"2.0","id":1,"method":m,"params":p},timeout=timeout).json()
+          def head(url):
+              return int(rpc(url,"eth_blockNumber",[])["result"],16)
+          def loaded():
+              try:
+                  a=rpc(URL,"eth_getCode",[addrs[0],"latest"]); b=rpc(URL,"eth_getCode",[addrs[-1],"latest"])
+                  return len(a.get("result","0x"))>10 and len(b.get("result","0x"))>10
+              except Exception: return False
+          def inflight():
+              try: return requests.get(PROXY+"/status",timeout=10).json().get("inflight",0)
+              except Exception: return -1   # proxy unknown: don't refork blindly
+          def load():
+              print("loading overlay...", flush=True); B=10
+              for at in range(0,len(chunks),B):
+                  batch=[{"jsonrpc":"2.0","id":i,"method":"anvil_setCode",
+                          "params":[addrs[at+i],"0x00"+chunks[at+i].hex()]} for i in range(min(B,len(chunks)-at))]
+                  requests.post(URL,json=batch,timeout=120).raise_for_status()
+              print("OVERLAY LOADED:",len(chunks),"chunks", flush=True)
+          while True:
+              try:
+                  drift = head(UP) - head(URL)
+                  if drift > REFRESH_AT and inflight() == 0:
+                      print(f"refork: drift={drift} blocks, no traces in flight", flush=True)
+                      rpc(URL,"anvil_reset",[{"forking":{"jsonRpcUrl":UP}}],timeout=180)
+                      load()
+                      print("REFORKED to ~head", flush=True)
+                  elif not loaded():
+                      load()
+              except Exception as e:
+                  print("retry:",str(e)[:100], flush=True); time.sleep(5); continue
+              time.sleep(30)
+          PY
+          python3 ensure.py
+        command:
+        - /bin/bash
+        - -lc
+        env:
+        # SCRUBBED: live value is the same API-keyed Alchemy Sepolia RPC URL as
+        # gk-sim-proxy's UPSTREAM_URL — reuse the gk-sim-upstream secret.
+        - name: UPSTREAM
+          valueFrom:
+            secretKeyRef:
+              name: gk-sim-upstream
+              key: url
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        name: ensurer
+        resources:
+          limits:
+            cpu: 1500m
+            memory: 3Gi
+          requests:
+            cpu: 200m
+            memory: 1200Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      nodeSelector:
+        role: sim
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
