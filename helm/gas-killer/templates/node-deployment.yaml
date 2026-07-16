@@ -190,6 +190,12 @@ spec:
             {{- else }}
             {{- fail "orchestrator.publicConfig must be set (or secretManager.enabled=true for TESTNET)" }}
             {{- end }}
+            {{- if eq (default "bls" $root.Values.global.signatureScheme) "schnorr" }}
+            # In schnorr mode the node signs with its secp256k1 operator key
+            # (separate from the BLS p2p identity above), read from the shared PVC.
+            - "--schnorr-key-file"
+            - "/app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.ecdsa.key.json"
+            {{- end }}
           env:
             {{- if eq $root.Values.global.environment "TESTNET" }}
             # TESTNET mode (no L2): Use external RPC from secret
@@ -246,6 +252,9 @@ spec:
               value: {{ $root.Values.router.rebroadcastInterval | quote }}
             - name: STORAGE_DIR
               value: {{ $root.Values.node.storageDir | quote }}
+            # Quorum signature scheme (bls | schnorr); must match the router's.
+            - name: SIGNATURE_SCHEME
+              value: {{ default "bls" $root.Values.global.signatureScheme | quote }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}

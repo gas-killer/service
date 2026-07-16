@@ -20,6 +20,12 @@ global:
   #          AVS contracts are deployed to real L1
   environment: LOCAL
 
+  # Quorum signature scheme: "bls" (default) or "schnorr". Every binary in the
+  # deployment must agree. In schnorr mode the nodes additionally load their
+  # secp256k1 Schnorr key from the operator_keys directory on the shared PVC; keep
+  # this "bls" for TESTNET/secretManager deployments (which restore only BLS keys).
+  signatureScheme: "bls"
+
   # Number of operator nodes to deploy
   nodeCount: 3
 

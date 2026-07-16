@@ -43,6 +43,7 @@ FUNDED_KEY="${FUNDED_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae78
 ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 SKIP_CLEANUP="${SKIP_CLEANUP:-false}"
+SIGNATURE_SCHEME="${SIGNATURE_SCHEME:-bls}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -65,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fork-url)
             FORK_URL="$2"
+            shift 2
+            ;;
+        --signature-scheme)
+            SIGNATURE_SCHEME="$2"
             shift 2
             ;;
         *)
@@ -179,6 +184,7 @@ helm install "$HELM_RELEASE" ./helm/gas-killer \
     --set router.image.repository=avs \
     --set router.image.tag=router-local \
     --set router.image.pullPolicy=Never \
+    --set global.signatureScheme="$SIGNATURE_SCHEME" \
     --set sharedData.storageClass=""
 
 echo -e "${GREEN}Helm chart installed successfully${NC}"
@@ -258,6 +264,18 @@ fi
 echo -e "${GREEN}AVS deployment file retrieved${NC}"
 cat ./config/.nodes/avs_deploy.json
 
+# In schnorr mode the deploy binary registers each operator with the
+# SchnorrStakeRegistry using a proof of possession, which requires the operator
+# key files the setup flow wrote to the shared PVC.
+if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
+    echo "Retrieving operator key files for Schnorr PoP registration..."
+    kubectl cp $ROUTER_POD:/app/.nodes/operator_keys ./config/.nodes/operator_keys
+    if ! ls ./config/.nodes/operator_keys/*.private.ecdsa.key.json >/dev/null 2>&1; then
+        echo -e "${RED}Operator key files not found on the shared PVC${NC}"
+        exit 1
+    fi
+fi
+
 # Step 10: Build and run test scripts
 echo -e "${YELLOW}Step 10: Building test scripts...${NC}"
 
@@ -278,6 +296,7 @@ export ARRAY_SUMMATION_ARRAY_SIZE=100
 export ARRAY_SUMMATION_MAX_VALUE=1000
 export ARRAY_SUMMATION_SEED=42
 export PRIVATE_KEY="$PRIVATE_KEY"
+export SIGNATURE_SCHEME="$SIGNATURE_SCHEME"
 
 cargo run --release -p scripts --bin deploy_array_summation
 cd "$PROJECT_ROOT"
