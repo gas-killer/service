@@ -17,6 +17,12 @@ jobs:
   e2e-test:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      # Run both schemes to completion even if one fails, so a scheme-specific
+      # regression is always visible.
+      fail-fast: false
+      matrix:
+        signature_scheme: [bls, schnorr]
 
     steps:
       - name: Checkout code
@@ -64,6 +70,8 @@ jobs:
           fi
 
       - name: Run test
+        env:
+          SIGNATURE_SCHEME: ${{ matrix.signature_scheme }}
         run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log; exit ${PIPESTATUS[0]}
 
       - name: Show router logs
@@ -76,6 +84,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-output
+          name: e2e-test-output-${{ matrix.signature_scheme }}
           path: e2e-test-output.log
           retention-days: 1

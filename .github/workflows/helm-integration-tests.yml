@@ -18,8 +18,14 @@ jobs:
     name: Test with Helm Charts
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      # Run both schemes to completion even if one fails.
+      fail-fast: false
+      matrix:
+        signature_scheme: [bls, schnorr]
     env:
       CI_ADMIN_KEY: ci-admin-key
+      SIGNATURE_SCHEME: ${{ matrix.signature_scheme }}
 
     steps:
       - name: Checkout repository
@@ -160,6 +166,7 @@ jobs:
             --set router.image.tag=router-local \
             --set router.image.pullPolicy=Never \
             --set sharedData.storageClass="" \
+            --set global.signatureScheme="$SIGNATURE_SCHEME" \
             --set l2.enabled=true \
             --set bridge.enabled=true \
             --set bridge.waitForBridge=true \
@@ -450,6 +457,15 @@ jobs:
 
           echo "AVS deployment file contents:"
           cat ./config/.nodes/avs_deploy.json
+
+          # In schnorr mode the deploy binary PoP-registers each operator with the
+          # SchnorrStakeRegistry, which needs the operator key files from the PVC.
+          if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
+            echo "Copying operator key files for Schnorr PoP registration..."
+            kubectl cp "$ROUTER_POD:/app/.nodes/operator_keys" ./config/.nodes/operator_keys
+            ls ./config/.nodes/operator_keys/*.private.ecdsa.key.json >/dev/null 2>&1 || {
+              echo "Operator key files not found on the shared PVC"; exit 1; }
+          fi
 
       - name: Deploy ArraySummation contract
         run: |
