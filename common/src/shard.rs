@@ -17,7 +17,7 @@
 //! "I verified the chain, and I personally executed my committee's share of it".
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -878,50 +878,189 @@ async fn fast_view_call(
 
     let bin = std::env::var("GK_FAST_VIEW_BIN").unwrap_or_else(|_| "gk-fast-view".to_string());
     let seg_id = job.seg_id;
-    let returndata = tokio::task::spawn_blocking(move || run_fast_view_sidecar(&bin, &jt))
+    let returndata = tokio::task::spawn_blocking(move || fast_view_sidecar_call(&bin, &jt))
         .await
         .context("gk-fast-view sidecar task panicked")??;
     debug!(seg_id, bytes = returndata.len(), "gk-fast-view fast path served segment");
     Ok(returndata)
 }
 
-/// Run the `gk-fast-view` binary with `job_text` on stdin, returning the
-/// returndata parsed from its stdout (one lowercase-hex line). Blocking — call
-/// from `spawn_blocking`.
-fn run_fast_view_sidecar(bin: &str, job_text: &str) -> Result<Vec<u8>> {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
+// ============================================================================
+// Persistent gk-fast-view sidecar (compile-once daemon client)
+// ============================================================================
+//
+// The engine bytecode JIT-compile (~116s of LLVM codegen on the real ~20KB seg
+// engine) dominates a segment's wall time. The sidecar memoizes the compiled fn
+// by codehash WITHIN a process, so the fix is to stop spawning a fresh one-shot
+// process per segment (which recompiled every time) and instead keep ONE
+// long-lived `gk-fast-view --serve` daemon per node that compiles the engine on
+// its first job and serves every subsequent segment on the cached artifact.
+//
+// ## Concurrency choice: one process behind a Mutex (not a pool)
+//
+// The node runs segments concurrently (`GK_SHARD_NODE_CONCURRENCY`, default 3).
+// A single `--serve` process is single-threaded per JIT context, so we serialize
+// all fast-path segments through it behind a `Mutex`. This is deliberate: the
+// COMPILE is the cost, not execution — a pool of N daemons would each pay the
+// ~116s codegen independently (N x the one-time cost) for marginal concurrency
+// on the cheap (~1s) execution. Serializing behind one Mutex pays codegen ONCE
+// and every later segment is fast; concurrent segments just queue on the lock.
+// (Correctness-over-cleverness, per the task's guidance.)
+//
+// Robustness: an `ERR` frame is a per-job execution failure (revert/halt) — the
+// daemon stays healthy, we surface it as `Err` and the caller
+// (`local_view_call`) falls back to the revm-31 interpreter. An IO error (broken
+// pipe / dead process) drops the daemon and respawns once, then retries; a second
+// failure returns `Err` so the interpreter fallback still kicks in.
 
-    let mut child = Command::new(bin)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("spawn gk-fast-view binary `{bin}` (set GK_FAST_VIEW_BIN?)"))?;
-    child
-        .stdin
-        .take()
-        .context("gk-fast-view: no stdin handle")?
-        .write_all(job_text.as_bytes())
-        .context("gk-fast-view: write job to stdin")?;
-    let output = child
-        .wait_with_output()
-        .context("gk-fast-view: wait for sidecar")?;
-    if !output.status.success() {
-        bail!(
-            "gk-fast-view exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+/// The single per-node persistent sidecar, lazily spawned on first fast-path use.
+static FAST_VIEW_SIDECAR: OnceLock<Mutex<Option<FastViewSidecar>>> = OnceLock::new();
+
+fn fast_view_sidecar_cell() -> &'static Mutex<Option<FastViewSidecar>> {
+    FAST_VIEW_SIDECAR.get_or_init(|| Mutex::new(None))
+}
+
+/// A live `gk-fast-view --serve` child with its framed stdin/stdout pipes.
+struct FastViewSidecar {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+/// Parsed response frame from the daemon.
+enum SidecarResp {
+    /// `OK` frame — decoded returndata.
+    Ok(Vec<u8>),
+    /// `ERR` frame — a per-job execution failure (revert/halt/parse); the daemon
+    /// is still healthy.
+    Err(String),
+}
+
+impl FastViewSidecar {
+    fn spawn(bin: &str) -> Result<Self> {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(bin)
+            .arg("--serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit()) // daemon diagnostics (compile logs) -> our stderr
+            .spawn()
+            .with_context(|| {
+                format!("spawn gk-fast-view --serve binary `{bin}` (set GK_FAST_VIEW_BIN?)")
+            })?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("gk-fast-view --serve: no stdin handle")?;
+        let stdout = std::io::BufReader::new(
+            child
+                .stdout
+                .take()
+                .context("gk-fast-view --serve: no stdout handle")?,
         );
+        Ok(FastViewSidecar { child, stdin, stdout })
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let hex_line = stdout
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .context("gk-fast-view: empty stdout")?
-        .trim();
-    hex::decode(hex_line.trim_start_matches("0x")).context("gk-fast-view: stdout not hex returndata")
+
+    /// Send one framed job, read one framed response. Any IO/protocol failure is
+    /// an `Err` (caller will respawn); a well-formed OK/ERR frame is `Ok(resp)`.
+    fn exchange(&mut self, job_text: &str) -> Result<SidecarResp> {
+        use std::io::{BufRead as _, Read as _, Write as _};
+
+        // request frame: "<byte_len>\n" then the job bytes
+        write!(self.stdin, "{}\n", job_text.len()).context("gk-fast-view: write frame len")?;
+        self.stdin
+            .write_all(job_text.as_bytes())
+            .context("gk-fast-view: write job frame")?;
+        self.stdin.flush().context("gk-fast-view: flush job frame")?;
+
+        // response frame: "<STATUS> <byte_len>\n" then payload bytes
+        let mut header = String::new();
+        let n = self
+            .stdout
+            .read_line(&mut header)
+            .context("gk-fast-view: read response header")?;
+        if n == 0 {
+            bail!("gk-fast-view --serve closed stdout (EOF before response)");
+        }
+        let header = header.trim();
+        let (status, len_str) = header
+            .split_once(' ')
+            .with_context(|| format!("gk-fast-view: malformed response header {header:?}"))?;
+        let len: usize = len_str
+            .parse()
+            .with_context(|| format!("gk-fast-view: bad response length {len_str:?}"))?;
+        let mut payload = vec![0u8; len];
+        self.stdout
+            .read_exact(&mut payload)
+            .context("gk-fast-view: read response payload")?;
+
+        match status {
+            "OK" => {
+                let hex_str = std::str::from_utf8(&payload)
+                    .context("gk-fast-view: OK payload not utf-8 hex")?;
+                let bytes = hex::decode(hex_str.trim())
+                    .context("gk-fast-view: OK payload not hex returndata")?;
+                Ok(SidecarResp::Ok(bytes))
+            }
+            "ERR" => Ok(SidecarResp::Err(String::from_utf8_lossy(&payload).into_owned())),
+            other => bail!("gk-fast-view: unknown response status {other:?}"),
+        }
+    }
+}
+
+impl Drop for FastViewSidecar {
+    fn drop(&mut self) {
+        // Closing stdin lets the daemon exit on EOF; kill+reap in case it's mid-job.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Serve `job_text` through the persistent per-node `gk-fast-view --serve`
+/// daemon (compile-once, run-many), returning the raw returndata. Blocking —
+/// call from `spawn_blocking`. Serializes all fast-path segments through one
+/// process behind a `Mutex` (see the module note above). Respawns once on a dead
+/// process; a per-job `ERR` (revert/halt) is returned as `Err` so the caller
+/// falls back to the interpreter.
+fn fast_view_sidecar_call(bin: &str, job_text: &str) -> Result<Vec<u8>> {
+    let cell = fast_view_sidecar_cell();
+    // Recover from a poisoned lock by discarding any (possibly mid-frame) daemon.
+    let mut guard = match cell.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            let mut g = poisoned.into_inner();
+            *g = None;
+            g
+        }
+    };
+
+    // Up to two attempts: on an IO error the first attempt drops+respawns.
+    let mut last_io_err: Option<anyhow::Error> = None;
+    for attempt in 0..2 {
+        if guard.is_none() {
+            *guard = Some(FastViewSidecar::spawn(bin)?);
+        }
+        let sidecar = guard.as_mut().expect("just ensured Some");
+        match sidecar.exchange(job_text) {
+            Ok(SidecarResp::Ok(bytes)) => return Ok(bytes),
+            Ok(SidecarResp::Err(msg)) => {
+                // Per-job execution error; daemon is healthy, keep it alive.
+                bail!("gk-fast-view sidecar job error: {msg}");
+            }
+            Err(io_err) => {
+                warn!(
+                    attempt,
+                    error = %io_err,
+                    "gk-fast-view --serve IO error; respawning sidecar and retrying"
+                );
+                *guard = None; // drops (kills+reaps) the dead daemon
+                last_io_err = Some(io_err);
+            }
+        }
+    }
+    Err(last_io_err
+        .unwrap_or_else(|| anyhow::anyhow!("gk-fast-view sidecar failed"))
+        .context("gk-fast-view sidecar failed after respawn"))
 }
 
 /// Fetch a contract's deployed bytecode at head via JSON-RPC `eth_getCode` — the
