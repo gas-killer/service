@@ -7,6 +7,8 @@ use crate::ingress::{
     start_gas_killer_http_server,
 };
 use crate::metrics::MetricsCollector;
+use crate::schnorr_coordinator::SchnorrCertifiedReceiver;
+use crate::schnorr_submitter::SchnorrSubmitter;
 use crate::sequencer::{TaskQueueDepth, TaskReceiver, TaskSender, task_channel, task_queue_depth};
 use crate::store::SqliteStore;
 use alloy::network::{Ethereum, EthereumWallet};
@@ -228,49 +230,29 @@ async fn create_wallet_provider_for_chain(
     Ok(provider)
 }
 
-/// Creates the [`Submitter`] configured for Gas Killer operations with multi-chain support.
+/// Builds the pieces every submitter shares: the L1 read-side provider (for
+/// block-number / operator-state reads) and the multi-chain [`GasKillerHandler`]
+/// that executes `verifyAndUpdate` on the write side.
 ///
-/// The submitter's read side (view_only_provider, BLS contracts) always points at L1 via
-/// `HTTP_RPC` and `AVS_DEPLOYMENT_PATH`. Operator state lives on L1 and is not
-/// available on the L2 mimic contract.
-///
-/// `L2_HTTP_RPC` is used exclusively for the write side: submitting `verifyAndUpdate`
-/// transactions on L2 when the target contract lives there.
-#[allow(clippy::too_many_arguments)]
-pub async fn create_submitter(
-    scheme: Bn254Scheme,
-    assignments: SharedAssignments<GasKillerTaskData>,
-    certified: CertifiedReceiver<Bn254Scheme>,
-    resolutions: ResolutionSender,
+/// The read side always points at L1 via `HTTP_RPC`. `L2_HTTP_RPC` is used
+/// exclusively for the write side: submitting `verifyAndUpdate` transactions on L2
+/// when the target contract lives there.
+async fn create_handler_parts(
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
-    namespace: Vec<u8>,
-) -> Result<Submitter<GasKillerTaskData, GasKillerHandler<SimpleWalletProvider>>> {
+) -> Result<(
+    gas_killer_common::bindings::ReadOnlyProvider,
+    GasKillerHandler<SimpleWalletProvider>,
+)> {
     let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
     let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY must be set");
 
     let l2_http_rpc = env::var("L2_HTTP_RPC").ok();
 
-    let deployment =
-        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
-    info!("Submitter reads operator state from L1 (HTTP_RPC)");
-
     let view_only_provider = ProviderBuilder::new().connect_http(
         url::Url::parse(&http_rpc)
             .map_err(|e| anyhow::anyhow!("Failed to parse RPC URL '{}': {}", http_rpc, e))?,
     );
-
-    let bls_apk_registry_address = deployment
-        .bls_apk_registry_address()
-        .map_err(|e| anyhow::anyhow!("Failed to get BLS APK registry address: {}", e))?;
-    let registry_coordinator_address = deployment
-        .registry_coordinator_address()
-        .map_err(|e| anyhow::anyhow!("Failed to get registry coordinator address: {}", e))?;
-    let bls_operator_state_retriever_address = deployment
-        .bls_sig_check_operator_state_retriever_address()
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
-        })?;
 
     // Create wallet providers for each supported chain, keyed by actual EVM chain ID.
     // `chain_roles` records the role behind each numeric ID so the executor can pick
@@ -333,13 +315,6 @@ pub async fn create_submitter(
         info!("L2_HTTP_RPC not set, L2 chain support disabled");
     }
 
-    let bls_apk_registry =
-        BLSApkRegistry::new(bls_apk_registry_address, view_only_provider.clone());
-    let bls_operator_state_retriever = BLSSigCheckOperatorStateRetriever::new(
-        bls_operator_state_retriever_address,
-        view_only_provider.clone(),
-    );
-
     // Optional override (seconds) for the verifyAndUpdate receipt-wait timeout.
     // Unset falls back to the executor's per-chain defaults.
     let receipt_timeout_override = env::var("EXECUTOR_RECEIPT_TIMEOUT_SECS")
@@ -353,6 +328,50 @@ pub async fn create_submitter(
         .with_dispatch_time(dispatch_time)
         .with_receipt_timeout(receipt_timeout_override);
 
+    Ok((view_only_provider, gas_killer_handler))
+}
+
+/// Creates the BLS [`Submitter`] with multi-chain support (`bls` mode).
+///
+/// The read side (view_only_provider, BLS contracts) always points at L1 via
+/// `HTTP_RPC` and `AVS_DEPLOYMENT_PATH`. Operator state lives on L1 and is not
+/// available on the L2 mimic contract.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_submitter(
+    scheme: Bn254Scheme,
+    assignments: SharedAssignments<GasKillerTaskData>,
+    certified: CertifiedReceiver<Bn254Scheme>,
+    resolutions: ResolutionSender,
+    metrics: Arc<MetricsCollector>,
+    dispatch_time: DispatchTime,
+    namespace: Vec<u8>,
+) -> Result<Submitter<GasKillerTaskData, GasKillerHandler<SimpleWalletProvider>>> {
+    let (view_only_provider, gas_killer_handler) =
+        create_handler_parts(metrics, dispatch_time).await?;
+
+    let deployment =
+        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
+    info!("Submitter reads operator state from L1 (HTTP_RPC)");
+
+    let bls_apk_registry_address = deployment
+        .bls_apk_registry_address()
+        .map_err(|e| anyhow::anyhow!("Failed to get BLS APK registry address: {}", e))?;
+    let registry_coordinator_address = deployment
+        .registry_coordinator_address()
+        .map_err(|e| anyhow::anyhow!("Failed to get registry coordinator address: {}", e))?;
+    let bls_operator_state_retriever_address = deployment
+        .bls_sig_check_operator_state_retriever_address()
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
+        })?;
+
+    let bls_apk_registry =
+        BLSApkRegistry::new(bls_apk_registry_address, view_only_provider.clone());
+    let bls_operator_state_retriever = BLSSigCheckOperatorStateRetriever::new(
+        bls_operator_state_retriever_address,
+        view_only_provider.clone(),
+    );
+
     Ok(Submitter::new(
         scheme,
         view_only_provider,
@@ -365,5 +384,29 @@ pub async fn create_submitter(
         resolutions,
         namespace,
         Bytes::from_static(QUORUM_NUMBERS),
+    ))
+}
+
+/// Creates the [`SchnorrSubmitter`] (`schnorr` mode). Same environment surface as
+/// [`create_submitter`]; only the certified-observation source and the on-chain
+/// calling convention differ (no BLS registry — the Schnorr registry is read
+/// on-chain by the target contract itself).
+pub async fn create_schnorr_submitter(
+    assignments: SharedAssignments<GasKillerTaskData>,
+    certified: SchnorrCertifiedReceiver,
+    resolutions: ResolutionSender,
+    metrics: Arc<MetricsCollector>,
+    dispatch_time: DispatchTime,
+    namespace: Vec<u8>,
+) -> Result<SchnorrSubmitter> {
+    let (view_only_provider, gas_killer_handler) =
+        create_handler_parts(metrics, dispatch_time).await?;
+    Ok(SchnorrSubmitter::new(
+        view_only_provider,
+        gas_killer_handler,
+        assignments,
+        certified,
+        resolutions,
+        namespace,
     ))
 }

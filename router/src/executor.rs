@@ -7,11 +7,12 @@ use anyhow::Result;
 use commonware_avs_router::executor::{BlsSignatureVerificationHandler, ExecutionResult};
 use commonware_avs_router::sequencer::{DispatchTime, take_dispatch_time};
 use gas_killer_common::ChainRole;
-use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::IBLSSignatureCheckerTypes as RetrieverIBLSTypes;
 use gas_killer_common::bindings::gaskillersdk::{
     BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes,
 };
+use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
+use gas_killer_common::bindings::{GAS_KILLER_INTERFACE_ID, SCHNORR_GAS_KILLER_INTERFACE_ID};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -346,6 +347,244 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             status: Some(receipt.status()),
             contract_address: receipt.contract_address.map(|a| a.to_string()),
         })
+    }
+
+    /// Schnorr twin of [`Self::supports_gas_killer_interface`], checking the
+    /// `ISchnorrGasKillerSDK` interface ID instead. Shares the same memo cache: a
+    /// process runs exactly one signature scheme, so a given target address is
+    /// only ever probed for one of the two interface IDs.
+    async fn supports_schnorr_interface(&self, provider: P, target_addr: Address) -> Result<bool> {
+        if let Some(supported) = self.interface_cache.read().await.get(&target_addr).copied() {
+            return Ok(supported);
+        }
+
+        let sdk = SchnorrGasKillerSDK::new(target_addr, provider);
+        let supports_interface_start = Instant::now();
+        let supported = match sdk
+            .supportsInterface(SCHNORR_GAS_KILLER_INTERFACE_ID)
+            .call()
+            .await
+        {
+            Ok(supported) => supported,
+            Err(e) => {
+                warn!("supportsInterface call failed: {}", e);
+                return Err(anyhow::anyhow!("supportsInterface call failed: {}", e));
+            }
+        };
+        if let Some(m) = &self.metrics {
+            m.executor_supports_interface_seconds
+                .observe(supports_interface_start.elapsed().as_secs_f64());
+        }
+        self.interface_cache
+            .write()
+            .await
+            .insert(target_addr, supported);
+        Ok(supported)
+    }
+
+    /// Schnorr twin of [`Self::execute_verification`]: identical preflights
+    /// (payload-hash match, ERC-165 gate, `refBlock = head − 1`), but the quorum
+    /// proof is a single aggregate signature `(s, Raddr)` plus the strictly
+    /// ascending non-signer list, submitted through the Schnorr SDK ABI.
+    async fn execute_schnorr_verification(
+        &mut self,
+        msg_hash: FixedBytes<32>,
+        current_block_number: u32,
+        s: U256,
+        r_addr: Address,
+        non_signers: Vec<Address>,
+        task_data: Option<&GasKillerTaskData>,
+    ) -> Result<ExecutionResult> {
+        let task_data = task_data
+            .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
+
+        let chain_id: u64 = task_data.chain_id;
+        let provider = self
+            .get_provider(chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No provider configured for chain: {}", chain_id))?
+            .clone();
+
+        let storage_updates = task_data.storage_updates.clone();
+        let transition_index = U256::from(task_data.transition_index);
+        let target_function = task_data.function_selector();
+        let target_addr = task_data.target_address;
+
+        // The payload-hash preflight and the ERC-165 interface check are
+        // independent, so run them concurrently. Once the interface result is
+        // cached the second future collapses to a hashmap read.
+        let metrics = self.metrics.clone();
+        let (expected_hash, supports_result) = tokio::join!(
+            async {
+                let hash_preflight_start = Instant::now();
+                let expected_hash = FixedBytes::<32>::from(
+                    task_data.build_payload_hash(storage_updates.as_ref()).0,
+                );
+                if let Some(m) = &metrics {
+                    m.executor_hash_preflight_seconds
+                        .observe(hash_preflight_start.elapsed().as_secs_f64());
+                }
+                expected_hash
+            },
+            self.supports_schnorr_interface(provider.clone(), target_addr),
+        );
+
+        // Confirm the locally computed payload hash matches the quorum's signed hash.
+        if expected_hash != msg_hash {
+            warn!(
+                offchain_msg_hash = %msg_hash,
+                local_expected_hash = %expected_hash,
+                transition_index = %transition_index,
+                target_address = %target_addr,
+                "Message hash mismatch between aggregation and local computation"
+            );
+            return Err(anyhow::anyhow!(
+                "Message hash mismatch: aggregation {} != local {}",
+                msg_hash,
+                expected_hash
+            ));
+        }
+
+        // Ensure the contract implements the Schnorr GasKiller interface (ERC-165).
+        if !supports_result? {
+            warn!(
+                interface_id = %SCHNORR_GAS_KILLER_INTERFACE_ID,
+                "Target contract does not support the Schnorr GasKiller interface"
+            );
+            return Err(anyhow::anyhow!(
+                "Target contract does not support the Schnorr GasKiller interface ({})",
+                SCHNORR_GAS_KILLER_INTERFACE_ID
+            ));
+        }
+
+        let sdk = SchnorrGasKillerSDK::new(target_addr, provider);
+
+        // referenceBlockNumber = current_block_number - 1 so eth_estimateGas (which
+        // simulates at the current block) satisfies the on-chain
+        // `require(referenceBlockNumber < block.number)` check.
+        info!(
+            non_signers = non_signers.len(),
+            "Sending Schnorr verifyAndUpdate transaction"
+        );
+        let tx_send_start = Instant::now();
+        let send_result = sdk
+            .verifyAndUpdate(
+                msg_hash,
+                current_block_number.saturating_sub(1),
+                storage_updates,
+                transition_index,
+                target_function,
+                s,
+                r_addr,
+                non_signers,
+            )
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send verifyAndUpdate transaction: {}", e));
+        if let Some(m) = &self.metrics {
+            m.executor_tx_send_seconds
+                .observe(tx_send_start.elapsed().as_secs_f64());
+        }
+        let call_return = send_result?;
+
+        // Bound the receipt wait so mempool congestion or a dropped transaction
+        // can't stall the executor indefinitely. Unknown chain IDs fall back to
+        // the L1 (longer) timeout.
+        let chain_role = self.chain_roles.get(&chain_id).copied().unwrap_or_default();
+        let receipt_timeout = self.receipt_timeout(chain_role);
+        let receipt_start = Instant::now();
+        let receipt = match tokio::time::timeout(receipt_timeout, call_return.get_receipt()).await {
+            Ok(receipt_result) => {
+                if let Some(m) = &self.metrics {
+                    m.executor_receipt_confirmation_seconds
+                        .observe(receipt_start.elapsed().as_secs_f64());
+                }
+                receipt_result
+                    .map_err(|e| anyhow::anyhow!("Failed to get transaction receipt: {}", e))?
+            }
+            Err(_) => {
+                warn!(
+                    chain = %chain_id,
+                    timeout_secs = receipt_timeout.as_secs(),
+                    "get_receipt timed out waiting for transaction inclusion"
+                );
+                return Err(anyhow::anyhow!(
+                    "get_receipt timed out after {}s on chain {}",
+                    receipt_timeout.as_secs(),
+                    chain_id
+                ));
+            }
+        };
+        info!(
+            tx = %receipt.transaction_hash,
+            block = receipt.block_number,
+            status = ?receipt.status(),
+            gas_used = ?receipt.gas_used,
+            "Schnorr verifyAndUpdate receipt"
+        );
+
+        Ok(ExecutionResult {
+            transaction_hash: format!("{:?}", receipt.transaction_hash),
+            block_number: receipt.block_number,
+            gas_used: Some(receipt.gas_used),
+            status: Some(receipt.status()),
+            contract_address: receipt.contract_address.map(|a| a.to_string()),
+        })
+    }
+
+    /// Schnorr twin of [`BlsSignatureVerificationHandler::handle_verification`]:
+    /// same metrics envelope, the proof arguments swap the BN254 non-signer struct
+    /// for the aggregate `(s, Raddr)` and the strictly ascending `non_signers`.
+    /// Called by [`crate::schnorr_submitter::SchnorrSubmitter`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn handle_schnorr_verification(
+        &mut self,
+        height: u64,
+        msg_hash: FixedBytes<32>,
+        current_block_number: u32,
+        s: U256,
+        r_addr: Address,
+        non_signers: Vec<Address>,
+        task_data: Option<&GasKillerTaskData>,
+    ) -> Result<ExecutionResult> {
+        let dispatch_start = take_dispatch_time(&self.dispatch_time, height);
+        if let Some(start) = dispatch_start
+            && let Some(m) = &self.metrics
+        {
+            m.p2p_round_trip_seconds
+                .observe(start.elapsed().as_secs_f64());
+        }
+
+        let exec_start = Instant::now();
+
+        let result = self
+            .execute_schnorr_verification(
+                msg_hash,
+                current_block_number,
+                s,
+                r_addr,
+                non_signers,
+                task_data,
+            )
+            .await;
+
+        if let Some(m) = &self.metrics {
+            m.execution_duration_seconds
+                .observe(exec_start.elapsed().as_secs_f64());
+            match &result {
+                Ok(_) => {
+                    m.aggregation_rounds_completed.inc();
+                    if let Some(start) = dispatch_start {
+                        m.round_latency_seconds
+                            .observe(start.elapsed().as_secs_f64());
+                    }
+                }
+                Err(_) => {
+                    m.aggregation_rounds_failed.inc();
+                }
+            }
+        }
+
+        result
     }
 }
 
