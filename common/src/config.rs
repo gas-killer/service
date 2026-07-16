@@ -322,6 +322,138 @@ pub fn rebroadcast_interval() -> std::time::Duration {
     )
 }
 
+/// Which quorum-signature scheme the node/router binaries run.
+///
+/// `Bls` is the engine-driven aggregation path (commonware aggregation engine,
+/// BLS-aggregated operator signatures verified on-chain). `Schnorr` is the
+/// interactive two-round MuSig2 aggregate path (coordinator/participant actors on
+/// a p2p channel, a single constant-gas signature on-chain). The two paths never
+/// mix inside one deployment: every binary in a stack must run the same scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureScheme {
+    Bls,
+    Schnorr,
+}
+
+/// Reads the signature scheme from `SIGNATURE_SCHEME` (case-insensitive `bls` |
+/// `schnorr`), defaulting to [`SignatureScheme::Bls`] when unset. Panics on an
+/// unrecognized value rather than silently running the wrong protocol.
+pub fn signature_scheme() -> SignatureScheme {
+    parse_signature_scheme(env::var("SIGNATURE_SCHEME").ok().as_deref())
+}
+
+/// Parses a `SIGNATURE_SCHEME` value into a [`SignatureScheme`], treating `None`
+/// (env var unset) as `bls`.
+///
+/// # Panics
+/// Panics if `value` is set to anything other than `""`, `"bls"`, or `"schnorr"`
+/// (case-insensitive).
+fn parse_signature_scheme(value: Option<&str>) -> SignatureScheme {
+    match value {
+        None => SignatureScheme::Bls,
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "bls" => SignatureScheme::Bls,
+            "schnorr" => SignatureScheme::Schnorr,
+            _ => panic!("SIGNATURE_SCHEME must be 'bls' or 'schnorr', got: {raw}"),
+        },
+    }
+}
+
+/// Default quorum threshold numerator/denominator used when `QUORUM_THRESHOLD` /
+/// `THRESHOLD_DENOMINATOR` are unset or malformed.
+pub const DEFAULT_QUORUM_THRESHOLD_NUMERATOR: u64 = 2;
+pub const DEFAULT_QUORUM_THRESHOLD_DENOMINATOR: u64 = 3;
+
+/// Reads the quorum threshold fraction `num/den` from `QUORUM_THRESHOLD`
+/// (numerator) and `THRESHOLD_DENOMINATOR` (denominator), defaulting to
+/// [`DEFAULT_QUORUM_THRESHOLD_NUMERATOR`] / [`DEFAULT_QUORUM_THRESHOLD_DENOMINATOR`].
+///
+/// These env var names are shared with the eigenlayer setup deployment tooling
+/// (see `example.env`), so the off-chain quorum check and the on-chain registry
+/// threshold stay in lockstep.
+pub fn quorum_threshold_fraction() -> (u64, u64) {
+    parse_quorum_threshold_fraction(
+        env::var("QUORUM_THRESHOLD").ok().as_deref(),
+        env::var("THRESHOLD_DENOMINATOR").ok().as_deref(),
+    )
+}
+
+/// Parses `QUORUM_THRESHOLD` / `THRESHOLD_DENOMINATOR` values into a fraction,
+/// falling back to the default whenever either is missing, unparseable, the
+/// denominator is zero, or the numerator exceeds the denominator.
+fn parse_quorum_threshold_fraction(num: Option<&str>, den: Option<&str>) -> (u64, u64) {
+    let num = num.and_then(|v| v.trim().parse::<u64>().ok());
+    let den = den.and_then(|v| v.trim().parse::<u64>().ok());
+    match (num, den) {
+        (Some(n), Some(d)) if d > 0 && n <= d => (n, d),
+        _ => (
+            DEFAULT_QUORUM_THRESHOLD_NUMERATOR,
+            DEFAULT_QUORUM_THRESHOLD_DENOMINATOR,
+        ),
+    }
+}
+
+/// Default per-stage timeout cap for the Schnorr coordinator's protocol rounds
+/// (nonce collection, partial-signature collection), before the `ROUND_TIMEOUT /
+/// 6` floor is applied.
+pub const DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS: f64 = 5.0;
+
+/// Reads the Schnorr per-stage timeout from `SCHNORR_STAGE_TIMEOUT_SECS` (seconds,
+/// fractional allowed). When unset, defaults to
+/// `min(DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS, round_timeout() / 6)` so several
+/// attempts fit inside one round-timeout window.
+pub fn schnorr_stage_timeout() -> std::time::Duration {
+    schnorr_stage_timeout_from(
+        round_timeout(),
+        env::var("SCHNORR_STAGE_TIMEOUT_SECS").ok().as_deref(),
+    )
+}
+
+/// Computes the Schnorr per-stage timeout given the current round timeout and an
+/// optional `SCHNORR_STAGE_TIMEOUT_SECS` override. An override is parsed as a flat
+/// seconds value (no `/ 6` floor); the floor only applies to the unset-default path.
+fn schnorr_stage_timeout_from(
+    round_timeout_duration: std::time::Duration,
+    override_value: Option<&str>,
+) -> std::time::Duration {
+    match override_value {
+        Some(raw) => parse_secs_env_duration(Some(raw), DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS),
+        None => std::cmp::min(
+            std::time::Duration::from_secs_f64(DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS),
+            round_timeout_duration / 6,
+        ),
+    }
+}
+
+/// Default per-peer message rate for the Schnorr protocol channel, in messages
+/// per second.
+pub const DEFAULT_SCHNORR_MESSAGES_PER_SECOND: u32 = 64;
+
+/// Reads the Schnorr protocol channel's per-peer message rate from
+/// `P2P_SCHNORR_MESSAGES_PER_SECOND`, defaulting to
+/// [`DEFAULT_SCHNORR_MESSAGES_PER_SECOND`]. Zero, malformed, or unparseable values
+/// fall back to the default.
+///
+/// A [`NonZeroU32`](std::num::NonZeroU32) because it feeds `Quota::per_second`
+/// directly. Sized generously: the p2p send-side limiter SILENTLY DROPS messages to
+/// rate-limited peers (same failure mode as the ack channel below), and a dropped
+/// signing-round message costs a whole retry attempt.
+pub fn schnorr_messages_per_second() -> std::num::NonZeroU32 {
+    parse_schnorr_messages_per_second(env::var("P2P_SCHNORR_MESSAGES_PER_SECOND").ok().as_deref())
+}
+
+/// Parses a `P2P_SCHNORR_MESSAGES_PER_SECOND` value, falling back to
+/// [`DEFAULT_SCHNORR_MESSAGES_PER_SECOND`] on zero, malformed, or unparseable input.
+fn parse_schnorr_messages_per_second(value: Option<&str>) -> std::num::NonZeroU32 {
+    value
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .and_then(std::num::NonZeroU32::new)
+        .unwrap_or_else(|| {
+            std::num::NonZeroU32::new(DEFAULT_SCHNORR_MESSAGES_PER_SECOND)
+                .expect("default schnorr message rate is nonzero")
+        })
+}
+
 /// Per-peer send/receive rate for the aggregation-engine TipAck channel (channel 0),
 /// in messages per second.
 ///
@@ -464,6 +596,99 @@ mod tests {
     fn p2p_quota_period_rejects_excessive_rate() {
         // 1.0 / 3e9 rounds below 1 ns and becomes Duration::ZERO; must fall back to default.
         assert_eq!(parse_p2p_quota_period(Some("3e9")), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn signature_scheme_defaults_to_bls() {
+        assert_eq!(parse_signature_scheme(None), SignatureScheme::Bls);
+        assert_eq!(parse_signature_scheme(Some("")), SignatureScheme::Bls);
+        assert_eq!(parse_signature_scheme(Some("bls")), SignatureScheme::Bls);
+        assert_eq!(parse_signature_scheme(Some("BLS")), SignatureScheme::Bls);
+    }
+
+    #[test]
+    fn signature_scheme_parses_schnorr_case_insensitively() {
+        assert_eq!(
+            parse_signature_scheme(Some("schnorr")),
+            SignatureScheme::Schnorr
+        );
+        assert_eq!(
+            parse_signature_scheme(Some(" Schnorr ")),
+            SignatureScheme::Schnorr
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "SIGNATURE_SCHEME must be 'bls' or 'schnorr', got: ecdsa")]
+    fn signature_scheme_panics_on_unrecognized_value() {
+        parse_signature_scheme(Some("ecdsa"));
+    }
+
+    #[test]
+    fn quorum_threshold_fraction_defaults_to_two_thirds() {
+        assert_eq!(parse_quorum_threshold_fraction(None, None), (2, 3));
+        assert_eq!(
+            parse_quorum_threshold_fraction(Some("abc"), Some("3")),
+            (2, 3)
+        );
+        assert_eq!(parse_quorum_threshold_fraction(Some("1"), None), (2, 3));
+    }
+
+    #[test]
+    fn quorum_threshold_fraction_reads_override() {
+        assert_eq!(
+            parse_quorum_threshold_fraction(Some("3"), Some("5")),
+            (3, 5)
+        );
+    }
+
+    #[test]
+    fn quorum_threshold_fraction_rejects_invalid_values() {
+        // Zero denominator.
+        assert_eq!(
+            parse_quorum_threshold_fraction(Some("1"), Some("0")),
+            (2, 3)
+        );
+        // Numerator exceeds denominator.
+        assert_eq!(
+            parse_quorum_threshold_fraction(Some("4"), Some("3")),
+            (2, 3)
+        );
+    }
+
+    #[test]
+    fn schnorr_stage_timeout_defaults_to_cap_when_round_timeout_is_large() {
+        assert_eq!(
+            schnorr_stage_timeout_from(Duration::from_secs(60), None),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn schnorr_stage_timeout_defaults_to_round_timeout_fraction_when_smaller() {
+        assert_eq!(
+            schnorr_stage_timeout_from(Duration::from_secs(12), None),
+            Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn schnorr_stage_timeout_reads_override() {
+        assert_eq!(
+            schnorr_stage_timeout_from(Duration::from_secs(60), Some("1.5")),
+            Duration::from_millis(1500)
+        );
+    }
+
+    #[test]
+    fn schnorr_messages_per_second_defaults_and_overrides() {
+        let nz = |n| std::num::NonZeroU32::new(n).unwrap();
+        assert_eq!(parse_schnorr_messages_per_second(None), nz(64));
+        assert_eq!(parse_schnorr_messages_per_second(Some("128")), nz(128));
+        // Zero, negative, and unparseable all fall back to the default.
+        assert_eq!(parse_schnorr_messages_per_second(Some("0")), nz(64));
+        assert_eq!(parse_schnorr_messages_per_second(Some("-1")), nz(64));
+        assert_eq!(parse_schnorr_messages_per_second(Some("abc")), nz(64));
     }
 
     #[test]
