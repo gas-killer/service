@@ -878,9 +878,37 @@ async fn fast_view_call(
 
     let bin = std::env::var("GK_FAST_VIEW_BIN").unwrap_or_else(|_| "gk-fast-view".to_string());
     let seg_id = job.seg_id;
-    let returndata = tokio::task::spawn_blocking(move || fast_view_sidecar_call(&bin, &jt))
-        .await
-        .context("gk-fast-view sidecar task panicked")??;
+    // Liveness watchdog: a wedged-but-alive daemon (stuck mid-job, pipe still
+    // open) would otherwise block this caller — and, via the sidecar Mutex,
+    // every other fast-path segment — forever, with the interpreter fallback
+    // structurally unreachable (it needs an `Err`; a blocked read never
+    // returns). On timeout we SIGKILL the daemon by pid from OUTSIDE the
+    // Mutex: the blocked holder's read turns into EOF, its error path drops
+    // the dead daemon (fresh respawn on next use), and THIS segment falls
+    // back to the interpreter. The default matches the coordinator's segment
+    // ceiling — legitimate cold jobs (34GB mount verify + JIT codegen) run
+    // minutes, so the ceiling only catches genuine wedges.
+    let timeout_secs: u64 = std::env::var("GK_FAST_VIEW_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7200);
+    let task = tokio::task::spawn_blocking(move || fast_view_sidecar_call(&bin, &jt));
+    let returndata = match tokio::time::timeout(Duration::from_secs(timeout_secs), task).await {
+        Ok(joined) => joined.context("gk-fast-view sidecar task panicked")??,
+        Err(_elapsed) => {
+            let pid = FAST_VIEW_SIDECAR_PID.load(std::sync::atomic::Ordering::SeqCst);
+            if pid != 0 {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+            }
+            bail!(
+                "gk-fast-view sidecar wedged: no response in {timeout_secs}s \
+                 (GK_FAST_VIEW_TIMEOUT_SECS); killed pid {pid} so the next \
+                 fast-path call respawns — this segment falls back to the interpreter"
+            );
+        }
+    };
     debug!(seg_id, bytes = returndata.len(), "gk-fast-view fast path served segment");
     Ok(returndata)
 }
@@ -915,6 +943,11 @@ async fn fast_view_call(
 
 /// The single per-node persistent sidecar, lazily spawned on first fast-path use.
 static FAST_VIEW_SIDECAR: OnceLock<Mutex<Option<FastViewSidecar>>> = OnceLock::new();
+
+/// PID of the live sidecar (0 = none). Lets the watchdog in [`fast_view_call`]
+/// SIGKILL a wedged-but-alive daemon from OUTSIDE the Mutex — whose holder is
+/// blocked in pipe IO and therefore can never release it on its own.
+static FAST_VIEW_SIDECAR_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn fast_view_sidecar_cell() -> &'static Mutex<Option<FastViewSidecar>> {
     FAST_VIEW_SIDECAR.get_or_init(|| Mutex::new(None))
@@ -958,54 +991,86 @@ impl FastViewSidecar {
                 .take()
                 .context("gk-fast-view --serve: no stdout handle")?,
         );
+        FAST_VIEW_SIDECAR_PID.store(child.id(), std::sync::atomic::Ordering::SeqCst);
         Ok(FastViewSidecar { child, stdin, stdout })
     }
 
     /// Send one framed job, read one framed response. Any IO/protocol failure is
-    /// an `Err` (caller will respawn); a well-formed OK/ERR frame is `Ok(resp)`.
-    fn exchange(&mut self, job_text: &str) -> Result<SidecarResp> {
+    /// an `Err` tagged with whether the request was already fully sent (see
+    /// [`SidecarIoError`]); a well-formed OK/ERR frame is `Ok(resp)`.
+    fn exchange(&mut self, job_text: &str) -> std::result::Result<SidecarResp, SidecarIoError> {
         use std::io::{BufRead as _, Read as _, Write as _};
+        let send = |err: anyhow::Error| SidecarIoError { request_sent: false, err };
+        let recv = |err: anyhow::Error| SidecarIoError { request_sent: true, err };
 
         // request frame: "<byte_len>\n" then the job bytes
-        write!(self.stdin, "{}\n", job_text.len()).context("gk-fast-view: write frame len")?;
+        write!(self.stdin, "{}\n", job_text.len())
+            .context("gk-fast-view: write frame len")
+            .map_err(send)?;
         self.stdin
             .write_all(job_text.as_bytes())
-            .context("gk-fast-view: write job frame")?;
-        self.stdin.flush().context("gk-fast-view: flush job frame")?;
+            .context("gk-fast-view: write job frame")
+            .map_err(send)?;
+        self.stdin
+            .flush()
+            .context("gk-fast-view: flush job frame")
+            .map_err(send)?;
 
         // response frame: "<STATUS> <byte_len>\n" then payload bytes
         let mut header = String::new();
         let n = self
             .stdout
             .read_line(&mut header)
-            .context("gk-fast-view: read response header")?;
+            .context("gk-fast-view: read response header")
+            .map_err(recv)?;
         if n == 0 {
-            bail!("gk-fast-view --serve closed stdout (EOF before response)");
+            return Err(recv(anyhow::anyhow!(
+                "gk-fast-view --serve closed stdout (EOF before response)"
+            )));
         }
         let header = header.trim();
         let (status, len_str) = header
             .split_once(' ')
-            .with_context(|| format!("gk-fast-view: malformed response header {header:?}"))?;
+            .with_context(|| format!("gk-fast-view: malformed response header {header:?}"))
+            .map_err(recv)?;
         let len: usize = len_str
             .parse()
-            .with_context(|| format!("gk-fast-view: bad response length {len_str:?}"))?;
+            .with_context(|| format!("gk-fast-view: bad response length {len_str:?}"))
+            .map_err(recv)?;
         let mut payload = vec![0u8; len];
         self.stdout
             .read_exact(&mut payload)
-            .context("gk-fast-view: read response payload")?;
+            .context("gk-fast-view: read response payload")
+            .map_err(recv)?;
 
         match status {
             "OK" => {
                 let hex_str = std::str::from_utf8(&payload)
-                    .context("gk-fast-view: OK payload not utf-8 hex")?;
+                    .context("gk-fast-view: OK payload not utf-8 hex")
+                    .map_err(recv)?;
                 let bytes = hex::decode(hex_str.trim())
-                    .context("gk-fast-view: OK payload not hex returndata")?;
+                    .context("gk-fast-view: OK payload not hex returndata")
+                    .map_err(recv)?;
                 Ok(SidecarResp::Ok(bytes))
             }
             "ERR" => Ok(SidecarResp::Err(String::from_utf8_lossy(&payload).into_owned())),
-            other => bail!("gk-fast-view: unknown response status {other:?}"),
+            other => Err(recv(anyhow::anyhow!(
+                "gk-fast-view: unknown response status {other:?}"
+            ))),
         }
     }
+}
+
+/// An IO/protocol failure in [`FastViewSidecar::exchange`], tagged by whether
+/// the daemon may already have STARTED executing the job (failure after the
+/// request was fully sent). Retrying a started job on a fresh daemon re-pays
+/// its full cost — and if the job itself wedged the daemon (watchdog-killed),
+/// resending it would wedge the replacement with nobody left to time it out —
+/// so only pre-send failures are retried; post-send failures fall back to the
+/// interpreter.
+struct SidecarIoError {
+    request_sent: bool,
+    err: anyhow::Error,
 }
 
 impl Drop for FastViewSidecar {
@@ -1013,6 +1078,14 @@ impl Drop for FastViewSidecar {
         // Closing stdin lets the daemon exit on EOF; kill+reap in case it's mid-job.
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Clear the watchdog pid only if it is still ours (a replacement may
+        // already have registered its own).
+        let _ = FAST_VIEW_SIDECAR_PID.compare_exchange(
+            self.child.id(),
+            0,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
     }
 }
 
@@ -1034,7 +1107,11 @@ fn fast_view_sidecar_call(bin: &str, job_text: &str) -> Result<Vec<u8>> {
         }
     };
 
-    // Up to two attempts: on an IO error the first attempt drops+respawns.
+    // Up to two attempts: a PRE-SEND IO error (dead pipe from an idle-crashed
+    // daemon) drops+respawns and resends. A POST-SEND failure is never retried
+    // — the job may have wedged the daemon (watchdog-killed), and resending it
+    // would wedge the replacement with nobody left to time it out; the caller
+    // falls back to the interpreter instead.
     let mut last_io_err: Option<anyhow::Error> = None;
     for attempt in 0..2 {
         if guard.is_none() {
@@ -1047,14 +1124,20 @@ fn fast_view_sidecar_call(bin: &str, job_text: &str) -> Result<Vec<u8>> {
                 // Per-job execution error; daemon is healthy, keep it alive.
                 bail!("gk-fast-view sidecar job error: {msg}");
             }
-            Err(io_err) => {
+            Err(SidecarIoError { request_sent, err }) => {
+                *guard = None; // drops (kills+reaps) the dead daemon
+                if request_sent {
+                    return Err(err.context(
+                        "gk-fast-view sidecar died mid-job (not retried on a fresh \
+                         daemon; this segment falls back to the interpreter)",
+                    ));
+                }
                 warn!(
                     attempt,
-                    error = %io_err,
-                    "gk-fast-view --serve IO error; respawning sidecar and retrying"
+                    error = %err,
+                    "gk-fast-view --serve send failed; respawning sidecar and retrying"
                 );
-                *guard = None; // drops (kills+reaps) the dead daemon
-                last_io_err = Some(io_err);
+                last_io_err = Some(err);
             }
         }
     }
