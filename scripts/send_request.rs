@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .to::<u64>();
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
-        .unwrap_or_else(|_| "http://localhost:8080/trigger".to_string());
+        .unwrap_or_else(|_| "http://localhost:8080/tasks".to_string());
     println!("Posting GasKiller task to {}", url);
 
     let client = reqwest::Client::new();
@@ -168,48 +168,137 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             request.body.call_data.len(),
             selector_hex
         );
-        Err(format!("Trigger failed with status {}", status).into())
-    } else {
-        // Poll currentSum until it changes or timeout
-        use tokio::time::{Duration, Instant, sleep};
-        let max_wait_time = Duration::from_secs(150);
-        let check_interval = Duration::from_secs(10);
-        let start_time = Instant::now();
+        return Err(format!("Trigger failed with status {}", status).into());
+    }
 
-        loop {
-            let current_sum = array_contract
-                .currentSum()
-                .call()
-                .await
-                .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
-                .to::<u64>();
+    let task_id = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("task_id")
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        })
+        .ok_or("Accepted response did not carry a task_id")?;
+    let mut task_status_url = Url::parse(&url)?;
+    task_status_url.set_path(&format!("/tasks/{task_id}"));
+    let api_key = env::var("GAS_KILLER_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty());
 
+    // Poll currentSum until it changes or timeout
+    use tokio::time::{Duration, Instant, sleep};
+    let max_wait_time = Duration::from_secs(150);
+    let check_interval = Duration::from_secs(10);
+    let start_time = Instant::now();
+
+    loop {
+        let current_sum = array_contract
+            .currentSum()
+            .call()
+            .await
+            .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
+            .to::<u64>();
+
+        println!(
+            "currentSum: {}, Initial: {}, Elapsed: {:.1}s",
+            current_sum,
+            initial_sum,
+            start_time.elapsed().as_secs_f64()
+        );
+
+        if current_sum != initial_sum {
             println!(
-                "currentSum: {}, Initial: {}, Elapsed: {:.1}s",
-                current_sum,
-                initial_sum,
-                start_time.elapsed().as_secs_f64()
+                "✅ currentSum changed from {} to {} — confirming task {} reaches 'ready'",
+                initial_sum, current_sum, task_id
             );
+            return confirm_task_ready(&client, &task_status_url, api_key.as_deref(), &task_id)
+                .await;
+        }
 
-            if current_sum != initial_sum {
-                println!(
-                    "✅ SUCCESS: currentSum changed from {} to {}",
-                    initial_sum, current_sum
-                );
+        if start_time.elapsed() >= max_wait_time {
+            println!(
+                "❌ TIMEOUT: currentSum unchanged ({}), waited {:.1} seconds",
+                current_sum,
+                max_wait_time.as_secs_f64()
+            );
+            return Err("Timeout waiting for currentSum to change".into());
+        }
+
+        sleep(check_interval).await;
+    }
+}
+
+/// Confirms `task_id` settles to `ready` shortly after `currentSum` moves,
+/// exercising the status-transition wiring (not just the on-chain effect).
+///
+/// The on-chain confirmation and the `ready` write happen back-to-back inside the
+/// same `handle_verification` call (see `router/src/executor.rs`), so this is a
+/// short, bounded follow-up poll — not another long wait for a fresh aggregation
+/// round.
+async fn confirm_task_ready(
+    client: &reqwest::Client,
+    task_status_url: &Url,
+    api_key: Option<&str>,
+    task_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::time::{Duration, Instant, sleep};
+    let max_wait_time = Duration::from_secs(60);
+    let check_interval = Duration::from_secs(5);
+    let start_time = Instant::now();
+
+    loop {
+        let mut req = client.get(task_status_url.clone());
+        if let Some(api_key) = api_key {
+            req = req.header("Authorization", format!("Bearer {api_key}"));
+        }
+        let body: serde_json::Value = req
+            .send()
+            .await
+            .map_err(|e| format!("Failed to poll task {}: {}", task_id, e))?
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse task {} response: {}", task_id, e))?;
+        let task_status = body
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        println!(
+            "task {}: status={}, elapsed={:.1}s",
+            task_id,
+            task_status,
+            start_time.elapsed().as_secs_f64()
+        );
+
+        match task_status.as_str() {
+            "ready" => {
+                println!("✅ SUCCESS: task {} reached 'ready'", task_id);
                 return Ok(());
             }
-
-            if start_time.elapsed() >= max_wait_time {
-                println!(
-                    "❌ TIMEOUT: currentSum unchanged ({}), waited {:.1} seconds",
-                    current_sum,
-                    max_wait_time.as_secs_f64()
+            "failed" | "expired" => {
+                let error = body
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("<no error recorded>");
+                return Err(
+                    format!("Task {} settled as '{}': {}", task_id, task_status, error).into(),
                 );
-                return Err("Timeout waiting for currentSum to change".into());
             }
-
-            sleep(check_interval).await;
+            _ => {}
         }
+
+        if start_time.elapsed() >= max_wait_time {
+            return Err(format!(
+                "Task {} did not reach 'ready' within {:.0}s of currentSum changing (last status: {})",
+                task_id,
+                max_wait_time.as_secs_f64(),
+                task_status
+            )
+            .into());
+        }
+
+        sleep(check_interval).await;
     }
 }
 
