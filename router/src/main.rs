@@ -46,10 +46,12 @@ use gas_killer_common::{
     round_timeout, schnorr_messages_per_second, schnorr_stage_timeout, signature_scheme,
     storage_directory,
 };
-use gas_killer_router::factories::{create_ingress, create_schnorr_submitter, create_submitter};
+use gas_killer_router::factories::{
+    create_ingress, create_schnorr_submitter, create_submitter, requeue_incomplete_tasks,
+};
 use gas_killer_router::metrics::MetricsCollector;
 use gas_killer_router::schnorr_coordinator::{SchnorrCoordinator, schnorr_certified_channel};
-use gas_killer_router::sequencer::GasKillerTaskSource;
+use gas_killer_router::sequencer::{GasKillerTaskSource, in_flight_task};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
@@ -390,7 +392,21 @@ fn main() {
         let ingress = create_ingress(Arc::clone(&metrics))
             .await
             .expect("Failed to create ingress");
+
+        // Resume work a previous router life acknowledged to a client but never
+        // finished: every task still `queued` or `processing` is rebuilt and
+        // pushed back through the same channel fresh submissions use.
+        if let Some(store) = &ingress.store {
+            requeue_incomplete_tasks(store, &ingress.sender, &ingress.queue_depth)
+                .await
+                .expect("Failed to re-enqueue incomplete tasks");
+        }
         let _task_sender = ingress.sender;
+
+        // Shared with the executor: the id of the task currently dispatched
+        // through the sequencer, so a certified height's execution result can be
+        // attributed back to its task. See `InFlightTask`.
+        let in_flight = in_flight_task();
 
         // Node tip reports (channel 1, node → router): if this router lost its
         // journal and assigns heights the nodes are already past, their reports
@@ -419,6 +435,8 @@ fn main() {
             ingress.queue_depth,
             validator,
             Some(Arc::clone(&metrics)),
+            ingress.store.clone(),
+            in_flight.clone(),
         );
 
         let scheme_mode = signature_scheme();
@@ -511,6 +529,8 @@ fn main() {
                     Arc::clone(&metrics),
                     Arc::clone(&dispatch_time),
                     APPLICATION_NAMESPACE.to_vec(),
+                    ingress.store.clone(),
+                    in_flight.clone(),
                 )
                 .await
                 .expect("Failed to create submitter");
@@ -576,6 +596,8 @@ fn main() {
                     Arc::clone(&metrics),
                     Arc::clone(&dispatch_time),
                     APPLICATION_NAMESPACE.to_vec(),
+                    ingress.store.clone(),
+                    in_flight.clone(),
                 )
                 .await
                 .expect("Failed to create schnorr submitter");

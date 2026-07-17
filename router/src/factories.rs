@@ -3,13 +3,16 @@
 
 use crate::GasKillerHandler;
 use crate::ingress::{
-    AvsMetadata, AvsOperatorSetMetadata, AvsOperatorSetSoftware, IngressState,
-    start_gas_killer_http_server,
+    AvsMetadata, AvsOperatorSetMetadata, AvsOperatorSetSoftware, GasKillerTaskRequest,
+    IngressState, start_gas_killer_http_server,
 };
 use crate::metrics::MetricsCollector;
 use crate::schnorr_coordinator::SchnorrCertifiedReceiver;
 use crate::schnorr_submitter::SchnorrSubmitter;
-use crate::sequencer::{TaskQueueDepth, TaskReceiver, TaskSender, task_channel, task_queue_depth};
+use crate::sequencer::{
+    InFlightTask, QueuedTask, TaskQueueDepth, TaskReceiver, TaskSender, task_channel,
+    task_queue_depth,
+};
 use crate::store::SqliteStore;
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_primitives::Bytes;
@@ -32,9 +35,10 @@ use gas_killer_common::bindings::bls_apk_registry::BLSApkRegistry;
 use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
 use gas_killer_common::task_data::GasKillerTaskData;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::{env, str::FromStr, sync::Arc};
-use tracing::info;
+use tracing::{error, info};
 
 /// Quorum 0 — the only quorum this deployment operates on.
 const QUORUM_NUMBERS: &[u8] = &[0x00];
@@ -70,6 +74,10 @@ pub struct IngressHandles {
     pub sender: TaskSender,
     pub receiver: TaskReceiver,
     pub queue_depth: TaskQueueDepth,
+    /// The durable store opened for the HTTP ingress, shared with the task source
+    /// and executor so they can drive task status transitions. `None` when
+    /// `INGRESS != true` (no store is opened without the HTTP server).
+    pub store: Option<SqliteStore>,
 }
 
 /// Creates the ingress task channel and, when `INGRESS=true`, spawns the HTTP
@@ -87,6 +95,7 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
             sender,
             receiver,
             queue_depth,
+            store: None,
         });
     }
 
@@ -159,6 +168,7 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
         });
     }
 
+    let store_for_return = store.clone();
     let ingress_state = IngressState::new(
         sender.clone(),
         queue_depth.clone(),
@@ -179,7 +189,47 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
         sender,
         receiver,
         queue_depth,
+        store: Some(store_for_return),
     })
+}
+
+/// Re-enqueues every task left `queued` or `processing` by a previous router life,
+/// so a restart resumes work already acknowledged to a client rather than losing
+/// it. Called once at startup, before the sequencer starts pulling from `sender`.
+///
+/// Each task is rebuilt from its persisted request and pushed through the same
+/// channel a fresh `POST /tasks` submission uses, so it flows through the normal
+/// dequeue → processing → ready/failed pipeline indistinguishably from new work.
+pub async fn requeue_incomplete_tasks(
+    store: &SqliteStore,
+    sender: &TaskSender,
+    queue_depth: &TaskQueueDepth,
+) -> Result<()> {
+    let tasks = store.incomplete_tasks().await?;
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    info!(
+        count = tasks.len(),
+        "re-enqueuing incomplete tasks from a previous router life"
+    );
+    for task in tasks {
+        let task_id = task.id;
+        let queued = QueuedTask {
+            task_id: task_id.clone(),
+            request: GasKillerTaskRequest { body: task.request },
+        };
+        if sender.send(queued).is_err() {
+            error!(
+                task_id,
+                "failed to re-enqueue incomplete task: channel closed"
+            );
+            continue;
+        }
+        queue_depth.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 fn build_ingress_providers()
@@ -240,6 +290,8 @@ async fn create_wallet_provider_for_chain(
 async fn create_handler_parts(
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
+    store: Option<SqliteStore>,
+    in_flight: InFlightTask,
 ) -> Result<(
     gas_killer_common::bindings::ReadOnlyProvider,
     GasKillerHandler<SimpleWalletProvider>,
@@ -321,12 +373,18 @@ async fn create_handler_parts(
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
 
-    // Create handler with multi-chain providers
-    let gas_killer_handler = GasKillerHandler::with_providers(providers)
+    // Create handler with multi-chain providers. The store and in-flight task slot
+    // let a settled height advance its task's terminal status; the slot is shared
+    // with the task source (see `GasKillerTaskSource`).
+    let mut gas_killer_handler = GasKillerHandler::with_providers(providers)
         .with_chain_roles(chain_roles)
         .with_metrics(metrics)
         .with_dispatch_time(dispatch_time)
-        .with_receipt_timeout(receipt_timeout_override);
+        .with_receipt_timeout(receipt_timeout_override)
+        .with_in_flight_task(in_flight);
+    if let Some(store) = store {
+        gas_killer_handler = gas_killer_handler.with_store(store);
+    }
 
     Ok((view_only_provider, gas_killer_handler))
 }
@@ -345,9 +403,11 @@ pub async fn create_submitter(
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
     namespace: Vec<u8>,
+    store: Option<SqliteStore>,
+    in_flight: InFlightTask,
 ) -> Result<Submitter<GasKillerTaskData, GasKillerHandler<SimpleWalletProvider>>> {
     let (view_only_provider, gas_killer_handler) =
-        create_handler_parts(metrics, dispatch_time).await?;
+        create_handler_parts(metrics, dispatch_time, store, in_flight).await?;
 
     let deployment =
         AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
@@ -391,6 +451,7 @@ pub async fn create_submitter(
 /// [`create_submitter`]; only the certified-observation source and the on-chain
 /// calling convention differ (no BLS registry — the Schnorr registry is read
 /// on-chain by the target contract itself).
+#[allow(clippy::too_many_arguments)]
 pub async fn create_schnorr_submitter(
     assignments: SharedAssignments<GasKillerTaskData>,
     certified: SchnorrCertifiedReceiver,
@@ -398,9 +459,11 @@ pub async fn create_schnorr_submitter(
     metrics: Arc<MetricsCollector>,
     dispatch_time: DispatchTime,
     namespace: Vec<u8>,
+    store: Option<SqliteStore>,
+    in_flight: InFlightTask,
 ) -> Result<SchnorrSubmitter> {
     let (view_only_provider, gas_killer_handler) =
-        create_handler_parts(metrics, dispatch_time).await?;
+        create_handler_parts(metrics, dispatch_time, store, in_flight).await?;
     Ok(SchnorrSubmitter::new(
         view_only_provider,
         gas_killer_handler,

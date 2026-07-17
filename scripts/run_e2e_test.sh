@@ -234,7 +234,7 @@ echo -e "${YELLOW}Step 9: Waiting briefly for services to stabilize...${NC}"
 sleep 5
 
 # Step 9b: Mint an API key so task submission is authenticated. The router requires a valid,
-# unrevoked key on /trigger; mint one via the admin API (guarded by ADMIN_KEY) and hand it to
+# unrevoked key on /tasks; mint one via the admin API (guarded by ADMIN_KEY) and hand it to
 # send_request through GAS_KILLER_API_KEY.
 echo -e "${YELLOW}Step 9b: Minting an API key via the admin endpoint...${NC}"
 CREATE_RESP=$(curl -s -X POST \

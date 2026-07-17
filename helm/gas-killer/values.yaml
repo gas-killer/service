@@ -688,6 +688,8 @@ ingress:
   # This keeps admin behind cluster access in addition to ADMIN_KEY. Add a path here only if it
   # genuinely needs to be internet-facing.
   publicPaths:
+    - /tasks
+    # Deprecated alias of /tasks, kept until clients migrate.
     - /trigger
     - /avs-metadata
     - /healthz

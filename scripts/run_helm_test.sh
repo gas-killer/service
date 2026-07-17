@@ -38,7 +38,7 @@ NODE_COUNT="${NODE_COUNT:-3}"
 FORK_URL="${FORK_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
 PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 FUNDED_KEY="${FUNDED_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
-# Guards the /admin/keys endpoints used to mint the API keys that authenticate /trigger. A fixed
+# Guards the /admin/keys endpoints used to mint the API keys that authenticate /tasks. A fixed
 # dev value for the local harness; override by exporting ADMIN_KEY.
 ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
@@ -307,7 +307,7 @@ echo -e "${GREEN}ArraySummation deployment completed${NC}"
 echo -e "${YELLOW}Step 12: Triggering Gas Killer task...${NC}"
 
 # Mint an API key so task submission is authenticated. The router requires a valid, unrevoked
-# key on /trigger; mint one via the admin API (guarded by ADMIN_KEY) and hand it to send_request
+# key on /tasks; mint one via the admin API (guarded by ADMIN_KEY) and hand it to send_request
 # through GAS_KILLER_API_KEY.
 CREATE_RESP=$(curl -s -X POST \
     -H "Authorization: Bearer $ADMIN_KEY" \

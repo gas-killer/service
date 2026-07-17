@@ -8,6 +8,7 @@
 
 use crate::ingress::GasKillerTaskRequest;
 use crate::metrics::MetricsCollector;
+use crate::store::{SqliteStore, TaskStatus};
 use commonware_avs_router::sequencer::{SequencedTask, TaskSource};
 use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
@@ -15,14 +16,22 @@ use gas_killer_common::task_data::GasKillerTaskData;
 use alloy_primitives::Bytes;
 use anyhow::Result;
 use commonware_cryptography::{Hasher, Sha256};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, error, info};
 
-pub type TaskSender = UnboundedSender<GasKillerTaskRequest>;
-pub type TaskReceiver = UnboundedReceiver<GasKillerTaskRequest>;
+/// A task queued for the sequencer, carrying the persisted task id alongside the
+/// request so status transitions can be attributed back to the right store row.
+#[derive(Debug, Clone)]
+pub struct QueuedTask {
+    pub task_id: String,
+    pub request: GasKillerTaskRequest,
+}
+
+pub type TaskSender = UnboundedSender<QueuedTask>;
+pub type TaskReceiver = UnboundedReceiver<QueuedTask>;
 /// Shared atomic counter tracking tasks in flight between the ingress sender and
 /// the task source's receiver.
 pub type TaskQueueDepth = Arc<AtomicUsize>;
@@ -33,6 +42,54 @@ pub fn task_channel() -> (TaskSender, TaskReceiver) {
 
 pub fn task_queue_depth() -> TaskQueueDepth {
     Arc::new(AtomicUsize::new(0))
+}
+
+/// Id of the task currently dispatched through the sequencer (dequeued but not yet
+/// settled), shared between [`GasKillerTaskSource`] and [`crate::executor::GasKillerHandler`]
+/// so a certified height's execution result can be attributed back to its task.
+///
+/// Exactly one task is ever in flight: the upstream [`commonware_avs_router::sequencer::Sequencer`]
+/// drives one height at a time and only calls [`TaskSource::next_task`] again once the
+/// current task resolves, so a single slot suffices — no keying by height or round
+/// is needed.
+///
+/// `next_task` sets the slot when a task starts. `GasKillerHandler::handle_verification`
+/// takes it when execution settles (ready or failed) — the only path that calls
+/// `handle_verification` is a certificate carrying the task's own expected digest, so
+/// a settling execution always belongs to the task presently in the slot. If the slot
+/// is still occupied the next time `next_task` runs, the previous task's height was
+/// skipped by the quorum instead — the one path that resolves a height without ever
+/// calling `handle_verification` — and `next_task` settles it as failed.
+pub type InFlightTask = Arc<Mutex<Option<String>>>;
+
+pub fn in_flight_task() -> InFlightTask {
+    Arc::new(Mutex::new(None))
+}
+
+/// Best-effort task status bookkeeping shared by the task source and the executor. A
+/// store error is logged rather than propagated: failing to record a status
+/// transition must never derail aggregation, which is the real work — a missed
+/// transition is recoverable (the startup re-queue picks up anything left `queued`
+/// or `processing`), whereas aborting the pipeline is not.
+async fn set_task_processing(store: &SqliteStore, task_id: &str) {
+    if let Err(e) = store
+        .update_task_status(task_id, TaskStatus::Processing)
+        .await
+    {
+        error!(task_id, error = %e, "failed to mark task processing");
+    }
+}
+
+pub(crate) async fn set_task_ready(store: &SqliteStore, task_id: &str) {
+    if let Err(e) = store.update_task_status(task_id, TaskStatus::Ready).await {
+        error!(task_id, error = %e, "failed to mark task ready");
+    }
+}
+
+pub(crate) async fn set_task_failed(store: &SqliteStore, task_id: &str, reason: &str) {
+    if let Err(e) = store.mark_task_failed(task_id, reason).await {
+        error!(task_id, error = %e, "failed to mark task failed");
+    }
 }
 
 /// Enriched task data that includes computed storage updates and block height.
@@ -68,6 +125,11 @@ pub struct GasKillerTaskSource {
     queue_depth: TaskQueueDepth,
     validator: Arc<GasKillerValidator>,
     metrics: Option<Arc<MetricsCollector>>,
+    /// Durable store used to advance task status as work progresses. `None` in
+    /// store-less test/dev harnesses, where status transitions are simply skipped.
+    store: Option<SqliteStore>,
+    /// Shared with [`crate::executor::GasKillerHandler`]; see [`InFlightTask`].
+    in_flight: InFlightTask,
 }
 
 impl GasKillerTaskSource {
@@ -76,19 +138,23 @@ impl GasKillerTaskSource {
         queue_depth: TaskQueueDepth,
         validator: Arc<GasKillerValidator>,
         metrics: Option<Arc<MetricsCollector>>,
+        store: Option<SqliteStore>,
+        in_flight: InFlightTask,
     ) -> Self {
         Self {
             receiver,
             queue_depth,
             validator,
             metrics,
+            store,
+            in_flight,
         }
     }
 
     /// Blocks until a task arrives, maintaining the queue-depth metric.
     ///
     /// Returns `None` when the ingress side of the channel closed.
-    async fn wait_for_task(&mut self) -> Option<GasKillerTaskRequest> {
+    async fn wait_for_task(&mut self) -> Option<QueuedTask> {
         let task = self.receiver.recv().await?;
         let depth = self
             .queue_depth
@@ -235,18 +301,43 @@ impl GasKillerTaskSource {
     }
 }
 
+impl GasKillerTaskSource {
+    /// Settles the previous in-flight task as `failed` if the slot is still
+    /// occupied — the quorum skipped that task's height without ever reaching
+    /// `GasKillerHandler::handle_verification`. A no-op when the slot is already
+    /// empty (the common case: the previous task settled normally).
+    async fn settle_orphaned_task(&self) {
+        if let Some(store) = &self.store
+            && let Some(task_id) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
+        {
+            set_task_failed(store, &task_id, "aggregation height skipped by quorum").await;
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
     /// Dequeues the next ingress task and enriches it. Enrichment failures are
-    /// logged and dropped; the loop keeps waiting for the next task rather than
-    /// shutting the sequencer down.
+    /// logged, settled as `failed`, and dropped; the loop keeps waiting for the
+    /// next task rather than shutting the sequencer down.
     async fn next_task(&mut self) -> Option<SequencedTask<GasKillerTaskData>> {
         loop {
-            let task = self.wait_for_task().await?;
-            let enriched = match self.enrich(task).await {
+            self.settle_orphaned_task().await;
+
+            let QueuedTask { task_id, request } = self.wait_for_task().await?;
+
+            if let Some(store) = &self.store {
+                set_task_processing(store, &task_id).await;
+            }
+
+            let enriched = match self.enrich(request).await {
                 Ok(enriched) => enriched,
                 Err(e) => {
-                    error!(error = %e, "failed to enrich task, dropping request");
+                    error!(error = %e, task_id, "failed to enrich task, dropping request");
+                    if let Some(store) = &self.store {
+                        set_task_failed(store, &task_id, &format!("task enrichment failed: {e}"))
+                            .await;
+                    }
                     continue;
                 }
             };
@@ -258,9 +349,14 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
             if let Err(e) = task_data.validate() {
                 error!(
                     error = %e,
+                    task_id,
                     target = %task_data.target_address,
                     "enriched task exceeds wire limits, dropping request"
                 );
+                if let Some(store) = &self.store {
+                    set_task_failed(store, &task_id, &format!("task exceeds wire limits: {e}"))
+                        .await;
+                }
                 continue;
             }
 
@@ -284,6 +380,12 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
                 ..task_data.clone()
             };
 
+            // Record this task as in flight so `GasKillerHandler::handle_verification`
+            // can settle it once its height executes.
+            if let Ok(mut slot) = self.in_flight.lock() {
+                *slot = Some(task_id);
+            }
+
             return Some(SequencedTask {
                 task: task_data,
                 announce,
@@ -298,23 +400,31 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, U256};
 
-    #[tokio::test]
-    async fn test_channel_send_recv() {
-        let (sender, mut receiver) = task_channel();
-        let task = GasKillerTaskRequest {
+    fn sample_request(transition_index: Option<u64>) -> GasKillerTaskRequest {
+        GasKillerTaskRequest {
             body: crate::ingress::GasKillerTaskRequestBody {
                 target_address: Address::from([1u8; 20]),
                 call_data: vec![0x12, 0x34, 0x56, 0x78],
-                transition_index: Some(1),
+                transition_index,
                 from_address: Address::from([2u8; 20]),
                 value: U256::from(1000),
                 block_height: 12345,
             },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_channel_send_recv() {
+        let (sender, mut receiver) = task_channel();
+        let queued = QueuedTask {
+            task_id: "task-1".to_string(),
+            request: sample_request(Some(1)),
         };
 
-        sender.send(task.clone()).unwrap();
+        sender.send(queued.clone()).unwrap();
         let received = receiver.try_recv().unwrap();
-        assert_eq!(received.body.transition_index, Some(1));
+        assert_eq!(received.task_id, "task-1");
+        assert_eq!(received.request.body.transition_index, Some(1));
         assert!(receiver.try_recv().is_err());
     }
 
@@ -343,5 +453,151 @@ mod tests {
         assert_eq!(task_data.transition_index, 42);
         assert_eq!(task_data.target_address, Address::from([1u8; 20]));
         assert_eq!(task_data.chain_id, 1);
+    }
+
+    // -- task lifecycle transitions --
+
+    async fn store() -> SqliteStore {
+        SqliteStore::connect_in_memory()
+            .await
+            .expect("in-memory store should open and migrate")
+    }
+
+    async fn key_id(store: &SqliteStore) -> String {
+        store
+            .create_api_key(None, None)
+            .await
+            .expect("key creation should succeed")
+            .id
+    }
+
+    fn request_body() -> crate::ingress::GasKillerTaskRequestBody {
+        crate::ingress::GasKillerTaskRequestBody {
+            target_address: Address::from([0x11; 20]),
+            call_data: vec![0x12, 0x34, 0x56, 0x78],
+            transition_index: Some(0),
+            from_address: Address::from([0x22; 20]),
+            value: U256::ZERO,
+            block_height: 1,
+        }
+    }
+
+    fn unreachable_validator() -> Arc<GasKillerValidator> {
+        // Nothing listens on this port; RPC calls fail fast with connection refused
+        // rather than hanging, so `enrich` errors quickly and deterministically.
+        Arc::new(GasKillerValidator::with_rpc_url("http://localhost:8545"))
+    }
+
+    #[tokio::test]
+    async fn set_helpers_persist_status_transitions() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let done = store.create_task(&key, &request_body()).await.unwrap();
+        let doomed = store.create_task(&key, &request_body()).await.unwrap();
+
+        set_task_processing(&store, &done.id).await;
+        assert_eq!(
+            store.get_task(&done.id).await.unwrap().unwrap().status,
+            TaskStatus::Processing
+        );
+
+        set_task_ready(&store, &done.id).await;
+        assert_eq!(
+            store.get_task(&done.id).await.unwrap().unwrap().status,
+            TaskStatus::Ready
+        );
+
+        set_task_failed(&store, &doomed.id, "boom").await;
+        let failed = store.get_task(&doomed.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn settle_orphaned_task_marks_failed_and_clears_slot() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request_body()).await.unwrap();
+
+        let in_flight = in_flight_task();
+        *in_flight.lock().unwrap() = Some(task.id.clone());
+
+        let (_sender, receiver) = task_channel();
+        let source = GasKillerTaskSource::new(
+            receiver,
+            task_queue_depth(),
+            unreachable_validator(),
+            None,
+            Some(store.clone()),
+            in_flight.clone(),
+        );
+
+        source.settle_orphaned_task().await;
+
+        assert!(in_flight.lock().unwrap().is_none());
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Failed);
+        assert_eq!(
+            settled.error.as_deref(),
+            Some("aggregation height skipped by quorum")
+        );
+    }
+
+    #[tokio::test]
+    async fn settle_orphaned_task_is_noop_when_slot_empty() {
+        let store = store().await;
+        let (_sender, receiver) = task_channel();
+        let source = GasKillerTaskSource::new(
+            receiver,
+            task_queue_depth(),
+            unreachable_validator(),
+            None,
+            Some(store),
+            in_flight_task(),
+        );
+
+        // Must not panic when there is nothing in flight to settle.
+        source.settle_orphaned_task().await;
+    }
+
+    #[tokio::test]
+    async fn next_task_marks_processing_then_failed_on_enrich_error() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request_body()).await.unwrap();
+
+        let (sender, receiver) = task_channel();
+        let mut source = GasKillerTaskSource::new(
+            receiver,
+            task_queue_depth(),
+            unreachable_validator(),
+            None,
+            Some(store.clone()),
+            in_flight_task(),
+        );
+
+        sender
+            .send(QueuedTask {
+                task_id: task.id.clone(),
+                request: GasKillerTaskRequest {
+                    body: request_body(),
+                },
+            })
+            .unwrap();
+        // Closing the sender lets `next_task` observe a closed channel (and return
+        // `None`) once the one queued task's enrichment fails and it loops back
+        // for the next task, instead of blocking forever.
+        drop(sender);
+
+        assert!(source.next_task().await.is_none());
+
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Failed);
+        assert!(
+            settled
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("task enrichment failed"))
+        );
     }
 }

@@ -1,4 +1,6 @@
 use crate::metrics::MetricsCollector;
+use crate::sequencer::{InFlightTask, in_flight_task, set_task_failed, set_task_ready};
+use crate::store::SqliteStore;
 use crate::task_data::GasKillerTaskData;
 use alloy::network::Ethereum;
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
@@ -43,6 +45,13 @@ pub struct GasKillerHandler<P> {
     /// applied to every chain. When unset, per-chain defaults apply. Sourced from
     /// `EXECUTOR_RECEIPT_TIMEOUT_SECS`.
     receipt_timeout_override: Option<u64>,
+    /// Durable store used to settle a task's terminal status once its height
+    /// executes. `None` in store-less test/dev harnesses, where the transition is
+    /// skipped.
+    store: Option<SqliteStore>,
+    /// Shared with [`crate::sequencer::GasKillerTaskSource`]; see
+    /// [`crate::sequencer::InFlightTask`].
+    in_flight: InFlightTask,
 }
 
 impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> {
@@ -57,6 +66,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
             receipt_timeout_override: None,
+            store: None,
+            in_flight: in_flight_task(),
         }
     }
 
@@ -69,6 +80,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
             receipt_timeout_override: None,
+            store: None,
+            in_flight: in_flight_task(),
         }
     }
 
@@ -93,6 +106,21 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// the per-chain defaults.
     pub fn with_receipt_timeout(mut self, timeout_secs: Option<u64>) -> Self {
         self.receipt_timeout_override = timeout_secs;
+        self
+    }
+
+    /// Attaches the durable store so a settled height advances its task's terminal
+    /// status.
+    pub fn with_store(mut self, store: SqliteStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Shares the in-flight task slot with [`crate::sequencer::GasKillerTaskSource`].
+    /// Must be the same handle the task source is built with, or a settled height
+    /// won't map back to its task.
+    pub fn with_in_flight_task(mut self, in_flight: InFlightTask) -> Self {
+        self.in_flight = in_flight;
         self
     }
 
@@ -651,6 +679,23 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
             }
         }
 
+        // Settle the task this height was executing. `GasKillerTaskSource::next_task`
+        // set the in-flight slot when it dispatched this task; taking it here both
+        // records the outcome and clears the slot so a later skipped height is not
+        // mistaken for this one. The task carries no user-executable payload yet
+        // (that arrives with the payload-delivery work), so a successful execution
+        // is recorded as `ready` with the status transition alone.
+        if let Some(store) = &self.store
+            && let Some(task_id) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
+        {
+            match &result {
+                Ok(_) => set_task_ready(store, &task_id).await,
+                Err(e) => {
+                    set_task_failed(store, &task_id, &format!("verification failed: {e}")).await
+                }
+            }
+        }
+
         result
     }
 }
@@ -788,5 +833,129 @@ mod tests {
             handler.receipt_timeout(ChainRole::L2),
             Duration::from_secs(45)
         );
+    }
+
+    // -- task lifecycle settlement --
+
+    use crate::store::TaskStatus;
+    use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BN254 as RetrieverBN254;
+
+    fn empty_non_signer_data() -> RetrieverIBLSTypes::NonSignerStakesAndSignature {
+        RetrieverIBLSTypes::NonSignerStakesAndSignature {
+            nonSignerQuorumBitmapIndices: vec![],
+            nonSignerPubkeys: vec![],
+            quorumApks: vec![],
+            apkG2: RetrieverBN254::G2Point {
+                X: [U256::ZERO, U256::ZERO],
+                Y: [U256::ZERO, U256::ZERO],
+            },
+            sigma: RetrieverBN254::G1Point {
+                X: U256::ZERO,
+                Y: U256::ZERO,
+            },
+            quorumApkIndices: vec![],
+            totalStakeIndices: vec![],
+            nonSignerStakeIndices: vec![],
+        }
+    }
+
+    async fn store() -> SqliteStore {
+        SqliteStore::connect_in_memory()
+            .await
+            .expect("in-memory store should open and migrate")
+    }
+
+    async fn key_id(store: &SqliteStore) -> String {
+        store
+            .create_api_key(None, None)
+            .await
+            .expect("key creation should succeed")
+            .id
+    }
+
+    fn request_body() -> crate::ingress::GasKillerTaskRequestBody {
+        crate::ingress::GasKillerTaskRequestBody {
+            target_address: Address::from([0x11; 20]),
+            call_data: vec![0x12, 0x34, 0x56, 0x78],
+            transition_index: Some(0),
+            from_address: Address::from([0x22; 20]),
+            value: U256::ZERO,
+            block_height: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_verification_settles_task_failed_when_task_data_missing() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store
+            .create_task(&key, &request_body())
+            .await
+            .expect("task creation should succeed");
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let in_flight = in_flight_task();
+        *in_flight.lock().unwrap() = Some(task.id.clone());
+
+        let mut handler = GasKillerHandler::new(1, provider)
+            .with_store(store.clone())
+            .with_in_flight_task(in_flight.clone());
+
+        // `task_data: None` makes `execute_verification` fail immediately (before any
+        // provider call), exercising the settlement wiring without needing a real
+        // chain, ABI-encoded certificate, or registered operator set.
+        let result = handler
+            .handle_verification(
+                0,
+                FixedBytes::<32>::ZERO,
+                Bytes::new(),
+                0,
+                empty_non_signer_data(),
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            in_flight.lock().unwrap().is_none(),
+            "the slot must be cleared once the task settles"
+        );
+        let settled = store
+            .get_task(&task.id)
+            .await
+            .unwrap()
+            .expect("task should still exist");
+        assert_eq!(settled.status, TaskStatus::Failed);
+        assert!(
+            settled
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("verification failed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_verification_is_noop_on_store_when_slot_empty() {
+        let store = store().await;
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+
+        let mut handler = GasKillerHandler::new(1, provider).with_store(store);
+
+        // No task was recorded as in flight (e.g. a certificate for an unassigned
+        // height); settlement must not panic when there is nothing to settle.
+        let result = handler
+            .handle_verification(
+                0,
+                FixedBytes::<32>::ZERO,
+                Bytes::new(),
+                0,
+                empty_non_signer_data(),
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
     }
 }
