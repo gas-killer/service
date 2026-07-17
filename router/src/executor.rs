@@ -560,9 +560,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     }
 
     /// Schnorr twin of [`BlsSignatureVerificationHandler::handle_verification`]:
-    /// same metrics envelope, the proof arguments swap the BN254 non-signer struct
-    /// for the aggregate `(s, Raddr)` and the strictly ascending `non_signers`.
-    /// Called by [`crate::schnorr_submitter::SchnorrSubmitter`].
+    /// same metrics envelope and task settlement, the proof arguments swap the
+    /// BN254 non-signer struct for the aggregate `(s, Raddr)` and the strictly
+    /// ascending `non_signers`. Called by
+    /// [`crate::schnorr_submitter::SchnorrSubmitter`].
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_schnorr_verification(
         &mut self,
@@ -608,6 +609,21 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 }
                 Err(_) => {
                     m.aggregation_rounds_failed.inc();
+                }
+            }
+        }
+
+        // Settle the task this height was executing. `GasKillerTaskSource::next_task`
+        // set the in-flight slot when it dispatched this task; taking it here both
+        // records the outcome and clears the slot so a later skipped height is not
+        // mistaken for this one.
+        if let Some(store) = &self.store
+            && let Some(task_id) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
+        {
+            match &result {
+                Ok(_) => set_task_ready(store, &task_id).await,
+                Err(e) => {
+                    set_task_failed(store, &task_id, &format!("verification failed: {e}")).await
                 }
             }
         }
@@ -952,6 +968,83 @@ mod tests {
                 Bytes::new(),
                 0,
                 empty_non_signer_data(),
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_schnorr_verification_settles_task_failed_when_task_data_missing() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store
+            .create_task(&key, &request_body())
+            .await
+            .expect("task creation should succeed");
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let in_flight = in_flight_task();
+        *in_flight.lock().unwrap() = Some(task.id.clone());
+
+        let mut handler = GasKillerHandler::new(1, provider)
+            .with_store(store.clone())
+            .with_in_flight_task(in_flight.clone());
+
+        // `task_data: None` makes `execute_schnorr_verification` fail immediately
+        // (before any provider call), exercising the settlement wiring without
+        // needing a real chain or a valid aggregate signature.
+        let result = handler
+            .handle_schnorr_verification(
+                0,
+                FixedBytes::<32>::ZERO,
+                0,
+                U256::ZERO,
+                Address::ZERO,
+                vec![],
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            in_flight.lock().unwrap().is_none(),
+            "the slot must be cleared once the task settles"
+        );
+        let settled = store
+            .get_task(&task.id)
+            .await
+            .unwrap()
+            .expect("task should still exist");
+        assert_eq!(settled.status, TaskStatus::Failed);
+        assert!(
+            settled
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("verification failed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_schnorr_verification_is_noop_on_store_when_slot_empty() {
+        let store = store().await;
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+
+        let mut handler = GasKillerHandler::new(1, provider).with_store(store);
+
+        // No task was recorded as in flight; settlement must not panic when there
+        // is nothing to settle.
+        let result = handler
+            .handle_schnorr_verification(
+                0,
+                FixedBytes::<32>::ZERO,
+                0,
+                U256::ZERO,
+                Address::ZERO,
+                vec![],
                 None,
             )
             .await;
