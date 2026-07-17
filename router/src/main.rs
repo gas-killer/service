@@ -44,9 +44,9 @@ use gas_killer_common::{
     agg_activity_timeout, agg_window, load_key_from_file, p2p_message_backlog, p2p_quota_period,
     rebroadcast_interval, round_timeout, storage_directory,
 };
-use gas_killer_router::factories::{create_ingress, create_submitter};
+use gas_killer_router::factories::{create_ingress, create_submitter, requeue_incomplete_tasks};
 use gas_killer_router::metrics::MetricsCollector;
-use gas_killer_router::sequencer::GasKillerTaskSource;
+use gas_killer_router::sequencer::{GasKillerTaskSource, in_flight_task};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
@@ -445,7 +445,21 @@ fn main() {
         let ingress = create_ingress(Arc::clone(&metrics))
             .await
             .expect("Failed to create ingress");
+
+        // Resume work a previous router life acknowledged to a client but never
+        // finished: every task still `queued` or `processing` is rebuilt and
+        // pushed back through the same channel fresh submissions use.
+        if let Some(store) = &ingress.store {
+            requeue_incomplete_tasks(store, &ingress.sender, &ingress.queue_depth)
+                .await
+                .expect("Failed to re-enqueue incomplete tasks");
+        }
         let _task_sender = ingress.sender;
+
+        // Shared with the executor: the id of the task currently dispatched
+        // through the sequencer, so a certified height's execution result can be
+        // attributed back to its task. See `InFlightTask`.
+        let in_flight = in_flight_task();
 
         // On-chain submitter: consumes verified certificates, resolves heights.
         let submitter = create_submitter(
@@ -456,6 +470,8 @@ fn main() {
             Arc::clone(&metrics),
             Arc::clone(&dispatch_time),
             APPLICATION_NAMESPACE.to_vec(),
+            ingress.store.clone(),
+            in_flight.clone(),
         )
         .await
         .expect("Failed to create submitter");
@@ -486,6 +502,8 @@ fn main() {
             ingress.queue_depth,
             validator,
             Some(Arc::clone(&metrics)),
+            ingress.store,
+            in_flight,
         );
 
         // Sequencer: assigns heights, broadcasts directives to the operator set
