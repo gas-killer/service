@@ -144,6 +144,17 @@ jobs:
             L2_FORK_URL="https://rpc.gnosischain.com"
           fi
 
+          # The l2 / bridge / yield-distribution subsystem exercises BLS-interface
+          # target contracts (the bridge deploys a BLSSignatureChecker and a BLS
+          # yield distributor). The schnorr router can only drive
+          # SchnorrGasKillerSDK targets, so disable that subsystem for the schnorr
+          # leg; the l1 SchnorrArraySummation flow below is independent of it.
+          if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
+            L2_FEATURES=false
+          else
+            L2_FEATURES=true
+          fi
+
           # Install without --wait to avoid circular dependency
           # (pods wait for setup job, setup job is post-install hook)
           helm install gas-killer ./helm/gas-killer \
@@ -167,10 +178,10 @@ jobs:
             --set router.image.pullPolicy=Never \
             --set sharedData.storageClass="" \
             --set global.signatureScheme="$SIGNATURE_SCHEME" \
-            --set l2.enabled=true \
-            --set bridge.enabled=true \
-            --set bridge.waitForBridge=true \
-            --set yieldDistribution.enabled=true
+            --set l2.enabled=$L2_FEATURES \
+            --set bridge.enabled=$L2_FEATURES \
+            --set bridge.waitForBridge=$L2_FEATURES \
+            --set yieldDistribution.enabled=$L2_FEATURES
 
       - name: Check deployment status
         run: |
@@ -558,6 +569,10 @@ jobs:
           echo "✅ All $SUCCESSFUL triggers completed successfully!"
 
       - name: Trigger Yield Distribution via router
+        # The yield distributor is a BLS-interface GasKillerSDK target; the schnorr
+        # router only drives SchnorrGasKillerSDK targets, so this l2 subsystem runs
+        # in the bls leg only (it is disabled at helm-install time for schnorr).
+        if: matrix.signature_scheme == 'bls'
         run: |
           echo "=== Triggering Yield Distribution through router ==="
 
