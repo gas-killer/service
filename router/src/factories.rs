@@ -198,18 +198,6 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
 /// Each task is rebuilt from its persisted request and pushed through the same
 /// channel a fresh `POST /tasks` submission uses, so it flows through the normal
 /// dequeue → processing → ready/failed pipeline indistinguishably from new work.
-///
-/// This is at-least-once, not exactly-once: a task whose on-chain transition
-/// already landed just before the crash — the router died between a successful
-/// `verifyAndUpdate` and the `set_task_ready` write, or that write itself failed —
-/// is still `processing` and gets re-run. The contract's transition-index
-/// ordering makes the re-run's on-chain effect a no-op (the stale index is
-/// rejected, never double-applied), so there is no on-chain safety issue, but the
-/// rejection then surfaces as an execution error and the task is recorded
-/// `failed` even though its transition already succeeded — a false-negative
-/// status, not a false-positive one. Tightening this (an on-chain state check
-/// before re-running, or request dedup) is out of scope here; tracked in
-/// gas-killer/service#325.
 pub async fn requeue_incomplete_tasks(
     store: &SqliteStore,
     sender: &TaskSender,
