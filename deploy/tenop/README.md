@@ -38,3 +38,15 @@
 Deployed this run: fresh AVS registryCoordinator 0x574369b8…, wrapper
 0xac91Ef6C…; consumer `GasKillerChatSharded` 0x833c59D2…, seg engine
 0xEe2723cB…; 10 operators registered at weight 1e14 (op6 2e14).
+
+## Phase-1 (prefix resume) live results — 2026-07-17
+
+Single-slot consumer 0x16a066E8… (SDK d44f65d): settlePrefix rounds land
+(21s), and a resumed ask (`prefix_len=15` of 16) ran in **369s vs 852s full
+(2.3×) with a byte-identical answer**. API contract: a resume must STRICTLY
+extend its warmed prefix (`prefix_len < len(prompt_ids)`); warm the fixed
+template prefix, not the whole prompt. Set `GK_SIM_RPC` (publicnode) on
+router AND all nodes — without it, settlement-round validation hits drpc's
+broken eth_getProof and every node crash-loops. Fire warms/infers only into
+a strictly stable fleet (11/11 Running sustained); segments leased to pods
+that die stall until the segment timeout requeues them.
