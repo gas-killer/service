@@ -237,7 +237,7 @@ spec:
           serviceAccount: demo-expiry
           serviceAccountName: demo-expiry
           terminationGracePeriodSeconds: 30
-  schedule: 0 12 21 7 *
+  schedule: 0 12 26 7 *
   successfulJobsHistoryLimit: 3
   suspend: true
   timeZone: Etc/UTC
