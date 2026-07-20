@@ -124,8 +124,8 @@ fn effective_nonce(r1_agg: &AffinePoint, r2_agg: &AffinePoint, b: &Scalar) -> Af
 /// malicious coordinator that gets a victim to sign twice under the *same* `SecNonce` (by
 /// varying the other signers' nonces so `R1_agg`/`R2_agg` differ) obtains two linear
 /// equations and can solve for the victim's key. Consume-by-value enforces single-use within
-/// one process; the live node/router integration MUST additionally persist a per-session
-/// "nonce spent" marker so a restart cannot replay a nonce (see `DESIGN.md`).
+/// one process; sessions live only in memory, so a node restart forgets in-flight secret
+/// nonces rather than risk replaying one (see `node::schnorr_participant`).
 #[derive(Clone)]
 pub struct SigningContext {
     /// The chosen aggregate key `X_agg(S)` over the signer subset `S`.

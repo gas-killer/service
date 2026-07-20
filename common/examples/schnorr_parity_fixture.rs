@@ -6,8 +6,8 @@
 //! ```
 //!
 //! The printed values are pasted verbatim into the Solidity test so the *same* aggregate
-//! signature this Rust protocol assembles is verified through the real on-chain path — the
-//! byte-for-byte Rust⇄Solidity guarantee (mirrors the ECDSA `parity_fixture.rs`).
+//! signature this Rust protocol assembles is verified through the real on-chain path —
+//! a byte-for-byte Rust⇄Solidity guarantee.
 
 use alloy_primitives::{hex, keccak256};
 use gas_killer_common::schnorr::musig::{Coordinator, Participant};

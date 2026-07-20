@@ -1,9 +1,7 @@
 //! secp256k1 **aggregate Schnorr** signatures for the Gas Killer AVS.
 //!
-//! This is the Schnorr equivalent of the ECDSA migration (service #309 / solidity-sdk
-//! #49). Where ECDSA submits `N` individually-recovered signatures, an aggregate Schnorr
-//! signature is a **single** `(s, R)` pair verified on-chain in constant gas with one
-//! `ecrecover` — regardless of how many operators signed.
+//! An aggregate Schnorr signature is a **single** `(s, R)` pair verified on-chain
+//! in constant gas with one `ecrecover` — regardless of how many operators signed.
 //!
 //! # Convention (audited: Chronicle/MakerDAO "Scribe")
 //!
@@ -31,9 +29,9 @@
 //! # What this module is (and is not)
 //!
 //! This is the cryptographic core + the [`musig`] two-round signing protocol, fully unit
-//! tested against the exact on-chain `ecrecover` identity. It is deliberately independent
-//! of the `ecdsa` module. Wiring the interactive protocol into the live node/router p2p
-//! binaries is a separate integration step (see `DESIGN.md`).
+//! tested against the exact on-chain `ecrecover` identity. Wiring the interactive
+//! protocol into the live node/router p2p binaries lives in
+//! `node::schnorr_participant` and `router::schnorr_coordinator`.
 
 pub mod musig;
 pub mod wire;
@@ -159,13 +157,13 @@ impl PrivateKey {
     }
 }
 
-/// Parses a private key from the operator key-file formats `get_signer` accepts for
-/// ECDSA: `0x`-prefixed hex, bare 64-char hex, or a legacy decimal scalar.
+/// Parses a private key from an operator key-file value: `0x`-prefixed hex, bare
+/// 64-char hex, or a legacy decimal scalar.
 ///
 /// The Schnorr key IS the operator's existing secp256k1 key — same scalar, same
 /// public-key point, and (because the registry identity is `keccak256(x ‖ y)[12..]`)
-/// the same Ethereum address as the operator's p2p/EigenLayer identity. Returns
-/// `None` on malformed input, a zero scalar, or a value ≥ the group order.
+/// the same Ethereum address as the operator's EigenLayer identity. Returns `None`
+/// on malformed input, a zero scalar, or a value ≥ the group order.
 pub fn private_key_from_hex(key: &str) -> Option<PrivateKey> {
     let key = key.trim();
     let bytes: [u8; 32] = if let Some(hex) = key
