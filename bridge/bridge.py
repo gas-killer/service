@@ -52,7 +52,7 @@ MODELS = {
             "stop0": 151645, "stop1": 151643, "seq_cap": 1024,
             "stages": 4, "argmax_shards": 2,
         },
-        "max_prompt": 992, "max_new_cap": 8,
+        "max_prompt": 992, "max_new_cap": 24,
     },
     "qwen35": {
         "consumer": "0xfd0EF988216D0346BF115530387021c1b699336d",
@@ -220,9 +220,15 @@ class H(BaseHTTPRequestHandler):
             model = body["model"]
             cfg = MODELS[model]
             prompt_ids = [int(t) for t in body["prompt_ids"]]
-            max_new = min(int(body.get("max_new", 8)), cfg["max_new_cap"])
+            max_new = int(body.get("max_new", 8))
+            if not (1 <= max_new <= cfg["max_new_cap"]):
+                raise ValueError(f"max_new must be 1..{cfg['max_new_cap']}")
             if not (0 < len(prompt_ids) <= cfg["max_prompt"]):
                 raise ValueError(f"prompt length must be 1..{cfg['max_prompt']}")
+            if len(prompt_ids) + max_new > cfg["req"]["seq_cap"]:
+                raise ValueError(
+                    f"prompt ({len(prompt_ids)}) + max_new ({max_new}) exceeds the "
+                    f"model's sequence cap ({cfg['req']['seq_cap']})")
             if any(t < 0 or t >= cfg["req"]["vocab"] for t in prompt_ids):
                 raise ValueError("token id out of vocab range")
         except Exception as e:  # noqa: BLE001
