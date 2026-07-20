@@ -42,6 +42,7 @@ eigen-logging = { workspace = true }
 # Internal crates
 gas-killer-common = { workspace = true }
 governor = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

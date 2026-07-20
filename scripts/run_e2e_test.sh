@@ -18,6 +18,14 @@ LOG_DIR="$PROJECT_ROOT/logs"
 # reads the same default for the router so the two stay in sync.
 export ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 
+# Capture the caller's signature scheme (default: bls) before `cp example.env .env`
+# and `source ../.env` can let the example default win. Re-exported after the
+# source below so it reaches the deploy binary; docker-compose reads it directly
+# from the environment for the node/router containers.
+SIGNATURE_SCHEME_CHOICE="${SIGNATURE_SCHEME:-bls}"
+export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
+echo "Signature scheme: $SIGNATURE_SCHEME_CHOICE"
+
 # Track if test passed
 TEST_PASSED=false
 
@@ -149,6 +157,9 @@ cd "$PROJECT_ROOT/scripts"
 
 # Source environment and run deployment
 source ../.env
+# `source ../.env` may reset SIGNATURE_SCHEME to the example default; restore the
+# caller's choice so deploy_array_summation picks the right stack.
+export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
