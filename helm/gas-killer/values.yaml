@@ -326,6 +326,10 @@ router:
   # under L1 mempool congestion or RPC degradation. Leave empty to use the per-chain
   # defaults baked into the router (L1: 120s, L2: 30s).
   receiptTimeoutSecs: ""
+  # Blocks past the aggregation reference block for which a completed task's rendered,
+  # user-signable payload stays valid (its valid_until_block). Must be <= BLOCK_STALE_MEASURE
+  # so a payload never outlives the contract's operator-set window.
+  payloadBlockBuffer: "50"
   ingress:
     enabled: true
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation.

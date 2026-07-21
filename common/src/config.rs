@@ -510,6 +510,32 @@ pub fn block_stale_measure() -> u64 {
         .unwrap_or(DEFAULT_BLOCK_STALE_MEASURE)
 }
 
+/// Grace window, in blocks past the aggregation reference block, for which a rendered
+/// user-executable payload stays valid. Used to set the payload's `valid_until_block`.
+pub const DEFAULT_PAYLOAD_BLOCK_BUFFER: u64 = 50;
+
+// A payload rendered against a reference block is only submittable while
+// `referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number`, so the default buffer must stay
+// within the default staleness window or `valid_until_block` would promise a payload the chain
+// already rejects. Enforced at compile time to keep the two defaults in lockstep.
+const _: () = assert!(DEFAULT_PAYLOAD_BLOCK_BUFFER <= DEFAULT_BLOCK_STALE_MEASURE);
+
+/// Reads the payload validity buffer from `PAYLOAD_BLOCK_BUFFER`, defaulting to
+/// [`DEFAULT_PAYLOAD_BLOCK_BUFFER`].
+///
+/// Must stay within the contract's operator-set window: on-chain, `verifyAndUpdate` requires
+/// `referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number`, so a payload rendered against a
+/// reference block only remains submittable for `BLOCK_STALE_MEASURE` blocks. Keeping the buffer
+/// `<= block_stale_measure()` guarantees `valid_until_block` never promises a payload past the
+/// point the chain would reject it.
+pub fn payload_block_buffer() -> u64 {
+    env::var("PAYLOAD_BLOCK_BUFFER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_PAYLOAD_BLOCK_BUFFER)
+}
+
 /// Runtime configuration for the speculative executor pre-build loop.
 ///
 /// The loop watches each chain's head and pre-builds the EVMSketch executor for the
@@ -725,5 +751,12 @@ mod tests {
         assert_eq!(DEFAULT_AGG_ACTIVITY_TIMEOUT, 256);
         // The default window must construct the NonZeroU64 the engine config needs.
         assert_eq!(agg_window().get(), DEFAULT_AGG_WINDOW);
+    }
+
+    #[test]
+    fn payload_block_buffer_defaults_are_sane() {
+        assert_eq!(DEFAULT_PAYLOAD_BLOCK_BUFFER, 50);
+        // The buffer-within-staleness-window invariant is enforced at compile time next to the
+        // constant definitions (`const _: () = assert!(...)`).
     }
 }

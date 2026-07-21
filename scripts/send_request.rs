@@ -1,7 +1,11 @@
+use alloy::network::{EthereumWallet, TransactionBuilder};
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::types::TransactionRequest;
+use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use bindings::arraysummation::ArraySummation::sumCall;
+use gas_killer_common::PayloadView;
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
 use serde_json::json;
 use std::env;
@@ -185,64 +189,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .ok()
         .filter(|k| !k.is_empty());
 
-    // Poll currentSum until it changes or timeout
-    use tokio::time::{Duration, Instant, sleep};
-    let max_wait_time = Duration::from_secs(150);
-    let check_interval = Duration::from_secs(10);
-    let start_time = Instant::now();
+    // The router no longer submits `verifyAndUpdate` itself: it renders a ready-to-sign payload.
+    // Poll until the task is `ready`, extract that payload, submit it ourselves with a funded key,
+    // then confirm the on-chain effect (`currentSum` moving) — the same end-to-end assertion, now
+    // driven by the user's submission rather than a router-broadcast transaction.
+    let http_rpc = env::var("HTTP_RPC")?;
+    // Prefer FUNDED_KEY (the Anvil dev account funded on the fork) so a hand-edited `.env` with a
+    // real-but-unfunded PRIVATE_KEY doesn't accidentally break local submission.
+    let submit_key = env::var("FUNDED_KEY")
+        .or_else(|_| env::var("PRIVATE_KEY"))
+        .map_err(|_| "FUNDED_KEY or PRIVATE_KEY required to submit the payload")?;
 
-    loop {
-        let current_sum = array_contract
-            .currentSum()
-            .call()
-            .await
-            .map_err(|e| format!("Failed to read currentSum after trigger: {}", e))?
-            .to::<u64>();
+    let payload =
+        wait_for_ready_payload(&client, &task_status_url, api_key.as_deref(), &task_id).await?;
 
-        println!(
-            "currentSum: {}, Initial: {}, Elapsed: {:.1}s",
-            current_sum,
-            initial_sum,
-            start_time.elapsed().as_secs_f64()
-        );
+    submit_payload(&payload, &http_rpc, &submit_key).await?;
 
-        if current_sum != initial_sum {
-            println!(
-                "✅ currentSum changed from {} to {} — confirming task {} reaches 'ready'",
-                initial_sum, current_sum, task_id
-            );
-            return confirm_task_ready(&client, &task_status_url, api_key.as_deref(), &task_id)
-                .await;
-        }
-
-        if start_time.elapsed() >= max_wait_time {
-            println!(
-                "❌ TIMEOUT: currentSum unchanged ({}), waited {:.1} seconds",
-                current_sum,
-                max_wait_time.as_secs_f64()
-            );
-            return Err("Timeout waiting for currentSum to change".into());
-        }
-
-        sleep(check_interval).await;
+    let final_sum = array_contract
+        .currentSum()
+        .call()
+        .await
+        .map_err(|e| format!("Failed to read currentSum after submission: {}", e))?
+        .to::<u64>();
+    if final_sum == initial_sum {
+        return Err(format!(
+            "currentSum unchanged ({final_sum}) after submitting the payload; verifyAndUpdate had no effect"
+        )
+        .into());
     }
+    println!(
+        "✅ SUCCESS: currentSum changed {} → {} after the user-submitted verifyAndUpdate (task {})",
+        initial_sum, final_sum, task_id
+    );
+    Ok(())
 }
 
-/// Confirms `task_id` settles to `ready` shortly after `currentSum` moves,
-/// exercising the status-transition wiring (not just the on-chain effect).
+/// Polls `GET /tasks/{id}` until the task is `ready` and returns its rendered payload.
 ///
-/// The on-chain confirmation and the `ready` write happen back-to-back inside the
-/// same `handle_verification` call (see `router/src/executor.rs`), so this is a
-/// short, bounded follow-up poll — not another long wait for a fresh aggregation
-/// round.
-async fn confirm_task_ready(
+/// A `ready` response carries the transaction request the user submits as-is. A `failed`/`expired`
+/// settlement, or a non-success status (e.g. `409 PAYLOAD_EXPIRED` if the payload went stale before
+/// we submitted), is terminal and surfaces as an error.
+async fn wait_for_ready_payload(
     client: &reqwest::Client,
     task_status_url: &Url,
     api_key: Option<&str>,
     task_id: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<PayloadView, Box<dyn std::error::Error + Send + Sync>> {
     use tokio::time::{Duration, Instant, sleep};
-    let max_wait_time = Duration::from_secs(60);
+    let max_wait_time = Duration::from_secs(150);
     let check_interval = Duration::from_secs(5);
     let start_time = Instant::now();
 
@@ -251,13 +245,28 @@ async fn confirm_task_ready(
         if let Some(api_key) = api_key {
             req = req.header("Authorization", format!("Bearer {api_key}"));
         }
-        let body: serde_json::Value = req
+        let resp = req
             .send()
             .await
-            .map_err(|e| format!("Failed to poll task {}: {}", task_id, e))?
+            .map_err(|e| format!("Failed to poll task {}: {}", task_id, e))?;
+        let status_code = resp.status();
+        let body: serde_json::Value = resp
             .json()
             .await
             .map_err(|e| format!("Failed to parse task {} response: {}", task_id, e))?;
+
+        // A non-success status (e.g. 409 PAYLOAD_EXPIRED) carries an error envelope, not a task.
+        if !status_code.is_success() {
+            let code = body
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("UNKNOWN");
+            return Err(
+                format!("Task {task_id} status query returned {status_code} ({code})").into(),
+            );
+        }
+
         let task_status = body
             .get("status")
             .and_then(|s| s.as_str())
@@ -273,8 +282,21 @@ async fn confirm_task_ready(
 
         match task_status.as_str() {
             "ready" => {
-                println!("✅ SUCCESS: task {} reached 'ready'", task_id);
-                return Ok(());
+                let payload_value = body
+                    .get("payload")
+                    .cloned()
+                    .ok_or_else(|| format!("ready task {task_id} carried no payload"))?;
+                let payload: PayloadView = serde_json::from_value(payload_value)
+                    .map_err(|e| format!("failed to parse task {task_id} payload: {e}"))?;
+                println!(
+                    "✅ task {} ready: to={:?} chain_id={} estimated_gas={} valid_until_block={}",
+                    task_id,
+                    payload.to,
+                    payload.chain_id,
+                    payload.estimated_gas,
+                    payload.valid_until_block
+                );
+                return Ok(payload);
             }
             "failed" | "expired" => {
                 let error = body
@@ -290,7 +312,7 @@ async fn confirm_task_ready(
 
         if start_time.elapsed() >= max_wait_time {
             return Err(format!(
-                "Task {} did not reach 'ready' within {:.0}s of currentSum changing (last status: {})",
+                "Task {} did not reach 'ready' within {:.0}s (last status: {})",
                 task_id,
                 max_wait_time.as_secs_f64(),
                 task_status
@@ -300,6 +322,53 @@ async fn confirm_task_ready(
 
         sleep(check_interval).await;
     }
+}
+
+/// Signs and submits a rendered payload with a funded key, mirroring what an integrator does, and
+/// asserts the `verifyAndUpdate` transaction lands successfully.
+async fn submit_payload(
+    payload: &PayloadView,
+    http_rpc: &str,
+    private_key: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let signer: PrivateKeySigner = private_key
+        .parse()
+        .map_err(|_| "invalid FUNDED_KEY/PRIVATE_KEY format")?;
+    let sender = signer.address();
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(http_rpc.parse().map_err(|_| "invalid HTTP_RPC URL")?);
+
+    let tx = TransactionRequest::default()
+        .with_to(payload.to)
+        .with_value(payload.value)
+        .with_input(payload.data.clone());
+
+    println!(
+        "Submitting verifyAndUpdate as {sender} to {:?} ({} bytes calldata)",
+        payload.to,
+        payload.data.len()
+    );
+    let pending = provider
+        .send_transaction(tx)
+        .await
+        .map_err(|e| format!("failed to send verifyAndUpdate: {e}"))?;
+    let receipt = pending
+        .get_receipt()
+        .await
+        .map_err(|e| format!("failed to get verifyAndUpdate receipt: {e}"))?;
+    if !receipt.status() {
+        return Err(format!(
+            "verifyAndUpdate reverted (tx {:?}, block {:?})",
+            receipt.transaction_hash, receipt.block_number
+        )
+        .into());
+    }
+    println!(
+        "✅ verifyAndUpdate landed: tx {:?} in block {:?}",
+        receipt.transaction_hash, receipt.block_number
+    );
+    Ok(())
 }
 
 fn env_var(name: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
