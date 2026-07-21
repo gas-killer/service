@@ -189,10 +189,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .ok()
         .filter(|k| !k.is_empty());
 
-    // The router no longer submits `verifyAndUpdate` itself: it renders a ready-to-sign payload.
-    // Poll until the task is `ready`, extract that payload, submit it ourselves with a funded key,
-    // then confirm the on-chain effect (`currentSum` moving) — the same end-to-end assertion, now
-    // driven by the user's submission rather than a router-broadcast transaction.
+    // Poll until the task is `ready`, extract the rendered payload, submit it with a funded key,
+    // then confirm the on-chain effect by checking `currentSum` moved.
     let http_rpc = env::var("HTTP_RPC")?;
     // Prefer FUNDED_KEY (the Anvil dev account funded on the fork) so a hand-edited `.env` with a
     // real-but-unfunded PRIVATE_KEY doesn't accidentally break local submission.

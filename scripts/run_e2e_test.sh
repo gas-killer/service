@@ -262,16 +262,15 @@ echo -e "${GREEN}Minted API key for task submission${NC}"
 echo -e "${YELLOW}Step 10: Triggering task and verifying execution...${NC}"
 echo "Sending a test task to the router..."
 cd "$PROJECT_ROOT/scripts"
-# send_request now submits the router-rendered payload itself and prints the user-submitted
-# verifyAndUpdate tx hash; capture its output so the diagnostics below can trace that tx. The
-# `tee` pipeline exits 0, so `set -e` does not abort here — the real status comes from PIPESTATUS.
+# send_request signs and submits the rendered payload and prints the verifyAndUpdate tx hash;
+# capture its output so the diagnostics below can trace that tx. The `tee` pipeline exits 0, so
+# `set -e` does not abort here — the real status comes from PIPESTATUS.
 SEND_REQUEST_LOG="$(mktemp)"
 cargo run --release -p scripts --bin send_request 2>&1 | tee "$SEND_REQUEST_LOG"
 TRIGGER_STATUS=${PIPESTATUS[0]}
 cd "$PROJECT_ROOT"
 
-# The user-submitted verifyAndUpdate tx hash, extracted from send_request's output (the router no
-# longer broadcasts, so it is not in the router logs).
+# The user-submitted verifyAndUpdate tx hash, extracted from send_request's output.
 USER_TX_HASH=$(grep -oE 'landed: tx 0x[a-fA-F0-9]{64}' "$SEND_REQUEST_LOG" | sed -E 's/.*tx //' | tail -1)
 
 if [ $TRIGGER_STATUS -eq 0 ]; then

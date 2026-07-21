@@ -68,8 +68,8 @@ fn reshape_non_signer(
 
 /// The [`ExecutionResult`] a completion handler returns for a rendered (non-broadcast) round.
 ///
-/// The v1-beta completion path persists the payload/bundle rather than submitting a transaction,
-/// so there is no receipt to report; the submitter only needs an `Ok` to mark the height settled.
+/// A rendered round persists the payload/bundle and submits no transaction, so there is no
+/// receipt to report; the submitter only needs an `Ok` to mark the height settled.
 fn rendered_execution_result() -> ExecutionResult {
     ExecutionResult {
         transaction_hash: String::new(),
@@ -408,11 +408,11 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// Broadcasts a BLS `verifyAndUpdate` on-chain from the router's funded wallet and waits for
     /// the receipt.
     ///
-    /// This is the **auto-execute** path, retained as the entry point for the future
-    /// per-API-key auto-execute / account-abstraction tier that submits the round on the user's
-    /// behalf. The v1-beta completion path renders a user-signed payload via
-    /// [`Self::render_bls_payload`] instead of calling this; both share [`Self::prepare_bls`], so
-    /// switching between them later is a localized branch.
+    /// This is the **auto-execute** path: the entry point for the per-API-key auto-execute /
+    /// account-abstraction tier that submits the round on the user's behalf. The completion
+    /// handler renders a user-signed payload via [`Self::render_bls_payload`]; both share
+    /// [`Self::prepare_bls`], so a per-key branch between rendering and broadcasting stays
+    /// localized.
     pub async fn execute_verification(
         &mut self,
         msg_hash: FixedBytes<32>,
@@ -736,10 +736,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         })
     }
 
-    /// Schnorr twin of [`Self::execute_verification`] — the **auto-execute** broadcast path,
-    /// retained for the future per-API-key auto-execute / account-abstraction tier. The v1-beta
-    /// completion path renders a user-signed payload via [`Self::render_schnorr_payload`]
-    /// instead; both share [`Self::prepare_schnorr`].
+    /// Schnorr twin of [`Self::execute_verification`] — the **auto-execute** broadcast path for
+    /// the per-API-key auto-execute / account-abstraction tier. The completion handler renders a
+    /// user-signed payload via [`Self::render_schnorr_payload`]; both share
+    /// [`Self::prepare_schnorr`].
     pub async fn execute_schnorr_verification(
         &mut self,
         msg_hash: FixedBytes<32>,
