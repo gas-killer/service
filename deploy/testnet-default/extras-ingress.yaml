@@ -1,0 +1,35 @@
+# RECONSTRUCTION (2026-07-21): the live "gas-killer-extras" Ingress was created
+# imperatively during operations and never exported before the expiry teardown.
+# It exposes gk-sim-proxy's /forkhead publicly so the bridge/frontend can pin task
+# block heights at the sim fork's head. It exists as a STANDALONE ingress precisely
+# because helm re-renders wiped /forkhead when it was patched onto the chart ingress
+# (happened 3x). Shape mirrors the tracked bridge ingress; re-verify host TLS
+# annotations against the chart ingress after applying.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gas-killer-extras
+  namespace: default
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: testnet.gaskiller.xyz
+      http:
+        paths:
+          - path: /forkhead
+            pathType: Prefix
+            backend:
+              service:
+                name: gk-sim-proxy
+                port:
+                  number: 8545
+    - host: 8-228-87-183.nip.io
+      http:
+        paths:
+          - path: /forkhead
+            pathType: Prefix
+            backend:
+              service:
+                name: gk-sim-proxy
+                port:
+                  number: 8545
