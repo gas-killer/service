@@ -835,33 +835,39 @@ async fn render_or_reject_payload<P: Provider + Clone>(
         None => return Ok(Some(payload)),
     };
 
+    // Block-window check first (cheapest), short-circuiting before the contract call. It is
+    // measured on the operator-set chain (L1): the certificate's reference block — from which
+    // `valid_until_block` is derived — is an L1 block, since operator state lives on L1, even when
+    // the target executes on L2. Comparing against the target chain's height would falsely expire
+    // every L2 payload. If no L1 provider is configured, skip the window check.
+    if let Some(l1_provider) = providers.get(&ChainRole::L1) {
+        let current_block = match freshness.cached_block_number(ChainRole::L1) {
+            Some(block) => block,
+            None => {
+                let block = l1_provider
+                    .get_block_number()
+                    .await
+                    .map_err(|e| ApiError::from(OnchainValidationError::RpcError(e.to_string())))?;
+                freshness.store_block_number(ChainRole::L1, block);
+                block
+            }
+        };
+        if current_block > bundle.valid_until_block {
+            let reason = format!(
+                "payload valid_until_block {} passed (current block {}); re-request",
+                bundle.valid_until_block, current_block
+            );
+            let _ = store.mark_task_expired(&task.id, &reason).await;
+            return Err(ApiError::payload_expired(reason));
+        }
+    }
+
+    // Consumed-bundle check on the target chain: `stateTransitionCount` is target-contract state,
+    // so it is read from the chain the target is deployed on (L1 or L2).
     let role = detect_contract_chain(providers, bundle.target_address).await?;
     let provider = providers
         .get(&role)
         .ok_or_else(|| ApiError::internal("no provider for detected chain"))?;
-
-    // Cheapest check first — the block window — short-circuiting before the contract call.
-    let current_block = match freshness.cached_block_number(role) {
-        Some(block) => block,
-        None => {
-            let block = provider
-                .get_block_number()
-                .await
-                .map_err(|e| ApiError::from(OnchainValidationError::RpcError(e.to_string())))?;
-            freshness.store_block_number(role, block);
-            block
-        }
-    };
-    if current_block > bundle.valid_until_block {
-        let reason = format!(
-            "payload valid_until_block {} passed (current block {}); re-request",
-            bundle.valid_until_block, current_block
-        );
-        let _ = store.mark_task_expired(&task.id, &reason).await;
-        return Err(ApiError::payload_expired(reason));
-    }
-
-    // Consumed-bundle check: the on-chain transition index has advanced past the bundle's.
     let current_count = match freshness.cached_transition_count(role, bundle.target_address) {
         Some(count) => count,
         None => {
@@ -2376,9 +2382,9 @@ mod tests {
             let task = store.get_task(&id).await.unwrap().unwrap();
 
             let asserter = Asserter::new();
-            asserter.push_success(&Bytes::from(vec![0x60, 0x00])); // detect_contract_chain: L1 code
-            asserter.push_success(&U64::from(90u64)); // eth_blockNumber, within window
-            asserter.push_success(&Bytes::from(U256::from(3u64).abi_encode())); // count == index
+            asserter.push_success(&U64::from(90u64)); // block-window: L1 eth_blockNumber, within window
+            asserter.push_success(&Bytes::from(vec![0x60, 0x00])); // detect_contract_chain: target code
+            asserter.push_success(&Bytes::from(U256::from(3u64).abi_encode())); // stateTransitionCount == index
 
             let provider = ProviderBuilder::new().connect_mocked_client(asserter);
             let mut providers = HashMap::new();
@@ -2391,7 +2397,7 @@ mod tests {
 
         #[tokio::test]
         async fn stale_check_rejects_when_block_past_valid_until() {
-            use alloy_primitives::{Bytes, U64};
+            use alloy_primitives::U64;
             use alloy_provider::{ProviderBuilder, mock::Asserter};
 
             let payload = fresh_payload(50);
@@ -2400,10 +2406,10 @@ mod tests {
             let task = store.get_task(&id).await.unwrap().unwrap();
 
             let asserter = Asserter::new();
-            asserter.push_success(&Bytes::from(vec![0x60, 0x00])); // detect_contract_chain: L1 code
-            asserter.push_success(&U64::from(51u64)); // past valid_until_block (50)
-            // No stateTransitionCount response is queued: if the block check did not short-circuit,
-            // the contract call would drain the empty asserter and this test would fail.
+            asserter.push_success(&U64::from(51u64)); // block-window: L1 block past valid_until_block (50)
+            // Nothing else is queued: the block-window check short-circuits before detecting the
+            // target chain or reading stateTransitionCount, so any further RPC would drain the
+            // empty asserter and fail the test.
 
             let provider = ProviderBuilder::new().connect_mocked_client(asserter);
             let mut providers = HashMap::new();
@@ -2433,9 +2439,9 @@ mod tests {
             let task = store.get_task(&id).await.unwrap().unwrap();
 
             let asserter = Asserter::new();
-            asserter.push_success(&Bytes::from(vec![0x60, 0x00])); // detect_contract_chain: L1 code
-            asserter.push_success(&U64::from(40u64)); // within window
-            asserter.push_success(&Bytes::from(U256::from(9u64).abi_encode())); // count 9 != index 3
+            asserter.push_success(&U64::from(40u64)); // block-window: L1 block within window
+            asserter.push_success(&Bytes::from(vec![0x60, 0x00])); // detect_contract_chain: target code
+            asserter.push_success(&Bytes::from(U256::from(9u64).abi_encode())); // stateTransitionCount 9 != index 3
 
             let provider = ProviderBuilder::new().connect_mocked_client(asserter);
             let mut providers = HashMap::new();
@@ -2460,7 +2466,7 @@ mod tests {
             let task = store.get_task(&id).await.unwrap().unwrap();
 
             let asserter = Asserter::new();
-            asserter.push_failure_msg("rpc down"); // detect_contract_chain get_code fails
+            asserter.push_failure_msg("rpc down"); // block-window: L1 get_block_number fails
 
             let provider = ProviderBuilder::new().connect_mocked_client(asserter);
             let mut providers = HashMap::new();

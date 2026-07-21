@@ -643,11 +643,18 @@ jobs:
           # Poll the task until the router renders its payload (or it fails), up to 300s.
           echo "Waiting for BLS aggregation to render the payload..."
           READY_TASK=""
+          DUMPED_UNKNOWN=0
           for i in $(seq 1 60); do
             sleep 5
             TASK=$(curl -s -H "Authorization: Bearer $GAS_KILLER_API_KEY" "$ROUTER_URL/tasks/$TASK_ID")
             STATUS=$(echo "$TASK" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")
             echo "  [$((i * 5))s] task status: $STATUS"
+            # Surface the raw response once if it isn't a recognizable task view (e.g. an error
+            # envelope), so an unexpected status query result is diagnosable from the log.
+            if [ "$STATUS" = "unknown" ] && [ "$DUMPED_UNKNOWN" = "0" ]; then
+              echo "  raw status response: $TASK"
+              DUMPED_UNKNOWN=1
+            fi
             case "$STATUS" in
               ready)
                 READY_TASK="$TASK"
