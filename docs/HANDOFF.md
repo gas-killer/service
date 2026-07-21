@@ -8,7 +8,9 @@ quorum and settled on Sepolia in one BLS-verified transaction.
 
 ## 0. Current status — READ FIRST
 
-**The demo backend is DOWN.** The `demo-expiry` CronJob fired today at 12:00 UTC
+**UPDATE 2026-07-21 ~20:40 UTC: revived.** The teardown turned out to be partial — the cron's GKE REST pool deletion failed on missing IAM (node SA lacked container permissions; scopes were fine) and the job hit its 3600s deadline before self-suspending. Only the sim stack was deleted and the node pins stripped; pools, PVC, secrets and the helm release all survived. Revival = re-apply sim-fork-stack + extras-ingress, re-patch the 4 nodeSelector pins, redeploy the bridge configmap. `roles/container.clusterAdmin` has now been granted to the node compute SA so the next expiry (re-dated `30 20 25 7 *` = July 25 20:30 UTC, armed) can actually delete the pools. Original incident text kept below for the record.
+
+**The demo backend was DOWN.** The `demo-expiry` CronJob fired today at 12:00 UTC
 (schedule `0 12 21 7 *`, Etc/UTC). The planned extension to July 26 was blocked by an
 expired gcloud auth token ("Reauthentication failed. cannot prompt during non-interactive
 execution") — a recurring blocker that only an interactive `gcloud auth login` clears.
