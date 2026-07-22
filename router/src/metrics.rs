@@ -131,7 +131,7 @@ impl MetricsCollector {
 
         let task_queue_depth = Gauge::default();
         registry.register(
-            "gas_killer_task_queue_depth",
+            "gas_killer_queue_depth",
             "Current number of tasks in the ingress queue awaiting processing",
             task_queue_depth.clone(),
         );

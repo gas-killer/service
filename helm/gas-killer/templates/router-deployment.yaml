@@ -293,6 +293,8 @@ spec:
               value: {{ .Values.router.persistence.mountPath | quote }}
             - name: INGRESS_TIMEOUT_MS
               value: {{ .Values.router.ingress.timeoutMs | quote }}
+            - name: MAX_QUEUE_DEPTH
+              value: {{ .Values.router.ingress.maxQueueDepth | quote }}
             {{- if or (and (eq .Values.global.environment "TESTNET") .Values.router.ingress.enabled) .Values.secrets.adminKey .Values.secrets.existingSecret }}
             - name: ADMIN_KEY
               valueFrom:

@@ -172,7 +172,7 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
     let ingress_state = IngressState::new(
         sender.clone(),
         queue_depth.clone(),
-        gas_killer_common::p2p_message_backlog(),
+        gas_killer_common::max_queue_depth(),
         metrics,
         providers,
         avs_metadata,

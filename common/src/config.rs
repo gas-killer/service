@@ -189,6 +189,25 @@ pub fn p2p_message_backlog() -> usize {
         .unwrap_or(DEFAULT_P2P_MESSAGE_BACKLOG)
 }
 
+/// Default maximum number of tasks the ingress queue holds before shedding load.
+///
+/// The router processes one task at a time, so a deep queue means later submissions are
+/// aggregated long after their block references have gone stale. Capping the depth bounds
+/// both memory and worst-case queue latency; requests arriving at capacity are rejected with
+/// `503 QUEUE_FULL` rather than accepted and starved. Configurable via `MAX_QUEUE_DEPTH`.
+pub const DEFAULT_MAX_QUEUE_DEPTH: usize = 100;
+
+/// Reads the ingress queue-depth cap from `MAX_QUEUE_DEPTH`, defaulting to
+/// [`DEFAULT_MAX_QUEUE_DEPTH`]. Zero or unparseable values fall back to the default,
+/// since a cap of zero would reject every request.
+pub fn max_queue_depth() -> usize {
+    env::var("MAX_QUEUE_DEPTH")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&v: &usize| v > 0)
+        .unwrap_or(DEFAULT_MAX_QUEUE_DEPTH)
+}
+
 /// Reads the P2P channel rate limit from `P2P_MESSAGES_PER_SECOND` and returns the
 /// per-message quota period (`1 / rate`), defaulting to
 /// [`DEFAULT_P2P_MESSAGES_PER_SECOND`] when unset or invalid.
