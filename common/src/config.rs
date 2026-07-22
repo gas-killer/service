@@ -521,19 +521,27 @@ pub const DEFAULT_PAYLOAD_BLOCK_BUFFER: u64 = 50;
 const _: () = assert!(DEFAULT_PAYLOAD_BLOCK_BUFFER <= DEFAULT_BLOCK_STALE_MEASURE);
 
 /// Reads the payload validity buffer from `PAYLOAD_BLOCK_BUFFER`, defaulting to
-/// [`DEFAULT_PAYLOAD_BLOCK_BUFFER`].
+/// [`DEFAULT_PAYLOAD_BLOCK_BUFFER`] and clamped to [`block_stale_measure`].
 ///
-/// Must stay within the contract's operator-set window: on-chain, `verifyAndUpdate` requires
-/// `referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number`, so a payload rendered against a
-/// reference block only remains submittable for `BLOCK_STALE_MEASURE` blocks. Keeping the buffer
-/// `<= block_stale_measure()` guarantees `valid_until_block` never promises a payload past the
-/// point the chain would reject it.
+/// On-chain, `verifyAndUpdate` requires `referenceBlockNumber + BLOCK_STALE_MEASURE >=
+/// block.number`, so a payload rendered against a reference block only remains submittable for
+/// `BLOCK_STALE_MEASURE` blocks. Clamping guarantees `valid_until_block` never promises a payload
+/// past the point the chain would reject it, under any env — not just the defaults the
+/// compile-time assertion covers.
 pub fn payload_block_buffer() -> u64 {
-    env::var("PAYLOAD_BLOCK_BUFFER")
+    let requested = env::var("PAYLOAD_BLOCK_BUFFER")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(DEFAULT_PAYLOAD_BLOCK_BUFFER)
+        .unwrap_or(DEFAULT_PAYLOAD_BLOCK_BUFFER);
+    clamp_payload_block_buffer(requested, block_stale_measure())
+}
+
+/// Clamps a requested payload buffer to the on-chain staleness window. A buffer past
+/// `stale_measure` would set `valid_until_block` beyond the block at which `verifyAndUpdate`
+/// reverts `StaleBlockNumber`, so the freshness gate would serve a payload that cannot land.
+fn clamp_payload_block_buffer(requested: u64, stale_measure: u64) -> u64 {
+    requested.min(stale_measure)
 }
 
 /// Runtime configuration for the speculative executor pre-build loop.
@@ -758,5 +766,15 @@ mod tests {
         assert_eq!(DEFAULT_PAYLOAD_BLOCK_BUFFER, 50);
         // The buffer-within-staleness-window invariant is enforced at compile time next to the
         // constant definitions (`const _: () = assert!(...)`).
+    }
+
+    #[test]
+    fn payload_block_buffer_clamps_to_staleness_window() {
+        // A buffer within the window is returned unchanged.
+        assert_eq!(clamp_payload_block_buffer(50, 300), 50);
+        // A buffer past the window is clamped so `valid_until_block` never exceeds the block at
+        // which `verifyAndUpdate` would revert `StaleBlockNumber`.
+        assert_eq!(clamp_payload_block_buffer(500, 300), 300);
+        assert_eq!(clamp_payload_block_buffer(300, 300), 300);
     }
 }

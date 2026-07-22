@@ -31,8 +31,12 @@ const DEFAULT_RECEIPT_TIMEOUT_L2_SECS: u64 = 30;
 
 /// Gas estimate recorded in a rendered payload when `eth_estimateGas` fails. It is advisory —
 /// the user re-fills gas when submitting — so a transient RPC failure still yields a submittable
-/// payload rather than failing an already-completed round.
-const PAYLOAD_GAS_ESTIMATE_FALLBACK: u64 = 3_000_000;
+/// payload rather than failing an already-completed round. Sized as a generous ceiling that clears
+/// a real `verifyAndUpdate` (signature verification plus a large batched state transition) so a
+/// caller that submits it verbatim as the gas limit does not run out of gas; it stays well under
+/// the block gas limit, and unused gas is refunded, so over-provisioning costs the submitter
+/// nothing.
+const PAYLOAD_GAS_ESTIMATE_FALLBACK: u64 = 10_000_000;
 
 /// Rebuilds the operator-state-retriever `NonSignerStakesAndSignature` into the distinct
 /// `GasKillerSDK` binding type. Each `sol!` invocation mints its own Rust type, so the fields

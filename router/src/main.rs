@@ -189,16 +189,22 @@ fn main() {
     let port = port.parse::<u16>().expect("Port not well-formed");
     tracing::info!(port, "loaded port");
 
-    // A rendered payload's `valid_until_block` must stay within the contract's operator-set
-    // window (`referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number`); a buffer larger
-    // than the staleness window would advertise payloads the chain already rejects.
-    let payload_block_buffer = gas_killer_common::payload_block_buffer();
+    // A rendered payload's `valid_until_block` must stay within the contract's operator-set window
+    // (`referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number`). `payload_block_buffer()`
+    // clamps to the staleness window so the effective value always holds; warn when an operator
+    // configured a larger buffer so it is clear the value was reduced.
     let block_stale_measure = gas_killer_common::block_stale_measure();
-    if payload_block_buffer > block_stale_measure {
+    let payload_block_buffer = gas_killer_common::payload_block_buffer();
+    if let Some(requested) = std::env::var("PAYLOAD_BLOCK_BUFFER")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        && requested > block_stale_measure
+    {
         tracing::warn!(
-            payload_block_buffer,
+            requested,
             block_stale_measure,
-            "PAYLOAD_BLOCK_BUFFER exceeds BLOCK_STALE_MEASURE; rendered payloads may expire on-chain before valid_until_block"
+            effective = payload_block_buffer,
+            "PAYLOAD_BLOCK_BUFFER exceeds BLOCK_STALE_MEASURE; clamped to the staleness window so rendered payloads stay submittable on-chain"
         );
     }
 

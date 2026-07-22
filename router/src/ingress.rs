@@ -37,9 +37,23 @@ const FRESHNESS_CACHE_TTL: Duration = Duration::from_secs(6);
 pub struct FreshnessCache {
     block_numbers: RwLock<HashMap<ChainRole, (u64, Instant)>>,
     transition_counts: RwLock<HashMap<(ChainRole, Address), (u64, Instant)>>,
+    chain_roles: RwLock<HashMap<Address, (ChainRole, Instant)>>,
 }
 
 impl FreshnessCache {
+    fn cached_chain_role(&self, target: Address) -> Option<ChainRole> {
+        let guard = self.chain_roles.read().ok()?;
+        guard
+            .get(&target)
+            .and_then(|(role, at)| (at.elapsed() < FRESHNESS_CACHE_TTL).then_some(*role))
+    }
+
+    fn store_chain_role(&self, target: Address, role: ChainRole) {
+        if let Ok(mut guard) = self.chain_roles.write() {
+            guard.insert(target, (role, Instant::now()));
+        }
+    }
+
     fn cached_block_number(&self, role: ChainRole) -> Option<u64> {
         let guard = self.block_numbers.read().ok()?;
         guard
@@ -787,9 +801,10 @@ pub struct ListTasksQuery {
 ///
 /// The check is the freshness authority for `GET /tasks/{id}`: a caller must fetch here (not the
 /// list endpoint) before submitting. It is ordered cheapest-first and short-circuits so a poll
-/// costs at most one `eth_blockNumber` and one `stateTransitionCount`, both served from a
-/// short-TTL cache under rapid polling. Once a payload is found stale the task is recorded
-/// `expired`, so every later poll returns immediately without a chain read.
+/// costs at most one `eth_getCode` (chain detection), one `eth_blockNumber`, and one
+/// `stateTransitionCount`, all served from a short-TTL cache under rapid polling. Once a payload is
+/// found stale the task is recorded `expired`, so every later poll returns immediately without a
+/// chain read.
 async fn render_or_reject_payload<P: Provider + Clone>(
     providers: &HashMap<ChainRole, P>,
     freshness: &FreshnessCache,
@@ -863,8 +878,17 @@ async fn render_or_reject_payload<P: Provider + Clone>(
     }
 
     // Consumed-bundle check on the target chain: `stateTransitionCount` is target-contract state,
-    // so it is read from the chain the target is deployed on (L1 or L2).
-    let role = detect_contract_chain(providers, bundle.target_address).await?;
+    // so it is read from the chain the target is deployed on (L1 or L2). The resolved chain is
+    // cached per target — a contract's chain does not change — so rapid polling skips the
+    // `eth_getCode` detection probe.
+    let role = match freshness.cached_chain_role(bundle.target_address) {
+        Some(role) => role,
+        None => {
+            let role = detect_contract_chain(providers, bundle.target_address).await?;
+            freshness.store_chain_role(bundle.target_address, role);
+            role
+        }
+    };
     let provider = providers
         .get(&role)
         .ok_or_else(|| ApiError::internal("no provider for detected chain"))?;
@@ -2393,6 +2417,37 @@ mod tests {
 
             let result = render_or_reject_payload(&providers, &freshness, &store, &task).await;
             assert_eq!(result.unwrap(), Some(payload));
+        }
+
+        #[tokio::test]
+        async fn stale_check_reuses_cache_across_repeat_polls() {
+            use alloy::sol_types::SolValue;
+            use alloy_primitives::{Bytes, U64};
+            use alloy_provider::{ProviderBuilder, mock::Asserter};
+
+            let payload = fresh_payload(100);
+            let bundle = fresh_bundle(3, 100);
+            let (store, id) = ready_store_task(&payload, &bundle).await;
+            let task = store.get_task(&id).await.unwrap().unwrap();
+
+            // Exactly one poll's worth of responses: block number, chain-detection code, and
+            // transition count. A second poll that issued any RPC would drain the empty asserter
+            // and fail, so the two passing calls prove every read — including chain detection — is
+            // served from the freshness cache.
+            let asserter = Asserter::new();
+            asserter.push_success(&U64::from(90u64));
+            asserter.push_success(&Bytes::from(vec![0x60, 0x00]));
+            asserter.push_success(&Bytes::from(U256::from(3u64).abi_encode()));
+
+            let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+            let freshness = FreshnessCache::default();
+
+            let first = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            assert_eq!(first.unwrap(), Some(payload.clone()));
+            let second = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            assert_eq!(second.unwrap(), Some(payload));
         }
 
         #[tokio::test]
