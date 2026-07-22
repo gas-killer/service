@@ -12,6 +12,7 @@ use crate::store::{SqliteStore, TaskStatus};
 use commonware_avs_router::sequencer::{SequencedTask, TaskSource};
 use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
+use gas_killer_common::{PayloadView, TaskBundle};
 
 use alloy_primitives::Bytes;
 use anyhow::Result;
@@ -80,8 +81,33 @@ async fn set_task_processing(store: &SqliteStore, task_id: &str) {
     }
 }
 
-pub(crate) async fn set_task_ready(store: &SqliteStore, task_id: &str) {
-    if let Err(e) = store.update_task_status(task_id, TaskStatus::Ready).await {
+/// Settles a task ready, persisting both the rendered transaction-request `payload` and the
+/// structured `bundle` it was derived from (each as JSON). A serialization failure is logged and
+/// the transition skipped rather than propagated, following the best-effort convention above.
+pub(crate) async fn set_task_ready(
+    store: &SqliteStore,
+    task_id: &str,
+    payload: &PayloadView,
+    bundle: &TaskBundle,
+) {
+    let payload_json = match serde_json::to_string(payload) {
+        Ok(json) => json,
+        Err(e) => {
+            error!(task_id, error = %e, "failed to serialize payload; task not marked ready");
+            return;
+        }
+    };
+    let bundle_json = match serde_json::to_string(bundle) {
+        Ok(json) => json,
+        Err(e) => {
+            error!(task_id, error = %e, "failed to serialize bundle; task not marked ready");
+            return;
+        }
+    };
+    if let Err(e) = store
+        .mark_task_ready_with_bundle(task_id, &payload_json, &bundle_json)
+        .await
+    {
         error!(task_id, error = %e, "failed to mark task ready");
     }
 }
@@ -398,7 +424,8 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, U256};
+    use alloy::primitives::{Address, B256, FixedBytes, U256};
+    use gas_killer_common::BundleProof;
 
     fn sample_request(transition_index: Option<u64>) -> GasKillerTaskRequest {
         GasKillerTaskRequest {
@@ -482,6 +509,35 @@ mod tests {
         }
     }
 
+    fn sample_payload() -> PayloadView {
+        PayloadView {
+            to: Address::from([0x11; 20]),
+            data: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
+            value: U256::ZERO,
+            chain_id: 31337,
+            estimated_gas: 21_000,
+            valid_until_block: 100,
+        }
+    }
+
+    fn sample_bundle() -> TaskBundle {
+        TaskBundle {
+            msg_hash: B256::ZERO,
+            reference_block_number: 50,
+            transition_index: 0,
+            target_address: Address::from([0x11; 20]),
+            target_function: FixedBytes::<4>::from([0x12, 0x34, 0x56, 0x78]),
+            storage_updates: Bytes::new(),
+            chain_id: 31337,
+            value: U256::ZERO,
+            valid_until_block: 100,
+            proof: BundleProof::Bls {
+                quorum_numbers: Bytes::from(vec![0x00]),
+                non_signer_stakes_and_signature: Bytes::new(),
+            },
+        }
+    }
+
     fn unreachable_validator() -> Arc<GasKillerValidator> {
         // Nothing listens on this port; RPC calls fail fast with connection refused
         // rather than hanging, so `enrich` errors quickly and deterministically.
@@ -501,11 +557,14 @@ mod tests {
             TaskStatus::Processing
         );
 
-        set_task_ready(&store, &done.id).await;
-        assert_eq!(
-            store.get_task(&done.id).await.unwrap().unwrap().status,
-            TaskStatus::Ready
-        );
+        set_task_ready(&store, &done.id, &sample_payload(), &sample_bundle()).await;
+        let ready = store.get_task(&done.id).await.unwrap().unwrap();
+        assert_eq!(ready.status, TaskStatus::Ready);
+        // Both the rendered payload and the structured bundle are persisted as JSON.
+        let payload: PayloadView = serde_json::from_str(ready.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload, sample_payload());
+        let bundle: TaskBundle = serde_json::from_str(ready.bundle.as_deref().unwrap()).unwrap();
+        assert_eq!(bundle, sample_bundle());
 
         set_task_failed(&store, &doomed.id, "boom").await;
         let failed = store.get_task(&doomed.id).await.unwrap().unwrap();

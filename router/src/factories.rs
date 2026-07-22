@@ -381,7 +381,8 @@ async fn create_handler_parts(
         .with_metrics(metrics)
         .with_dispatch_time(dispatch_time)
         .with_receipt_timeout(receipt_timeout_override)
-        .with_in_flight_task(in_flight);
+        .with_in_flight_task(in_flight)
+        .with_payload_block_buffer(gas_killer_common::payload_block_buffer());
     if let Some(store) = store {
         gas_killer_handler = gas_killer_handler.with_store(store);
     }

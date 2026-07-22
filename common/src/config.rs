@@ -510,6 +510,40 @@ pub fn block_stale_measure() -> u64 {
         .unwrap_or(DEFAULT_BLOCK_STALE_MEASURE)
 }
 
+/// Grace window, in blocks past the aggregation reference block, for which a rendered
+/// user-executable payload stays valid. Used to set the payload's `valid_until_block`.
+pub const DEFAULT_PAYLOAD_BLOCK_BUFFER: u64 = 50;
+
+// A payload rendered against a reference block is only submittable while
+// `referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number`, so the default buffer must stay
+// within the default staleness window or `valid_until_block` would promise a payload the chain
+// already rejects. Enforced at compile time to keep the two defaults in lockstep.
+const _: () = assert!(DEFAULT_PAYLOAD_BLOCK_BUFFER <= DEFAULT_BLOCK_STALE_MEASURE);
+
+/// Reads the payload validity buffer from `PAYLOAD_BLOCK_BUFFER`, defaulting to
+/// [`DEFAULT_PAYLOAD_BLOCK_BUFFER`] and clamped to [`block_stale_measure`].
+///
+/// On-chain, `verifyAndUpdate` requires `referenceBlockNumber + BLOCK_STALE_MEASURE >=
+/// block.number`, so a payload rendered against a reference block only remains submittable for
+/// `BLOCK_STALE_MEASURE` blocks. Clamping guarantees `valid_until_block` never promises a payload
+/// past the point the chain would reject it, under any env — not just the defaults the
+/// compile-time assertion covers.
+pub fn payload_block_buffer() -> u64 {
+    let requested = env::var("PAYLOAD_BLOCK_BUFFER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_PAYLOAD_BLOCK_BUFFER);
+    clamp_payload_block_buffer(requested, block_stale_measure())
+}
+
+/// Clamps a requested payload buffer to the on-chain staleness window. A buffer past
+/// `stale_measure` would set `valid_until_block` beyond the block at which `verifyAndUpdate`
+/// reverts `StaleBlockNumber`, so the freshness gate would serve a payload that cannot land.
+fn clamp_payload_block_buffer(requested: u64, stale_measure: u64) -> u64 {
+    requested.min(stale_measure)
+}
+
 /// Runtime configuration for the speculative executor pre-build loop.
 ///
 /// The loop watches each chain's head and pre-builds the EVMSketch executor for the
@@ -725,5 +759,22 @@ mod tests {
         assert_eq!(DEFAULT_AGG_ACTIVITY_TIMEOUT, 256);
         // The default window must construct the NonZeroU64 the engine config needs.
         assert_eq!(agg_window().get(), DEFAULT_AGG_WINDOW);
+    }
+
+    #[test]
+    fn payload_block_buffer_defaults_are_sane() {
+        assert_eq!(DEFAULT_PAYLOAD_BLOCK_BUFFER, 50);
+        // The buffer-within-staleness-window invariant is enforced at compile time next to the
+        // constant definitions (`const _: () = assert!(...)`).
+    }
+
+    #[test]
+    fn payload_block_buffer_clamps_to_staleness_window() {
+        // A buffer within the window is returned unchanged.
+        assert_eq!(clamp_payload_block_buffer(50, 300), 50);
+        // A buffer past the window is clamped so `valid_until_block` never exceeds the block at
+        // which `verifyAndUpdate` would revert `StaleBlockNumber`.
+        assert_eq!(clamp_payload_block_buffer(500, 300), 300);
+        assert_eq!(clamp_payload_block_buffer(300, 300), 300);
     }
 }

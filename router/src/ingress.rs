@@ -16,12 +16,70 @@ use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
+use gas_killer_common::{PayloadView, TaskBundle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+/// TTL for the chain reads backing the payload freshness check. Roughly half an L1 block, so a
+/// burst of polls for the same task reuses one read while a stale payload is still caught within
+/// a block.
+const FRESHNESS_CACHE_TTL: Duration = Duration::from_secs(6);
+
+/// Short-lived cache of the chain reads that back the `ready`-payload freshness check, keyed so
+/// rapid polling of the same task reuses a read rather than issuing an RPC per poll. Shared across
+/// [`IngressState`] clones.
+#[derive(Default)]
+pub struct FreshnessCache {
+    block_numbers: RwLock<HashMap<ChainRole, (u64, Instant)>>,
+    transition_counts: RwLock<HashMap<(ChainRole, Address), (u64, Instant)>>,
+    chain_roles: RwLock<HashMap<Address, (ChainRole, Instant)>>,
+}
+
+impl FreshnessCache {
+    fn cached_chain_role(&self, target: Address) -> Option<ChainRole> {
+        let guard = self.chain_roles.read().ok()?;
+        guard
+            .get(&target)
+            .and_then(|(role, at)| (at.elapsed() < FRESHNESS_CACHE_TTL).then_some(*role))
+    }
+
+    fn store_chain_role(&self, target: Address, role: ChainRole) {
+        if let Ok(mut guard) = self.chain_roles.write() {
+            guard.insert(target, (role, Instant::now()));
+        }
+    }
+
+    fn cached_block_number(&self, role: ChainRole) -> Option<u64> {
+        let guard = self.block_numbers.read().ok()?;
+        guard
+            .get(&role)
+            .and_then(|(value, at)| (at.elapsed() < FRESHNESS_CACHE_TTL).then_some(*value))
+    }
+
+    fn store_block_number(&self, role: ChainRole, value: u64) {
+        if let Ok(mut guard) = self.block_numbers.write() {
+            guard.insert(role, (value, Instant::now()));
+        }
+    }
+
+    fn cached_transition_count(&self, role: ChainRole, target: Address) -> Option<u64> {
+        let guard = self.transition_counts.read().ok()?;
+        guard
+            .get(&(role, target))
+            .and_then(|(value, at)| (at.elapsed() < FRESHNESS_CACHE_TTL).then_some(*value))
+    }
+
+    fn store_transition_count(&self, role: ChainRole, target: Address, value: u64) {
+        if let Ok(mut guard) = self.transition_counts.write() {
+            guard.insert((role, target), (value, Instant::now()));
+        }
+    }
+}
 
 /// AVS identity metadata served at `GET /avs-metadata`.
 ///
@@ -65,6 +123,8 @@ pub struct IngressState {
     pub max_queue_depth: usize,
     pub metrics: Option<Arc<MetricsCollector>>,
     pub providers: Arc<HashMap<ChainRole, ReadOnlyProvider>>,
+    /// Short-lived cache backing the `ready`-payload freshness check on `GET /tasks/{id}`.
+    pub freshness: Arc<FreshnessCache>,
     /// Shared secret guarding the `/admin/keys` endpoints (`ADMIN_KEY`). `None` disables the
     /// admin API, so keys cannot be managed until it is set.
     pub admin_key: Option<String>,
@@ -95,6 +155,7 @@ impl IngressState {
             max_queue_depth,
             metrics: Some(metrics),
             providers: Arc::new(providers),
+            freshness: Arc::new(FreshnessCache::default()),
             admin_key: None,
             avs_metadata,
             store: None,
@@ -114,6 +175,7 @@ impl IngressState {
             max_queue_depth: gas_killer_common::p2p_message_backlog(),
             metrics: None,
             providers: Arc::new(HashMap::new()),
+            freshness: Arc::new(FreshnessCache::default()),
             admin_key: None,
             avs_metadata: AvsMetadata::default(),
             store: None,
@@ -674,18 +736,29 @@ pub struct TaskView {
     pub created_at: i64,
     pub updated_at: i64,
     pub error: Option<String>,
-    pub payload: Option<String>,
+    pub payload: Option<PayloadView>,
 }
 
 impl From<Task> for TaskView {
     fn from(task: Task) -> Self {
+        // Lenient parse: the stored payload is JSON the server itself wrote, so it always parses;
+        // a failure yields `None` (logged) rather than failing the whole response. The list
+        // endpoint relies on this to surface the stored payload without a freshness check, while
+        // `GET /tasks/{id}` overwrites `payload` with the stale-checked result.
+        let payload = task.payload.as_deref().and_then(|raw| {
+            serde_json::from_str::<PayloadView>(raw)
+                .inspect_err(|e| {
+                    tracing::warn!(task_id = %task.id, error = %e, "stored payload failed to parse");
+                })
+                .ok()
+        });
         Self {
             task_id: task.id,
             status: task.status,
             created_at: task.created_at,
             updated_at: task.updated_at,
             error: task.error,
-            payload: task.payload,
+            payload,
         }
     }
 }
@@ -722,11 +795,139 @@ pub struct ListTasksQuery {
     offset: Option<i64>,
 }
 
+/// Validates a task's stored `ready` payload against current chain state, returning the payload to
+/// serve, `None` when the task has no submittable payload, or a typed re-request error when the
+/// payload has gone stale.
+///
+/// The check is the freshness authority for `GET /tasks/{id}`: a caller must fetch here (not the
+/// list endpoint) before submitting. It is ordered cheapest-first and short-circuits so a poll
+/// costs at most one `eth_getCode` (chain detection), one `eth_blockNumber`, and one
+/// `stateTransitionCount`, all served from a short-TTL cache under rapid polling. Once a payload is
+/// found stale the task is recorded `expired`, so every later poll returns immediately without a
+/// chain read.
+async fn render_or_reject_payload<P: Provider + Clone>(
+    providers: &HashMap<ChainRole, P>,
+    freshness: &FreshnessCache,
+    store: &SqliteStore,
+    task: &Task,
+) -> Result<Option<PayloadView>, ApiError> {
+    let payload = match task.payload.as_deref() {
+        Some(raw) => serde_json::from_str::<PayloadView>(raw).map_err(|e| {
+            tracing::error!(task_id = %task.id, error = %e, "stored payload failed to parse");
+            ApiError::internal("Internal error: stored payload is malformed")
+        })?,
+        // No payload recorded yet (queued/processing/failed).
+        None => return Ok(None),
+    };
+
+    // A task recorded `expired` had its payload found stale on an earlier poll; return the
+    // re-request error without touching the chain again.
+    if task.status == TaskStatus::Expired {
+        return Err(ApiError::payload_expired(
+            task.error
+                .clone()
+                .unwrap_or_else(|| "payload is no longer valid; re-request".to_string()),
+        ));
+    }
+
+    // Only a ready task carries a submittable payload.
+    if task.status != TaskStatus::Ready {
+        return Ok(None);
+    }
+
+    // Store-only harnesses (no providers) cannot reach a chain; serve the stored payload as-is.
+    if providers.is_empty() {
+        return Ok(Some(payload));
+    }
+
+    // The bundle carries the chain / target / transition / validity data the check needs.
+    let bundle: TaskBundle = match task.bundle.as_deref() {
+        Some(raw) => serde_json::from_str(raw).map_err(|e| {
+            tracing::error!(task_id = %task.id, error = %e, "stored bundle failed to parse");
+            ApiError::internal("Internal error: stored bundle is malformed")
+        })?,
+        // Ready without a bundle: nothing to validate against, so serve as-is.
+        None => return Ok(Some(payload)),
+    };
+
+    // Block-window check first (cheapest), short-circuiting before the contract call. It is
+    // measured on the operator-set chain (L1): the certificate's reference block — from which
+    // `valid_until_block` is derived — is an L1 block, since operator state lives on L1, even when
+    // the target executes on L2. Comparing against the target chain's height would falsely expire
+    // every L2 payload. If no L1 provider is configured, skip the window check.
+    if let Some(l1_provider) = providers.get(&ChainRole::L1) {
+        let current_block = match freshness.cached_block_number(ChainRole::L1) {
+            Some(block) => block,
+            None => {
+                let block = l1_provider
+                    .get_block_number()
+                    .await
+                    .map_err(|e| ApiError::from(OnchainValidationError::RpcError(e.to_string())))?;
+                freshness.store_block_number(ChainRole::L1, block);
+                block
+            }
+        };
+        if current_block > bundle.valid_until_block {
+            let reason = format!(
+                "payload valid_until_block {} passed (current block {}); re-request",
+                bundle.valid_until_block, current_block
+            );
+            let _ = store.mark_task_expired(&task.id, &reason).await;
+            return Err(ApiError::payload_expired(reason));
+        }
+    }
+
+    // Consumed-bundle check on the target chain: `stateTransitionCount` is target-contract state,
+    // so it is read from the chain the target is deployed on (L1 or L2). The resolved chain is
+    // cached per target — a contract's chain does not change — so rapid polling skips the
+    // `eth_getCode` detection probe.
+    let role = match freshness.cached_chain_role(bundle.target_address) {
+        Some(role) => role,
+        None => {
+            let role = detect_contract_chain(providers, bundle.target_address).await?;
+            freshness.store_chain_role(bundle.target_address, role);
+            role
+        }
+    };
+    let provider = providers
+        .get(&role)
+        .ok_or_else(|| ApiError::internal("no provider for detected chain"))?;
+    let current_count = match freshness.cached_transition_count(role, bundle.target_address) {
+        Some(count) => count,
+        None => {
+            let contract = GasKillerSDK::new(bundle.target_address, provider.clone());
+            let count = contract
+                .stateTransitionCount()
+                .call()
+                .await
+                .map_err(|e| ApiError::from(OnchainValidationError::RpcError(e.to_string())))?;
+            let count: u64 = count.try_into().map_err(|_| {
+                ApiError::from(OnchainValidationError::RpcError(
+                    "stateTransitionCount overflow".into(),
+                ))
+            })?;
+            freshness.store_transition_count(role, bundle.target_address, count);
+            count
+        }
+    };
+    if current_count != bundle.transition_index {
+        let reason = format!(
+            "bundle consumed: on-chain transition index is {current_count}, payload targets {}; re-request",
+            bundle.transition_index
+        );
+        let _ = store.mark_task_expired(&task.id, &reason).await;
+        return Err(ApiError::payload_expired(reason));
+    }
+
+    Ok(Some(payload))
+}
+
 /// Handler for `GET /tasks/{task_id}` — returns the full state of a single task.
 ///
 /// A task is visible only to the API key that created it: an unknown id yields `404`, and a task
 /// owned by a different key yields `403` (kept distinct from `404` so a caller can tell "no such
-/// task" from "not yours").
+/// task" from "not yours"). For a `ready` task this is the authoritative freshness check: a stale
+/// payload yields a `409 PAYLOAD_EXPIRED` re-request error rather than calldata that would revert.
 pub async fn get_task_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
@@ -749,7 +950,11 @@ pub async fn get_task_handler(
         return Err(ApiError::forbidden("Task belongs to a different API key"));
     }
 
-    Ok(Json(task.into()))
+    let payload =
+        render_or_reject_payload(&*state.providers, &state.freshness, store, &task).await?;
+    let mut view = TaskView::from(task);
+    view.payload = payload;
+    Ok(Json(view))
 }
 
 /// Handler for `GET /tasks` — lists the calling key's tasks, newest first.
@@ -2102,10 +2307,25 @@ mod tests {
 
         #[tokio::test]
         async fn get_task_ready_includes_payload() {
+            use alloy_primitives::Bytes;
             let (app, store, _rx) = make_app_with_store(None).await;
             let key = store.create_api_key(None, None).await.unwrap();
             let id = seed_task(&store, &key.id).await;
-            store.mark_task_ready(&id, "0xdeadbeef").await.unwrap();
+
+            let payload = PayloadView {
+                to: Address::from([0x11; 20]),
+                data: Bytes::from(vec![0x93, 0xde, 0x45, 0x31]),
+                value: U256::ZERO,
+                chain_id: 31337,
+                estimated_gas: 234_000,
+                valid_until_block: 22_345_678,
+            };
+            // The store-less test harness has no providers, so the freshness check is skipped and
+            // the stored payload is returned as-is (the bundle is not consulted here).
+            store
+                .mark_task_ready_with_bundle(&id, &serde_json::to_string(&payload).unwrap(), "{}")
+                .await
+                .unwrap();
 
             let view = task_view(
                 app.oneshot(get_request(&format!("/tasks/{id}"), Some(&key.key)))
@@ -2114,7 +2334,257 @@ mod tests {
             )
             .await;
             assert_eq!(view.status, TaskStatus::Ready);
-            assert_eq!(view.payload.as_deref(), Some("0xdeadbeef"));
+            // The payload comes back as a structured object, not a string.
+            assert_eq!(
+                view.payload.expect("ready task should carry a payload"),
+                payload
+            );
+        }
+
+        // -- payload freshness (stale re-request) check --
+
+        fn fresh_payload(valid_until_block: u64) -> PayloadView {
+            PayloadView {
+                to: Address::from([0x11; 20]),
+                data: alloy_primitives::Bytes::new(),
+                value: U256::ZERO,
+                chain_id: 31337,
+                estimated_gas: 21_000,
+                valid_until_block,
+            }
+        }
+
+        fn fresh_bundle(transition_index: u64, valid_until_block: u64) -> TaskBundle {
+            TaskBundle {
+                msg_hash: alloy_primitives::B256::ZERO,
+                reference_block_number: 10,
+                transition_index,
+                target_address: Address::from([0x11; 20]),
+                target_function: alloy_primitives::FixedBytes::<4>::ZERO,
+                storage_updates: alloy_primitives::Bytes::new(),
+                chain_id: 31337,
+                value: U256::ZERO,
+                valid_until_block,
+                proof: gas_killer_common::BundleProof::Bls {
+                    quorum_numbers: alloy_primitives::Bytes::new(),
+                    non_signer_stakes_and_signature: alloy_primitives::Bytes::new(),
+                },
+            }
+        }
+
+        /// In-memory store holding a single `ready` task carrying the given payload and bundle.
+        async fn ready_store_task(
+            payload: &PayloadView,
+            bundle: &TaskBundle,
+        ) -> (SqliteStore, String) {
+            let store = SqliteStore::connect_in_memory().await.unwrap();
+            let key = store.create_api_key(None, None).await.unwrap();
+            let task = store
+                .create_task(&key.id, &valid_request().body)
+                .await
+                .unwrap();
+            store
+                .mark_task_ready_with_bundle(
+                    &task.id,
+                    &serde_json::to_string(payload).unwrap(),
+                    &serde_json::to_string(bundle).unwrap(),
+                )
+                .await
+                .unwrap();
+            (store, task.id)
+        }
+
+        #[tokio::test]
+        async fn stale_check_serves_payload_in_window_with_matching_index() {
+            use alloy::sol_types::SolValue;
+            use alloy_primitives::{Bytes, U64};
+            use alloy_provider::{ProviderBuilder, mock::Asserter};
+
+            let payload = fresh_payload(100);
+            let bundle = fresh_bundle(3, 100);
+            let (store, id) = ready_store_task(&payload, &bundle).await;
+            let task = store.get_task(&id).await.unwrap().unwrap();
+
+            let asserter = Asserter::new();
+            asserter.push_success(&U64::from(90u64)); // block-window: L1 eth_blockNumber, within window
+            asserter.push_success(&Bytes::from(vec![0x60, 0x00])); // detect_contract_chain: target code
+            asserter.push_success(&Bytes::from(U256::from(3u64).abi_encode())); // stateTransitionCount == index
+
+            let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+            let freshness = FreshnessCache::default();
+
+            let result = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            assert_eq!(result.unwrap(), Some(payload));
+        }
+
+        #[tokio::test]
+        async fn stale_check_reuses_cache_across_repeat_polls() {
+            use alloy::sol_types::SolValue;
+            use alloy_primitives::{Bytes, U64};
+            use alloy_provider::{ProviderBuilder, mock::Asserter};
+
+            let payload = fresh_payload(100);
+            let bundle = fresh_bundle(3, 100);
+            let (store, id) = ready_store_task(&payload, &bundle).await;
+            let task = store.get_task(&id).await.unwrap().unwrap();
+
+            // Exactly one poll's worth of responses: block number, chain-detection code, and
+            // transition count. A second poll that issued any RPC would drain the empty asserter
+            // and fail, so the two passing calls prove every read — including chain detection — is
+            // served from the freshness cache.
+            let asserter = Asserter::new();
+            asserter.push_success(&U64::from(90u64));
+            asserter.push_success(&Bytes::from(vec![0x60, 0x00]));
+            asserter.push_success(&Bytes::from(U256::from(3u64).abi_encode()));
+
+            let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+            let freshness = FreshnessCache::default();
+
+            let first = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            assert_eq!(first.unwrap(), Some(payload.clone()));
+            let second = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            assert_eq!(second.unwrap(), Some(payload));
+        }
+
+        #[tokio::test]
+        async fn stale_check_rejects_when_block_past_valid_until() {
+            use alloy_primitives::U64;
+            use alloy_provider::{ProviderBuilder, mock::Asserter};
+
+            let payload = fresh_payload(50);
+            let bundle = fresh_bundle(3, 50);
+            let (store, id) = ready_store_task(&payload, &bundle).await;
+            let task = store.get_task(&id).await.unwrap().unwrap();
+
+            let asserter = Asserter::new();
+            asserter.push_success(&U64::from(51u64)); // block-window: L1 block past valid_until_block (50)
+            // Nothing else is queued: the block-window check short-circuits before detecting the
+            // target chain or reading stateTransitionCount, so any further RPC would drain the
+            // empty asserter and fail the test.
+
+            let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+            let freshness = FreshnessCache::default();
+
+            let err = render_or_reject_payload(&providers, &freshness, &store, &task)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::PayloadExpired);
+            assert_eq!(err.status, StatusCode::CONFLICT);
+
+            // The task is now recorded expired so later polls short-circuit without a chain read.
+            let settled = store.get_task(&id).await.unwrap().unwrap();
+            assert_eq!(settled.status, TaskStatus::Expired);
+        }
+
+        #[tokio::test]
+        async fn stale_check_rejects_on_transition_mismatch() {
+            use alloy::sol_types::SolValue;
+            use alloy_primitives::{Bytes, U64};
+            use alloy_provider::{ProviderBuilder, mock::Asserter};
+
+            let payload = fresh_payload(100);
+            let bundle = fresh_bundle(3, 100);
+            let (store, id) = ready_store_task(&payload, &bundle).await;
+            let task = store.get_task(&id).await.unwrap().unwrap();
+
+            let asserter = Asserter::new();
+            asserter.push_success(&U64::from(40u64)); // block-window: L1 block within window
+            asserter.push_success(&Bytes::from(vec![0x60, 0x00])); // detect_contract_chain: target code
+            asserter.push_success(&Bytes::from(U256::from(9u64).abi_encode())); // stateTransitionCount 9 != index 3
+
+            let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+            let freshness = FreshnessCache::default();
+
+            let err = render_or_reject_payload(&providers, &freshness, &store, &task)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::PayloadExpired);
+            let settled = store.get_task(&id).await.unwrap().unwrap();
+            assert_eq!(settled.status, TaskStatus::Expired);
+        }
+
+        #[tokio::test]
+        async fn stale_check_maps_rpc_error_to_503() {
+            use alloy_provider::{ProviderBuilder, mock::Asserter};
+
+            let payload = fresh_payload(100);
+            let bundle = fresh_bundle(3, 100);
+            let (store, id) = ready_store_task(&payload, &bundle).await;
+            let task = store.get_task(&id).await.unwrap().unwrap();
+
+            let asserter = Asserter::new();
+            asserter.push_failure_msg("rpc down"); // block-window: L1 get_block_number fails
+
+            let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+            let freshness = FreshnessCache::default();
+
+            let err = render_or_reject_payload(&providers, &freshness, &store, &task)
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(err.code, ErrorCode::RpcUnavailable);
+            // A transient RPC failure must not expire the task.
+            let settled = store.get_task(&id).await.unwrap().unwrap();
+            assert_eq!(settled.status, TaskStatus::Ready);
+        }
+
+        #[tokio::test]
+        async fn stale_check_skipped_without_providers() {
+            let payload = fresh_payload(100);
+            let bundle = fresh_bundle(3, 100);
+            let (store, id) = ready_store_task(&payload, &bundle).await;
+            let task = store.get_task(&id).await.unwrap().unwrap();
+
+            let providers: HashMap<ChainRole, ReadOnlyProvider> = HashMap::new();
+            let freshness = FreshnessCache::default();
+            let result = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            assert_eq!(result.unwrap(), Some(payload));
+        }
+
+        #[tokio::test]
+        async fn stale_check_returns_none_for_non_ready_task() {
+            let store = SqliteStore::connect_in_memory().await.unwrap();
+            let key = store.create_api_key(None, None).await.unwrap();
+            let task = store
+                .create_task(&key.id, &valid_request().body)
+                .await
+                .unwrap();
+
+            let providers: HashMap<ChainRole, ReadOnlyProvider> = HashMap::new();
+            let freshness = FreshnessCache::default();
+            let result = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            assert_eq!(result.unwrap(), None);
+        }
+
+        #[tokio::test]
+        async fn stale_check_short_circuits_when_already_expired() {
+            let payload = fresh_payload(100);
+            let bundle = fresh_bundle(3, 100);
+            let (store, id) = ready_store_task(&payload, &bundle).await;
+            store
+                .mark_task_expired(&id, "payload valid_until_block passed; re-request")
+                .await
+                .unwrap();
+            let task = store.get_task(&id).await.unwrap().unwrap();
+
+            // Even with providers configured, an already-expired task never touches the chain.
+            let providers: HashMap<ChainRole, ReadOnlyProvider> = HashMap::new();
+            let freshness = FreshnessCache::default();
+            let err = render_or_reject_payload(&providers, &freshness, &store, &task)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::PayloadExpired);
+            assert_eq!(err.status, StatusCode::CONFLICT);
         }
 
         #[tokio::test]

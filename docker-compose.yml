@@ -201,6 +201,8 @@ services:
       # Defaults to a fixed value for the local/e2e harness; override by exporting ADMIN_KEY.
       - ADMIN_KEY=${ADMIN_KEY:-ci-admin-key}
       - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
+      # Blocks past the reference block for which a rendered task payload stays valid.
+      - PAYLOAD_BLOCK_BUFFER=${PAYLOAD_BLOCK_BUFFER:-50}
     volumes:
       - ./config/.nodes:/app/.nodes:ro
       - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro

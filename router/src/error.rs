@@ -34,6 +34,9 @@ pub enum ErrorCode {
     StaleBlock,
     /// The provided `transition_index` does not match the contract's current state.
     TransitionMismatch,
+    /// A previously rendered `ready` payload is no longer submittable — its `valid_until_block`
+    /// has passed or the on-chain transition index has advanced — so the caller must re-request.
+    PayloadExpired,
     /// `call_data` exceeds the maximum accepted size.
     CalldataTooLarge,
     /// The client exceeded its allotted request rate.
@@ -113,6 +116,13 @@ impl ApiError {
     /// 404 with [`ErrorCode::NotFound`].
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message)
+    }
+
+    /// 409 with [`ErrorCode::PayloadExpired`]. Signals that a `ready` payload has gone stale and
+    /// the caller must re-request; 409 (not 410) because the task still exists and the resolution
+    /// is to submit a fresh request, not that the resource is permanently gone.
+    pub fn payload_expired(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, ErrorCode::PayloadExpired, message)
     }
 
     /// 503 with [`ErrorCode::QueueFull`].
@@ -209,6 +219,7 @@ mod tests {
             (ErrorCode::InvalidAddress, "INVALID_ADDRESS"),
             (ErrorCode::StaleBlock, "STALE_BLOCK"),
             (ErrorCode::TransitionMismatch, "TRANSITION_MISMATCH"),
+            (ErrorCode::PayloadExpired, "PAYLOAD_EXPIRED"),
             (ErrorCode::CalldataTooLarge, "CALLDATA_TOO_LARGE"),
             (ErrorCode::RateLimited, "RATE_LIMITED"),
             (ErrorCode::QueueFull, "QUEUE_FULL"),
@@ -244,6 +255,13 @@ mod tests {
             parsed.error.message,
             "expected transition_index 42, contract reports 43"
         );
+    }
+
+    #[test]
+    fn payload_expired_carries_conflict_status() {
+        let err = ApiError::payload_expired("valid_until_block 100 passed; re-request");
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.code, ErrorCode::PayloadExpired);
     }
 
     #[test]

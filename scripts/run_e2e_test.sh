@@ -262,9 +262,16 @@ echo -e "${GREEN}Minted API key for task submission${NC}"
 echo -e "${YELLOW}Step 10: Triggering task and verifying execution...${NC}"
 echo "Sending a test task to the router..."
 cd "$PROJECT_ROOT/scripts"
-cargo run --release -p scripts --bin send_request
-TRIGGER_STATUS=$?
+# send_request signs and submits the rendered payload and prints the verifyAndUpdate tx hash;
+# capture its output so the diagnostics below can trace that tx. The `tee` pipeline exits 0, so
+# `set -e` does not abort here — the real status comes from PIPESTATUS.
+SEND_REQUEST_LOG="$(mktemp)"
+cargo run --release -p scripts --bin send_request 2>&1 | tee "$SEND_REQUEST_LOG"
+TRIGGER_STATUS=${PIPESTATUS[0]}
 cd "$PROJECT_ROOT"
+
+# The user-submitted verifyAndUpdate tx hash, extracted from send_request's output.
+USER_TX_HASH=$(grep -oE 'landed: tx 0x[a-fA-F0-9]{64}' "$SEND_REQUEST_LOG" | sed -E 's/.*tx //' | tail -1)
 
 if [ $TRIGGER_STATUS -eq 0 ]; then
     echo -e "${GREEN}✅ Array summation verified successfully - state was updated!${NC}"
@@ -274,12 +281,11 @@ else
     docker compose logs --tail=100 router || true
     echo -e "${YELLOW}Recent node logs:${NC}"
     docker compose logs --tail=50 node-1 node-2 node-3 || true
-    # Trace the verifyAndUpdate transaction, if one was submitted, to surface a revert reason.
+    # If the user-submitted verifyAndUpdate reverted, re-simulate it to surface a revert reason.
     # cast run re-simulates the transaction, so this is best-effort diagnostic output.
-    TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -o "transaction_hash=0x[a-fA-F0-9]*" | sed 's/transaction_hash=//' | tail -1)
-    if [ -n "$TX_HASH" ] && command -v cast >/dev/null 2>&1; then
-        echo -e "${YELLOW}Execution trace for $TX_HASH:${NC}"
-        cast run "$TX_HASH" --rpc-url http://localhost:8545 || true
+    if [ -n "$USER_TX_HASH" ] && command -v cast >/dev/null 2>&1; then
+        echo -e "${YELLOW}Execution trace for $USER_TX_HASH:${NC}"
+        cast run "$USER_TX_HASH" --rpc-url http://localhost:8545 || true
     fi
     exit 1
 fi
@@ -288,12 +294,11 @@ fi
 echo -e "${YELLOW}Recent router logs:${NC}"
 docker compose logs --tail=50 router || true
 
-# Print the execution trace of the successful verifyAndUpdate for inspection.
+# Print the execution trace of the successful user-submitted verifyAndUpdate for inspection.
 # debug_traceTransaction reflects the real mined execution, not a re-simulation.
-TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -o "transaction_hash=0x[a-fA-F0-9]*" | sed 's/transaction_hash=//' | tail -1)
-if [ -n "$TX_HASH" ] && command -v cast >/dev/null 2>&1; then
-    echo -e "${YELLOW}Execution trace for $TX_HASH:${NC}"
-    cast rpc debug_traceTransaction "$TX_HASH" '{"tracer":"callTracer"}' --rpc-url http://localhost:8545 | jq '.' || true
+if [ -n "$USER_TX_HASH" ] && command -v cast >/dev/null 2>&1; then
+    echo -e "${YELLOW}Execution trace for $USER_TX_HASH:${NC}"
+    cast rpc debug_traceTransaction "$USER_TX_HASH" '{"tracer":"callTracer"}' --rpc-url http://localhost:8545 | jq '.' || true
 fi
 
 echo -e "${GREEN}✅ Test passed - Stack is up and array summation completed successfully!${NC}"

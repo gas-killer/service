@@ -24,7 +24,7 @@ use crate::ingress::GasKillerTaskRequestBody;
 /// Columns selected for every task read, in the order the [`TaskRow`] fields expect. sqlx maps
 /// by column name, but listing them once keeps the queries consistent and self-documenting.
 const TASK_COLUMNS: &str = "id, key_id, status, target_address, call_data, transition_index, \
-     from_address, value, block_height, payload, error, created_at, updated_at";
+     from_address, value, block_height, payload, bundle, error, created_at, updated_at";
 
 /// Lifecycle state of a task as it moves through aggregation.
 ///
@@ -82,8 +82,12 @@ pub struct Task {
     pub status: TaskStatus,
     /// The original request, preserved so the task can be rebuilt and re-enqueued on restart.
     pub request: GasKillerTaskRequestBody,
-    /// Executable payload, populated once the task is [`TaskStatus::Ready`].
+    /// Serialized [`gas_killer_common::PayloadView`] — the ready-to-sign transaction request,
+    /// populated once the task is [`TaskStatus::Ready`].
     pub payload: Option<String>,
+    /// Serialized [`gas_killer_common::TaskBundle`] — the structured completed round the payload
+    /// is rendered from, populated alongside `payload` once the task is [`TaskStatus::Ready`].
+    pub bundle: Option<String>,
     /// Human-readable failure reason, populated once the task is `failed` or `expired`.
     pub error: Option<String>,
     pub created_at: i64,
@@ -104,6 +108,7 @@ struct TaskRow {
     value: String,
     block_height: i64,
     payload: Option<String>,
+    bundle: Option<String>,
     error: Option<String>,
     created_at: i64,
     updated_at: i64,
@@ -132,6 +137,7 @@ impl TryFrom<TaskRow> for Task {
             key_id: row.key_id,
             request,
             payload: row.payload,
+            bundle: row.bundle,
             error: row.error,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -177,6 +183,7 @@ impl SqliteStore {
             status: TaskStatus::Queued,
             request: request.clone(),
             payload: None,
+            bundle: None,
             error: None,
             created_at,
             updated_at,
@@ -250,6 +257,49 @@ impl SqliteStore {
         .execute(self.pool())
         .await
         .context("marking task ready")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Settles a task as [`TaskStatus::Ready`], recording both the rendered transaction-request
+    /// `payload` and the structured round `bundle` it was rendered from, and stamping
+    /// `updated_at`. Both are stored as JSON. Returns `true` if a task with that id existed.
+    pub async fn mark_task_ready_with_bundle(
+        &self,
+        id: &str,
+        payload: &str,
+        bundle: &str,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE tasks SET status = 'ready', payload = ?2, bundle = ?3, \
+             updated_at = unixepoch() WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(payload)
+        .bind(bundle)
+        .execute(self.pool())
+        .await
+        .context("marking task ready with bundle")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Settles a task as [`TaskStatus::Expired`], recording why and stamping `updated_at`.
+    ///
+    /// The read path uses this when a ready payload is no longer submittable — its
+    /// `valid_until_block` has passed or the on-chain transition index has advanced — so a later
+    /// poll short-circuits to the re-request error without another chain read. Returns `true` if a
+    /// task with that id existed.
+    pub async fn mark_task_expired(&self, id: &str, reason: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE tasks SET status = 'expired', error = ?2, updated_at = unixepoch() \
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(reason)
+        .execute(self.pool())
+        .await
+        .context("marking task expired")?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -487,6 +537,57 @@ mod tests {
         assert_eq!(fetched.status, TaskStatus::Ready);
         assert_eq!(fetched.payload.as_deref(), Some("0xcafe"));
         assert!(fetched.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_ready_with_bundle_records_both() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request()).await.unwrap();
+
+        assert!(
+            store
+                .mark_task_ready_with_bundle(&task.id, "{\"payload\":1}", "{\"bundle\":2}")
+                .await
+                .unwrap()
+        );
+        let fetched = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, TaskStatus::Ready);
+        assert_eq!(fetched.payload.as_deref(), Some("{\"payload\":1}"));
+        assert_eq!(fetched.bundle.as_deref(), Some("{\"bundle\":2}"));
+        assert!(fetched.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_expired_records_reason() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request()).await.unwrap();
+        store
+            .mark_task_ready_with_bundle(&task.id, "{}", "{}")
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .mark_task_expired(&task.id, "payload validity window elapsed")
+                .await
+                .unwrap()
+        );
+        let fetched = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, TaskStatus::Expired);
+        assert_eq!(
+            fetched.error.as_deref(),
+            Some("payload validity window elapsed")
+        );
+
+        assert!(
+            !store
+                .mark_task_expired("does-not-exist", "nope")
+                .await
+                .unwrap(),
+            "expiring an unknown task should report no change"
+        );
     }
 
     #[tokio::test]
