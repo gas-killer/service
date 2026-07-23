@@ -4128,6 +4128,7 @@ dependencies = [
  "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
+ "dashmap",
  "dotenv",
  "eigen-logging",
  "gas-analyzer-evmsketch",

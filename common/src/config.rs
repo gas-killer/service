@@ -208,6 +208,24 @@ pub fn max_queue_depth() -> usize {
         .unwrap_or(DEFAULT_MAX_QUEUE_DEPTH)
 }
 
+/// Default per-API-key request rate on the ingress `POST /tasks` endpoint, in requests per
+/// minute. Applied to every key that was not issued with an explicit override, so one client
+/// cannot monopolise the shared task queue. Configurable via `RATE_LIMIT_RPM`.
+pub const DEFAULT_RATE_LIMIT_RPM: u32 = 60;
+
+/// Reads the global default per-key rate limit from `RATE_LIMIT_RPM` (requests per minute),
+/// defaulting to [`DEFAULT_RATE_LIMIT_RPM`]. Zero or unparseable values fall back to the default,
+/// since a limit of zero would reject every request.
+pub fn rate_limit_rpm() -> std::num::NonZeroU32 {
+    env::var("RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .and_then(std::num::NonZeroU32::new)
+        .unwrap_or_else(|| {
+            std::num::NonZeroU32::new(DEFAULT_RATE_LIMIT_RPM).expect("default rpm is non-zero")
+        })
+}
+
 /// Reads the P2P channel rate limit from `P2P_MESSAGES_PER_SECOND` and returns the
 /// per-message quota period (`1 / rate`), defaulting to
 /// [`DEFAULT_P2P_MESSAGES_PER_SECOND`] when unset or invalid.

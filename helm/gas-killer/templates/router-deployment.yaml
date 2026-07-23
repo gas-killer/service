@@ -295,6 +295,8 @@ spec:
               value: {{ .Values.router.ingress.timeoutMs | quote }}
             - name: MAX_QUEUE_DEPTH
               value: {{ .Values.router.ingress.maxQueueDepth | quote }}
+            - name: RATE_LIMIT_RPM
+              value: {{ .Values.router.ingress.rateLimitRpm | quote }}
             {{- if or (and (eq .Values.global.environment "TESTNET") .Values.router.ingress.enabled) .Values.secrets.adminKey .Values.secrets.existingSecret }}
             - name: ADMIN_KEY
               valueFrom:
