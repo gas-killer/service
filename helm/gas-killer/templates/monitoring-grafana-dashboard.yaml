@@ -293,7 +293,7 @@ data:
           "gridPos": { "x": 18, "y": 24, "w": 6, "h": 8 },
           "targets": [
             {
-              "expr": "gas_killer_task_queue_depth",
+              "expr": "gas_killer_queue_depth",
               "legendFormat": "queued tasks"
             }
           ],

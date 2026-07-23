@@ -30,7 +30,10 @@ pub struct MetricsCollector {
     /// Excludes ingress-queue wait and router-side storage computation, which finish before the
     /// dispatch timestamp is stamped.
     pub round_latency_seconds: Histogram,
-    /// Current number of tasks sitting in the ingress queue waiting to be processed.
+    /// Current ingress queue depth: enqueued tasks awaiting processing plus submissions
+    /// holding a reserved slot while they validate. Reserved slots are released if the
+    /// submission is rejected, so a brief bump under a flood of invalid requests is expected
+    /// backpressure, not a leak.
     pub task_queue_depth: Gauge<i64, AtomicI64>,
     /// Whether the SQLite store answered its most recent health check (1 = up, 0 = down).
     pub db_up: Gauge<i64, AtomicI64>,
@@ -131,8 +134,8 @@ impl MetricsCollector {
 
         let task_queue_depth = Gauge::default();
         registry.register(
-            "gas_killer_task_queue_depth",
-            "Current number of tasks in the ingress queue awaiting processing",
+            "gas_killer_queue_depth",
+            "Ingress queue depth: enqueued tasks awaiting processing plus submissions holding a reserved slot during validation",
             task_queue_depth.clone(),
         );
 

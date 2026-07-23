@@ -172,7 +172,7 @@ impl IngressState {
         Self {
             sender,
             queue_depth,
-            max_queue_depth: gas_killer_common::p2p_message_backlog(),
+            max_queue_depth: gas_killer_common::max_queue_depth(),
             metrics: None,
             providers: Arc::new(HashMap::new()),
             freshness: Arc::new(FreshnessCache::default()),
@@ -615,6 +615,75 @@ pub struct TaskAcceptedResponse {
     pub status: TaskStatus,
 }
 
+/// `Retry-After` estimate (seconds) returned alongside a `503 QUEUE_FULL`. The router drains
+/// the queue one task at a time, so a slot typically frees once the in-flight round settles;
+/// sizing the hint to roughly one round nudges a shed client to retry about when capacity is
+/// likely to open rather than hot-looping against a full queue.
+const QUEUE_FULL_RETRY_AFTER_SECS: u64 = 60;
+
+/// A reserved slot in the ingress queue.
+///
+/// [`QueueSlot::reserve`] atomically increments the shared depth counter only while it is below
+/// the cap, so the capacity check and the reservation are a single operation with no
+/// check-then-increment race. Dropping the guard releases the slot (decrement + gauge refresh)
+/// unless it has been [`committed`](QueueSlot::commit) to an enqueued task, so a submission that
+/// is rejected or fails after reserving never permanently consumes capacity — regardless of which
+/// early-return path it takes.
+struct QueueSlot<'a> {
+    state: &'a IngressState,
+    committed: bool,
+}
+
+impl<'a> QueueSlot<'a> {
+    /// Atomically reserves a slot when the queue is below its cap, returning the guard and the
+    /// resulting depth. Returns `Err(current_depth)` when already at capacity, taking no slot.
+    fn reserve(state: &'a IngressState) -> Result<(Self, usize), usize> {
+        let max = state.max_queue_depth;
+        match state
+            .queue_depth
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < max).then_some(n + 1)
+            }) {
+            Ok(prev) => {
+                let depth = prev + 1;
+                if let Some(m) = &state.metrics {
+                    m.task_queue_depth.set(depth as i64);
+                }
+                Ok((
+                    Self {
+                        state,
+                        committed: false,
+                    },
+                    depth,
+                ))
+            }
+            Err(current) => Err(current),
+        }
+    }
+
+    /// Transfers the reservation to an enqueued task so it is not released on drop; the sequencer
+    /// decrements the depth when it dequeues the task.
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for QueueSlot<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let depth = self
+            .state
+            .queue_depth
+            .fetch_sub(1, Ordering::Relaxed)
+            .saturating_sub(1);
+        if let Some(m) = &self.state.metrics {
+            m.task_queue_depth.set(depth as i64);
+        }
+    }
+}
+
 /// Handler for `POST /tasks`, and its deprecated alias `POST /trigger`.
 ///
 /// Validates the request, persists it as a `queued` task before responding — so a restart can
@@ -629,24 +698,29 @@ pub async fn submit_task_handler(
 ) -> Result<(StatusCode, Json<TaskAcceptedResponse>), ApiError> {
     let key_id = authenticate_caller(&state, &headers).await?;
 
-    // Load-shed before any validation work. Onchain validation costs multiple RPC
-    // round-trips, so rejecting at-capacity requests up front keeps an overloaded
-    // service from amplifying its own load; a request that would have failed
-    // validation gets a 503 instead of a 400 while the queue is full.
-    let current_depth = state.queue_depth.load(Ordering::Relaxed);
-    if current_depth >= state.max_queue_depth {
-        warn!(
-            queue_depth = current_depth,
-            max_queue_depth = state.max_queue_depth,
-            "Task rejected: queue at capacity"
-        );
-        if let Some(m) = &state.metrics {
-            m.ingress_at_capacity.inc();
+    // Load-shed before any validation work by atomically reserving a queue slot. Onchain
+    // validation costs multiple RPC round-trips, so rejecting at-capacity requests up front keeps
+    // an overloaded service from amplifying its own load; a request that would have failed
+    // validation gets a 503 instead of a 400 while the queue is full. The reservation is released
+    // (see `QueueSlot`) on every early return below, so only a task that is actually enqueued
+    // consumes lasting capacity.
+    let slot = match QueueSlot::reserve(&state) {
+        Ok((slot, _depth)) => slot,
+        Err(current_depth) => {
+            warn!(
+                queue_depth = current_depth,
+                max_queue_depth = state.max_queue_depth,
+                "Task rejected: queue at capacity"
+            );
+            if let Some(m) = &state.metrics {
+                m.ingress_at_capacity.inc();
+            }
+            return Err(ApiError::queue_full(
+                "Service at capacity, please retry shortly",
+                QUEUE_FULL_RETRY_AFTER_SECS,
+            ));
         }
-        return Err(ApiError::queue_full(
-            "Service at capacity, please try again in a few minutes",
-        ));
-    }
+    };
 
     if let Err(e) = request.validate() {
         warn!(
@@ -701,19 +775,19 @@ pub async fn submit_task_handler(
         call_data_len = request.body.call_data.len(),
         "Task accepted"
     );
-    let depth = state.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
     let queued = QueuedTask {
         task_id: task.id.clone(),
         request,
     };
     if state.sender.send(queued).is_err() {
-        state.queue_depth.fetch_sub(1, Ordering::Relaxed);
         tracing::error!(task_id = %task.id, "task channel closed, dropping request");
         return Err(ApiError::internal("Internal error: task queue unavailable"));
     }
+    // The enqueued task now owns the reserved slot; the sequencer decrements the depth counter
+    // when it dequeues. Releasing here would double-count against a task that is genuinely queued.
+    slot.commit();
     if let Some(m) = &state.metrics {
         m.ingress_accepted.inc();
-        m.task_queue_depth.set(depth as i64);
     }
     Ok((
         StatusCode::ACCEPTED,
@@ -1361,6 +1435,49 @@ mod tests {
         assert_eq!(clamp_offset(Some(-1)), 0);
         assert_eq!(clamp_offset(Some(0)), 0);
         assert_eq!(clamp_offset(Some(42)), 42);
+    }
+
+    // -- queue-slot reservation --
+
+    fn slot_test_state(max_queue_depth: usize) -> (IngressState, TaskQueueDepth) {
+        // The receiver is unused: reservation only touches the depth counter, never the channel.
+        let (sender, _receiver) = crate::sequencer::task_channel();
+        let queue_depth = crate::sequencer::task_queue_depth();
+        let mut state = IngressState::without_metrics(sender, queue_depth.clone());
+        state.max_queue_depth = max_queue_depth;
+        (state, queue_depth)
+    }
+
+    #[test]
+    fn queue_slot_reserves_up_to_cap_then_refuses() {
+        let (state, queue_depth) = slot_test_state(2);
+
+        let (_s1, d1) = QueueSlot::reserve(&state).expect("first reservation fits");
+        let (_s2, d2) = QueueSlot::reserve(&state).expect("second reservation fills the queue");
+        assert_eq!((d1, d2), (1, 2));
+        assert_eq!(queue_depth.load(Ordering::Relaxed), 2);
+
+        // At capacity the reservation is refused atomically and consumes no slot, so concurrent
+        // submissions cannot race past the cap.
+        assert!(QueueSlot::reserve(&state).is_err());
+        assert_eq!(queue_depth.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn queue_slot_releases_on_drop_but_not_after_commit() {
+        let (state, queue_depth) = slot_test_state(2);
+
+        let (dropped, _) = QueueSlot::reserve(&state).expect("reservation fits");
+        let (kept, _) = QueueSlot::reserve(&state).expect("reservation fits");
+        assert_eq!(queue_depth.load(Ordering::Relaxed), 2);
+
+        // An uncommitted slot frees capacity when it drops (a rejected/failed submission).
+        drop(dropped);
+        assert_eq!(queue_depth.load(Ordering::Relaxed), 1);
+
+        // A committed slot stays counted — the enqueued task owns it until the sequencer dequeues.
+        kept.commit();
+        assert_eq!(queue_depth.load(Ordering::Relaxed), 1);
     }
 
     // -- HTTP handler integration tests --
@@ -2194,6 +2311,31 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_full_queue_response_carries_retry_after() {
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
+            let mut state = IngressState::without_metrics(sender, queue_depth.clone());
+            state.max_queue_depth = 1;
+            queue_depth.store(1, std::sync::atomic::Ordering::Relaxed);
+            let app = build_app().with_state(state);
+
+            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let retry_after = resp
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .expect("503 QUEUE_FULL must carry a Retry-After header");
+            assert!(
+                retry_after
+                    .to_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .is_ok_and(|secs| secs > 0),
+                "Retry-After must be a positive number of seconds"
+            );
+        }
+
+        #[tokio::test]
         async fn test_full_queue_increments_at_capacity_metric() {
             let (sender, _receiver) = crate::sequencer::task_channel();
             let queue_depth = crate::sequencer::task_queue_depth();
@@ -2250,6 +2392,36 @@ mod tests {
             assert!(
                 receiver.try_recv().is_err(),
                 "invalid task must not be pushed to queue"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_rejected_request_releases_reserved_slot() {
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
+            let state = IngressState::without_metrics(sender, queue_depth.clone());
+            let app = build_app().with_state(state);
+
+            // A zero-target request reserves a slot, fails validation, and must release it on the
+            // way out so a rejected submission never permanently shrinks capacity.
+            let invalid = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000000",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      [0xAB, 0xCD, 0xEF, 0x01],
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 1
+                }
+            })
+            .to_string();
+
+            let resp = app.oneshot(json_request(&invalid)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                queue_depth.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "a rejected request must not leave its reserved slot occupied"
             );
         }
 

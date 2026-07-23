@@ -13,8 +13,8 @@
 
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, Query, Request};
-use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, async_trait};
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,10 @@ pub struct ApiError {
     pub status: StatusCode,
     pub code: ErrorCode,
     pub message: String,
+    /// When set, emitted as a `Retry-After` header (in seconds) so a client that hit a
+    /// transient limit knows roughly how long to wait before retrying. Only meaningful for
+    /// retryable statuses (e.g. 503 `QUEUE_FULL`).
+    pub retry_after_secs: Option<u64>,
 }
 
 impl ApiError {
@@ -96,7 +100,14 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            retry_after_secs: None,
         }
+    }
+
+    /// Attaches a `Retry-After` estimate (in seconds), returned as a header on the response.
+    pub fn with_retry_after(mut self, secs: u64) -> Self {
+        self.retry_after_secs = Some(secs);
+        self
     }
 
     /// 401 with [`ErrorCode::Unauthorized`].
@@ -125,13 +136,15 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, ErrorCode::PayloadExpired, message)
     }
 
-    /// 503 with [`ErrorCode::QueueFull`].
-    pub fn queue_full(message: impl Into<String>) -> Self {
+    /// 503 with [`ErrorCode::QueueFull`], carrying a `Retry-After` estimate (seconds) so a
+    /// load-shed client backs off rather than hot-looping against a full queue.
+    pub fn queue_full(message: impl Into<String>, retry_after_secs: u64) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::QueueFull,
             message,
         )
+        .with_retry_after(retry_after_secs)
     }
 
     /// 500 with [`ErrorCode::Internal`].
@@ -146,13 +159,21 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let retry_after = self.retry_after_secs;
+        let status = self.status;
         let body = ApiErrorEnvelope {
             error: ApiErrorBody {
                 code: self.code,
                 message: self.message,
             },
         };
-        (self.status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if let Some(secs) = retry_after
+            && let Ok(value) = HeaderValue::from_str(&secs.to_string())
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        response
     }
 }
 
@@ -262,6 +283,22 @@ mod tests {
         let err = ApiError::payload_expired("valid_until_block 100 passed; re-request");
         assert_eq!(err.status, StatusCode::CONFLICT);
         assert_eq!(err.code, ErrorCode::PayloadExpired);
+    }
+
+    #[tokio::test]
+    async fn queue_full_response_sets_retry_after_header() {
+        let resp = ApiError::queue_full("full", 60).into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers().get(header::RETRY_AFTER).unwrap(),
+            &HeaderValue::from_static("60")
+        );
+    }
+
+    #[tokio::test]
+    async fn error_without_retry_after_omits_the_header() {
+        let resp = ApiError::not_found("nope").into_response();
+        assert!(resp.headers().get(header::RETRY_AFTER).is_none());
     }
 
     #[test]
