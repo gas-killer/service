@@ -7,6 +7,8 @@ pub struct MetricsCollector {
     registry: Registry,
     /// Ingress requests that passed validation and were queued.
     pub ingress_accepted: Counter<u64, AtomicU64>,
+    /// Ingress requests that collapsed onto an existing task via deduplication.
+    pub ingress_deduplicated: Counter<u64, AtomicU64>,
     /// Ingress requests rejected by validation.
     pub ingress_rejected: Counter<u64, AtomicU64>,
     /// Ingress requests dropped because the task queue is at capacity.
@@ -60,6 +62,13 @@ impl MetricsCollector {
             "gas_killer_ingress_requests_accepted",
             "Total ingress task requests accepted and queued",
             ingress_accepted.clone(),
+        );
+
+        let ingress_deduplicated = Counter::default();
+        registry.register(
+            "gas_killer_ingress_requests_deduplicated",
+            "Total ingress task requests that collapsed onto an existing task via deduplication",
+            ingress_deduplicated.clone(),
         );
 
         let ingress_rejected = Counter::default();
@@ -200,6 +209,7 @@ impl MetricsCollector {
         Self {
             registry,
             ingress_accepted,
+            ingress_deduplicated,
             ingress_rejected,
             ingress_at_capacity,
             ingress_rate_limited,
