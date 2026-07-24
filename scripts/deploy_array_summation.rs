@@ -3,6 +3,7 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use bindings::arraysummationfactory::ArraySummationFactory;
+use bindings::reentrantcheckpointfactory::ReentrantCheckpointFactory;
 use bindings::schnorrarraysummationfactory::SchnorrArraySummationFactory;
 use bindings::schnorrstakeregistry::SchnorrStakeRegistry;
 use gas_killer_common::schnorr::{PrivateKey, private_key_from_hex};
@@ -486,6 +487,19 @@ async fn deploy_schnorr() -> Result<(), DynError> {
         }
     }
 
+    // Example selector: the re-entrancy demonstration deploys a different target (a
+    // ReentrantCheckpoint + its Observer) but reuses the same registry/operators/JSON
+    // wiring. Gated so the default array-summation e2e is byte-identical.
+    if e2e_example_is_reentrant() {
+        return deploy_reentrant_checkpoint(
+            provider.clone(),
+            avs_address,
+            registry_address,
+            &avs_deployment_path,
+        )
+        .await;
+    }
+
     // Deploy the factory and the target, strictly after the registrations above so
     // the first verification's `refBlock = head - 1` is at/after `effectiveBlock`.
     println!("🏭 Deploying a fresh SchnorrArraySummationFactory...");
@@ -651,5 +665,129 @@ fn update_schnorr_deployment_json(
         .map_err(|e| format!("Failed to write updated deployment JSON: {}", e))?;
 
     println!("📝 Updated deployment JSON with new addresses");
+    Ok(())
+}
+
+/// True when `E2E_EXAMPLE=reentrant` (case-insensitive) selects the re-entrancy
+/// demonstration target instead of the default array-summation one.
+fn e2e_example_is_reentrant() -> bool {
+    matches!(
+        env::var("E2E_EXAMPLE").map(|v| v.trim().to_ascii_lowercase()),
+        Ok(ref v) if v == "reentrant" || v == "reentrant-checkpoint"
+    )
+}
+
+/// Deploy the re-entrancy demonstration target: a `ReentrantCheckpointFactory` that
+/// produces a wired `{ReentrantObserver, ReentrantCheckpoint}` pair. The checkpoint's
+/// `advance()` task re-enters itself through the observer mid-transition, so settling it
+/// through the aggregate-Schnorr path proves re-entrancy is safe under the **canonical**
+/// state encoding (`STATE_ENCODING=canonical`).
+///
+/// Writes the checkpoint address under the scheme-agnostic `arraySummation` alias (so
+/// `send_request` / `verify_message_hash_parity` target it unchanged) plus explicit
+/// `reentrantCheckpoint` / `reentrantObserver` keys.
+async fn deploy_reentrant_checkpoint<P>(
+    provider: P,
+    avs_address: Address,
+    registry_address: Address,
+    avs_deployment_path: &str,
+) -> Result<(), DynError>
+where
+    P: Provider + Clone,
+{
+    println!("🏭 Deploying a fresh ReentrantCheckpointFactory (re-entrancy e2e)...");
+    let factory = ReentrantCheckpointFactory::deploy(provider.clone())
+        .await
+        .map_err(|e| format!("Failed to deploy ReentrantCheckpointFactory: {}", e))?;
+    let factory_address = *factory.address();
+    println!(
+        "✅ ReentrantCheckpointFactory deployed at: {}",
+        factory_address
+    );
+
+    let count_before = factory
+        .getDeployedContractCount()
+        .call()
+        .await
+        .map_err(|e| format!("Failed to get deployed contract count: {}", e))?;
+
+    println!("🚀 Deploying the {{observer, checkpoint}} pair...");
+    let pending_tx = factory
+        .deployReentrantCheckpoint(avs_address, registry_address)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send deployReentrantCheckpoint: {}", e))?;
+    let receipt = pending_tx
+        .get_receipt()
+        .await
+        .map_err(|e| format!("deployReentrantCheckpoint failed or was not mined: {}", e))?;
+    if !receipt.status() {
+        return Err("deployReentrantCheckpoint reverted".into());
+    }
+
+    let checkpoint_address = factory
+        .deployedCheckpoints(count_before)
+        .call()
+        .await
+        .map_err(|e| format!("Failed to read deployed checkpoint address: {}", e))?;
+    if checkpoint_address == Address::ZERO {
+        return Err("Deployed checkpoint address is zero".into());
+    }
+    let observer_address = factory
+        .observerOf(checkpoint_address)
+        .call()
+        .await
+        .map_err(|e| format!("Failed to read observer address: {}", e))?;
+
+    println!("✅ ReentrantCheckpoint deployed at: {}", checkpoint_address);
+    println!("✅ ReentrantObserver deployed at:   {}", observer_address);
+
+    update_reentrant_deployment_json(
+        avs_deployment_path,
+        &format!("{:?}", registry_address),
+        &format!("{:?}", factory_address),
+        &format!("{:?}", checkpoint_address),
+        &format!("{:?}", observer_address),
+    )?;
+
+    println!("🎉 Re-entrancy target deployment completed successfully!");
+    Ok(())
+}
+
+fn update_reentrant_deployment_json(
+    avs_deployment_path: &str,
+    registry_address: &str,
+    factory_address: &str,
+    checkpoint_address: &str,
+    observer_address: &str,
+) -> Result<(), DynError> {
+    let deployment_content = match fs::read_to_string(avs_deployment_path) {
+        Ok(content) => content,
+        Err(_) => {
+            println!("⚠️  Could not read deployment file for updating, skipping JSON update");
+            return Ok(());
+        }
+    };
+
+    let mut deployment: serde_json::Value = serde_json::from_str(&deployment_content)
+        .map_err(|e| format!("Failed to parse deployment JSON for updating: {}", e))?;
+
+    if !deployment["addresses"].is_object() {
+        deployment["addresses"] = serde_json::json!({});
+    }
+
+    deployment["addresses"]["schnorrStakeRegistry"] = serde_json::json!(registry_address);
+    deployment["addresses"]["reentrantCheckpointFactory"] = serde_json::json!(factory_address);
+    deployment["addresses"]["reentrantCheckpoint"] = serde_json::json!(checkpoint_address);
+    deployment["addresses"]["reentrantObserver"] = serde_json::json!(observer_address);
+    // Scheme-agnostic alias the trigger/parity readers use as the task target.
+    deployment["addresses"]["arraySummation"] = serde_json::json!(checkpoint_address);
+
+    let updated_json = serde_json::to_string_pretty(&deployment)
+        .map_err(|e| format!("Failed to serialize updated JSON: {}", e))?;
+    fs::write(avs_deployment_path, updated_json)
+        .map_err(|e| format!("Failed to write updated deployment JSON: {}", e))?;
+
+    println!("📝 Updated deployment JSON with re-entrancy target addresses");
     Ok(())
 }

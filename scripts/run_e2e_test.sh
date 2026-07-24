@@ -26,6 +26,16 @@ SIGNATURE_SCHEME_CHOICE="${SIGNATURE_SCHEME:-bls}"
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 echo "Signature scheme: $SIGNATURE_SCHEME_CHOICE"
 
+# STATE_ENCODING (legacy|canonical) and E2E_EXAMPLE (array-summation|reentrant) follow the
+# same capture-then-re-export discipline as SIGNATURE_SCHEME so the containers AND the
+# host-side deploy/send binaries agree. `reentrant` deploys a ReentrantCheckpoint whose
+# task re-enters mid-transition; pair it with `canonical` to prove re-entrancy is safe.
+STATE_ENCODING_CHOICE="${STATE_ENCODING:-legacy}"
+export STATE_ENCODING="$STATE_ENCODING_CHOICE"
+E2E_EXAMPLE_CHOICE="${E2E_EXAMPLE:-array-summation}"
+export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
+echo "State encoding: $STATE_ENCODING_CHOICE | e2e example: $E2E_EXAMPLE_CHOICE"
+
 # Track if test passed
 TEST_PASSED=false
 
@@ -157,9 +167,12 @@ cd "$PROJECT_ROOT/scripts"
 
 # Source environment and run deployment
 source ../.env
-# `source ../.env` may reset SIGNATURE_SCHEME to the example default; restore the
-# caller's choice so deploy_array_summation picks the right stack.
+# `source ../.env` may reset these to the example defaults; restore the caller's
+# choices so deploy_array_summation / send_request pick the right stack, encoding,
+# and example target.
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
+export STATE_ENCODING="$STATE_ENCODING_CHOICE"
+export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
