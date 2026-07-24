@@ -4,9 +4,12 @@
 //! abusive client cannot exhaust the shared task queue and starve other keys. A key is limited at
 //! the global default rate (`RATE_LIMIT_RPM`) unless it was issued with a per-key override.
 //!
-//! State is in-memory and per-process: a restart resets every window. This is acceptable for the
-//! v1 beta (the queue is bounded independently by `MAX_QUEUE_DEPTH`) and keeps the check off the
-//! database — no per-request write on the hot path.
+//! State is in-memory and per-process: a restart resets every window, and the limit is enforced
+//! per router process. Running multiple ingress replicas behind a load balancer would multiply the
+//! effective rate by the replica count, so a horizontally scaled deployment would need a shared
+//! backend (e.g. Redis-backed GCRA) instead. This is acceptable for the single-router v1 beta (the
+//! queue is bounded independently by `MAX_QUEUE_DEPTH`) and keeps the check off the database — no
+//! per-request write on the hot path.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
