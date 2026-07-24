@@ -7,6 +7,7 @@ use crate::ingress::{
     IngressState, start_gas_killer_http_server,
 };
 use crate::metrics::MetricsCollector;
+use crate::rate_limit::KeyRateLimiter;
 use crate::schnorr_coordinator::SchnorrCertifiedReceiver;
 use crate::schnorr_submitter::SchnorrSubmitter;
 use crate::sequencer::{
@@ -169,10 +170,12 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
     }
 
     let store_for_return = store.clone();
+    let rate_limiter = Arc::new(KeyRateLimiter::new(gas_killer_common::rate_limit_rpm()));
     let ingress_state = IngressState::new(
         sender.clone(),
         queue_depth.clone(),
         gas_killer_common::max_queue_depth(),
+        rate_limiter,
         metrics,
         providers,
         avs_metadata,

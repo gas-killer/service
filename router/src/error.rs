@@ -136,6 +136,17 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, ErrorCode::PayloadExpired, message)
     }
 
+    /// 429 with [`ErrorCode::RateLimited`], carrying the `Retry-After` delay (seconds) until the
+    /// caller's next request is allowed under its per-key rate limit.
+    pub fn rate_limited(retry_after_secs: u64) -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::RateLimited,
+            "Rate limit exceeded; retry after the indicated delay",
+        )
+        .with_retry_after(retry_after_secs)
+    }
+
     /// 503 with [`ErrorCode::QueueFull`], carrying a `Retry-After` estimate (seconds) so a
     /// load-shed client backs off rather than hot-looping against a full queue.
     pub fn queue_full(message: impl Into<String>, retry_after_secs: u64) -> Self {
@@ -299,6 +310,16 @@ mod tests {
     async fn error_without_retry_after_omits_the_header() {
         let resp = ApiError::not_found("nope").into_response();
         assert!(resp.headers().get(header::RETRY_AFTER).is_none());
+    }
+
+    #[tokio::test]
+    async fn rate_limited_response_sets_429_and_retry_after() {
+        let resp = ApiError::rate_limited(42).into_response();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers().get(header::RETRY_AFTER).unwrap(),
+            &HeaderValue::from_static("42")
+        );
     }
 
     #[test]

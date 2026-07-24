@@ -1,7 +1,10 @@
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ApiQuery, ErrorCode};
 use crate::metrics::MetricsCollector;
+use crate::rate_limit::KeyRateLimiter;
 use crate::sequencer::{QueuedTask, TaskQueueDepth, TaskSender};
-use crate::store::{ApiKeyMetadata, CreatedApiKey, SqliteStore, Task, TaskStatus};
+use crate::store::{
+    ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, SqliteStore, Task, TaskStatus,
+};
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use axum::{
@@ -20,6 +23,7 @@ use gas_killer_common::{PayloadView, TaskBundle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -121,6 +125,8 @@ pub struct IngressState {
     pub queue_depth: TaskQueueDepth,
     /// Maximum number of tasks allowed in the queue before the ingress starts returning 503.
     pub max_queue_depth: usize,
+    /// Per-API-key request rate limiter guarding `POST /tasks`; see [`KeyRateLimiter`].
+    pub rate_limiter: Arc<KeyRateLimiter>,
     pub metrics: Option<Arc<MetricsCollector>>,
     pub providers: Arc<HashMap<ChainRole, ReadOnlyProvider>>,
     /// Short-lived cache backing the `ready`-payload freshness check on `GET /tasks/{id}`.
@@ -141,10 +147,12 @@ pub struct IngressState {
 }
 
 impl IngressState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sender: TaskSender,
         queue_depth: TaskQueueDepth,
         max_queue_depth: usize,
+        rate_limiter: Arc<KeyRateLimiter>,
         metrics: Arc<MetricsCollector>,
         providers: HashMap<ChainRole, ReadOnlyProvider>,
         avs_metadata: AvsMetadata,
@@ -153,6 +161,7 @@ impl IngressState {
             sender,
             queue_depth,
             max_queue_depth,
+            rate_limiter,
             metrics: Some(metrics),
             providers: Arc::new(providers),
             freshness: Arc::new(FreshnessCache::default()),
@@ -173,6 +182,7 @@ impl IngressState {
             sender,
             queue_depth,
             max_queue_depth: gas_killer_common::max_queue_depth(),
+            rate_limiter: Arc::new(KeyRateLimiter::new(gas_killer_common::rate_limit_rpm())),
             metrics: None,
             providers: Arc::new(HashMap::new()),
             freshness: Arc::new(FreshnessCache::default()),
@@ -223,16 +233,16 @@ fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
         .is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
 }
 
-/// Authenticates the caller against the durable store, returning the API key's id. Used by
-/// every task endpoint (submission and status) to identify — and scope work to — the calling
-/// key. When a store is present — always the case in production — a valid, unrevoked API key is
-/// required and its id is returned. With no store, the request is rejected unless
-/// `allow_unauthenticated` is set (the test/dev bare constructor), which yields `None`; a missing
-/// store fails closed rather than silently opening the endpoint.
+/// Authenticates the caller against the durable store, returning the authenticated key (its id
+/// and rate-limit ceiling). Used by every task endpoint (submission and status) to identify — and
+/// scope work to — the calling key. When a store is present — always the case in production — a
+/// valid, unrevoked API key is required and its record is returned. With no store, the request is
+/// rejected unless `allow_unauthenticated` is set (the test/dev bare constructor), which yields
+/// `None`; a missing store fails closed rather than silently opening the endpoint.
 async fn authenticate_caller(
     state: &IngressState,
     headers: &HeaderMap,
-) -> Result<Option<String>, ApiError> {
+) -> Result<Option<AuthenticatedKey>, ApiError> {
     let Some(store) = &state.store else {
         return if state.allow_unauthenticated {
             Ok(None)
@@ -243,7 +253,7 @@ async fn authenticate_caller(
 
     if let Some(token) = bearer_token(headers) {
         match store.verify_api_key(token).await {
-            Ok(Some(id)) => return Ok(Some(id)),
+            Ok(Some(authed)) => return Ok(Some(authed)),
             Ok(None) => {}
             Err(e) => {
                 tracing::error!(error = %e, "api key verification failed");
@@ -696,7 +706,27 @@ pub async fn submit_task_handler(
     headers: HeaderMap,
     ApiJson(request): ApiJson<GasKillerTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskAcceptedResponse>), ApiError> {
-    let key_id = authenticate_caller(&state, &headers).await?;
+    let auth = authenticate_caller(&state, &headers).await?;
+
+    // Enforce the caller's per-key rate limit before reserving a queue slot, so an abusive key is
+    // turned away before it can occupy capacity or trigger validation RPCs. Only authenticated
+    // callers are limited; the store-less dev path (`allow_unauthenticated`) has no key to
+    // attribute requests to and is never reachable in production.
+    if let Some(key) = &auth
+        && let Err(retry_after_secs) = state
+            .rate_limiter
+            .check(&key.id, key.rpm_limit.and_then(NonZeroU32::new))
+    {
+        warn!(
+            key_id = %key.id,
+            retry_after_secs,
+            "Task rejected: per-key rate limit exceeded"
+        );
+        if let Some(m) = &state.metrics {
+            m.ingress_rate_limited.inc();
+        }
+        return Err(ApiError::rate_limited(retry_after_secs));
+    }
 
     // Load-shed before any validation work by atomically reserving a queue slot. Onchain
     // validation costs multiple RPC round-trips, so rejecting at-capacity requests up front keeps
@@ -754,10 +784,10 @@ pub async fn submit_task_handler(
     }
 
     // Persistence is required to hand back a task id and to survive restarts. A configured store
-    // always authenticates (see `authenticate_caller`), so `key_id` is `Some` here; an absent
-    // id is treated as unauthorized rather than unwrapped.
+    // always authenticates (see `authenticate_caller`), so `auth` is `Some` here; an absent key
+    // is treated as unauthorized rather than unwrapped.
     let store = require_store(&state)?;
-    let key_id = key_id.ok_or_else(ApiError::unauthorized)?;
+    let key_id = auth.ok_or_else(ApiError::unauthorized)?.id;
 
     let task = store
         .create_task(&key_id, &request.body)
@@ -1009,7 +1039,7 @@ pub async fn get_task_handler(
 ) -> Result<Json<TaskView>, ApiError> {
     let key_id = authenticate_caller(&state, &headers).await?;
     let store = require_store(&state)?;
-    let key_id = key_id.ok_or_else(ApiError::unauthorized)?;
+    let key_id = key_id.ok_or_else(ApiError::unauthorized)?.id;
 
     let task = store
         .get_task(&task_id)
@@ -1043,7 +1073,7 @@ pub async fn list_tasks_handler(
 ) -> Result<Json<Vec<TaskView>>, ApiError> {
     let key_id = authenticate_caller(&state, &headers).await?;
     let store = require_store(&state)?;
-    let key_id = key_id.ok_or_else(ApiError::unauthorized)?;
+    let key_id = key_id.ok_or_else(ApiError::unauthorized)?.id;
 
     let limit = clamp_page_limit(params.limit);
     let offset = clamp_offset(params.offset);
@@ -1068,6 +1098,10 @@ pub struct CreateApiKeyRequest {
     pub label: Option<String>,
     #[serde(default)]
     pub invalid_at: Option<i64>,
+    /// Per-key requests-per-minute override for `POST /tasks`. Omit or send `null` to limit the
+    /// key at the global default rate (`RATE_LIMIT_RPM`). Must be positive when present.
+    #[serde(default)]
+    pub rpm_limit: Option<u32>,
 }
 
 /// `POST /admin/keys` — issues a new API key. Admin-only. The response carries the raw key
@@ -1107,14 +1141,25 @@ async fn create_api_key_handler(
         ));
     }
 
+    // A zero override would rate-limit the key to nothing; reject it so a misconfiguration
+    // surfaces at creation rather than as a permanently 429ing key. Omit the field for the
+    // global default rate.
+    if request.rpm_limit == Some(0) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "rpm_limit must be a positive number of requests per minute",
+        ));
+    }
+
     let created = store
-        .create_api_key(label, request.invalid_at)
+        .create_api_key_with_rpm(label, request.invalid_at, request.rpm_limit)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to create api key");
             ApiError::internal("Failed to create API key")
         })?;
-    info!(id = %created.id, "api key created");
+    info!(id = %created.id, rpm_limit = ?created.rpm_limit, "api key created");
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -2115,6 +2160,49 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn admin_create_honors_rpm_override() {
+            let (app, _store, _rx) = make_app_with_store(Some("admin-secret")).await;
+            let req = admin_request(
+                Method::POST,
+                "/admin/keys",
+                Some("admin-secret"),
+                r#"{"label":"vip","rpm_limit":600}"#,
+            );
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let json = created_key_json(resp).await;
+            assert_eq!(json["rpm_limit"].as_u64(), Some(600));
+        }
+
+        #[tokio::test]
+        async fn admin_create_defaults_rpm_to_null() {
+            let (app, _store, _rx) = make_app_with_store(Some("admin-secret")).await;
+            let req = admin_request(Method::POST, "/admin/keys", Some("admin-secret"), "{}");
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let json = created_key_json(resp).await;
+            assert!(
+                json["rpm_limit"].is_null(),
+                "a key with no override reports a null rpm_limit (global default applies)"
+            );
+        }
+
+        #[tokio::test]
+        async fn admin_create_rejects_zero_rpm() {
+            let (app, _store, _rx) = make_app_with_store(Some("admin-secret")).await;
+            let req = admin_request(
+                Method::POST,
+                "/admin/keys",
+                Some("admin-secret"),
+                r#"{"rpm_limit":0}"#,
+            );
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
+        }
+
+        #[tokio::test]
         async fn admin_create_rejects_past_expiry() {
             let (app, _store, _rx) = make_app_with_store(Some("admin-secret")).await;
             // A 1970 timestamp is already in the past.
@@ -2423,6 +2511,134 @@ mod tests {
                 0,
                 "a rejected request must not leave its reserved slot occupied"
             );
+        }
+
+        // -- per-key rate limit tests --
+
+        /// Builds an app backed by an in-memory store whose ingress limits every key at
+        /// `default_rpm` requests per minute (a `governor` burst of `default_rpm`). Returns the
+        /// store, so tests can mint keys, and the receiver, so accepted tasks have somewhere to
+        /// land. Optional metrics let a test assert the rejection counter.
+        async fn make_rate_limited_app(
+            default_rpm: u32,
+            metrics: Option<Arc<MetricsCollector>>,
+        ) -> (Router, SqliteStore, crate::sequencer::TaskReceiver) {
+            let (sender, receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
+            let store = SqliteStore::connect_in_memory()
+                .await
+                .expect("in-memory store should open");
+            let mut state =
+                IngressState::without_metrics(sender, queue_depth).with_store(store.clone());
+            state.rate_limiter = Arc::new(crate::rate_limit::KeyRateLimiter::new(
+                std::num::NonZeroU32::new(default_rpm).unwrap(),
+            ));
+            state.metrics = metrics;
+            let app = build_app().with_state(state);
+            (app, store, receiver)
+        }
+
+        #[tokio::test]
+        async fn rate_limit_rejects_second_request_with_429_and_retry_after() {
+            let (app, store, _rx) = make_rate_limited_app(1, None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+
+            // First request is within the one-per-minute budget.
+            let first = app
+                .clone()
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::ACCEPTED);
+
+            // Second immediate request from the same key exceeds it.
+            let second = app
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+            let retry_after = second
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .expect("429 must carry a Retry-After header");
+            assert!(
+                retry_after
+                    .to_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .is_ok_and(|secs| secs > 0),
+                "Retry-After must be a positive number of seconds"
+            );
+            let body = error_envelope(second).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::RateLimited);
+        }
+
+        #[tokio::test]
+        async fn rate_limit_increments_metric() {
+            let metrics = Arc::new(MetricsCollector::new());
+            let (app, store, _rx) = make_rate_limited_app(1, Some(Arc::clone(&metrics))).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+
+            app.clone()
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(metrics.ingress_rate_limited.get(), 1);
+        }
+
+        #[tokio::test]
+        async fn rate_limit_is_scoped_per_key() {
+            let (app, store, _rx) = make_rate_limited_app(1, None).await;
+            let key_a = store.create_api_key(None, None).await.unwrap();
+            let key_b = store.create_api_key(None, None).await.unwrap();
+
+            // Exhaust key A's budget.
+            app.clone()
+                .oneshot(bearer_request(&valid_body(), &key_a.key))
+                .await
+                .unwrap();
+            let a_second = app
+                .clone()
+                .oneshot(bearer_request(&valid_body(), &key_a.key))
+                .await
+                .unwrap();
+            assert_eq!(a_second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+            // Key B has its own independent budget and is unaffected.
+            let b_first = app
+                .oneshot(bearer_request(&valid_body(), &key_b.key))
+                .await
+                .unwrap();
+            assert_eq!(b_first.status(), StatusCode::ACCEPTED);
+        }
+
+        #[tokio::test]
+        async fn rate_limit_override_widens_a_key_budget() {
+            // Global default is one per minute, but this key is issued a generous override, so a
+            // burst that would 429 a default key is accepted.
+            let (app, store, _rx) = make_rate_limited_app(1, None).await;
+            let key = store
+                .create_api_key_with_rpm(None, None, Some(600))
+                .await
+                .unwrap();
+
+            for _ in 0..5 {
+                let resp = app
+                    .clone()
+                    .oneshot(bearer_request(&valid_body(), &key.key))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::ACCEPTED,
+                    "a key with a high rpm override should not be limited at the default rate"
+                );
+            }
         }
 
         // -- status polling tests (GET /tasks/{id}, GET /tasks) --

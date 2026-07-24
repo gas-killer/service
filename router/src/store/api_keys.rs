@@ -36,6 +36,9 @@ pub struct CreatedApiKey {
     pub created_at: i64,
     /// Unix timestamp at which the key stops authenticating, or `None` if it never expires.
     pub invalid_at: Option<i64>,
+    /// Per-key requests-per-minute override for `POST /tasks`, or `None` to use the global
+    /// default rate.
+    pub rpm_limit: Option<u32>,
 }
 
 /// Non-secret metadata about an active API key, safe to list. Deliberately omits the key value
@@ -49,6 +52,18 @@ pub struct ApiKeyMetadata {
     /// Unix timestamp at which the key expires, or `None` if it never expires. Listed keys are
     /// always still valid, so this is only ever null or a future time.
     pub invalid_at: Option<i64>,
+    /// Per-key requests-per-minute override, or `None` when the key uses the global default rate.
+    pub rpm_limit: Option<u32>,
+}
+
+/// The outcome of authenticating a presented key: the key's public id and its rate-limit ceiling.
+/// Returned by [`SqliteStore::verify_api_key`] so the ingress can both attribute the request to a
+/// key and pick the right rate-limit quota in one lookup.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedKey {
+    pub id: String,
+    /// Per-key requests-per-minute override, or `None` when the key uses the global default rate.
+    pub rpm_limit: Option<u32>,
 }
 
 /// Generates a fresh opaque key: `gk_` followed by 32 hex-encoded random bytes.
@@ -72,27 +87,40 @@ fn hash_key(raw: &str) -> String {
 }
 
 impl SqliteStore {
-    /// Issues a new API key with an optional human-readable label and optional expiry
-    /// (`invalid_at`, a unix timestamp; `None` never expires), persisting only its hash. The
-    /// returned [`CreatedApiKey`] carries the raw key value, which the caller must surface to the
-    /// operator immediately — it cannot be retrieved again.
+    /// Issues a new API key limited at the global default rate. Convenience wrapper over
+    /// [`create_api_key_with_rpm`](Self::create_api_key_with_rpm) with no per-key override.
     pub async fn create_api_key(
         &self,
         label: Option<String>,
         invalid_at: Option<i64>,
+    ) -> anyhow::Result<CreatedApiKey> {
+        self.create_api_key_with_rpm(label, invalid_at, None).await
+    }
+
+    /// Issues a new API key with an optional human-readable label, optional expiry (`invalid_at`,
+    /// a unix timestamp; `None` never expires), and an optional per-key requests-per-minute
+    /// override (`None` uses the global default rate), persisting only its hash. The returned
+    /// [`CreatedApiKey`] carries the raw key value, which the caller must surface to the operator
+    /// immediately — it cannot be retrieved again.
+    pub async fn create_api_key_with_rpm(
+        &self,
+        label: Option<String>,
+        invalid_at: Option<i64>,
+        rpm_limit: Option<u32>,
     ) -> anyhow::Result<CreatedApiKey> {
         let key = generate_key();
         let id = generate_id();
         let key_hash = hash_key(&key);
 
         let created_at: i64 = sqlx::query_scalar(
-            "INSERT INTO api_keys (id, key_hash, label, invalid_at) \
-             VALUES (?1, ?2, ?3, ?4) RETURNING created_at",
+            "INSERT INTO api_keys (id, key_hash, label, invalid_at, rpm_limit) \
+             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING created_at",
         )
         .bind(&id)
         .bind(&key_hash)
         .bind(label.as_deref())
         .bind(invalid_at)
+        .bind(rpm_limit)
         .fetch_one(self.pool())
         .await
         .context("inserting api key")?;
@@ -103,14 +131,25 @@ impl SqliteStore {
             label,
             created_at,
             invalid_at,
+            rpm_limit,
         })
     }
 
     /// Lists metadata for every still-valid key (neither revoked nor expired), most recently
     /// created first. The key values and hashes are never returned.
     pub async fn list_api_keys(&self) -> anyhow::Result<Vec<ApiKeyMetadata>> {
-        let rows = sqlx::query_as::<_, (String, Option<String>, i64, Option<i64>, Option<i64>)>(
-            "SELECT id, label, created_at, last_used, invalid_at FROM api_keys \
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                i64,
+                Option<i64>,
+                Option<i64>,
+                Option<u32>,
+            ),
+        >(
+            "SELECT id, label, created_at, last_used, invalid_at, rpm_limit FROM api_keys \
              WHERE invalid_at IS NULL OR invalid_at > unixepoch() ORDER BY created_at DESC, id",
         )
         .fetch_all(self.pool())
@@ -120,12 +159,13 @@ impl SqliteStore {
         Ok(rows
             .into_iter()
             .map(
-                |(id, label, created_at, last_used, invalid_at)| ApiKeyMetadata {
+                |(id, label, created_at, last_used, invalid_at, rpm_limit)| ApiKeyMetadata {
                     id,
                     label,
                     created_at,
                     last_used,
                     invalid_at,
+                    rpm_limit,
                 },
             )
             .collect())
@@ -148,24 +188,27 @@ impl SqliteStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Authenticates a presented key. Returns the key's id when it matches a still-valid key
-    /// (neither revoked nor past its expiry), stamping `last_used` in the same statement;
-    /// returns `None` when the key is unknown, revoked, or expired. Lookup is by hash, so the raw
-    /// secret is never compared byte-wise.
-    pub async fn verify_api_key(&self, presented: &str) -> anyhow::Result<Option<String>> {
+    /// Authenticates a presented key. Returns the key's id and rate-limit ceiling when it matches
+    /// a still-valid key (neither revoked nor past its expiry), stamping `last_used` in the same
+    /// statement; returns `None` when the key is unknown, revoked, or expired. Lookup is by hash,
+    /// so the raw secret is never compared byte-wise.
+    pub async fn verify_api_key(
+        &self,
+        presented: &str,
+    ) -> anyhow::Result<Option<AuthenticatedKey>> {
         let key_hash = hash_key(presented);
 
-        let id: Option<String> = sqlx::query_scalar(
+        let row: Option<(String, Option<u32>)> = sqlx::query_as(
             "UPDATE api_keys SET last_used = unixepoch() \
              WHERE key_hash = ?1 AND (invalid_at IS NULL OR invalid_at > unixepoch()) \
-             RETURNING id",
+             RETURNING id, rpm_limit",
         )
         .bind(&key_hash)
         .fetch_optional(self.pool())
         .await
         .context("verifying api key")?;
 
-        Ok(id)
+        Ok(row.map(|(id, rpm_limit)| AuthenticatedKey { id, rpm_limit }))
     }
 }
 
@@ -213,12 +256,12 @@ mod tests {
         let store = store().await;
         let created = store.create_api_key(None, None).await.unwrap();
 
-        let id = store
+        let authed = store
             .verify_api_key(&created.key)
             .await
             .expect("verify should not error")
             .expect("valid key should authenticate");
-        assert_eq!(id, created.id);
+        assert_eq!(authed.id, created.id);
 
         // last_used starts null and is set after a successful verification.
         let listed = store.list_api_keys().await.unwrap();
@@ -350,6 +393,45 @@ mod tests {
         assert!(
             store.verify_api_key(&created.key).await.unwrap().is_none(),
             "revocation must invalidate the key ahead of its scheduled expiry"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpm_override_round_trips_through_create_verify_and_list() {
+        let store = store().await;
+        let created = store
+            .create_api_key_with_rpm(Some("fast".to_string()), None, Some(600))
+            .await
+            .unwrap();
+        assert_eq!(created.rpm_limit, Some(600));
+
+        let authed = store
+            .verify_api_key(&created.key)
+            .await
+            .unwrap()
+            .expect("key should authenticate");
+        assert_eq!(authed.id, created.id);
+        assert_eq!(
+            authed.rpm_limit,
+            Some(600),
+            "verify should surface the per-key override"
+        );
+
+        let listed = store.list_api_keys().await.unwrap();
+        let entry = listed.iter().find(|k| k.id == created.id).unwrap();
+        assert_eq!(entry.rpm_limit, Some(600));
+    }
+
+    #[tokio::test]
+    async fn key_without_override_reports_no_rpm_limit() {
+        let store = store().await;
+        let created = store.create_api_key(None, None).await.unwrap();
+        assert_eq!(created.rpm_limit, None);
+
+        let authed = store.verify_api_key(&created.key).await.unwrap().unwrap();
+        assert_eq!(
+            authed.rpm_limit, None,
+            "a key with no override falls back to the global default rate"
         );
     }
 

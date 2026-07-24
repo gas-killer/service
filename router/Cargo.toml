@@ -57,6 +57,7 @@ commonware-p2p = { workspace = true }
 commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
+dashmap = { workspace = true }
 dotenv = { workspace = true }
 
 # EigenLayer SDK

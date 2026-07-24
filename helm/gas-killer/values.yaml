@@ -339,6 +339,11 @@ router:
     # returns 503 QUEUE_FULL with a Retry-After hint. The router processes one task at a time,
     # so this bounds both memory and worst-case queue latency (MAX_QUEUE_DEPTH).
     maxQueueDepth: "100"
+    # Default per-API-key request rate on POST /tasks, in requests per minute. Keys issued with a
+    # per-key override (via POST /admin/keys) use their own limit instead. Requests over the limit
+    # get 429 with a Retry-After header. Counters are in-memory and reset on restart
+    # (RATE_LIMIT_RPM).
+    rateLimitRpm: "60"
   # AVS identity metadata served at GET /avs-metadata.
   # Set metadata.uri in config.json to the public URL of this endpoint
   # (e.g. https://api.gaskiller.xyz/avs-metadata) before calling updateAVSMetadataURI.

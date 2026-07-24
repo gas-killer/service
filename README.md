@@ -227,6 +227,7 @@ Optional environment variables:
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
 - `INGRESS_TIMEOUT_MS`: Timeout for waiting on ingress tasks in milliseconds (default: 0, no timeout)
 - `ADMIN_KEY`: Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke the per-client API keys that authenticate `/trigger`. Omit or leave empty to disable the admin API.
+- `RATE_LIMIT_RPM`: Default per-API-key request rate on `/trigger` (`POST /tasks`), in requests per minute (default: 60). Applies to every key without a per-key override (set at creation via the `rpm_limit` field of `POST /admin/keys`). Over-limit requests get `429 Too Many Requests` with a `Retry-After` header. Counters are in-memory per router process and reset on restart.
 - `QUORUM_NUMBER`: Quorum number to use (default: 0)
 - `P2P_ACK_MESSAGES_PER_SECOND`: Per-peer rate for the engine's TipAck channel. Defaults to `2 * AGG_ACTIVITY_TIMEOUT / REBROADCAST_INTERVAL + 8`, sized so steady-state ack rebroadcast never hits the p2p limiter (which silently drops over-rate messages). Only override to constrain bandwidth. The legacy `P2P_MESSAGES_PER_SECOND` knob now only governs the task-directive channel.
 
@@ -277,6 +278,13 @@ curl -X POST http://localhost:8080/admin/keys \
   -d '{"label": "my-client", "invalid_at": 1893456000}'   # invalid_at optional; unix ts, future
 # → {"id":"...","key":"gk_...","label":"my-client","created_at":...,"invalid_at":1893456000}
 ```
+
+Add `rpm_limit` (requests per minute) to the create body to give a key a custom rate; omit it to
+use the global `RATE_LIMIT_RPM` default. Each key is rate-limited on `/trigger`: over-limit requests
+return `429 Too Many Requests` with a `Retry-After` header (seconds until the next request is
+allowed). The limiter is a token bucket, not a strict rolling window — a key may burst up to its
+full per-minute allowance at once, after which requests refill at roughly `rpm / 60` per second.
+Counters are in-memory per router process and reset on restart.
 
 On a Kubernetes deployment the `/admin/*` endpoints are **not** exposed through the public Ingress
 (only `/trigger`, `/avs-metadata`, `/healthz` are — see `ingress.publicPaths` in the chart).

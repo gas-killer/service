@@ -11,6 +11,8 @@ pub struct MetricsCollector {
     pub ingress_rejected: Counter<u64, AtomicU64>,
     /// Ingress requests dropped because the task queue is at capacity.
     pub ingress_at_capacity: Counter<u64, AtomicU64>,
+    /// Ingress requests rejected by per-API-key rate limiting.
+    pub ingress_rate_limited: Counter<u64, AtomicU64>,
     /// Tasks dequeued and handed to the creator for aggregation.
     pub tasks_created: Counter<u64, AtomicU64>,
     /// EVM storage-update computation duration (seconds).
@@ -72,6 +74,13 @@ impl MetricsCollector {
             "gas_killer_ingress_requests_at_capacity",
             "Total ingress task requests dropped because the queue was full",
             ingress_at_capacity.clone(),
+        );
+
+        let ingress_rate_limited = Counter::default();
+        registry.register(
+            "gas_killer_ingress_requests_rate_limited",
+            "Total ingress task requests rejected by per-API-key rate limiting",
+            ingress_rate_limited.clone(),
         );
 
         let tasks_created = Counter::default();
@@ -193,6 +202,7 @@ impl MetricsCollector {
             ingress_accepted,
             ingress_rejected,
             ingress_at_capacity,
+            ingress_rate_limited,
             tasks_created,
             storage_computation_seconds,
             aggregation_rounds_completed,

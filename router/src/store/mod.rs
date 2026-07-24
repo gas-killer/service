@@ -12,7 +12,7 @@
 mod api_keys;
 mod tasks;
 
-pub use api_keys::{ApiKeyMetadata, CreatedApiKey};
+pub use api_keys::{ApiKeyMetadata, AuthenticatedKey, CreatedApiKey};
 pub use tasks::{Task, TaskStatus};
 
 use std::path::{Path, PathBuf};
