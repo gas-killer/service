@@ -19,8 +19,6 @@ spec:
     type: RollingUpdate
   template:
     metadata:
-      annotations:
-        kubectl.kubernetes.io/restartedAt: '2026-07-16T15:15:38-04:00'
       labels:
         app: gk-shard-bridge
     spec:
@@ -103,6 +101,16 @@ kind: Ingress
 metadata:
   name: gk-shard-bridge
   namespace: default
+  annotations:
+    # The frontend is served from GitHub Pages (llm.gaskiller.xyz), so every
+    # /bridge call is cross-origin — without these the browser blocks it.
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "POST, GET, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "Authorization,Content-Type"
+    # Must stay "false": TLS terminates upstream, and enabling the redirect makes
+    # nginx 308-loop (same failure the gas-killer-extras ingress documents).
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   ingressClassName: nginx
   rules:
@@ -177,13 +185,16 @@ spec:
   schedule: '*/8 * * * *'
   successfulJobsHistoryLimit: 2
   # SUSPENDED (2026-07-27) and superseded by qwen-overlay-ensurer's own refork.
+  #
   # This job fires an UNCONDITIONAL anvil_reset, which re-forks from upstream and
-  # therefore wipes every overlay chunk setCode'd into the fork so far. Loading
-  # the 0.6B overlay is 24,364 chunks at ~4 setCode/s (~100 min), so an 8-minute
-  # reset meant the overlay could never converge. It also ignores in-flight
-  # traces, so it can reset the fork mid-trace. The ensurer already reforks
-  # correctly: only when drift > 150 blocks AND inflight() == 0, and it reloads
-  # the overlay afterwards. Re-enable only if the ensurer is removed.
+  # so wipes every overlay chunk setCode'd into the fork. That used to be fatal:
+  # the 0.6B overlay loaded at ~4 setCode/s (~100 min for 24,364 chunks), so an
+  # 8-minute reset meant it could never converge. Batching + connection reuse in
+  # the ensurer cut that to ~3s, so a reset is no longer unrecoverable — but this
+  # job is still the wrong tool. It ignores in-flight traces and can reset the
+  # fork mid-trace, and it duplicates logic the ensurer already does properly:
+  # refork only when drift > 150 blocks AND inflight() == 0, then reload.
+  # Re-enable only if the ensurer is removed.
   suspend: true
 ---
 apiVersion: batch/v1
