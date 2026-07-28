@@ -31,13 +31,13 @@
 router:
   image:
     tag: router-pr-321
-  # !!! FRAGILE: pins the pod to ONE VM by hostname. The high-mem ops node is
-  # !!! not durable — node-pool upgrades/recreations rename it, and the demo
-  # !!! teardown ("demo expiry") strips this selector entirely. Re-check the
-  # !!! hostname (kubectl get nodes) before every apply; drop the key to let
-  # !!! the scheduler place freely.
+  # Pins the pod to the ops-highmem node pool. The RWO gas-killer-shared-data
+  # PVC can only attach to one node, so the router and all three nodes must
+  # co-locate; the pool also supplies the 64Gi needed for the 34GB overlay mmap.
+  # `role` is a node-pool label (set in infra/terraform/llm-testnet), so it
+  # survives VM recreation and node-pool upgrades — unlike a hostname pin.
   nodeSelector:
-    kubernetes.io/hostname: gke-gas-killer-ops-highmem-1c128d1b-nmbc
+    role: ops-highmem
   extraEnv:
     # Raised reference-block staleness window (in blocks) — multi-hour sharded
     # rounds outlive the 300-block default baked into the router.
@@ -64,10 +64,10 @@ node:
     # gk-fast: revmc AOT node image from Artifact Registry (not ghcr).
     repository: us-east4-docker.pkg.dev/gas-killer-testnet/gk-fast/node-fast
     tag: v6
-  # !!! FRAGILE: same single-VM hostname pin as the router — see the warning
-  # !!! there. Demo expiry strips it.
+  # Same ops-highmem pool pin as the router — see the note there. All four pods
+  # must land on the node holding the RWO PVC.
   nodeSelector:
-    kubernetes.io/hostname: gke-gas-killer-ops-highmem-1c128d1b-nmbc
+    role: ops-highmem
   extraEnv:
     # Same multi-overlay mmap sextet as the router (pinned simulation
     # environment: router and ALL nodes must mount the same model set).
