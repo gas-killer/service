@@ -1048,7 +1048,7 @@ impl FastViewSidecar {
         };
 
         // request frame: "<byte_len>\n" then the job bytes
-        write!(self.stdin, "{}\n", job_text.len())
+        writeln!(self.stdin, "{}", job_text.len())
             .context("gk-fast-view: write frame len")
             .map_err(send)?;
         self.stdin
