@@ -455,6 +455,33 @@ fn parse_quorum_threshold_fraction(num: Option<&str>, den: Option<&str>) -> (u64
     }
 }
 
+/// Default notice window, in blocks, for `SchnorrStakeRegistry` operator-set changes.
+///
+/// Zero means changes apply as soon as they are committed, which is what the e2e stack wants:
+/// its whole operator set is registered before the target contract is deployed, so there is no
+/// in-flight round for a mutation to invalidate and no reason to wait out a window.
+pub const DEFAULT_SCHNORR_NOTICE_WINDOW: u64 = 0;
+
+/// Reads the `SchnorrStakeRegistry` notice window from `SCHNORR_NOTICE_WINDOW`, defaulting to
+/// [`DEFAULT_SCHNORR_NOTICE_WINDOW`].
+///
+/// The registry takes this at construction and it is immutable thereafter. A deployment that
+/// mutates its operator set while rounds are in flight must set it above the longest window a
+/// settlement can span — the signing round's duration plus the consumer contract's
+/// `blockStaleMeasure` — or an announced change can still land between a round assembling its
+/// signature and that signature settling. The registry cannot check this itself: the bound lives
+/// on each consumer and is adjustable there, while one registry may back several consumers.
+pub fn schnorr_notice_window() -> u64 {
+    parse_schnorr_notice_window(env::var("SCHNORR_NOTICE_WINDOW").ok().as_deref())
+}
+
+/// Parses `SCHNORR_NOTICE_WINDOW`, falling back to the default when missing, empty or
+/// unparseable.
+fn parse_schnorr_notice_window(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SCHNORR_NOTICE_WINDOW)
+}
+
 /// Default per-stage timeout cap for the Schnorr coordinator's protocol rounds
 /// (nonce collection, partial-signature collection), before the `ROUND_TIMEOUT /
 /// 6` floor is applied.
@@ -744,6 +771,19 @@ mod tests {
     #[should_panic(expected = "STATE_ENCODING must be")]
     fn state_encoding_rejects_unknown() {
         let _ = parse_state_encoding(Some("bogus"));
+    }
+
+    #[test]
+    fn schnorr_notice_window_defaults_to_zero() {
+        assert_eq!(parse_schnorr_notice_window(None), 0);
+        assert_eq!(parse_schnorr_notice_window(Some("")), 0);
+        assert_eq!(parse_schnorr_notice_window(Some("abc")), 0);
+    }
+
+    #[test]
+    fn schnorr_notice_window_reads_override() {
+        assert_eq!(parse_schnorr_notice_window(Some("150")), 150);
+        assert_eq!(parse_schnorr_notice_window(Some("  300  ")), 300);
     }
 
     #[test]
