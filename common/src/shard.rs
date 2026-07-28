@@ -939,7 +939,11 @@ async fn fast_view_call(
             );
         }
     };
-    debug!(seg_id, bytes = returndata.len(), "gk-fast-view fast path served segment");
+    debug!(
+        seg_id,
+        bytes = returndata.len(),
+        "gk-fast-view fast path served segment"
+    );
     Ok(returndata)
 }
 
@@ -1022,7 +1026,11 @@ impl FastViewSidecar {
                 .context("gk-fast-view --serve: no stdout handle")?,
         );
         FAST_VIEW_SIDECAR_PID.store(child.id(), std::sync::atomic::Ordering::SeqCst);
-        Ok(FastViewSidecar { child, stdin, stdout })
+        Ok(FastViewSidecar {
+            child,
+            stdin,
+            stdout,
+        })
     }
 
     /// Send one framed job, read one framed response. Any IO/protocol failure is
@@ -1030,8 +1038,14 @@ impl FastViewSidecar {
     /// [`SidecarIoError`]); a well-formed OK/ERR frame is `Ok(resp)`.
     fn exchange(&mut self, job_text: &str) -> std::result::Result<SidecarResp, SidecarIoError> {
         use std::io::{BufRead as _, Read as _, Write as _};
-        let send = |err: anyhow::Error| SidecarIoError { request_sent: false, err };
-        let recv = |err: anyhow::Error| SidecarIoError { request_sent: true, err };
+        let send = |err: anyhow::Error| SidecarIoError {
+            request_sent: false,
+            err,
+        };
+        let recv = |err: anyhow::Error| SidecarIoError {
+            request_sent: true,
+            err,
+        };
 
         // request frame: "<byte_len>\n" then the job bytes
         write!(self.stdin, "{}\n", job_text.len())
@@ -1083,7 +1097,9 @@ impl FastViewSidecar {
                     .map_err(recv)?;
                 Ok(SidecarResp::Ok(bytes))
             }
-            "ERR" => Ok(SidecarResp::Err(String::from_utf8_lossy(&payload).into_owned())),
+            "ERR" => Ok(SidecarResp::Err(
+                String::from_utf8_lossy(&payload).into_owned(),
+            )),
             other => Err(recv(anyhow::anyhow!(
                 "gk-fast-view: unknown response status {other:?}"
             ))),
