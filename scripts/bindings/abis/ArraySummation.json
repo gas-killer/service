@@ -32,19 +32,6 @@
   },
   {
     "type": "function",
-    "name": "BLOCK_STALE_MEASURE",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint32",
-        "internalType": "uint32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "QUORUM_THRESHOLD",
     "inputs": [],
     "outputs": [
@@ -97,13 +84,26 @@
   },
   {
     "type": "function",
+    "name": "blockStaleMeasure",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "blsSignatureChecker",
     "inputs": [],
     "outputs": [
       {
         "name": "",
         "type": "address",
-        "internalType": "contract BLSSignatureChecker"
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -162,6 +162,35 @@
         "name": "",
         "type": "uint256[]",
         "internalType": "uint256[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getMessageHash",
+    "inputs": [
+      {
+        "name": "transitionIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "targetFunction",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      },
+      {
+        "name": "storageUpdates",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "stateMutability": "view"
@@ -248,6 +277,25 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "supportsInterface",
+    "inputs": [
+      {
+        "name": "interfaceId",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -435,6 +483,11 @@
   },
   {
     "type": "error",
+    "name": "DeploymentFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "FutureBlockNumber",
     "inputs": []
   },
@@ -471,6 +524,11 @@
   {
     "type": "error",
     "name": "InvalidTransitionIndex",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MalformedLogPayload",
     "inputs": []
   },
   {
