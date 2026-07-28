@@ -296,7 +296,17 @@ spec:
           UP=os.environ["UPSTREAM"]
           REL="https://github.com/gas-killer/solidity-sdk/releases/download/qwen3-0.6b-onchain-v1"
           EXPECT="23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
-          REFRESH_AT=150   # blocks of drift before refork (window is 300)
+          # Blocks of drift before reforking. This is bounded by the UPSTREAM's
+          # non-archive window, NOT by anything in gas-killer: publicnode serves
+          # state for roughly the last ~110 blocks and 403s anything older
+          # ("Archive requests require a personal token"). Anything the fork has
+          # not already cached — notably the 35B engine's code, which unlike the
+          # 0.6B overlay is never setCode'd in — is fetched at the fork base, so
+          # once drift exceeds that window 35B inference fails on its first
+          # segment. The loop below polls every 30s (~2.5 blocks), so 60 caps
+          # real drift near 63 and leaves margin. Raising this above ~100 will
+          # silently break 35B while 0.6B keeps working.
+          REFRESH_AT=60
           def k(b):
               h=keccak.new(digest_bits=256); h.update(b); return h.digest()
           def fetch(f):
