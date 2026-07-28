@@ -7,7 +7,9 @@ use bindings::reentrantcheckpointfactory::ReentrantCheckpointFactory;
 use bindings::schnorrarraysummationfactory::SchnorrArraySummationFactory;
 use bindings::schnorrstakeregistry::SchnorrStakeRegistry;
 use gas_killer_common::schnorr::{PrivateKey, private_key_from_hex};
-use gas_killer_common::{SignatureScheme, quorum_threshold_fraction, signature_scheme};
+use gas_killer_common::{
+    SignatureScheme, quorum_threshold_fraction, schnorr_notice_window, signature_scheme,
+};
 use rand::RngCore;
 use serde::Deserialize;
 use std::env;
@@ -352,6 +354,11 @@ async fn deploy_schnorr() -> Result<(), DynError> {
     // `quorum_threshold_fraction`).
     let (threshold_num, threshold_den) = quorum_threshold_fraction();
 
+    // Blocks an operator-set change must be announced ahead of applying, fixed at registry
+    // deployment. Zero for the e2e stack: the whole operator set is registered before the target
+    // deploys, so no round is ever in flight for a mutation to invalidate.
+    let notice_window = schnorr_notice_window();
+
     // The AVS reference comes from the eigenlayer deployment JSON — operators
     // register with EigenLayer through the same service manager regardless of the
     // quorum-signature scheme the target contract verifies.
@@ -424,14 +431,15 @@ async fn deploy_schnorr() -> Result<(), DynError> {
         }
         None => {
             println!(
-                "🏦 Deploying SchnorrStakeRegistry (threshold {}/{}, owner {})...",
-                threshold_num, threshold_den, deployer
+                "🏦 Deploying SchnorrStakeRegistry (threshold {}/{}, owner {}, notice window {} blocks)...",
+                threshold_num, threshold_den, deployer, notice_window
             );
             let registry = SchnorrStakeRegistry::deploy(
                 provider.clone(),
                 U256::from(threshold_num),
                 U256::from(threshold_den),
                 deployer,
+                U256::from(notice_window),
             )
             .await
             .map_err(|e| format!("Failed to deploy SchnorrStakeRegistry: {}", e))?;
