@@ -176,7 +176,15 @@ spec:
           terminationGracePeriodSeconds: 30
   schedule: '*/8 * * * *'
   successfulJobsHistoryLimit: 2
-  suspend: false
+  # SUSPENDED (2026-07-27) and superseded by qwen-overlay-ensurer's own refork.
+  # This job fires an UNCONDITIONAL anvil_reset, which re-forks from upstream and
+  # therefore wipes every overlay chunk setCode'd into the fork so far. Loading
+  # the 0.6B overlay is 24,364 chunks at ~4 setCode/s (~100 min), so an 8-minute
+  # reset meant the overlay could never converge. It also ignores in-flight
+  # traces, so it can reset the fork mid-trace. The ensurer already reforks
+  # correctly: only when drift > 150 blocks AND inflight() == 0, and it reloads
+  # the overlay afterwards. Re-enable only if the ensurer is removed.
+  suspend: true
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -196,31 +204,42 @@ spec:
         spec:
           containers:
           - args:
-            - "set -x\nPROJ=gas-killer-testnet; LOC=us-east4; CLUSTER=gas-killer\n\
-              API=\"https://container.googleapis.com/v1/projects/$PROJ/locations/$LOC/clusters/$CLUSTER\"\
-              \ntok() { curl -s -H \"Metadata-Flavor: Google\" \\\n  \"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token\"\
-              \ \\\n  | sed -n 's/.*\"access_token\":\"\\([^\"]*\\)\".*/\\1/p'; }\n\
-              # 1. demo workloads\nkubectl delete deploy qwen-sim-fork qwen-overlay-ensurer\
-              \ gk-sim-proxy -n default --ignore-not-found\nkubectl delete svc qwen-sim-fork\
-              \ gk-sim-proxy -n default --ignore-not-found\nkubectl delete configmap\
-              \ gk-sim-proxy-src -n default --ignore-not-found\n# 2. unpin operators\
-              \ so they can reschedule after the node shrink\nfor d in gas-killer-node-1\
-              \ gas-killer-node-2 gas-killer-node-3 gas-killer-router; do\n  kubectl\
-              \ patch deploy $d -n default --type json \\\n    -p '[{\"op\":\"remove\"\
-              ,\"path\":\"/spec/template/spec/nodeSelector\"}]' || true\ndone\n# 3.\
-              \ delete the sim + operators node pools, waiting out any running cluster\
-              \ op\nfor POOL in sim-pool-c4 ops-highmem; do\n  for i in $(seq 1 60);\
-              \ do\n    OUT=$(curl -s -X DELETE -H \"Authorization: Bearer $(tok)\"\
-              \ \"$API/nodePools/$POOL\")\n    echo \"$OUT\" | grep -q '\"name\"'\
-              \ && break\n    echo \"$OUT\" | grep -qi \"notFound\" && break\n   \
-              \ sleep 60\n  done\ndone\n# 4. shrink default pool to 1 node (retry\
-              \ until the delete op clears)\nfor i in $(seq 1 60); do\n  OUT=$(curl\
-              \ -s -X POST -H \"Authorization: Bearer $(tok)\" \\\n    -H \"Content-Type:\
-              \ application/json\" -d '{\"nodeCount\":1}' \\\n    \"$API/nodePools/default-pool:setSize\"\
-              )\n  echo \"$OUT\" | grep -q '\"name\"' && break\n  sleep 60\ndone\n\
-              # 5. one-shot: suspend this cronjob\nkubectl patch cronjob demo-expiry\
-              \ -n default -p '{\"spec\":{\"suspend\":true}}'\necho \"EXPIRY COMPLETE\"\
-              \n"
+            - |
+              set -x
+              PROJ=gas-killer-testnet; LOC=us-east4; CLUSTER=gas-killer
+              API="https://container.googleapis.com/v1/projects/$PROJ/locations/$LOC/clusters/$CLUSTER"
+              tok() { curl -s -H "Metadata-Flavor: Google" \
+                "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+                | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'; }
+              # 1. demo workloads
+              kubectl delete deploy qwen-sim-fork qwen-overlay-ensurer gk-sim-proxy -n default --ignore-not-found
+              kubectl delete svc qwen-sim-fork gk-sim-proxy -n default --ignore-not-found
+              kubectl delete configmap gk-sim-proxy-src -n default --ignore-not-found
+              # 2. delete the sim + operators node pools, waiting out any running cluster op.
+              #    The operator pods are deliberately NOT unpinned: they select the ops-highmem
+              #    node POOL by label, so once the pool returns they schedule correctly on their
+              #    own. Stripping the selector (as this script used to) let node-1 land on the
+              #    sim pool while the RWO shared-data PVC was attached to ops-highmem, which
+              #    deadlocked it in Init and crashlooped the router - the 2026-07-27 outage.
+              for POOL in sim-pool ops-highmem; do
+                for i in $(seq 1 60); do
+                  OUT=$(curl -s -X DELETE -H "Authorization: Bearer $(tok)" "$API/nodePools/$POOL")
+                  echo "$OUT" | grep -q '"name"' && break
+                  echo "$OUT" | grep -qi "notFound" && break
+                  sleep 60
+                done
+              done
+              # 3. shrink default pool to 1 node (retry until the delete op clears)
+              for i in $(seq 1 60); do
+                OUT=$(curl -s -X POST -H "Authorization: Bearer $(tok)" \
+                  -H "Content-Type: application/json" -d '{"nodeCount":1}' \
+                  "$API/nodePools/default-pool:setSize")
+                echo "$OUT" | grep -q '"name"' && break
+                sleep 60
+              done
+              # 4. one-shot: suspend this cronjob
+              kubectl patch cronjob demo-expiry -n default -p '{"spec":{"suspend":true}}'
+              echo "EXPIRY COMPLETE"
             command:
             - /bin/bash
             - -c

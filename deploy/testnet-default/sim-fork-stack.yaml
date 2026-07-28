@@ -45,12 +45,17 @@ spec:
         ports:
         - containerPort: 8547
           protocol: TCP
+        # Measured steady-state on the sim pool: ~0.03 vCPU and ~2Gi. The old
+        # 5-vCPU REQUEST was the only reason this pool needed an 8-vCPU machine
+        # (c4-highcpu-8, $248/mo); it now fits c4-standard-4 at $144/mo. Memory
+        # headroom is kept generous — anvil grows with fork state and the
+        # setCode'd overlay chunks.
         resources:
           limits:
-            cpu: 7500m
+            cpu: 3500m
             memory: 12Gi
           requests:
-            cpu: '5'
+            cpu: 1500m
             memory: 4Gi
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
@@ -282,6 +287,10 @@ spec:
           cat > ensure.py <<'PY'
           import requests, time, os
           from Crypto.Hash import keccak
+          # One pooled session for every JSON-RPC call. Without keep-alive each
+          # anvil_setCode batch paid a fresh TCP handshake, which (with B=10)
+          # capped the overlay load at ~4 chunks/s => ~100 min for 24,364 chunks.
+          S=requests.Session()
           URL="http://qwen-sim-fork:8547"
           PROXY="http://gk-sim-proxy:8545"
           UP=os.environ["UPSTREAM"]
@@ -306,7 +315,7 @@ spec:
               for at in range(0,len(blob),CH): chunks.append(blob[at:at+CH])
           assert len(chunks)==len(addrs)
           def rpc(url,m,p,timeout=60):
-              return requests.post(url,json={"jsonrpc":"2.0","id":1,"method":m,"params":p},timeout=timeout).json()
+              return S.post(url,json={"jsonrpc":"2.0","id":1,"method":m,"params":p},timeout=timeout).json()
           def head(url):
               return int(rpc(url,"eth_blockNumber",[])["result"],16)
           def loaded():
@@ -315,15 +324,23 @@ spec:
                   return len(a.get("result","0x"))>10 and len(b.get("result","0x"))>10
               except Exception: return False
           def inflight():
-              try: return requests.get(PROXY+"/status",timeout=10).json().get("inflight",0)
+              try: return S.get(PROXY+"/status",timeout=10).json().get("inflight",0)
               except Exception: return -1   # proxy unknown: don't refork blindly
           def load():
-              print("loading overlay...", flush=True); B=10
+              # B=100 keeps each JSON-RPC body around 5MB (chunks are 24575B ->
+              # ~49KB of hex each) while cutting round trips 10x vs the old B=10.
+              t0=time.time(); B=100
+              print(f"loading overlay... {len(chunks)} chunks", flush=True)
               for at in range(0,len(chunks),B):
                   batch=[{"jsonrpc":"2.0","id":i,"method":"anvil_setCode",
                           "params":[addrs[at+i],"0x00"+chunks[at+i].hex()]} for i in range(min(B,len(chunks)-at))]
-                  requests.post(URL,json=batch,timeout=120).raise_for_status()
-              print("OVERLAY LOADED:",len(chunks),"chunks", flush=True)
+                  S.post(URL,json=batch,timeout=300).raise_for_status()
+                  # Progress every ~2000 chunks: a silent multi-minute load is why
+                  # it went unnoticed that the overlay never finished converging.
+                  if (at//B) % 20 == 0 and at:
+                      el=time.time()-t0
+                      print(f"  overlay {at}/{len(chunks)} chunks  {at/max(el,.001):.0f}/s", flush=True)
+              print("OVERLAY LOADED:",len(chunks),"chunks in %.0fs"%(time.time()-t0), flush=True)
           while True:
               try:
                   drift = head(UP) - head(URL)

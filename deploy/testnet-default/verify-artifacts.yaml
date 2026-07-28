@@ -1,0 +1,109 @@
+# One-shot integrity check for the overlay weights on the gas-killer-shared-data PVC.
+#
+#   kubectl apply -f deploy/testnet-default/verify-artifacts.yaml
+#   kubectl logs -f gk-keccak-verify
+#   kubectl delete pod gk-keccak-verify
+#
+# WHY THIS EXISTS: nothing else verifies these bytes. The original staging Job
+# (qwen35-artifact-loader) explicitly skipped the keccak check and asserted only
+# file sizes, and the node containers mmap the overlay lazily at first analysis
+# rather than eagerly at boot — so a healthy fleet is not evidence of integrity.
+# Size-correct but corrupt weights would surface ~70 minutes into a 35B demo.
+#
+# Runtime ~2 min: the 34GB hash runs at ~294 MiB/s once the file is page-cached
+# (the ops-highmem node holds it in ~38GB of buff/cache).
+#
+# MUST run on ops-highmem: gas-killer-shared-data is RWO and is already attached
+# there by the router/node pods. Mounted read-only; nothing here writes.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gk-keccak-verify
+  namespace: default
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    role: ops-highmem
+  containers:
+  - name: verify
+    image: python:3.12-slim
+    resources:
+      requests: {cpu: "500m", memory: "512Mi"}
+      # 4Gi, not something tighter: cgroup v2 charges page cache to the reading
+      # cgroup, and this streams 34GB.
+      limits: {cpu: "2", memory: "4Gi"}
+    volumeMounts:
+    - name: shared-data
+      mountPath: /data
+      readOnly: true
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      set -e
+      pip install --quiet --disable-pip-version-check pycryptodome
+      python3 - <<'PY'
+      from Crypto.Hash import keccak
+      import json, os, time
+
+      def kf(path, buf=1 << 24):
+          h = keccak.new(digest_bits=256); n = 0; t0 = time.time()
+          with open(path, 'rb') as f:
+              while True:
+                  b = f.read(buf)
+                  if not b: break
+                  h.update(b); n += len(b)
+          return h.digest(), n, time.time() - t0
+
+      def kk(*parts):
+          h = keccak.new(digest_bits=256)
+          for p in parts: h.update(p)
+          return h.digest()
+
+      # Guard against hashlib.sha3_256, which is NIST SHA3 (different padding)
+      # and would silently produce plausible-looking but wrong digests.
+      assert kk(b'').hex() == 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'
+      print('keccak256 self-test OK\n')
+
+      MODELS = [
+          ('qwen35', '/data/qwen35/weights.bin', '/data/qwen35/tokenizer.bin',
+           '0x7bdf4876a6861287521dadab3d3870f74dfa557507ed200d49f75bcb09f01fa9'),
+          ('qwen06', '/data/qwen06/weights.bin', '/data/qwen06/tokenizer.bin',
+           '0x23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9'),
+      ]
+
+      ok = True
+      for name, wp, tp, expect in MODELS:
+          print(f'=== {name} ===')
+          wd, wn, wt = kf(wp)
+          td, tn, _ = kf(tp)
+          man = '0x' + kk(wd, td).hex()
+          print(f'  weights   {wn:>14,} B in {wt:6.1f}s ({wn/1024**2/max(wt,.001):7.0f} MiB/s)')
+          print(f'    keccak  0x{wd.hex()}')
+          print(f'  tokenizer {tn:>14,} B')
+          print(f'    keccak  0x{td.hex()}')
+          print(f'  computed manifest {man}')
+          print(f'  expected manifest {expect}')
+          m_ok = man == expect
+          print(f'  MANIFEST {"MATCH" if m_ok else "*** MISMATCH ***"}')
+
+          # 35B also ships a manifest.json recording the component digests.
+          mfp = os.path.join(os.path.dirname(wp), 'manifest.json')
+          if os.path.exists(mfp):
+              mf = json.load(open(mfp))
+              for label, recorded, computed in (
+                  ('keccakWeights', mf.get('keccakWeights', ''), '0x' + wd.hex()),
+                  ('keccakTokenizer', mf.get('keccakTokenizer', ''), '0x' + td.hex()),
+              ):
+                  hit = recorded.lower() == computed
+                  print(f'  manifest.json {label:<16} {"MATCH" if hit else "*** MISMATCH *** recorded=" + recorded}')
+                  m_ok = m_ok and hit
+          ok = ok and m_ok
+          print()
+
+      print('RESULT:', 'ALL VERIFIED' if ok else 'VERIFICATION FAILED')
+      raise SystemExit(0 if ok else 1)
+      PY
+  volumes:
+  - name: shared-data
+    persistentVolumeClaim:
+      claimName: gas-killer-shared-data
