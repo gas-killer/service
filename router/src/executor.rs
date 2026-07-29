@@ -15,6 +15,7 @@ use gas_killer_common::bindings::gaskillersdk::{
     BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes,
 };
 use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
+use gas_killer_common::bindings::schnorrstakeregistry::ISchnorrStakeRegistry;
 use gas_killer_common::bindings::{GAS_KILLER_INTERFACE_ID, SCHNORR_GAS_KILLER_INTERFACE_ID};
 use gas_killer_common::{BundleProof, PayloadView, TaskBundle};
 use std::collections::HashMap;
@@ -126,6 +127,27 @@ struct PreparedSchnorr<P> {
 struct RenderedRound {
     payload: PayloadView,
     bundle: TaskBundle,
+}
+
+/// Bound a rendered payload's validity so it expires before the operator set can change.
+///
+/// A payload is submittable until `valid_until_block`, but a Schnorr settlement only verifies while
+/// the operator set still matches the one its signature was assembled against. `horizon` is the
+/// registry's earliest possible mutation block, so validity must end strictly below it — a
+/// settlement landing *on* that block can already see the mutated set.
+///
+/// `None` leaves the value untouched (the horizon could not be read). `u64::MAX` — which the
+/// registry returns as `type(uint256).max` when nothing is scheduled — is the common case and
+/// clamps nothing. A horizon at or below the existing validity yields a payload that is already
+/// expired; that is deliberate, and `GET /tasks/{id}` answers it with the usual `PAYLOAD_EXPIRED`
+/// re-request rather than handing over calldata that would revert.
+fn clamp_to_mutation_horizon(valid_until_block: u64, horizon: Option<U256>) -> u64 {
+    let Some(horizon) = horizon else {
+        return valid_until_block;
+    };
+    // Saturating: an unscheduled horizon is `type(uint256).max`, far beyond u64.
+    let horizon = u64::try_from(horizon).unwrap_or(u64::MAX);
+    valid_until_block.min(horizon.saturating_sub(1))
 }
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
@@ -850,6 +872,49 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         })
     }
 
+    /// Read the target's Schnorr registry horizon: the earliest block at which its operator set
+    /// can change.
+    ///
+    /// `SchnorrStakeRegistry` holds a single current aggregate key rather than per-block history,
+    /// so any operator-set change invalidates a signature an off-chain round already assembled
+    /// against the previous set. Changes are announced ahead of time and this horizon publishes
+    /// when the earliest one becomes applicable, which is what lets a rendered payload be given a
+    /// validity that ends before the set can move underneath it.
+    ///
+    /// Returns `None` when the horizon cannot be established, in which case the payload keeps its
+    /// unclamped validity: a transient RPC failure should not discard a completed signing round,
+    /// and the registry's own fail-closed watermark still rejects a settlement assembled against a
+    /// stale set. The guarantee is best-effort for the same reason it is only a guarantee for the
+    /// announced path — `registerOperator` / `deregisterOperator` bypass the notice window
+    /// entirely and emit `ForcedMutation`.
+    async fn schnorr_mutation_horizon(&self, provider: P, target_addr: Address) -> Option<U256> {
+        let sdk = SchnorrGasKillerSDK::new(target_addr, provider.clone());
+        let registry_addr = match sdk.schnorrRegistry().call().await {
+            Ok(addr) => addr,
+            Err(error) => {
+                warn!(
+                    target = %target_addr,
+                    %error,
+                    "could not read schnorrRegistry; leaving payload validity unclamped"
+                );
+                return None;
+            }
+        };
+
+        let registry = ISchnorrStakeRegistry::new(registry_addr, provider);
+        match registry.nextPossibleMutationBlock().call().await {
+            Ok(horizon) => Some(horizon),
+            Err(error) => {
+                warn!(
+                    registry = %registry_addr,
+                    %error,
+                    "could not read nextPossibleMutationBlock; leaving payload validity unclamped"
+                );
+                None
+            }
+        }
+    }
+
     /// Schnorr twin of [`Self::render_bls_payload`]: renders a completed Schnorr round into a
     /// user-signable transaction request and its durable [`TaskBundle`] without broadcasting.
     /// The outer payload is scheme-agnostic — only the encoded `data` and the bundle's proof
@@ -919,7 +984,20 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             }
         };
 
-        let valid_until_block = reference_block_number as u64 + self.payload_block_buffer;
+        let unclamped_valid_until = reference_block_number as u64 + self.payload_block_buffer;
+        let horizon = self
+            .schnorr_mutation_horizon(sdk.provider().clone(), target_addr)
+            .await;
+        let valid_until_block = clamp_to_mutation_horizon(unclamped_valid_until, horizon);
+        if valid_until_block < unclamped_valid_until {
+            info!(
+                target = %target_addr,
+                reference_block = reference_block_number,
+                valid_until_block,
+                unclamped_valid_until,
+                "payload validity shortened to expire before the operator set can change"
+            );
+        }
 
         let payload = PayloadView {
             to: target_addr,
@@ -1119,6 +1197,44 @@ mod tests {
     // queued entry corresponds to exactly one RPC.
     fn push_supports_interface(asserter: &Asserter, supported: bool) {
         asserter.push_success(&Bytes::from(supported.abi_encode()));
+    }
+
+    // An unscheduled horizon is `type(uint256).max`, which is the state of a registry with nothing
+    // announced — by far the common case, and it must leave validity untouched.
+    #[test]
+    fn horizon_clamp_is_noop_when_no_change_is_scheduled() {
+        assert_eq!(clamp_to_mutation_horizon(150, Some(U256::MAX)), 150);
+    }
+
+    // A horizon the router could not read must not silently shorten validity.
+    #[test]
+    fn horizon_clamp_is_noop_when_horizon_is_unknown() {
+        assert_eq!(clamp_to_mutation_horizon(150, None), 150);
+    }
+
+    // A horizon beyond the payload's own expiry constrains nothing.
+    #[test]
+    fn horizon_clamp_is_noop_when_horizon_is_beyond_validity() {
+        assert_eq!(clamp_to_mutation_horizon(150, Some(U256::from(400))), 150);
+    }
+
+    // The payload must stop being valid strictly *below* the horizon: a settlement landing on that
+    // block can already see the mutated operator set.
+    #[test]
+    fn horizon_clamp_ends_validity_one_block_before_the_horizon() {
+        assert_eq!(clamp_to_mutation_horizon(150, Some(U256::from(120))), 119);
+        assert_eq!(clamp_to_mutation_horizon(150, Some(U256::from(151))), 150);
+        assert_eq!(clamp_to_mutation_horizon(150, Some(U256::from(150))), 149);
+    }
+
+    // A change announced mid-round can leave the horizon at or behind the payload's reference
+    // block. The payload is then born expired, which `GET /tasks/{id}` reports as PAYLOAD_EXPIRED —
+    // preferable to handing over calldata that would revert.
+    #[test]
+    fn horizon_clamp_yields_an_already_expired_payload_when_a_change_is_imminent() {
+        assert_eq!(clamp_to_mutation_horizon(150, Some(U256::from(10))), 9);
+        // A zero horizon must not underflow into u64::MAX, which would defeat the clamp entirely.
+        assert_eq!(clamp_to_mutation_horizon(150, Some(U256::ZERO)), 0);
     }
 
     #[tokio::test]
