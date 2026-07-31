@@ -31,6 +31,27 @@ pub struct SecNonce {
     k2: Scalar,
 }
 
+impl SecNonce {
+    /// Builds a nonce pair from raw scalars, rejecting zeros. Used by the deterministic
+    /// pre-committed-batch derivation ([`super::precommit`]); the "consume exactly once"
+    /// rule applies unchanged — determinism makes reuse *reproducible*, not safe, so
+    /// callers MUST gate every derivation behind a spend journal.
+    pub fn from_scalars(k1: Scalar, k2: Scalar) -> Option<Self> {
+        if bool::from(k1.is_zero()) || bool::from(k2.is_zero()) {
+            return None;
+        }
+        Some(Self { k1, k2 })
+    }
+
+    /// The public half `(k1·G, k2·G)`.
+    pub fn pub_nonce(&self) -> PubNonce {
+        PubNonce {
+            r1: (ProjectivePoint::GENERATOR * self.k1).to_affine(),
+            r2: (ProjectivePoint::GENERATOR * self.k2).to_affine(),
+        }
+    }
+}
+
 /// The public half of a nonce pair: `(R1 = k1·G, R2 = k2·G)`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PubNonce {
@@ -141,6 +162,38 @@ pub struct SigningContext {
 }
 
 impl SigningContext {
+    /// Derives the full context — aggregate nonces, effective `R`, `address(R)` — from an
+    /// aggregate key, the signer subset's public nonces, and the message. Returns `None`
+    /// on an empty nonce set or a degenerate aggregate (`R` = identity / zero address).
+    ///
+    /// This is the deterministic core shared by the interactive coordinator
+    /// ([`Coordinator::build_context`]) and the pre-committed-nonce scheme
+    /// ([`super::scheme`]), where every party derives the same context locally instead of
+    /// receiving it from a coordinator.
+    pub fn derive<'a>(
+        x_agg: PublicKey,
+        nonces: impl IntoIterator<Item = &'a PubNonce>,
+        message: &[u8; MESSAGE_LEN],
+    ) -> Option<Self> {
+        let (r1_agg, r2_agg) = aggregate_pubnonces(nonces)?;
+        let b = nonce_coefficient(&r1_agg, &r2_agg, &x_agg, message);
+        let r_point = effective_nonce(&r1_agg, &r2_agg, &b);
+        if bool::from(r_point.is_identity()) {
+            return None;
+        }
+        let r_addr = eth_address_of_point(&r_point);
+        if r_addr == alloy_primitives::Address::ZERO {
+            return None;
+        }
+        Some(Self {
+            x_agg,
+            r1_agg,
+            r2_agg,
+            r_addr,
+            message: *message,
+        })
+    }
+
     /// The aggregate nonce pair `(R1_agg, R2_agg)` as a [`PubNonce`] (wire form).
     pub fn agg_nonces(&self) -> PubNonce {
         PubNonce {
@@ -218,23 +271,7 @@ impl Coordinator {
             return None;
         }
         let x_agg = PublicKey::aggregate(contributions.iter().map(|(pk, _)| pk))?;
-        let (r1_agg, r2_agg) = aggregate_pubnonces(contributions.iter().map(|(_, n)| n))?;
-        let b = nonce_coefficient(&r1_agg, &r2_agg, &x_agg, message);
-        let r_point = effective_nonce(&r1_agg, &r2_agg, &b);
-        if bool::from(r_point.is_identity()) {
-            return None;
-        }
-        let r_addr = eth_address_of_point(&r_point);
-        if r_addr == alloy_primitives::Address::ZERO {
-            return None;
-        }
-        Some(SigningContext {
-            x_agg,
-            r1_agg,
-            r2_agg,
-            r_addr,
-            message: *message,
-        })
+        SigningContext::derive(x_agg, contributions.iter().map(|(_, n)| n), message)
     }
 
     /// Verifies a single signer's partial signature against its nonce commitment:
