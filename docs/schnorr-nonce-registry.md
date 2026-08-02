@@ -1,8 +1,10 @@
 # Schnorr Nonce-Commitment Registry — non-interactive aggregate signing
 
-Status: **phases 1–3 implemented + phase-4 groundwork**; live node/router wiring pending.
-Branch: `Rubydusa/schnorr-nonce-registry`, building on
-`RonTuretzky/schnorr-aggregate-signatures`.
+Status: **phases 1–4 implemented**; phase-5 hardening outstanding (see below).
+
+The contracts live in the [`gas-killer/solidity-sdk`](https://github.com/gas-killer/solidity-sdk)
+repo (`src/schnorr/SchnorrNonceRegistry.sol`); this repo carries the off-chain half plus a
+vendored deploy artifact built from that source.
 
 ## Implementation status
 
@@ -10,13 +12,13 @@ Done (all tested; `cargo test --workspace` + `forge test` green):
 
 | Piece | Where |
 |---|---|
-| `SchnorrNonceRegistry` contract (§5) + interfaces | `contracts/src/SchnorrNonceRegistry.sol`, `interface/ISchnorrNonceRegistry.sol`, `ISchnorrStakeRegistry.operators` |
-| Foundry suite w/ in-Solidity Schnorr signer + Rust parity vector | `contracts/test/SchnorrNonceRegistry.t.sol` |
+| `SchnorrNonceRegistry` contract (§5) + interfaces | solidity-sdk: `src/schnorr/SchnorrNonceRegistry.sol`, `interface/ISchnorrNonceRegistry.sol`, `interface/ISchnorrOperatorRegistry.sol` |
+| Foundry suite w/ in-Solidity Schnorr signer + Rust parity vector | solidity-sdk: `test/SchnorrNonceRegistry.t.sol` |
 | Slot mapping, seed→nonce derivation, Merkle batches, batch message (§4, §6.1) | `common/src/schnorr/precommit.rs` |
 | `SchnorrScheme` (`certificate::Scheme`, two-form certificate) (§7) | `common/src/schnorr/scheme.rs` (incl. engine smoke test + completion-round crypto proof) |
 | Durable spend journal (invariant N1, fsync write-ahead, torn-tail recovery) | `common/src/schnorr/journal.rs` |
 | Batch gossip + completion wire messages (§6.2–6.3) | `common/src/schnorr/wire.rs` (`PrecommitMsg`) |
-| Deploy tooling: registry deploy + per-operator batch-0 commitment | `scripts/deploy_array_summation.rs` (`SCHNORR_NONCE_REGISTRY_ADDRESS`, `SCHNORR_NONCE_BATCH_SLOTS`), `scripts/bindings/schnorrnonceregistry.rs` |
+| Deploy tooling: registry deploy + per-operator batch-0 commitment | `scripts/deploy_array_summation.rs` (`SCHNORR_NONCE_REGISTRY_ADDRESS`, `SCHNORR_NONCE_BATCH_SLOTS`), `scripts/bindings/schnorrnonceregistry.rs` (artifact vendored from solidity-sdk) |
 | Batch gossip store (chunk reassembly, self-authenticating verification, serve/re-announce) | `common/src/schnorr/batches.rs` (`BatchStore`) |
 | Completion round: context/sign/verify on the scheme + router-side collector | `scheme.rs` (`completion_context`/`sign_completion`), `batches.rs` (`CompletionCollector`) — end-to-end tested through the production API |
 | On-chain startup reads (operator points, batch metadata) | `common/src/schnorr/onchain.rs` (`load_operator_keys`, `load_batches`) |
@@ -30,20 +32,23 @@ unit-verified; docker e2e pending):
 
 | Piece | Where |
 |---|---|
-| Node arm: scheme from on-chain reads, key-rederived batches (root-checked), fsync spend journal, engine with the ECDSA arm's knobs | `node/src/main.rs` |
+| Node arm: scheme from on-chain reads, key-rederived batches (root-checked), fsync spend journal, engine with the BLS arm's knobs | `node/src/main.rs` |
 | Node channel-2 actor: announce/ingest/serve/pull batches; `Attested`-tap → journal-gated completion partial to the router | `node/src/precommit.rs` |
-| Scheme-generic node reporter with `CertifiedSummary` tap (ECDSA arm unchanged) | `node/src/reporter.rs`, `common/src/consensus.rs` (`CertificateInspect`) |
-| Router arm: verifier engine + combined reporter/CertIndex/gossip/completion actor; `Aggregate` (and skips) → `SchnorrCertified` to the existing submitter; `Attested` → `CompletionCollector` | `router/src/main.rs`, `router/src/precommit.rs` |
+| Certificate tap driving completion rounds | upstream `commonware_avs_node::reporter::NodeReporter::with_certificate_tap` (BLS arm unchanged) |
+| Router arm: verifier engine + upstream `CertReporter` (reporter/CertIndex) feeding a gossip/completion actor; `Aggregate` (and skips) → `SchnorrCertified` to the existing submitter; `Attested` → `CompletionCollector` | `router/src/main.rs`, `router/src/precommit.rs` |
 | Config + address resolution (`schnorr-precommit`; env override or deployment-JSON fallback via `AVS_DEPLOYMENT_PATH`) | `common/src/config.rs` (`resolve_deployed_address`) |
 
-`SIGNATURE_SCHEME=schnorr-precommit ./scripts/run_e2e_test.sh` is expected to work
-end-to-end with no compose changes (the deploy flow writes `schnorrNonceRegistry`
-into the deployment JSON both binaries already mount) — running it is the next step.
+`SIGNATURE_SCHEME=schnorr-precommit ./scripts/run_e2e_test.sh` runs the mode with no
+compose changes (the deploy flow writes `schnorrNonceRegistry` into the deployment JSON
+both binaries already mount); CI runs it as a fourth e2e leg. Helm deliberately does not
+run precommit — the pods cannot resolve registries the runner-side deploy produces (see
+the matrix comment in `.github/workflows/helm-integration-tests.yml`).
 
 Remaining (phase 5 hardening):
 
-* Run + green the docker e2e and Helm flows in precommit mode; then delete
-  `NonceRequest`/`NonceCommit` + the interactive coordinator/participant actors.
+* Green the docker e2e in precommit mode, then delete `NonceRequest`/`NonceCommit` +
+  the interactive coordinator/participant actors. Helm coverage needs the
+  deploy-before-readiness rework noted above.
 * Own-batch auto re-registration at the consumption threshold (`registerBatch` from the
   node, batch index `i` seeded by `derive_batch_seed(key, i)`); until then a deployment
   is bounded by batch-0 coverage (`SCHNORR_NONCE_BATCH_SLOTS`/`MAX_ATTEMPTS` heights).
@@ -107,7 +112,7 @@ members of S₁: re-sign for exactly S₁ at slot(h, a=1) → gossip channel 2
 (no coordinator message needed — S₁ is read from the certificate everyone holds)
 ```
 
-The signing-time shape recovers the ECDSA mode's "node unilaterally signs on task
+The signing-time shape recovers the BLS mode's "node unilaterally signs on task
 resolution" latency while keeping constant-gas on-chain verification — and certificate
 formation rides the same commonware aggregation engine PR #299 migrated to (§7), instead
 of the custom channel-2 session actors.
@@ -266,8 +271,8 @@ that re-implement sessions, retries, pruning, and restart semantics by hand. Pre
 nonces remove that blocker: signing becomes a deterministic one-shot per height, i.e.
 exactly ack-shaped. This plan therefore brings Schnorr mode back onto
 `commonware_consensus::aggregation::Engine` (2026.5.0, scheme-generic), following the
-architecture PR #299 established for the BN254→engine migration and the `EcdsaScheme`
-precedent (`common/src/ecdsa/scheme.rs`): nodes run signing engine instances on channel 0,
+architecture the engine migration established, following the `Bn254Scheme` precedent
+(upstream `commonware-avs-core`): nodes run signing engine instances on channel 0,
 the router runs a verifier-only instance (`me() == None`), the TaskBook/automaton derives
 each height's digest locally, and the engine provides TipAck gossip, rebroadcast,
 journaling/restart recovery, epochs, tip skip-ahead, and attribution — all of which the
@@ -299,7 +304,7 @@ enum SchnorrCertificate {
   partial against the deterministic full committed set `S₀`, persists `(slot, partial)`,
   and returns it. Re-asked for an already-signed item it returns the **cached** partial
   (idempotent — same slot, same context; this is today's participant re-send rule moved
-  into the scheme). Verifier-only instances return `None`, as `EcdsaScheme` does.
+  into the scheme). Verifier-only instances return `None`, as `Bn254Scheme` does.
 * `verify_attestation` checks `s_i·G == R1_i + b·R2_i − e·X_i` from the sender's
   *committed* slot points — pure public data held by the scheme (today's
   `Coordinator::verify_partial`, verbatim). Bad partials are attributed and blocked by the
@@ -309,9 +314,12 @@ enum SchnorrCertificate {
   `Attested` at engine quorum. Both are honest certificates for "this set attested to this
   digest"; `verify_certificate` verifies the aggregate identity resp. each partial.
 * Scheme instances are built per epoch from on-chain reads (stake-registry operator set +
-  nonce-registry coverage) via the engine's provider hook — the same place `EcdsaScheme`
+  nonce-registry coverage) via the engine's provider hook — the same place `Bn254Scheme`
   gets its ordered participant set; participant indices are positions in the ordered
-  operator-address set, exactly as in ECDSA mode.
+  BN254 participant set, with each operator's Schnorr point carried index-aligned beside
+  it (the engine ties `Scheme::PublicKey` to the p2p identity, which stays BN254 in every
+  mode). Participant order is therefore BN254-key order, so any address list the chain
+  wants sorted — `nonSigners` — is sorted explicitly rather than inherited from it.
 
 ### 7.3 Completion round (only when the certificate is `Attested`)
 
@@ -329,7 +337,8 @@ path as today. `MAX_ATTEMPTS` bounds the shrink-and-retry (`S₂ ⊂ S₁`, slot
 * **Deleted**: `router/src/schnorr_coordinator.rs` and `node/src/schnorr_participant.rs`
   session machinery (≈700 lines of hand-rolled retry/prune/restart logic) — replaced by
   the engine + `SchnorrScheme` + the small completion actor. The router regains full
-  symmetry with ECDSA mode (verifier-only engine, sequencer, submitter).
+  symmetry with BLS mode (verifier-only engine, upstream `CertReporter`, sequencer,
+  submitter).
 * **Quorum semantics**: the engine's threshold is its fixed N3f1 participant count (PR
   #299 note); the *stake-weighted* threshold stays authoritative on-chain and is
   re-checked by the submitter before submission — unchanged from today, but now an
@@ -343,7 +352,7 @@ path as today. `MAX_ATTEMPTS` bounds the shrink-and-retry (`S₂ ⊂ S₁`, slot
   invariant N1 and needs a dedicated chaos test.
 * **Digest disagreement across nodes** (task-validity dispute): conflicting acks for a
   height simply never reach quorum on either digest — no certificate, deadline/skip path,
-  same as ECDSA mode. The watermark burns slot `idx(h,0)` on first sign regardless
+  same as BLS mode. The watermark burns slot `idx(h,0)` on first sign regardless
   (signing a different digest for `h` later is exactly what N1 forbids).
 
 ## 8. Security analysis
@@ -386,11 +395,11 @@ path as today. `MAX_ATTEMPTS` bounds the shrink-and-retry (`S₂ ⊂ S₁`, slot
    `generate_key`/deploy scripts), gossip messages + persistence + root verification on
    both node and router, spent-slot WAL with fsync-before-send and restart tests.
 3. **`SchnorrScheme` for the aggregation engine** (§7). Implement
-   `certificate::Scheme` in `common/src/schnorr/scheme.rs` mirroring `EcdsaScheme`
+   `certificate::Scheme` in `common/src/schnorr/scheme.rs` mirroring `Bn254Scheme`
    (partial = attestation; two-form `Aggregate`/`Attested` certificate; committed-nonce
    `verify_attestation`; cached-partial idempotent `sign` gated by the watermark).
    Unit tests at the scheme level (quorum boundaries, subset ≠ S₀ ⇒ `Attested`, replay
-   idempotency), mirroring the `EcdsaScheme` test suite.
+   idempotency), mirroring the `Bn254Scheme` test suite.
 4. **Engine wiring + completion actor.** Schnorr mode instantiates the engine on
    channel 0 (nodes signing, router verifier-only) per the PR #299 architecture;
    epoch provider reads stake + nonce registries; completion actor on channel 2 for
@@ -408,7 +417,7 @@ path as today. `MAX_ATTEMPTS` bounds the shrink-and-retry (`S₂ ⊂ S₁`, slot
 * **FROST / threshold Schnorr** — fixed group key, any t-of-n, no subtraction; rejected:
   requires DKG + resharing on churn, changes the trust model, and the registry's
   non-signer-subtraction design already fits EigenLayer-style dynamic operator sets.
-* **Keeping the custom channel-2 session actors (engine stays ECDSA-only)** — the
+* **Keeping the custom channel-2 session actors (engine stays BLS-only)** — the
   original shape of this plan, rejected once the trait mismatch was resolved: a naive
   "partial = attestation, aggregate = certificate" scheme is unsound because
   `Scheme::assemble` may receive *any* quorum subset while MuSig2 partials only sum over

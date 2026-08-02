@@ -5,7 +5,9 @@ use alloy::signers::local::PrivateKeySigner;
 use bindings::arraysummationfactory::ArraySummationFactory;
 use bindings::reentrantcheckpointfactory::ReentrantCheckpointFactory;
 use bindings::schnorrarraysummationfactory::SchnorrArraySummationFactory;
+use bindings::schnorrnonceregistry::SchnorrNonceRegistry;
 use bindings::schnorrstakeregistry::SchnorrStakeRegistry;
+use gas_killer_common::schnorr::precommit::{BatchDomain, NonceBatch, derive_batch_seed};
 use gas_killer_common::schnorr::{PrivateKey, private_key_from_hex};
 use gas_killer_common::{
     SignatureScheme, quorum_threshold_fraction, schnorr_notice_window, signature_scheme,
@@ -52,7 +54,7 @@ async fn main() -> Result<(), DynError> {
     // of possession) before deploying the target.
     match signature_scheme() {
         SignatureScheme::Bls => deploy_bls().await,
-        SignatureScheme::Schnorr => deploy_schnorr().await,
+        SignatureScheme::Schnorr | SignatureScheme::SchnorrPrecommit => deploy_schnorr().await,
     }
 }
 
@@ -495,6 +497,109 @@ async fn deploy_schnorr() -> Result<(), DynError> {
         }
     }
 
+    // Deploy the nonce-commitment registry and commit each operator's first nonce
+    // batch (pre-committed-nonce mode; see docs/schnorr-nonce-registry.md). Deployed
+    // for both Schnorr modes — the interactive one simply never reads it — so the two
+    // share one deploy path and one deployment JSON shape. Reuse an existing registry
+    // when SCHNORR_NONCE_REGISTRY_ADDRESS points at deployed code (its batches are
+    // assumed already committed, matching the stake-registry reuse).
+    let nonce_registry_address: Address = match env_address("SCHNORR_NONCE_REGISTRY_ADDRESS")? {
+        Some(addr) => {
+            let code = provider.get_code_at(addr).await.map_err(|e| {
+                format!(
+                    "Failed to get code for SchnorrNonceRegistry {}: {}",
+                    addr, e
+                )
+            })?;
+            if code.as_ref().is_empty() {
+                return Err(format!(
+                    "SCHNORR_NONCE_REGISTRY_ADDRESS {} has no code deployed; unset it to deploy a fresh registry",
+                    addr
+                )
+                .into());
+            }
+            println!(
+                "🗄️  Using existing SchnorrNonceRegistry at: {} (skipping batch commitments)",
+                addr
+            );
+            addr
+        }
+        None => {
+            println!("🗄️  Deploying SchnorrNonceRegistry...");
+            let nonce_registry = SchnorrNonceRegistry::deploy(provider.clone(), registry_address)
+                .await
+                .map_err(|e| format!("Failed to deploy SchnorrNonceRegistry: {}", e))?;
+            let addr = *nonce_registry.address();
+            println!("✅ SchnorrNonceRegistry deployed at: {}", addr);
+
+            // Commit batch 0 for every operator. The batch seed derives from the
+            // operator key (`derive_batch_seed`), so the node recomputes the same
+            // secret nonces at runtime from its key file alone.
+            let chain_id = provider
+                .get_chain_id()
+                .await
+                .map_err(|e| format!("Failed to get chain id: {}", e))?;
+            let batch_slots = match env::var("SCHNORR_NONCE_BATCH_SLOTS") {
+                Ok(v) => v
+                    .parse::<u64>()
+                    .map_err(|_| "SCHNORR_NONCE_BATCH_SLOTS must be a u64")?,
+                Err(_) => 4096,
+            };
+            let mut rng = rand::rng();
+            let mut fill = |b: &mut [u8]| rng.fill_bytes(b);
+            for key in &operator_keys {
+                let pubkey = key.public_key();
+                let operator = pubkey.eth_address();
+                let domain = BatchDomain {
+                    chain_id,
+                    registry: addr,
+                    operator,
+                };
+                let seed = derive_batch_seed(key, 0);
+                let batch = NonceBatch::generate(domain, &seed, 0, 0, batch_slots)
+                    .ok_or("invalid SCHNORR_NONCE_BATCH_SLOTS (zero or above the cap)")?;
+                let signature = batch
+                    .sign_registration(key, &mut fill)
+                    .expect("key identity matches the batch domain by construction");
+                // Cheap local check before spending gas: the registry verifies the same.
+                if !batch.verify_registration(&pubkey, &signature) {
+                    return Err(format!(
+                        "locally generated batch registration failed to verify for operator {}",
+                        operator
+                    )
+                    .into());
+                }
+                let sig_bytes = signature.to_bytes();
+                let pending_tx = nonce_registry
+                    .registerBatch(
+                        U256::from_be_bytes(pubkey.x_bytes()),
+                        U256::from_be_bytes(pubkey.y_bytes()),
+                        batch.root().into(),
+                        batch.count(),
+                        U256::from_be_slice(&sig_bytes[..32]),
+                        Address::from_slice(&sig_bytes[32..]),
+                    )
+                    .send()
+                    .await
+                    .map_err(|e| format!("Failed to send registerBatch for {}: {}", operator, e))?;
+                let receipt = pending_tx.get_receipt().await.map_err(|e| {
+                    format!(
+                        "registerBatch transaction for {} failed or was not mined: {}",
+                        operator, e
+                    )
+                })?;
+                if !receipt.status() {
+                    return Err(format!("registerBatch reverted for operator {}", operator).into());
+                }
+                println!(
+                    "✅ Committed nonce batch 0 for {} ({} slots)",
+                    operator, batch_slots
+                );
+            }
+            addr
+        }
+    };
+
     // Example selector: the re-entrancy demonstration deploys a different target (a
     // ReentrantCheckpoint + its Observer) but reuses the same registry/operators/JSON
     // wiring. Gated so the default array-summation e2e is byte-identical.
@@ -503,6 +608,7 @@ async fn deploy_schnorr() -> Result<(), DynError> {
             provider.clone(),
             avs_address,
             registry_address,
+            nonce_registry_address,
             &avs_deployment_path,
         )
         .await;
@@ -583,6 +689,7 @@ async fn deploy_schnorr() -> Result<(), DynError> {
     update_schnorr_deployment_json(
         &avs_deployment_path,
         &format!("{:?}", registry_address),
+        &format!("{:?}", nonce_registry_address),
         &format!("{:?}", factory_address),
         &format!("{:?}", deployed_address),
     )?;
@@ -590,6 +697,7 @@ async fn deploy_schnorr() -> Result<(), DynError> {
     println!("🎉 Deployment completed successfully!");
     println!("📋 Summary:");
     println!("  SchnorrStakeRegistry: {}", registry_address);
+    println!("  SchnorrNonceRegistry: {}", nonce_registry_address);
     println!("  SchnorrArraySummation Factory: {}", factory_address);
     println!("  SchnorrArraySummation Contract: {}", deployed_address);
     println!("  AVS Service Manager: {}", avs_address);
@@ -637,6 +745,7 @@ fn update_deployment_json(
 fn update_schnorr_deployment_json(
     avs_deployment_path: &str,
     registry_address: &str,
+    nonce_registry_address: &str,
     factory_address: &str,
     deployed_address: &str,
 ) -> Result<(), DynError> {
@@ -661,6 +770,7 @@ fn update_schnorr_deployment_json(
     // verify_message_hash_parity, and the CI assertions all read that key, and the
     // digest they compute against it is scheme-agnostic.
     deployment["addresses"]["schnorrStakeRegistry"] = serde_json::json!(registry_address);
+    deployment["addresses"]["schnorrNonceRegistry"] = serde_json::json!(nonce_registry_address);
     deployment["addresses"]["schnorrArraySummationFactory"] = serde_json::json!(factory_address);
     deployment["addresses"]["schnorrArraySummation"] = serde_json::json!(deployed_address);
     deployment["addresses"]["arraySummation"] = serde_json::json!(deployed_address);
@@ -698,6 +808,7 @@ async fn deploy_reentrant_checkpoint<P>(
     provider: P,
     avs_address: Address,
     registry_address: Address,
+    nonce_registry_address: Address,
     avs_deployment_path: &str,
 ) -> Result<(), DynError>
 where
@@ -753,6 +864,7 @@ where
     update_reentrant_deployment_json(
         avs_deployment_path,
         &format!("{:?}", registry_address),
+        &format!("{:?}", nonce_registry_address),
         &format!("{:?}", factory_address),
         &format!("{:?}", checkpoint_address),
         &format!("{:?}", observer_address),
@@ -765,6 +877,7 @@ where
 fn update_reentrant_deployment_json(
     avs_deployment_path: &str,
     registry_address: &str,
+    nonce_registry_address: &str,
     factory_address: &str,
     checkpoint_address: &str,
     observer_address: &str,
@@ -785,6 +898,7 @@ fn update_reentrant_deployment_json(
     }
 
     deployment["addresses"]["schnorrStakeRegistry"] = serde_json::json!(registry_address);
+    deployment["addresses"]["schnorrNonceRegistry"] = serde_json::json!(nonce_registry_address);
     deployment["addresses"]["reentrantCheckpointFactory"] = serde_json::json!(factory_address);
     deployment["addresses"]["reentrantCheckpoint"] = serde_json::json!(checkpoint_address);
     deployment["addresses"]["reentrantObserver"] = serde_json::json!(observer_address);

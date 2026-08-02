@@ -13,10 +13,14 @@ use alloy_primitives::Address;
 sol! {
     #[sol(rpc)]
     interface ISchnorrStakeRegistryView {
+        /// Must match `SchnorrStakeRegistry`'s packed `Operator` record exactly — the
+        /// widths are part of the return ABI, so a stale arity/width here decodes the
+        /// wrong fields rather than failing loudly. See `ISchnorrOperatorRegistry` in
+        /// gas-killer/solidity-sdk.
         function operators(address operatorId)
             external
             view
-            returns (uint256 x, uint256 y, uint256 weight, bool registered);
+            returns (uint256 x, uint256 y, uint96 weight, bool registered, uint48 exitBlock);
     }
 
     #[sol(rpc)]

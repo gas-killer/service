@@ -18,8 +18,12 @@ LOG_DIR="$PROJECT_ROOT/logs"
 # reads the same default for the router so the two stay in sync.
 export ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 
-# Capture the caller's signature scheme (default: bls) before `cp example.env .env`
-# and `source ../.env` can let the example default win. Re-exported after the
+# Capture the caller's signature scheme before `cp example.env .env` and
+# `source ../.env` can let the example default win: bls (engine path, default),
+# schnorr (interactive aggregate path), or schnorr-precommit (non-interactive
+# aggregate path via pre-committed nonces — docs/schnorr-nonce-registry.md; the
+# deploy flow writes the registry addresses into the deployment JSON the
+# containers already mount, so it needs no compose changes). Re-exported after the
 # source below so it reaches the deploy binary; docker-compose reads it directly
 # from the environment for the node/router containers.
 SIGNATURE_SCHEME_CHOICE="${SIGNATURE_SCHEME:-bls}"

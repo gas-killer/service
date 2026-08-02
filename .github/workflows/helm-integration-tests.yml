@@ -22,6 +22,18 @@ jobs:
       # Run both schemes to completion even if one fails.
       fail-fast: false
       matrix:
+        # schnorr-precommit is intentionally NOT run here — the e2e-test workflow
+        # covers it. In precommit mode the node/router read the SchnorrStakeRegistry
+        # + SchnorrNonceRegistry on-chain at startup, but in this Helm harness those
+        # registries are deployed by deploy_array_summation *on the runner*, gated
+        # behind pod readiness, and never written back to the pods' shared PVC — so
+        # the pods can never resolve the addresses and the readiness gate deadlocks.
+        # (docker-compose e2e shares the deploy volume with the containers, so it
+        # exercises precommit end-to-end there.) The interactive schnorr path is
+        # unaffected because it exchanges operator points over p2p rather than
+        # reading the registries at boot. Enabling precommit here needs a
+        # deploy-before-readiness + address-propagation rework of this workflow; see
+        # docs/schnorr-nonce-registry.md.
         signature_scheme: [bls, schnorr]
     env:
       CI_ADMIN_KEY: ci-admin-key

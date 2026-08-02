@@ -91,9 +91,9 @@ impl PendingBatch {
 #[derive(Default)]
 struct OperatorBatches {
     pubkey: Option<SchnorrPublicKey>,
-    /// In-flight reassemblies keyed by `(relaying sender, batch_index)` — isolated
+    /// In-flight reassemblies keyed by `(relaying peer, batch_index)` — isolated
     /// per relayer so a bad stream cannot poison a good one.
-    pending: HashMap<(Address, u64), PendingBatch>,
+    pending: HashMap<(OperatorKey, u64), PendingBatch>,
     complete: BTreeMap<u64, StoredBatch>,
 }
 
@@ -152,7 +152,7 @@ impl BatchStore {
     #[allow(clippy::too_many_arguments)]
     pub fn ingest(
         &self,
-        sender: Address,
+        relayer: &OperatorKey,
         pubkey: SchnorrPublicKey,
         batch_index: u64,
         start_slot: u64,
@@ -165,8 +165,8 @@ impl BatchStore {
             return Ingest::Rejected(Rejection::BadMetadata);
         }
         // The operator identity derives from the announced key itself; the batch is
-        // authenticated by its registration signature at completion, so `sender` is
-        // only the relayer — used to isolate reassembly streams, never trusted.
+        // authenticated by its registration signature at completion, so `relayer` is
+        // only the relaying peer — used to isolate reassembly streams, never trusted.
         let operator = pubkey.eth_address();
 
         let mut inner = self.inner.lock().expect("batch store lock");
@@ -178,7 +178,7 @@ impl BatchStore {
 
         let pending = entry
             .pending
-            .entry((sender, batch_index))
+            .entry((relayer.clone(), batch_index))
             .or_insert_with(|| PendingBatch {
                 start_slot,
                 total,
@@ -207,7 +207,7 @@ impl BatchStore {
         // Assemble and verify the whole batch against the registration signature.
         let pending = entry
             .pending
-            .remove(&(sender, batch_index))
+            .remove(&(relayer.clone(), batch_index))
             .expect("pending batch just inserted");
         let batch = NonceBatch {
             domain: BatchDomain {
@@ -429,6 +429,14 @@ mod tests {
         Address::repeat_byte(0x42)
     }
 
+    /// A distinct relaying peer identity. Reassembly streams are keyed by the p2p
+    /// sender, and the batch authenticates itself, so any BN254 key works here — what
+    /// the tests care about is only that different relayers are different keys.
+    fn relayer(seed: u64) -> OperatorKey {
+        use commonware_cryptography::Signer as _;
+        commonware_avs_core::bn254::Bn254::from_seed(seed).public_key()
+    }
+
     fn signed_batch(key: &PrivateKey, count: u64) -> (NonceBatch, AggregateSignature) {
         let domain = BatchDomain {
             chain_id: CHAIN_ID,
@@ -444,6 +452,7 @@ mod tests {
     fn chunked_ingest_out_of_order_completes_and_serves() {
         let key = PrivateKey::from_seed(1);
         let operator = key.public_key().eth_address();
+        let peer = relayer(1);
         let (batch, signature) = signed_batch(&key, SLOTS);
 
         let store = BatchStore::new(
@@ -464,7 +473,7 @@ mod tests {
 
         for (i, (offset, nonces)) in chunks.iter().enumerate() {
             let outcome = store.ingest(
-                operator,
+                &peer,
                 key.public_key(),
                 0,
                 0,
@@ -502,7 +511,7 @@ mod tests {
 
         // Re-announce of a verified batch is idempotent.
         let again = store.ingest(
-            operator,
+            &peer,
             key.public_key(),
             0,
             0,
@@ -518,6 +527,7 @@ mod tests {
     fn ingest_rejections() {
         let key = PrivateKey::from_seed(2);
         let operator = key.public_key().eth_address();
+        let peer = relayer(2);
         let (batch, signature) = signed_batch(&key, 8);
         let store = BatchStore::new(
             CHAIN_ID,
@@ -530,7 +540,7 @@ mod tests {
         // the transport sender.
         assert_eq!(
             store.ingest(
-                Address::repeat_byte(0x99),
+                &relayer(99),
                 key.public_key(),
                 0,
                 0,
@@ -553,7 +563,7 @@ mod tests {
         // Oversized / zero totals.
         assert_eq!(
             store.ingest(
-                operator,
+                &peer,
                 key.public_key(),
                 0,
                 0,
@@ -570,12 +580,12 @@ mod tests {
         let mut tampered = batch.nonces.clone();
         tampered.swap(0, 1);
         assert_eq!(
-            store.ingest(operator, key.public_key(), 0, 0, 8, signature, 0, tampered),
+            store.ingest(&peer, key.public_key(), 0, 0, 8, signature, 0, tampered),
             Ingest::Rejected(Rejection::BadRegistration)
         );
         assert_eq!(
             store.ingest(
-                operator,
+                &peer,
                 key.public_key(),
                 0,
                 0,
@@ -592,17 +602,17 @@ mod tests {
         let key3 = PrivateKey::from_seed(4);
         let (batch3, sig3) = signed_batch(&key3, 32);
         let op3 = key3.public_key().eth_address();
-        let evil = Address::repeat_byte(0xEE);
-        let honest = Address::repeat_byte(0x88);
+        let evil = relayer(0xEE);
+        let honest = relayer(0x88);
         let mut poisoned = batch3.nonces[..16].to_vec();
         poisoned.swap(0, 1);
         assert_eq!(
-            store.ingest(evil, key3.public_key(), 0, 0, 32, sig3, 0, poisoned),
+            store.ingest(&evil, key3.public_key(), 0, 0, 32, sig3, 0, poisoned),
             Ingest::Pending
         );
         assert_eq!(
             store.ingest(
-                honest,
+                &honest,
                 key3.public_key(),
                 0,
                 0,
@@ -616,7 +626,7 @@ mod tests {
         // The evil stream completes first and fails verification — dropped alone.
         assert_eq!(
             store.ingest(
-                evil,
+                &evil,
                 key3.public_key(),
                 0,
                 0,
@@ -630,7 +640,7 @@ mod tests {
         // The honest stream still completes and verifies.
         assert_eq!(
             store.ingest(
-                honest,
+                &honest,
                 key3.public_key(),
                 0,
                 0,
@@ -647,9 +657,10 @@ mod tests {
         let key2 = PrivateKey::from_seed(3);
         let (batch2, sig2) = signed_batch(&key2, 32);
         let op2 = key2.public_key().eth_address();
+        let peer2 = relayer(3);
         assert_eq!(
             store.ingest(
-                op2,
+                &peer2,
                 key2.public_key(),
                 0,
                 0,
@@ -662,7 +673,7 @@ mod tests {
         );
         assert_eq!(
             store.ingest(
-                op2,
+                &peer2,
                 key2.public_key(),
                 0,
                 0,
@@ -673,6 +684,9 @@ mod tests {
             ),
             Ingest::Rejected(Rejection::ConflictingChunk)
         );
+        // The conflict leaves the batch unverified — a rejected chunk must never
+        // half-complete an operator's coverage.
+        assert!(!store.has(op2, 0));
     }
 
     /// Full production-API completion flow: 4 operators, one offline, quorum bitmap →

@@ -50,6 +50,7 @@ use gas_killer_router::factories::{
     create_ingress, create_schnorr_submitter, create_submitter, requeue_incomplete_tasks,
 };
 use gas_killer_router::metrics::MetricsCollector;
+use gas_killer_router::precommit::SchnorrPrecommitRouter;
 use gas_killer_router::schnorr_coordinator::{SchnorrCoordinator, schnorr_certified_channel};
 use gas_killer_router::sequencer::{GasKillerTaskSource, in_flight_task};
 use std::collections::{HashMap, HashSet};
@@ -631,6 +632,217 @@ fn main() {
                     dispatch_time,
                     assignments,
                     coordinator_mailbox,
+                    resolution_receiver,
+                    directive_sender,
+                    directive_recipients,
+                    tip_reports,
+                    round_timeout(),
+                    rebroadcast_interval(),
+                );
+                context.child("sequencer").spawn(move |_| sequencer.run());
+            }
+            SignatureScheme::SchnorrPrecommit => {
+                // On-chain reads: operator key points (verifier scheme construction).
+                let http_rpc = std::env::var("HTTP_RPC")
+                    .expect("HTTP_RPC environment variable must be set for schnorr-precommit");
+                let rpc_provider = alloy::providers::ProviderBuilder::new()
+                    .connect_http(http_rpc.parse().expect("HTTP_RPC is not a valid URL"));
+                let chain_id = alloy::providers::Provider::get_chain_id(&rpc_provider)
+                    .await
+                    .expect("failed to read chain id from HTTP_RPC");
+
+                // Operator identity addresses in PARTICIPANT order — the nodes build
+                // the identical pairing from the same operator state, which is what
+                // makes an ack's participant index mean the same operator everywhere.
+                let participant_addresses: Vec<alloy::primitives::Address> = participants
+                    .iter()
+                    .map(|g2| {
+                        operators
+                            .iter()
+                            .find(|o| {
+                                o.pub_keys
+                                    .as_ref()
+                                    .is_some_and(|keys| keys.g2_pub_key == *g2)
+                            })
+                            .expect("every participant derives from an operator record")
+                            .address
+                    })
+                    .collect();
+
+                // The deploy flow publishes the registry addresses and PoP-registers
+                // every operator in the SchnorrStakeRegistry *after* the router boots
+                // (avs_deploy.json is written as its final step), so on a cold start
+                // these reads race the deploy. Wait for it rather than crash-looping
+                // into docker restart back-off, which would delay a clean start past
+                // the first task. Mirrors resolve_with_retry / the node's arm.
+                let (nonce_registry, operator_points) = {
+                    let mut attempt = 1u32;
+                    let max_attempts = 90u32; // ~3 min at 2s; deploy lands seconds after boot
+                    loop {
+                        let loaded = async {
+                            let stake_registry = gas_killer_common::resolve_deployed_address(
+                                "SCHNORR_STAKE_REGISTRY_ADDRESS",
+                                "schnorrStakeRegistry",
+                            )?;
+                            let nonce_registry = gas_killer_common::resolve_deployed_address(
+                                "SCHNORR_NONCE_REGISTRY_ADDRESS",
+                                "schnorrNonceRegistry",
+                            )?;
+                            let operator_points =
+                                gas_killer_common::schnorr::onchain::load_operator_keys(
+                                    rpc_provider.clone(),
+                                    stake_registry,
+                                    &participant_addresses,
+                                )
+                                .await?;
+                            Ok::<_, String>((nonce_registry, operator_points))
+                        }
+                        .await;
+                        match loaded {
+                            Ok(state) => break state,
+                            Err(e) if attempt >= max_attempts => panic!(
+                                "SchnorrPrecommit chain state not ready after {attempt} \
+                                 attempts: {e}. Was the deploy flow (deploy_array_summation) run?"
+                            ),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    attempt,
+                                    max_attempts,
+                                    "SchnorrPrecommit chain state not ready (deploy pending?), retrying..."
+                                );
+                                ::tokio::time::sleep(Duration::from_secs(2)).await;
+                                attempt += 1;
+                            }
+                        }
+                    }
+                };
+
+                // Gossip-fed nonce directory + verifier scheme (`me() == None`).
+                let directory =
+                    Arc::new(gas_killer_common::schnorr::scheme::MemoryNonceDirectory::default());
+                let store = Arc::new(gas_killer_common::schnorr::batches::BatchStore::new(
+                    chain_id,
+                    nonce_registry,
+                    Arc::clone(&directory),
+                ));
+                let scheme = gas_killer_common::schnorr::scheme::SchnorrScheme::verifier(
+                    participants,
+                    operator_points,
+                    directory,
+                    gas_killer_common::schnorr::scheme::DEFAULT_ATTEMPTS_PER_HEIGHT,
+                )
+                .expect("operator key set is malformed (duplicate keys or arity mismatch)");
+                tracing::info!(
+                    participants = scheme.participants().len(),
+                    engine_quorum = scheme.participants().quorum::<N3f1>(),
+                    contract_threshold = quorum_infos[quorum_number].threshold,
+                    "operator set loaded (schnorr-precommit)"
+                );
+
+                // Engine ack channel (same quota rationale as the BLS arm) and the
+                // channel-2 gossip/completion channel.
+                let ack_rate = ack_messages_per_second();
+                let ack_quota = Quota::per_second(ack_rate);
+                tracing::info!(
+                    ack_messages_per_second = ack_rate.get(),
+                    "engine channel quota"
+                );
+                let (ack_sender, ack_receiver) =
+                    network.register(ACK_CHANNEL, ack_quota, p2p_backlog);
+                let schnorr_quota = Quota::per_second(schnorr_messages_per_second());
+                let (pc_sender, pc_receiver) =
+                    network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
+
+                // Two hops: the upstream reporter verifies certificates and answers the
+                // sequencer's CertIndex, then the precommit actor turns each verified
+                // certificate into a submittable observation (immediately for
+                // `Aggregate`, after a completion round for `Attested`).
+                let (verified_sender, verified_receiver) = certified_channel();
+                let (certified_sender, certified_receiver) = schnorr_certified_channel();
+
+                let (cert_reporter, reporter_mailbox) = CertReporter::new(
+                    context.child("cert_reporter"),
+                    scheme.clone(),
+                    verified_sender,
+                );
+                context
+                    .child("cert_reporter_actor")
+                    .spawn(move |_| cert_reporter.run());
+
+                let actor = SchnorrPrecommitRouter::new(
+                    scheme.clone(),
+                    store,
+                    participant_addresses,
+                    APPLICATION_NAMESPACE.to_vec(),
+                    verified_receiver,
+                    certified_sender,
+                    pc_receiver,
+                    pc_sender,
+                    rebroadcast_interval(),
+                );
+                context
+                    .child("schnorr_precommit_actor")
+                    .spawn(move |_| actor.run());
+
+                // Verifier-only aggregation engine on channel 0.
+                let engine = Engine::new(
+                    context.child("engine"),
+                    AggregationConfig {
+                        monitor: StaticEpochMonitor::new(),
+                        provider: ConstantProvider::<
+                            gas_killer_common::schnorr::scheme::SchnorrScheme,
+                            Epoch,
+                        >::new(scheme),
+                        automaton: RouterAutomaton::new(assignments.clone()),
+                        reporter: reporter_mailbox.clone(),
+                        blocker: oracle.clone(),
+                        priority_acks: false,
+                        rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_interval()),
+                        epoch_bounds: (EpochDelta::new(0), EpochDelta::new(0)),
+                        window: agg_window(),
+                        activity_timeout: HeightDelta::new(agg_activity_timeout()),
+                        journal_partition: JOURNAL_PARTITION.to_string(),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_heights_per_section: NZU64!(64),
+                        journal_compression: None,
+                        journal_page_cache: CacheRef::from_pooler(
+                            &context,
+                            NZU16!(4096),
+                            NZUsize!(128),
+                        ),
+                        strategy: Sequential,
+                    },
+                );
+                engine.start((ack_sender, ack_receiver));
+
+                // On-chain submitter: the existing Schnorr submitter, unchanged — it
+                // consumes the same final-aggregate observations the interactive
+                // coordinator produces.
+                let submitter = create_schnorr_submitter(
+                    assignments.clone(),
+                    certified_receiver,
+                    resolution_sender,
+                    Arc::clone(&metrics),
+                    Arc::clone(&dispatch_time),
+                    APPLICATION_NAMESPACE.to_vec(),
+                    ingress.store.clone(),
+                    in_flight.clone(),
+                )
+                .await
+                .expect("Failed to create schnorr submitter");
+                context
+                    .child("schnorr_submitter")
+                    .spawn(move |_| submitter.run());
+
+                // Sequencer: unchanged behavior; its certificate observations come from
+                // the engine reporter, exactly as in the BLS arm.
+                let sequencer = Sequencer::new(
+                    task_source,
+                    dispatch_time,
+                    assignments,
+                    reporter_mailbox,
                     resolution_receiver,
                     directive_sender,
                     directive_recipients,

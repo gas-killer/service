@@ -1,7 +1,7 @@
 //! Aggregate-Schnorr [`certificate::Scheme`] for the aggregation engine, built on
 //! **pre-committed nonce batches** ([`super::precommit`]).
 //!
-//! [`SchnorrScheme`] mirrors [`crate::ecdsa::scheme::EcdsaScheme`] structurally, but the
+//! [`SchnorrScheme`] mirrors the BLS `Bn254Scheme` structurally, but the
 //! attestation is a MuSig2 **partial signature** for the deterministic full committed set
 //! `S₀(h)` (every participant with verified nonce coverage at the height's attempt-0
 //! slot), not an independently useful signature. That set-boundness is why the
@@ -35,8 +35,8 @@ use super::{
     AggregateSignature, MESSAGE_LEN, PrivateKey, PublicKey as SchnorrPublicKey, verify_aggregate,
 };
 use alloy_primitives::{Address, keccak256};
-use commonware_avs_core::bn254::PublicKey as OperatorKey;
 use bytes::{Buf, BufMut};
+use commonware_avs_core::bn254::PublicKey as OperatorKey;
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::aggregation::types::Item;
 use commonware_cryptography::Digest;
@@ -178,7 +178,7 @@ impl SpendJournal for MemorySpendJournal {
 }
 
 /// Extracts the raw 32 digest bytes from an [`Item`]'s digest (32-byte digests only,
-/// mirroring `EcdsaScheme`).
+/// mirroring `Bn254Scheme`).
 fn item_digest<D: Digest>(item: &Item<D>) -> Option<[u8; MESSAGE_LEN]> {
     item.digest.as_ref().try_into().ok()
 }
@@ -1047,7 +1047,9 @@ pub(crate) mod test_support {
     /// Participant order is BN254-key order — deliberately unrelated to Schnorr address
     /// order — so the suites exercise the same index/address decoupling production has.
     pub fn operators(n: usize, seed_base: u64) -> Operators {
-        let bn254: Vec<Bn254> = (0..n).map(|i| Bn254::from_seed(seed_base + i as u64)).collect();
+        let bn254: Vec<Bn254> = (0..n)
+            .map(|i| Bn254::from_seed(seed_base + i as u64))
+            .collect();
         let schnorr: Vec<PrivateKey> = (0..n)
             .map(|i| PrivateKey::from_seed(seed_base + i as u64))
             .collect();
@@ -1065,7 +1067,10 @@ pub(crate) mod test_support {
                 .expect("identity is in the set");
             keys[usize::from(index)] = Some(sk);
         }
-        let keys: Vec<PrivateKey> = keys.into_iter().map(|k| k.expect("every slot filled")).collect();
+        let keys: Vec<PrivateKey> = keys
+            .into_iter()
+            .map(|k| k.expect("every slot filled"))
+            .collect();
         let schnorr_keys: Vec<SchnorrPublicKey> = keys.iter().map(|k| k.public_key()).collect();
         let identities: Vec<OperatorKey> = participants.iter().cloned().collect();
         Operators {
@@ -1260,7 +1265,7 @@ mod tests {
         );
     }
 
-    // Unlike ECDSA mode, the partial is height-BOUND: the same digest at two heights
+    // Unlike a plain per-digest signature, the partial is height-BOUND: the same digest at two heights
     // consumes two different slots and produces different partials.
     #[test]
     fn partial_is_height_bound() {

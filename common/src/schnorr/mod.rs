@@ -32,6 +32,12 @@
 //! tested against the exact on-chain `ecrecover` identity. Wiring the interactive
 //! protocol into the live node/router p2p binaries lives in
 //! `node::schnorr_participant` and `router::schnorr_coordinator`.
+//!
+//! The non-interactive mode ([`precommit`], [`scheme`], [`batches`], [`journal`],
+//! [`onchain`]) reuses that same core unchanged — the equations, the final on-chain
+//! artifact and the registry verification are identical. All it removes is the online
+//! nonce round: nonces are committed on-chain ahead of time, so a node's MuSig2 partial
+//! becomes a one-shot aggregation-engine ack. See `docs/schnorr-nonce-registry.md`.
 
 pub mod batches;
 pub mod journal;
