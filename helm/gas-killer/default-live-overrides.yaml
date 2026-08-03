@@ -37,7 +37,7 @@ router:
   # !!! hostname (kubectl get nodes) before every apply; drop the key to let
   # !!! the scheduler place freely.
   nodeSelector:
-    kubernetes.io/hostname: gke-gas-killer-ops-highmem-1c128d1b-nmbc
+    kubernetes.io/hostname: gke-gas-killer-ops-highmem-1c128d1b-6v89
   extraEnv:
     # Raised reference-block staleness window (in blocks) — multi-hour sharded
     # rounds outlive the 300-block default baked into the router.
@@ -67,7 +67,7 @@ node:
   # !!! FRAGILE: same single-VM hostname pin as the router — see the warning
   # !!! there. Demo expiry strips it.
   nodeSelector:
-    kubernetes.io/hostname: gke-gas-killer-ops-highmem-1c128d1b-nmbc
+    kubernetes.io/hostname: gke-gas-killer-ops-highmem-1c128d1b-6v89
   extraEnv:
     # Same multi-overlay mmap sextet as the router (pinned simulation
     # environment: router and ALL nodes must mount the same model set).
