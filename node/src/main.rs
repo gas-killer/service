@@ -9,11 +9,18 @@
 //!   scheme — the node gossips TipAcks on channel 0 until the height certifies.
 //! - `schnorr`: the interactive two-round MuSig2 participant actor on channel 2
 //!   (see [`schnorr_participant`]), answering the router coordinator's session
-//!   messages. The p2p transport identity stays BN254 in both modes; the Schnorr
-//!   signing key is a separate secp256k1 operator key loaded from
-//!   `--schnorr-key-file`.
+//!   messages.
+//! - `schnorr-precommit`: the same constant-gas artifact without the interactive
+//!   nonce round — nonces are pre-committed on-chain, so the node's MuSig2 partial
+//!   IS its aggregation-engine ack and signing rides the engine exactly as `bls`
+//!   does. Channel 2 carries only batch gossip and the completion round (see
+//!   [`precommit`] and `docs/schnorr-nonce-registry.md`).
+//!
+//! The p2p transport identity stays BN254 in every mode; both Schnorr modes take a
+//! separate secp256k1 operator key from `--schnorr-key-file`.
 
 mod digest;
+mod precommit;
 mod schnorr_participant;
 
 use ::tokio::net::TcpListener;
@@ -46,6 +53,7 @@ use gas_killer_common::{
     p2p_message_backlog, p2p_quota_period, rebroadcast_interval, round_timeout,
     schnorr_messages_per_second, signature_scheme, storage_directory,
 };
+use rand::TryRngCore as _;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
@@ -202,7 +210,8 @@ fn main() {
                 .required(false)
                 .help(
                     "Path to the JSON file containing the operator's secp256k1 Schnorr \
-                     signing key (required only when SIGNATURE_SCHEME=schnorr)",
+                     signing key (required only when SIGNATURE_SCHEME=schnorr or \
+                     schnorr-precommit)",
                 ),
         )
         .get_matches();
@@ -211,15 +220,16 @@ fn main() {
     let (signer, port) = configure_identity(&matches);
     let orchestrator_config = configure_orchestrator(&matches);
 
-    // In schnorr mode the node signs with a separate secp256k1 operator key; the
-    // BN254 --key-file identity is only the p2p transport key. Loaded here so the
+    // In either schnorr mode the node signs with a separate secp256k1 operator key;
+    // the BN254 --key-file identity is only the p2p transport key. Loaded here so the
     // async closure below does not capture the CLI matches.
     let schnorr_key = match signature_scheme() {
-        SignatureScheme::Schnorr => Some(
+        SignatureScheme::Schnorr | SignatureScheme::SchnorrPrecommit => Some(
             gas_killer_common::schnorr::private_key_from_hex(&load_key_from_file(
-                matches
-                    .get_one::<String>("schnorr-key-file")
-                    .expect("--schnorr-key-file is required when SIGNATURE_SCHEME=schnorr"),
+                matches.get_one::<String>("schnorr-key-file").expect(
+                    "--schnorr-key-file is required when SIGNATURE_SCHEME=schnorr or \
+                     schnorr-precommit",
+                ),
             ))
             .expect("schnorr key is not a valid secp256k1 scalar"),
         ),
@@ -690,6 +700,310 @@ fn main() {
                         .await;
                     });
                 None
+            }
+            SignatureScheme::SchnorrPrecommit => {
+                let schnorr_key = schnorr_key.expect("schnorr key loaded before runtime start");
+                let own_address = schnorr_key.public_key().eth_address();
+
+                // Both identities must be registered, same as the interactive arm: the
+                // BN254 key carries p2p and the participant index, the Schnorr key
+                // signs. `SchnorrScheme::signer` re-checks the Schnorr half against the
+                // on-chain points, which is also what fixes our participant index.
+                let own_bn254 = signer.public_key();
+                if !participants.iter().any(|k| *k == own_bn254) {
+                    panic!(
+                        "own BN254 G2 key {own_bn254:?} is not in the quorum-{quorum_number} \
+                         operator set; register the operator on-chain before starting the node"
+                    );
+                }
+
+                // Operator identity addresses in PARTICIPANT order (positions in the
+                // sorted BN254 set), so every vector the scheme holds — BN254 keys,
+                // Schnorr points, nonce coverage — shares one index space. Participant
+                // order is BN254-key order, which is unrelated to address order, so this
+                // pairing is the only thing tying the two identities together.
+                let participant_addresses: Vec<alloy::primitives::Address> = participants
+                    .iter()
+                    .map(|g2| {
+                        operators
+                            .iter()
+                            .find(|o| {
+                                o.pub_keys
+                                    .as_ref()
+                                    .is_some_and(|keys| keys.g2_pub_key == *g2)
+                            })
+                            .expect("every participant derives from an operator record")
+                            .address
+                    })
+                    .collect();
+
+                // On-chain reads: operator key points from the stake registry and our
+                // own registered batch metadata from the nonce registry (the scheme is
+                // built from chain state; see docs/schnorr-nonce-registry.md §7.2).
+                let http_rpc = std::env::var("HTTP_RPC")
+                    .expect("HTTP_RPC environment variable must be set for schnorr-precommit");
+                let provider = alloy::providers::ProviderBuilder::new()
+                    .connect_http(http_rpc.parse().expect("HTTP_RPC is not a valid URL"));
+                let chain_id = alloy::providers::Provider::get_chain_id(&provider)
+                    .await
+                    .expect("failed to read chain id from HTTP_RPC");
+
+                // The deploy flow (deploy_array_summation) deploys both Schnorr
+                // registries and commits every operator's batch 0 *after* the nodes
+                // boot, writing the registry addresses into avs_deploy.json as its final
+                // step. On a cold start these reads therefore race the deploy, so wait
+                // for it to finish (registries resolvable + our batch committed) rather
+                // than crash-looping: a panic here trips docker's restart back-off and
+                // delays a clean start well past the first task, stalling the height-0
+                // round. Mirrors the router's DNS startup retries (resolve_with_retry).
+                let (nonce_registry, operator_points, batch_metas) = {
+                    let mut attempt = 1u32;
+                    let max_attempts = 90u32; // ~3 min at 2s; deploy lands seconds after boot
+                    loop {
+                        let loaded = async {
+                            let stake_registry = gas_killer_common::resolve_deployed_address(
+                                "SCHNORR_STAKE_REGISTRY_ADDRESS",
+                                "schnorrStakeRegistry",
+                            )?;
+                            let nonce_registry = gas_killer_common::resolve_deployed_address(
+                                "SCHNORR_NONCE_REGISTRY_ADDRESS",
+                                "schnorrNonceRegistry",
+                            )?;
+                            let operator_points =
+                                gas_killer_common::schnorr::onchain::load_operator_keys(
+                                    provider.clone(),
+                                    stake_registry,
+                                    &participant_addresses,
+                                )
+                                .await?;
+                            // Our own batches from the key + on-chain metadata (batch
+                            // seeds derive from the key; each root is re-checked below,
+                            // so a mismatch is caught rather than signing junk).
+                            let batch_metas = gas_killer_common::schnorr::onchain::load_batches(
+                                provider.clone(),
+                                nonce_registry,
+                                own_address,
+                            )
+                            .await?;
+                            if batch_metas.is_empty() {
+                                return Err(format!(
+                                    "no nonce batches registered yet for {own_address}"
+                                ));
+                            }
+                            Ok::<_, String>((nonce_registry, operator_points, batch_metas))
+                        }
+                        .await;
+                        match loaded {
+                            Ok(state) => break state,
+                            Err(e) if attempt >= max_attempts => panic!(
+                                "SchnorrPrecommit chain state not ready after {attempt} \
+                                 attempts: {e}. Was the deploy flow (deploy_array_summation) run?"
+                            ),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    attempt,
+                                    max_attempts,
+                                    "SchnorrPrecommit chain state not ready (deploy pending?), retrying..."
+                                );
+                                ::tokio::time::sleep(Duration::from_secs(2)).await;
+                                attempt += 1;
+                            }
+                        }
+                    }
+                };
+
+                let domain = gas_killer_common::schnorr::precommit::BatchDomain {
+                    chain_id,
+                    registry: nonce_registry,
+                    operator: own_address,
+                };
+                let directory =
+                    Arc::new(gas_killer_common::schnorr::scheme::MemoryNonceDirectory::default());
+                let store = Arc::new(gas_killer_common::schnorr::batches::BatchStore::new(
+                    chain_id,
+                    nonce_registry,
+                    Arc::clone(&directory),
+                ));
+                let mut fill = |b: &mut [u8]| {
+                    rand::rngs::OsRng
+                        .try_fill_bytes(b)
+                        .expect("operating system RNG failed")
+                };
+                let mut secrets = Vec::with_capacity(batch_metas.len());
+                let mut own_announces = Vec::new();
+                for meta in &batch_metas {
+                    let seed = gas_killer_common::schnorr::precommit::derive_batch_seed(
+                        &schnorr_key,
+                        meta.batch_index,
+                    );
+                    let batch = gas_killer_common::schnorr::precommit::NonceBatch::generate(
+                        domain,
+                        &seed,
+                        meta.batch_index,
+                        meta.start_slot,
+                        meta.count,
+                    )
+                    .expect("on-chain batch metadata is out of local bounds");
+                    assert_eq!(
+                        batch.root(),
+                        meta.root,
+                        "locally derived batch {} root diverges from the on-chain \
+                         registration — key file / registry mismatch",
+                        meta.batch_index
+                    );
+                    let signature = batch
+                        .sign_registration(&schnorr_key, &mut fill)
+                        .expect("batch domain operator matches the key by construction");
+                    assert!(
+                        store.insert_local(&schnorr_key.public_key(), &batch, signature),
+                        "locally generated batch failed its own registration check"
+                    );
+                    own_announces.extend(
+                        gas_killer_common::schnorr::batches::BatchStore::chunk_batch(
+                            &schnorr_key.public_key(),
+                            &batch,
+                            signature,
+                        ),
+                    );
+                    secrets.push(gas_killer_common::schnorr::scheme::SeedSecrets::new(
+                        domain,
+                        seed,
+                        meta.start_slot,
+                        meta.count,
+                    ));
+                }
+
+                // Invariant N1: the fsync write-ahead spend journal (survives restarts;
+                // per-identity file so shared storage dirs cannot cross-contaminate).
+                let journal = gas_killer_common::schnorr::journal::FileSpendJournal::open(
+                    storage_dir.join(format!("schnorr-spend-{own_address}.journal")),
+                )
+                .expect("failed to open the nonce spend journal");
+
+                let scheme = gas_killer_common::schnorr::scheme::SchnorrScheme::signer(
+                    participants,
+                    operator_points,
+                    schnorr_key.clone(),
+                    Arc::new(secrets),
+                    Arc::new(journal),
+                    directory,
+                    gas_killer_common::schnorr::scheme::DEFAULT_ATTEMPTS_PER_HEIGHT,
+                )
+                .unwrap_or_else(|| {
+                    panic!(
+                        "own Schnorr key address {own_address:?} is not in the registered \
+                         operator set; register the operator on-chain before starting"
+                    )
+                });
+
+                // Aggregation engine — identical knobs to the BLS arm; only the scheme
+                // differs (the ack payload is our MuSig2 partial).
+                let ack_rate = ack_messages_per_second();
+                let ack_quota = Quota::per_second(ack_rate);
+                tracing::info!(
+                    ack_messages_per_second = ack_rate.get(),
+                    "engine channel quota"
+                );
+                let (engine_sender, engine_receiver) =
+                    network.register(ENGINE_CHANNEL, ack_quota, p2p_backlog);
+
+                // Reporter with a certificate tap: `Attested` certificates drive the
+                // precommit actor's completion partials. The tap is deduplicated by
+                // height upstream, and `sign_completion` is journal-gated, so a replayed
+                // observation after a restart is a no-op rather than a second partial.
+                let (tap_sender, tap_receiver) =
+                    commonware_avs_node::reporter::observation_channel();
+                let (node_reporter, reporter_mailbox) = NodeReporter::<
+                    GasKillerTaskData,
+                    gas_killer_common::schnorr::scheme::SchnorrScheme,
+                >::new(
+                    context.child("reporter"),
+                    task_book_mailbox.clone(),
+                    Arc::clone(&engine_tip),
+                    APPLICATION_NAMESPACE.to_vec(),
+                );
+                let node_reporter = node_reporter.with_certificate_tap(tap_sender);
+                context
+                    .child("reporter_actor")
+                    .spawn(move |_| node_reporter.run());
+
+                // Same automaton as the BLS arm: both signing paths must vouch for
+                // identical digests.
+                let validator_trait =
+                    Arc::clone(&validator) as Arc<dyn ValidatorTrait<GasKillerTaskData>>;
+                let automaton = NodeAutomaton::new(
+                    context.child("automaton"),
+                    task_book_mailbox.clone(),
+                    validator_trait,
+                    APPLICATION_NAMESPACE.to_vec(),
+                    round_timeout(),
+                );
+
+                let provider_epoch = ConstantProvider::<
+                    gas_killer_common::schnorr::scheme::SchnorrScheme,
+                    Epoch,
+                >::new(scheme.clone());
+                let monitor = StaticEpochMonitor::new();
+                let monitor_guard = monitor.clone();
+
+                tracing::info!(
+                    window = agg_window().get(),
+                    activity_timeout = agg_activity_timeout(),
+                    rebroadcast_secs = rebroadcast_interval().as_secs_f64(),
+                    round_timeout_secs = round_timeout().as_secs_f64(),
+                    "aggregation engine tuning (schnorr-precommit)"
+                );
+                let engine = Engine::new(
+                    context.child("engine"),
+                    AggregationConfig {
+                        monitor,
+                        provider: provider_epoch,
+                        automaton,
+                        reporter: reporter_mailbox,
+                        blocker: oracle.clone(),
+                        priority_acks: false,
+                        rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_interval()),
+                        epoch_bounds: (EpochDelta::new(0), EpochDelta::new(0)),
+                        window: agg_window(),
+                        activity_timeout: HeightDelta::new(agg_activity_timeout()),
+                        journal_partition: format!("aggregation-node-{}", signer.public_key()),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_heights_per_section: NZU64!(6),
+                        journal_compression: Some(3),
+                        journal_page_cache: CacheRef::from_pooler(
+                            &context,
+                            NZU16!(1024),
+                            NZUsize!(10),
+                        ),
+                        strategy: Sequential,
+                    },
+                );
+                engine.start((engine_sender, engine_receiver));
+
+                // Precommit actor: batch gossip + completion partials on channel 2.
+                let schnorr_quota = Quota::per_second(schnorr_messages_per_second());
+                let (pc_sender, pc_receiver) =
+                    network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
+                let router_key = orchestrator_pub_key.clone();
+                context
+                    .child("precommit_actor")
+                    .spawn(move |_| async move {
+                        precommit::run(
+                            scheme,
+                            store,
+                            own_announces,
+                            participant_addresses,
+                            router_key,
+                            rebroadcast_interval(),
+                            tap_receiver,
+                            pc_receiver,
+                            pc_sender,
+                        )
+                        .await;
+                    });
+                Some(monitor_guard)
             }
         };
 

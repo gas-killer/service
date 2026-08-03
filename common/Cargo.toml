@@ -27,6 +27,7 @@ commonware-avs-eigenlayer = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 
@@ -45,6 +46,7 @@ url = { workspace = true }
 
 # Schnorr / MuSig2 signatures
 k256 = { version = "0.13", features = ["arithmetic"] }
+rand_core = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }

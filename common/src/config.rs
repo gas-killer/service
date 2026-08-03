@@ -364,17 +364,23 @@ pub fn rebroadcast_interval() -> std::time::Duration {
 /// `Bls` is the engine-driven aggregation path (commonware aggregation engine,
 /// BLS-aggregated operator signatures verified on-chain). `Schnorr` is the
 /// interactive two-round MuSig2 aggregate path (coordinator/participant actors on
-/// a p2p channel, a single constant-gas signature on-chain). The two paths never
+/// a p2p channel, a single constant-gas signature on-chain). `SchnorrPrecommit`
+/// signs the same constant-gas artifact but non-interactively, off pre-committed
+/// nonce batches, and rides the aggregation engine like `Bls` does. The paths never
 /// mix inside one deployment: every binary in a stack must run the same scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureScheme {
     Bls,
     Schnorr,
+    /// Pre-committed-nonce aggregate Schnorr riding the aggregation engine
+    /// (non-interactive; see `docs/schnorr-nonce-registry.md`).
+    SchnorrPrecommit,
 }
 
 /// Reads the signature scheme from `SIGNATURE_SCHEME` (case-insensitive `bls` |
-/// `schnorr`), defaulting to [`SignatureScheme::Bls`] when unset. Panics on an
-/// unrecognized value rather than silently running the wrong protocol.
+/// `schnorr` | `schnorr-precommit`), defaulting to [`SignatureScheme::Bls`] when
+/// unset. Panics on an unrecognized value rather than silently running the wrong
+/// protocol.
 pub fn signature_scheme() -> SignatureScheme {
     parse_signature_scheme(env::var("SIGNATURE_SCHEME").ok().as_deref())
 }
@@ -383,17 +389,48 @@ pub fn signature_scheme() -> SignatureScheme {
 /// (env var unset) as `bls`.
 ///
 /// # Panics
-/// Panics if `value` is set to anything other than `""`, `"bls"`, or `"schnorr"`
-/// (case-insensitive).
+/// Panics if `value` is set to anything other than `""`, `"bls"`, `"schnorr"`, or
+/// `"schnorr-precommit"` (case-insensitive).
 fn parse_signature_scheme(value: Option<&str>) -> SignatureScheme {
     match value {
         None => SignatureScheme::Bls,
         Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "" | "bls" => SignatureScheme::Bls,
             "schnorr" => SignatureScheme::Schnorr,
-            _ => panic!("SIGNATURE_SCHEME must be 'bls' or 'schnorr', got: {raw}"),
+            "schnorr-precommit" => SignatureScheme::SchnorrPrecommit,
+            _ => panic!(
+                "SIGNATURE_SCHEME must be 'bls', 'schnorr', or 'schnorr-precommit', got: {raw}"
+            ),
         },
     }
+}
+
+/// Resolves a deployed contract address for the schnorr-precommit mode: the explicit
+/// env var wins; otherwise fall back to `addresses[json_key]` in the deployment JSON
+/// at `AVS_DEPLOYMENT_PATH` (which the deploy flow writes and every container already
+/// mounts, so the mode needs no compose changes).
+pub fn resolve_deployed_address(
+    env_var: &str,
+    json_key: &str,
+) -> Result<alloy_primitives::Address, String> {
+    if let Ok(value) = env::var(env_var) {
+        return value
+            .trim()
+            .parse()
+            .map_err(|_| format!("{env_var} is not a valid address"));
+    }
+    let path = env::var("AVS_DEPLOYMENT_PATH")
+        .map_err(|_| format!("{env_var} is unset and AVS_DEPLOYMENT_PATH is unavailable"))?;
+    let contents = fs::read_to_string(&path).map_err(|e| format!("failed to read {path}: {e}"))?;
+    let deployment: serde_json::Value =
+        serde_json::from_str(&contents).map_err(|e| format!("failed to parse {path}: {e}"))?;
+    let address = deployment["addresses"][json_key]
+        .as_str()
+        .ok_or_else(|| format!("addresses.{json_key} missing from {path}"))?;
+    address
+        .trim()
+        .parse()
+        .map_err(|_| format!("addresses.{json_key} in {path} is not a valid address"))
 }
 
 /// Reads the storage-update encoding from `STATE_ENCODING` (case-insensitive
@@ -742,9 +779,36 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "SIGNATURE_SCHEME must be 'bls' or 'schnorr', got: ecdsa")]
+    fn signature_scheme_parses_schnorr_precommit() {
+        assert_eq!(
+            parse_signature_scheme(Some("schnorr-precommit")),
+            SignatureScheme::SchnorrPrecommit
+        );
+        assert_eq!(
+            parse_signature_scheme(Some(" Schnorr-Precommit ")),
+            SignatureScheme::SchnorrPrecommit
+        );
+        // The two Schnorr modes are distinct protocols, not aliases.
+        assert_ne!(
+            parse_signature_scheme(Some("schnorr")),
+            SignatureScheme::SchnorrPrecommit
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "SIGNATURE_SCHEME must be 'bls', 'schnorr', or 'schnorr-precommit', got: ecdsa"
+    )]
     fn signature_scheme_panics_on_unrecognized_value() {
         parse_signature_scheme(Some("ecdsa"));
+    }
+
+    /// A near-miss spelling must fail loudly rather than fall back to a working-but-wrong
+    /// protocol: every binary in a stack has to agree on the scheme.
+    #[test]
+    #[should_panic(expected = "SIGNATURE_SCHEME must be")]
+    fn signature_scheme_panics_on_precommit_typo() {
+        parse_signature_scheme(Some("schnorr_precommit"));
     }
 
     #[test]

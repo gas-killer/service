@@ -266,7 +266,9 @@ cat ./config/.nodes/avs_deploy.json
 
 # In schnorr mode the deploy binary registers each operator with the
 # SchnorrStakeRegistry using a proof of possession, which requires the operator
-# key files the setup flow wrote to the shared PVC.
+# key files the setup flow wrote to the shared PVC. (schnorr-precommit is not
+# exercised via Helm — the pods can't resolve the registries the runner-side
+# deploy produces; use the docker-compose e2e path for precommit instead.)
 if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
     echo "Retrieving operator key files for Schnorr PoP registration..."
     kubectl cp $ROUTER_POD:/app/.nodes/operator_keys ./config/.nodes/operator_keys
