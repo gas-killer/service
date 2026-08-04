@@ -544,6 +544,11 @@
   },
   {
     "type": "error",
+    "name": "InsufficientQuorumThreshold",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "InvalidArguments",
     "inputs": []
   },
