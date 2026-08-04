@@ -14,7 +14,7 @@ use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
 use gas_killer_common::{PayloadView, TaskBundle};
 
-use alloy_primitives::Bytes;
+use alloy_primitives::{B256, Bytes};
 use anyhow::Result;
 use commonware_cryptography::{Hasher, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -123,6 +123,8 @@ struct EnrichedTask {
     task: GasKillerTaskRequest,
     storage_updates: Bytes,
     block_height: u64,
+    /// Hash of the anchor block (`block_height`) the storage updates were computed against.
+    anchor_hash: B256,
     /// Resolved transition index (sentinel `None` → concrete count from chain).
     transition_index: u64,
     /// Actual EVM chain ID (e.g. 1 = Ethereum mainnet, 100 = Gnosis, 31337 = Anvil).
@@ -139,6 +141,7 @@ impl EnrichedTask {
             from_address: self.task.body.from_address,
             value: self.task.body.value,
             block_height: self.block_height,
+            anchor_hash: self.anchor_hash,
             chain_id: self.chain_id,
         }
     }
@@ -222,6 +225,7 @@ impl GasKillerTaskSource {
         let (
             storage_updates,
             block_height,
+            anchor_hash,
             numeric_chain_id,
             resolved_transition_index,
             storage_elapsed,
@@ -229,7 +233,7 @@ impl GasKillerTaskSource {
             let start = Instant::now();
             // compute_storage_updates_for_tx detects the chain, runs EVMSketch, and also
             // calls eth_chainId on the same RPC — returns the numeric chain ID directly.
-            let (updates, height, chain_id) = self
+            let (updates, height, anchor_hash, chain_id) = self
                 .validator
                 .compute_storage_updates_for_tx(
                     task.body.target_address,
@@ -240,7 +244,7 @@ impl GasKillerTaskSource {
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
-            (updates, height, chain_id, idx, start.elapsed())
+            (updates, height, anchor_hash, chain_id, idx, start.elapsed())
         } else {
             // Detect chain once so all concurrent futures skip redundant eth_getCode probes.
             let chain_role = self
@@ -280,11 +284,18 @@ impl GasKillerTaskSource {
                         task.body.block_height,
                     )
                     .await
-                    .map(|r| (r.storage_updates, r.block_height, start.elapsed()))
+                    .map(|r| {
+                        (
+                            r.storage_updates,
+                            r.block_height,
+                            r.anchor_hash,
+                            start.elapsed(),
+                        )
+                    })
             };
             // eth_chainId runs concurrently — completes in ~50ms, well before EVMSketch.
             let chain_id_fut = async move { chain_id_validator.get_chain_id_for(chain_role).await };
-            let (count, (updates, height, storage_elapsed), chain_id) =
+            let (count, (updates, height, anchor_hash, storage_elapsed), chain_id) =
                 tokio::try_join!(count_fut, storage_fut, chain_id_fut)?;
 
             info!(
@@ -293,7 +304,14 @@ impl GasKillerTaskSource {
                 count,
                 "Resolved auto transition_index from chain"
             );
-            (updates, height, chain_id, count, storage_elapsed)
+            (
+                updates,
+                height,
+                anchor_hash,
+                chain_id,
+                count,
+                storage_elapsed,
+            )
         };
 
         if let Some(m) = &self.metrics {
@@ -310,9 +328,10 @@ impl GasKillerTaskSource {
             storage_updates_len = storage_updates.len(),
             storage_updates_hash = %storage_hash_hex,
             block_height = block_height,
+            anchor_hash = %anchor_hash,
             transition_index = resolved_transition_index,
             target_address = %task.body.target_address,
-            target_function = %task.body.call_data.get(..4).map(hex::encode).unwrap_or_default(),
+            call_data_len = task.body.call_data.len(),
             chain_id = numeric_chain_id,
             "Sequencer computed storage updates"
         );
@@ -321,6 +340,7 @@ impl GasKillerTaskSource {
             task,
             storage_updates: storage_updates.into(),
             block_height,
+            anchor_hash,
             transition_index: resolved_transition_index,
             chain_id: numeric_chain_id,
         })
@@ -424,7 +444,7 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, B256, FixedBytes, U256};
+    use alloy::primitives::{Address, B256, U256};
     use gas_killer_common::BundleProof;
 
     fn sample_request(transition_index: Option<u64>) -> GasKillerTaskRequest {
@@ -472,11 +492,13 @@ mod tests {
             task,
             storage_updates: vec![0x01, 0x02, 0x03, 0x04].into(), // computed by GasAnalyzer
             block_height: 12345,
+            anchor_hash: B256::from([7u8; 32]),
             transition_index: 42,
             chain_id: 1u64,
         };
         let task_data = enriched.into_task_data();
 
+        assert_eq!(task_data.anchor_hash, B256::from([7u8; 32]));
         assert_eq!(task_data.transition_index, 42);
         assert_eq!(task_data.target_address, Address::from([1u8; 20]));
         assert_eq!(task_data.chain_id, 1);
@@ -526,7 +548,9 @@ mod tests {
             reference_block_number: 50,
             transition_index: 0,
             target_address: Address::from([0x11; 20]),
-            target_function: FixedBytes::<4>::from([0x12, 0x34, 0x56, 0x78]),
+            anchor_hash: B256::from([0x5a; 32]),
+            caller_address: Address::from([0x22; 20]),
+            contract_calldata: Bytes::from(vec![0x12, 0x34, 0x56, 0x78]),
             storage_updates: Bytes::new(),
             chain_id: 31337,
             value: U256::ZERO,

@@ -176,9 +176,19 @@
         "internalType": "uint256"
       },
       {
-        "name": "targetFunction",
-        "type": "bytes4",
-        "internalType": "bytes4"
+        "name": "anchorHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "callerAddress",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "contractCalldata",
+        "type": "bytes",
+        "internalType": "bytes"
       },
       {
         "name": "storageUpdates",
@@ -191,6 +201,19 @@
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "inTransition",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "locked",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
@@ -251,6 +274,19 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "slasher",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -346,9 +382,19 @@
         "internalType": "uint256"
       },
       {
-        "name": "targetFunction",
-        "type": "bytes4",
-        "internalType": "bytes4"
+        "name": "anchorHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "callerAddress",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "contractCalldata",
+        "type": "bytes",
+        "internalType": "bytes"
       },
       {
         "name": "nonSignerStakesAndSignature",
@@ -447,7 +493,7 @@
       }
     ],
     "outputs": [],
-    "stateMutability": "nonpayable"
+    "stateMutability": "payable"
   },
   {
     "type": "event",
@@ -498,6 +544,11 @@
   },
   {
     "type": "error",
+    "name": "InsufficientQuorumThreshold",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "InvalidArguments",
     "inputs": []
   },
@@ -529,6 +580,11 @@
   {
     "type": "error",
     "name": "MalformedLogPayload",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReentrantTransition",
     "inputs": []
   },
   {

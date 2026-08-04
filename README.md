@@ -202,6 +202,37 @@ while this one has none) — never on a bare timer.
   processes with different participant sets reject (and eventually disconnect) each
   other's acks.
 
+### Slashing
+
+A Gas Killer commitment is fraudulent when the quorum signed storage updates that differ
+from the ones produced by actually executing the committed call. Slashing is a fraud
+proof: anyone can re-execute the call inside the challenger SP1 program and submit the
+resulting Groth16 proof to the slasher, which burns the signers' stake.
+
+What this repo contributes is the **signed message**. Operators sign
+
+```
+sha256(abi.encode(transitionIndex, target, anchorHash, callerAddress, contractCalldata, storageUpdates))
+```
+
+— the full execution context, so a challenger can reproduce the exact call rather than
+just the 4-byte selector the digest used to carry. Both signature schemes sign the same
+six fields, so one commitment shape covers BLS and Schnorr alike.
+
+`anchorHash` is the hash of the block the storage updates were computed at. Validators
+derive it from the same EVMSketch execution that produced the updates
+(`common/src/validator.rs`) and **reject a task whose announced anchor differs**, so a
+malicious task creator cannot trick honest operators into signing a commitment no
+challenger could reproduce — which is exactly the commitment they would be slashed for.
+
+The slasher contracts (`GasKillerSlasherBase`, `GasKillerBLSSlasher`) live in
+[gas-killer/solidity-sdk](https://github.com/gas-killer/solidity-sdk). **No slasher is
+deployed or wired by this repo**, and operators hold no slashable magnitude in
+EigenLayer yet, so a slash would currently be a no-op on-chain. Making slashing bite in
+production additionally requires creating an AllocationManager operator set, having
+operators allocate magnitude to it, and granting the slasher `slashOperator` through the
+PermissionController — tracked separately.
+
 ## Configuration
 
 ### Environment Variables

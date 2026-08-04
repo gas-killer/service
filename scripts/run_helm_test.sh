@@ -291,7 +291,9 @@ cd scripts
 export HTTP_RPC=http://localhost:8545
 export WS_RPC=ws://localhost:8545
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
-export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
+# ARRAY_SUMMATION_FACTORY_ADDRESS intentionally unset: the deploy binary deploys its own
+# factory from the vendored artifact, so the target speaks the same signed-digest ABI as the
+# node and router images under test.
 export ARRAY_SUMMATION_ARRAY_SIZE=100
 export ARRAY_SUMMATION_MAX_VALUE=1000
 export ARRAY_SUMMATION_SEED=42
