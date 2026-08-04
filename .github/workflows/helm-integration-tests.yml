@@ -486,7 +486,9 @@ jobs:
           export WS_RPC=ws://localhost:8545
           export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-          export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
+          # ARRAY_SUMMATION_FACTORY_ADDRESS intentionally unset: the deploy binary deploys its
+          # own factory from the vendored artifact, so the target speaks the same signed-digest
+          # ABI as the images under test.
           export ARRAY_SUMMATION_ARRAY_SIZE=100
           export ARRAY_SUMMATION_MAX_VALUE=1000
           export ARRAY_SUMMATION_SEED=42

@@ -6,7 +6,7 @@
 //! unit: the payload is one rendering of it, so the retained on-chain broadcast path (future
 //! auto-execute / AA tier) can consume the same bundle to submit the transaction directly.
 
-use alloy_primitives::{Address, B256, Bytes, FixedBytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use serde::{Deserialize, Serialize};
 
 /// A ready-to-sign transaction request returned by `GET /tasks/{id}` once a task is ready.
@@ -70,8 +70,12 @@ pub struct TaskBundle {
     pub transition_index: u64,
     /// Gas-killer target contract.
     pub target_address: Address,
-    /// Selector of the target function being optimized.
-    pub target_function: FixedBytes<4>,
+    /// Hash of the block the off-chain execution was anchored to.
+    pub anchor_hash: B256,
+    /// `msg.sender` of the original call the quorum executed.
+    pub caller_address: Address,
+    /// Full calldata of the original call the quorum executed.
+    pub contract_calldata: Bytes,
     /// EVMSketch storage updates to apply.
     pub storage_updates: Bytes,
     /// Numeric EVM chain id.
@@ -127,7 +131,9 @@ mod tests {
             reference_block_number: 100,
             transition_index: 7,
             target_address: Address::from([0x22; 20]),
-            target_function: FixedBytes::<4>::from([0xde, 0xad, 0xbe, 0xef]),
+            anchor_hash: B256::from([0x77; 32]),
+            caller_address: Address::from([0x88; 20]),
+            contract_calldata: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
             storage_updates: Bytes::from(vec![0x01, 0x02, 0x03]),
             chain_id: 31337,
             value: U256::ZERO,
@@ -151,7 +157,9 @@ mod tests {
             reference_block_number: 200,
             transition_index: 3,
             target_address: Address::from([0x33; 20]),
-            target_function: FixedBytes::<4>::from([0x01, 0x02, 0x03, 0x04]),
+            anchor_hash: B256::from([0x99; 32]),
+            caller_address: Address::from([0xaa; 20]),
+            contract_calldata: Bytes::from(vec![0x01, 0x02, 0x03, 0x04]),
             storage_updates: Bytes::from(vec![0x09]),
             chain_id: 1,
             value: U256::ZERO,

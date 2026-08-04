@@ -7,7 +7,7 @@
 //!
 //! Exits non-zero on any mismatch so the e2e workflow fails.
 
-use alloy::primitives::{Address, Bytes, FixedBytes, U256};
+use alloy::primitives::{Address, B256, Bytes, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use gas_killer_common::GasKillerTaskData;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
@@ -41,11 +41,15 @@ async fn main() -> Result<(), BoxError> {
     let mut checked = 0usize;
     let mut mismatches = 0usize;
 
-    for (transition_index, selector, storage_updates) in test_vectors() {
+    for (transition_index, anchor_hash, caller, contract_calldata, storage_updates) in
+        test_vectors()
+    {
         let onchain = contract
             .getMessageHash(
                 U256::from(transition_index),
-                FixedBytes::<4>::from(selector),
+                anchor_hash,
+                caller,
+                Bytes::from(contract_calldata.clone()),
                 Bytes::from(storage_updates.clone()),
             )
             .call()
@@ -56,10 +60,11 @@ async fn main() -> Result<(), BoxError> {
             storage_updates: Bytes::from(storage_updates.clone()),
             transition_index,
             target_address,
-            call_data: selector.to_vec(),
-            from_address: Address::ZERO,
+            call_data: contract_calldata.clone(),
+            from_address: caller,
             value: U256::ZERO,
             block_height: 0,
+            anchor_hash,
             chain_id: 0,
         };
         let local = FixedBytes::<32>::from(task_data.build_payload_hash(&storage_updates).0);
@@ -67,15 +72,15 @@ async fn main() -> Result<(), BoxError> {
         checked += 1;
         if local == onchain {
             println!(
-                "  ok    ti={transition_index:<20} selector=0x{} len={:<4} hash={local}",
-                hex_selector(&selector),
+                "  ok    ti={transition_index:<20} anchor={anchor_hash} caller={caller} calldata_len={:<4} updates_len={:<4} hash={local}",
+                contract_calldata.len(),
                 storage_updates.len(),
             );
         } else {
             mismatches += 1;
             eprintln!(
-                "  FAIL  ti={transition_index:<20} selector=0x{} len={:<4}\n        local   = {local}\n        onchain = {onchain}",
-                hex_selector(&selector),
+                "  FAIL  ti={transition_index:<20} anchor={anchor_hash} caller={caller} calldata_len={:<4} updates_len={:<4}\n        local   = {local}\n        onchain = {onchain}",
+                contract_calldata.len(),
                 storage_updates.len(),
             );
         }
@@ -114,30 +119,52 @@ fn resolve_target_address() -> Result<Address, BoxError> {
     Ok(addr.parse()?)
 }
 
-/// `(transition_index, function_selector, storage_updates)` vectors spanning the dynamic-bytes
-/// padding boundaries (0, sub-word, exactly one word, word+1, multi-word) and selector/index edges.
-fn test_vectors() -> Vec<(u64, [u8; 4], Vec<u8>)> {
-    let selectors = [
-        [0x00, 0x00, 0x00, 0x00],
-        [0x12, 0x34, 0x56, 0x78],
-        [0xde, 0xad, 0xbe, 0xef],
-        [0xff, 0xff, 0xff, 0xff],
+/// One parity vector: `(transition_index, anchor_hash, caller, contract_calldata,
+/// storage_updates)`.
+type TestVector = (u64, B256, Address, Vec<u8>, Vec<u8>);
+
+/// Parity vectors.
+///
+/// Both dynamic fields (`contract_calldata` and `storage_updates`) are swept across the
+/// dynamic-bytes padding boundaries (0, sub-word, exactly one word, word+1, multi-word) so the
+/// two-tail ABI layout is exercised, along with anchor/caller/index edges.
+fn test_vectors() -> Vec<TestVector> {
+    let anchors = [
+        B256::ZERO,
+        B256::from([0x11; 32]),
+        B256::from([0xde; 32]),
+        B256::from([0xff; 32]),
     ];
-    let lengths = [0usize, 1, 4, 31, 32, 33, 64, 100];
+    let callers = [
+        Address::ZERO,
+        Address::from([0x22; 20]),
+        Address::from([0xca; 20]),
+    ];
+    // Both dynamic tails sweep the same padding boundaries: 0 (empty), 1/4/31 (sub-word),
+    // 32 (exactly one word), 33 (word+1), 64/100 (multi-word). The calldata index is offset so
+    // the two tails usually have different lengths, exercising asymmetric two-tail layouts too.
+    let byte_lengths = [0usize, 1, 4, 31, 32, 33, 64, 100];
     let indices = [0u64, 1, 7, 1_000_000, u64::MAX];
 
     let mut vectors = Vec::new();
-    for (i, len) in lengths.iter().enumerate() {
-        let selector = selectors[i % selectors.len()];
+    for (i, updates_len) in byte_lengths.iter().enumerate() {
+        let anchor_hash = anchors[i % anchors.len()];
+        let caller = callers[i % callers.len()];
         let transition_index = indices[i % indices.len()];
-        let storage_updates = (0..*len)
+        let calldata_len = byte_lengths[(i + 3) % byte_lengths.len()];
+        let contract_calldata = (0..calldata_len)
+            .map(|b| (b as u8).wrapping_mul(13).wrapping_add(3))
+            .collect();
+        let storage_updates = (0..*updates_len)
             .map(|b| (b as u8).wrapping_mul(7).wrapping_add(1))
             .collect();
-        vectors.push((transition_index, selector, storage_updates));
+        vectors.push((
+            transition_index,
+            anchor_hash,
+            caller,
+            contract_calldata,
+            storage_updates,
+        ));
     }
     vectors
-}
-
-fn hex_selector(selector: &[u8; 4]) -> String {
-    selector.iter().map(|b| format!("{b:02x}")).collect()
 }

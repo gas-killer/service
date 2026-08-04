@@ -4,7 +4,7 @@ use crate::store::SqliteStore;
 use crate::task_data::GasKillerTaskData;
 use alloy::network::Ethereum;
 use alloy::sol_types::SolValue;
-use alloy_primitives::{Address, Bytes, FixedBytes, U256};
+use alloy_primitives::{Address, B256, Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
 use anyhow::Result;
 use commonware_avs_router::executor::{BlsSignatureVerificationHandler, ExecutionResult};
@@ -92,6 +92,9 @@ struct PreparedBls<P> {
     provider: P,
     chain_id: u64,
     target_addr: Address,
+    /// The task's originating caller. Doubles as the rendered transaction's `from` and as the
+    /// `callerAddress` argument bound into the signed digest — they are the same address by
+    /// construction, since the quorum executed the call on this caller's behalf.
     from_address: Address,
     msg_hash: FixedBytes<32>,
     quorum_numbers: Bytes,
@@ -99,7 +102,10 @@ struct PreparedBls<P> {
     reference_block_number: u32,
     storage_updates: Bytes,
     transition_index: u64,
-    target_function: FixedBytes<4>,
+    /// Hash of the block the off-chain execution was anchored to.
+    anchor_hash: B256,
+    /// Full calldata of the original call, as signed.
+    contract_calldata: Bytes,
     non_signer: GasKillerIBLSTypes::NonSignerStakesAndSignature,
 }
 
@@ -110,12 +116,16 @@ struct PreparedSchnorr<P> {
     provider: P,
     chain_id: u64,
     target_addr: Address,
+    /// See [`PreparedBls::from_address`].
     from_address: Address,
     msg_hash: FixedBytes<32>,
     reference_block_number: u32,
     storage_updates: Bytes,
     transition_index: u64,
-    target_function: FixedBytes<4>,
+    /// Hash of the block the off-chain execution was anchored to.
+    anchor_hash: B256,
+    /// Full calldata of the original call, as signed.
+    contract_calldata: Bytes,
     s: U256,
     r_addr: Address,
     non_signers: Vec<Address>,
@@ -330,14 +340,17 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 
         let storage_updates = task_data.storage_updates.clone();
         let transition_index = task_data.transition_index;
-        let target_function = task_data.function_selector();
+        let anchor_hash = task_data.anchor_hash;
+        let contract_calldata = Bytes::copy_from_slice(&task_data.call_data);
         let target_addr = task_data.target_address;
         let from_address = task_data.from_address;
 
         debug!(
             transition_index,
             target_address = %target_addr,
-            target_function = %target_function,
+            anchor_hash = %anchor_hash,
+            caller_address = %from_address,
+            call_data_len = contract_calldata.len(),
             storage_updates_len = storage_updates.len(),
             storage_updates_first_32 = %hex::encode(&task_data.storage_updates[..std::cmp::min(32, task_data.storage_updates.len())]),
             detected_chain = %chain_id,
@@ -370,7 +383,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 local_expected_hash = %expected_hash,
                 transition_index,
                 target_address = %target_addr,
-                target_function = %target_function,
+                anchor_hash = %anchor_hash,
+                caller_address = %from_address,
                 storage_updates_len = storage_updates.len(),
                 "Message hash mismatch between aggregation and local computation"
             );
@@ -404,7 +418,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             reference_block_number: current_block_number.saturating_sub(1),
             storage_updates,
             transition_index,
-            target_function,
+            anchor_hash,
+            contract_calldata,
             non_signer,
         })
     }
@@ -438,14 +453,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             provider,
             chain_id,
             target_addr,
+            from_address,
             msg_hash,
             quorum_numbers,
             reference_block_number,
             storage_updates,
             transition_index,
-            target_function,
+            anchor_hash,
+            contract_calldata,
             non_signer,
-            ..
         } = prepared;
 
         let gas_killer_sdk = GasKillerSDK::new(target_addr, provider);
@@ -459,7 +475,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 reference_block_number,
                 storage_updates,
                 U256::from(transition_index),
-                target_function,
+                anchor_hash,
+                from_address,
+                contract_calldata,
                 non_signer,
             )
             .send()
@@ -553,7 +571,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             reference_block_number,
             storage_updates,
             transition_index,
-            target_function,
+            anchor_hash,
+            contract_calldata,
             non_signer,
         } = prepared;
 
@@ -569,7 +588,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 reference_block_number,
                 storage_updates.clone(),
                 U256::from(transition_index),
-                target_function,
+                anchor_hash,
+                from_address,
+                contract_calldata.clone(),
                 non_signer,
             )
             .from(from_address)
@@ -604,7 +625,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             reference_block_number,
             transition_index,
             target_address: target_addr,
-            target_function,
+            anchor_hash,
+            caller_address: from_address,
+            contract_calldata,
             storage_updates,
             chain_id,
             value,
@@ -673,7 +696,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 
         let storage_updates = task_data.storage_updates.clone();
         let transition_index = task_data.transition_index;
-        let target_function = task_data.function_selector();
+        let anchor_hash = task_data.anchor_hash;
+        let contract_calldata = Bytes::copy_from_slice(&task_data.call_data);
         let target_addr = task_data.target_address;
         let from_address = task_data.from_address;
 
@@ -703,6 +727,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 local_expected_hash = %expected_hash,
                 transition_index,
                 target_address = %target_addr,
+                anchor_hash = %anchor_hash,
+                caller_address = %from_address,
                 "Message hash mismatch between aggregation and local computation"
             );
             return Err(anyhow::anyhow!(
@@ -733,7 +759,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             reference_block_number: current_block_number.saturating_sub(1),
             storage_updates,
             transition_index,
-            target_function,
+            anchor_hash,
+            contract_calldata,
             s,
             r_addr,
             non_signers,
@@ -767,15 +794,16 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             provider,
             chain_id,
             target_addr,
+            from_address,
             msg_hash,
             reference_block_number,
             storage_updates,
             transition_index,
-            target_function,
+            anchor_hash,
+            contract_calldata,
             s,
             r_addr,
             non_signers,
-            ..
         } = prepared;
 
         let sdk = SchnorrGasKillerSDK::new(target_addr, provider);
@@ -791,7 +819,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 reference_block_number,
                 storage_updates,
                 U256::from(transition_index),
-                target_function,
+                anchor_hash,
+                from_address,
+                contract_calldata,
                 s,
                 r_addr,
                 non_signers,
@@ -883,7 +913,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             reference_block_number,
             storage_updates,
             transition_index,
-            target_function,
+            anchor_hash,
+            contract_calldata,
             s,
             r_addr,
             non_signers,
@@ -897,7 +928,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 reference_block_number,
                 storage_updates.clone(),
                 U256::from(transition_index),
-                target_function,
+                anchor_hash,
+                from_address,
+                contract_calldata.clone(),
                 s,
                 r_addr,
                 non_signers.clone(),
@@ -934,7 +967,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             reference_block_number,
             transition_index,
             target_address: target_addr,
-            target_function,
+            anchor_hash,
+            caller_address: from_address,
+            contract_calldata,
             storage_updates,
             chain_id,
             value,
@@ -1366,6 +1401,7 @@ mod tests {
             from_address: Address::from([0x22; 20]),
             value: U256::ZERO,
             block_height: 1,
+            anchor_hash: B256::from([0x33; 32]),
             chain_id: 1,
         };
         let msg_hash =
@@ -1424,7 +1460,10 @@ mod tests {
         assert_eq!(decoded.referenceBlockNumber, current_block - 1);
         assert_eq!(decoded.storageUpdates, storage_updates);
         assert_eq!(decoded.transitionIndex, U256::ZERO);
-        assert_eq!(decoded.targetFunction, task_data.function_selector());
+        // The execution context the challenger re-executes against travels in the calldata.
+        assert_eq!(decoded.anchorHash, task_data.anchor_hash);
+        assert_eq!(decoded.callerAddress, task_data.from_address);
+        assert_eq!(decoded.contractCalldata.as_ref(), &task_data.call_data[..]);
 
         // The structured bundle persists alongside the payload and round-trips.
         let bundle: TaskBundle =
@@ -1433,6 +1472,9 @@ mod tests {
         assert_eq!(bundle.reference_block_number, current_block - 1);
         assert_eq!(bundle.transition_index, 0);
         assert_eq!(bundle.chain_id, 1);
+        assert_eq!(bundle.anchor_hash, task_data.anchor_hash);
+        assert_eq!(bundle.caller_address, task_data.from_address);
+        assert_eq!(bundle.contract_calldata.as_ref(), &task_data.call_data[..]);
         assert!(matches!(bundle.proof, BundleProof::Bls { .. }));
     }
 

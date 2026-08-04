@@ -46,8 +46,8 @@ async fn main() -> Result<(), DynError> {
     dotenv::dotenv().ok();
 
     // `SIGNATURE_SCHEME` selects which quorum stack the target contract verifies
-    // against (default: bls). The bls path deploys the ArraySummation target via the
-    // pre-deployed factory; the schnorr path additionally deploys the
+    // against (default: bls). The bls path deploys the ArraySummation target via an
+    // ArraySummationFactory; the schnorr path additionally deploys the
     // SchnorrStakeRegistry and registers each operator's Schnorr key (with a proof
     // of possession) before deploying the target.
     match signature_scheme() {
@@ -84,24 +84,24 @@ fn read_avs_deployment(avs_deployment_path: &str) -> Result<AvsDeploymentJson, D
         .map_err(|e| format!("Failed to parse AVS deployment JSON: {}", e))?)
 }
 
-/// Deploys the BLS `ArraySummation` target through the pre-deployed factory
-/// (`ARRAY_SUMMATION_FACTORY_ADDRESS`), wired to the BLS signature checker.
+/// Deploys the BLS `ArraySummation` target through an `ArraySummationFactory`, wired to the BLS
+/// signature checker.
+///
+/// `ARRAY_SUMMATION_FACTORY_ADDRESS` selects a pre-deployed factory (testnet/helm deployments
+/// reuse one). Left unset, this deploys a fresh factory from the vendored artifact — the same
+/// self-contained flow the Schnorr and reentrant paths use, which keeps the target's signed-digest
+/// ABI in lockstep with the vendored bindings instead of with whatever a shared factory was built
+/// from.
 async fn deploy_bls() -> Result<(), DynError> {
     println!("🚀 Deploying ArraySummation...");
 
     let http_rpc = env::var("HTTP_RPC").map_err(|_| "HTTP_RPC environment variable is required")?;
     let private_key =
         env::var("PRIVATE_KEY").map_err(|_| "PRIVATE_KEY environment variable is required")?;
-    let array_summation_factory_address = env::var("ARRAY_SUMMATION_FACTORY_ADDRESS")
-        .map_err(|_| "ARRAY_SUMMATION_FACTORY_ADDRESS environment variable is required")?;
+    let factory_address = env_address("ARRAY_SUMMATION_FACTORY_ADDRESS")?;
     let array_size = env_u64("ARRAY_SUMMATION_ARRAY_SIZE")?;
     let max_value = env_u64("ARRAY_SUMMATION_MAX_VALUE")?;
     let seed = env_u64("ARRAY_SUMMATION_SEED")?;
-
-    // Parse addresses
-    let factory_address: Address = array_summation_factory_address
-        .parse()
-        .map_err(|_| "Invalid ARRAY_SUMMATION_FACTORY_ADDRESS format")?;
 
     // Get AVS address from deployment JSON
     let avs_deployment_path = env::var("AVS_DEPLOYMENT_PATH")
@@ -163,6 +163,9 @@ async fn deploy_bls() -> Result<(), DynError> {
     let maybe_existing = env::var("ARRAY_SUMMATION_ADDRESS").ok();
     let deployed_address: Address;
     let used_existing: bool;
+    // The factory actually used, once resolved. Stays `None` when an existing target is reused
+    // and no factory address was configured, in which case there is nothing to record.
+    let mut resolved_factory_address = factory_address;
     if let Some(addr) = maybe_existing {
         let addr: Address = addr
             .parse()
@@ -185,8 +188,24 @@ async fn deploy_bls() -> Result<(), DynError> {
         deployed_address = addr;
         used_existing = true;
     } else {
-        // Create factory instance
-        let factory = ArraySummationFactory::new(factory_address, provider);
+        let factory = match factory_address {
+            Some(addr) => {
+                println!("🏭 Using pre-deployed ArraySummationFactory at: {}", addr);
+                ArraySummationFactory::new(addr, provider)
+            }
+            None => {
+                println!("🏭 Deploying a fresh ArraySummationFactory...");
+                let factory = ArraySummationFactory::deploy(provider)
+                    .await
+                    .map_err(|e| format!("Failed to deploy ArraySummationFactory: {}", e))?;
+                println!(
+                    "✅ ArraySummationFactory deployed at: {}",
+                    factory.address()
+                );
+                factory
+            }
+        };
+        resolved_factory_address = Some(*factory.address());
 
         // Get contract count before deployment
         println!("📊 Getting deployed contract count before deployment...");
@@ -250,19 +269,20 @@ async fn deploy_bls() -> Result<(), DynError> {
         used_existing = false;
     }
 
+    let factory_display = resolved_factory_address
+        .map(|a| format!("{a:?}"))
+        .unwrap_or_default();
+
     // Update deployment JSON if it exists
     update_deployment_json(
         &avs_deployment_path,
-        &array_summation_factory_address,
+        &factory_display,
         &format!("{:?}", deployed_address),
     )?;
 
     println!("🎉 Deployment completed successfully!");
     println!("📋 Summary:");
-    println!(
-        "  ArraySummation Factory: {}",
-        array_summation_factory_address
-    );
+    println!("  ArraySummation Factory: {}", factory_display);
     if used_existing {
         println!("  ArraySummation Contract (existing): {}", deployed_address);
     } else {
