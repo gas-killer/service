@@ -1,5 +1,25 @@
 # Deployed image provenance (default-ns demo fleet)
 
+**Exact commit pins (file-level verified against Cloud Build's archived source):**
+
+| Image | Source == | Pin branch |
+|---|---|---|
+| `router-live:v1` | service `85a54d4` (all compiled paths byte-identical) | `deployed/router-live-v1` |
+| `node-fast:v6` (node binary) | service `3f61064` | `deployed/node-fast-v6` |
+| `node-fast:v6` (gk-fast-view sidecar) | gas-analyzer `541c9e7` (= `ron/local-execution` tip, PR #172) | analyzer `deployed/node-fast-v6-sidecar` |
+
+Both service commits are ancestors of `ron/sharded-inference` (PR #321), and the paths
+each image compiles are UNCHANGED between its pin and the current branch tip — so
+rebuilding from today's branch tips reproduces the live binaries. No unpushed local
+code is deployed.
+
+**Caveat:** the router-live:v1 build context also swept in the untracked
+`config/.nodes/` (avs_deploy.json + testacc1-3 operator BLS/ECDSA keys), which
+`COPY config /app/config` baked into the image. Keep the AR repo PRIVATE. A rebuild
+from git won't contain that dir (the router reads its real secrets from the mounted
+`/app/secrets`, so this is vestigial local-dev state — but canary a rebuild first).
+The node image copies no config/ at all.
+
 The helm chart defaults to GitHub-built ghcr images (`ghcr.io/breadchaincoop/*`,
 `pr-NNN` tags from service-repo Docker CI). The LIVE fleet overrides them (see
 `helm/gas-killer/default-live-overrides.yaml`) with two Artifact Registry images
