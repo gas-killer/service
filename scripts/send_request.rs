@@ -1,12 +1,12 @@
-use alloy::network::{EthereumWallet, TransactionBuilder};
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::rpc::types::TransactionRequest;
-use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use bindings::arraysummation::ArraySummation::sumCall;
 use bindings::reentrantcheckpoint::ReentrantCheckpoint::advanceCall;
-use gas_killer_common::PayloadView;
+use bindings::task_payload::{
+    DEFAULT_READY_TIMEOUT_SECS, submit_payload, submitter_key, task_status_url,
+    wait_for_ready_payload,
+};
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
 use serde_json::json;
 use std::env;
@@ -212,8 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .map(str::to_string)
         })
         .ok_or("Accepted response did not carry a task_id")?;
-    let mut task_status_url = Url::parse(&url)?;
-    task_status_url.set_path(&format!("/tasks/{task_id}"));
+    let status_url = task_status_url(&url, &task_id)?;
     let api_key = env::var("GAS_KILLER_API_KEY")
         .ok()
         .filter(|k| !k.is_empty());
@@ -221,14 +220,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Poll until the task is `ready`, extract the rendered payload, submit it with a funded key,
     // then confirm the on-chain effect by checking `currentSum` moved.
     let http_rpc = env::var("HTTP_RPC")?;
-    // Prefer FUNDED_KEY (the Anvil dev account funded on the fork) so a hand-edited `.env` with a
-    // real-but-unfunded PRIVATE_KEY doesn't accidentally break local submission.
-    let submit_key = env::var("FUNDED_KEY")
-        .or_else(|_| env::var("PRIVATE_KEY"))
-        .map_err(|_| "FUNDED_KEY or PRIVATE_KEY required to submit the payload")?;
+    let submit_key = submitter_key()?;
 
-    let payload =
-        wait_for_ready_payload(&client, &task_status_url, api_key.as_deref(), &task_id).await?;
+    let payload = wait_for_ready_payload(
+        &client,
+        &status_url,
+        api_key.as_deref(),
+        &task_id,
+        DEFAULT_READY_TIMEOUT_SECS,
+    )
+    .await?;
 
     submit_payload(&payload, &http_rpc, &submit_key).await?;
 
@@ -245,153 +246,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!(
         "✅ SUCCESS: target progress changed {} → {} after the user-submitted verifyAndUpdate (task {})",
         initial_sum, final_sum, task_id
-    );
-    Ok(())
-}
-
-/// Polls `GET /tasks/{id}` until the task is `ready` and returns its rendered payload.
-///
-/// A `ready` response carries the transaction request the user submits as-is. A `failed`/`expired`
-/// settlement, or a non-success status (e.g. `409 PAYLOAD_EXPIRED` if the payload went stale before
-/// we submitted), is terminal and surfaces as an error.
-async fn wait_for_ready_payload(
-    client: &reqwest::Client,
-    task_status_url: &Url,
-    api_key: Option<&str>,
-    task_id: &str,
-) -> Result<PayloadView, Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::time::{Duration, Instant, sleep};
-    let max_wait_time = Duration::from_secs(150);
-    let check_interval = Duration::from_secs(5);
-    let start_time = Instant::now();
-
-    loop {
-        let mut req = client.get(task_status_url.clone());
-        if let Some(api_key) = api_key {
-            req = req.header("Authorization", format!("Bearer {api_key}"));
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("Failed to poll task {}: {}", task_id, e))?;
-        let status_code = resp.status();
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse task {} response: {}", task_id, e))?;
-
-        // A non-success status (e.g. 409 PAYLOAD_EXPIRED) carries an error envelope, not a task.
-        if !status_code.is_success() {
-            let code = body
-                .get("error")
-                .and_then(|e| e.get("code"))
-                .and_then(|c| c.as_str())
-                .unwrap_or("UNKNOWN");
-            return Err(
-                format!("Task {task_id} status query returned {status_code} ({code})").into(),
-            );
-        }
-
-        let task_status = body
-            .get("status")
-            .and_then(|s| s.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        println!(
-            "task {}: status={}, elapsed={:.1}s",
-            task_id,
-            task_status,
-            start_time.elapsed().as_secs_f64()
-        );
-
-        match task_status.as_str() {
-            "ready" => {
-                let payload_value = body
-                    .get("payload")
-                    .cloned()
-                    .ok_or_else(|| format!("ready task {task_id} carried no payload"))?;
-                let payload: PayloadView = serde_json::from_value(payload_value)
-                    .map_err(|e| format!("failed to parse task {task_id} payload: {e}"))?;
-                println!(
-                    "✅ task {} ready: to={:?} chain_id={} estimated_gas={} valid_until_block={}",
-                    task_id,
-                    payload.to,
-                    payload.chain_id,
-                    payload.estimated_gas,
-                    payload.valid_until_block
-                );
-                return Ok(payload);
-            }
-            "failed" | "expired" => {
-                let error = body
-                    .get("error")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("<no error recorded>");
-                return Err(
-                    format!("Task {} settled as '{}': {}", task_id, task_status, error).into(),
-                );
-            }
-            _ => {}
-        }
-
-        if start_time.elapsed() >= max_wait_time {
-            return Err(format!(
-                "Task {} did not reach 'ready' within {:.0}s (last status: {})",
-                task_id,
-                max_wait_time.as_secs_f64(),
-                task_status
-            )
-            .into());
-        }
-
-        sleep(check_interval).await;
-    }
-}
-
-/// Signs and submits a rendered payload with a funded key, mirroring what an integrator does, and
-/// asserts the `verifyAndUpdate` transaction lands successfully.
-async fn submit_payload(
-    payload: &PayloadView,
-    http_rpc: &str,
-    private_key: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let signer: PrivateKeySigner = private_key
-        .parse()
-        .map_err(|_| "invalid FUNDED_KEY/PRIVATE_KEY format")?;
-    let sender = signer.address();
-    let provider = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(signer))
-        .connect_http(http_rpc.parse().map_err(|_| "invalid HTTP_RPC URL")?);
-
-    let tx = TransactionRequest::default()
-        .with_to(payload.to)
-        .with_value(payload.value)
-        .with_input(payload.data.clone());
-
-    println!(
-        "Submitting verifyAndUpdate as {sender} to {:?} ({} bytes calldata)",
-        payload.to,
-        payload.data.len()
-    );
-    let pending = provider
-        .send_transaction(tx)
-        .await
-        .map_err(|e| format!("failed to send verifyAndUpdate: {e}"))?;
-    let receipt = pending
-        .get_receipt()
-        .await
-        .map_err(|e| format!("failed to get verifyAndUpdate receipt: {e}"))?;
-    if !receipt.status() {
-        return Err(format!(
-            "verifyAndUpdate reverted (tx {:?}, block {:?})",
-            receipt.transaction_hash, receipt.block_number
-        )
-        .into());
-    }
-    println!(
-        "✅ verifyAndUpdate landed: tx {:?} in block {:?}",
-        receipt.transaction_hash, receipt.block_number
     );
     Ok(())
 }

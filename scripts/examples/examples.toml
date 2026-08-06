@@ -1,0 +1,109 @@
+# Manifest for the `deploy_example` binary — the contracts from
+# gas-killer/example-contracts, how to construct them, and how to exercise them.
+#
+#   ./scripts/examples/fetch_examples.sh
+#   cargo run -p scripts --bin deploy_example -- --dry-run
+#   cargo run -p scripts --bin deploy_example -- --example onchainLife
+#   cargo run -p scripts --bin run_scenario -- scripts/scenarios/generated/onchainLife.toml
+#
+# Argument *types* come from each artifact's ABI, so only values live here. A value is a
+# string; an array or tuple parameter takes a list. Placeholders:
+#
+#   $avs           the AVS service manager (addresses.avsServiceManagerWrapper, or --avs)
+#   $sigChecker    a real BLSSignatureChecker (addresses.IncredibleSquaringTaskManager, or
+#                  --sig-checker). NOT addresses.blsSigCheck — see example.env.
+#   $deploy:<key>  any key under `addresses` in the AVS deployment JSON
+#   $signer:<n>    the address of signers[n] below
+#   $env:VAR       an environment variable
+#
+# Adding an example is an edit here plus an entry in EXPECTED_ARTIFACTS in
+# fetch_examples.sh. No Rust changes.
+
+# Index 0 is the deployer and the default sender for every setup call. The remaining entries
+# are Anvil's well-known unlocked test accounts, used only to create distinct depositors for
+# guardedVault below. They are public keys for a local fork — a testnet run must replace this
+# list with funded keys (or drop the multi-depositor setup).
+signers = [
+  "$env:PRIVATE_KEY",
+  "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d", # anvil #1
+  "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a", # anvil #2
+  "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6", # anvil #3
+]
+
+# ── OnchainLife ──────────────────────────────────────────────────────────────────────────
+# Conway's Game of Life on a 64x64 toroidal board, stepped entirely on-chain. One generation
+# costs roughly 16.9M gas and two exceed a 30M block, but the resulting diff is at most 16
+# changed words plus the generation counter — the same size no matter how many generations the
+# operator stepped. The cost-collapse case.
+[[examples]]
+name      = "onchainLife"
+artifact  = "OnchainLife.sol:OnchainLife"
+# uint256[16] seed: the board, four 64-bit rows per word. Word 0 carries a standard glider at
+# cells (1,0) (2,1) (0,2) (1,2) (2,2), i.e. the sum of 1 << (y * 64 + x).
+ctor_args = [
+  "$avs",
+  "$sigChecker",
+  [
+    "2381976568446569244317409228317215686658",
+    "0", "0", "0", "0", "0", "0", "0",
+    "0", "0", "0", "0", "0", "0", "0", "0",
+  ],
+]
+
+  # WARNING: this exercise does not currently complete against the local compose stack.
+  #
+  # The router derives the diff by calling `debug_traceCall`, and one generation of Life is
+  # ~16.9M gas. The resulting structLog trace exhausted the anvil container (3.82 GiB) and the
+  # process was OOM-killed (exit 137), so the task never rendered a payload:
+  #
+  #   ERROR gas_killer_router::sequencer: failed to enrich task, dropping request
+  #     error=Gas analysis failed: debug_trace_call failed: error sending request
+  #
+  # `generations` is the only parameter and 1 is already its floor, so there is no cheaper
+  # setting — the limit is the trace-based encoder, not the manifest. The example repo
+  # describes the intended fix in docs/APPROACH-A-PRESTATE.md (a prestate diff extractor that
+  # avoids structLogs entirely). Left in place so the case stays one command to reproduce.
+  #
+  # `guardedVault` below is the example that currently runs green end to end.
+  [[examples.exercise]]
+  label = "life_step_1"
+  sig   = "step(uint32)"
+  args  = ["1"]
+
+# ── GuardedVault ─────────────────────────────────────────────────────────────────────────
+# A vault whose every state transition re-validates an O(N) global invariant. Operators
+# simulate `settle`, run `checkInvariant()` against the post-state, and only sign a diff that
+# passes — so the quorum signature doubles as an attestation that the transition preserved the
+# invariant, and `verifyAndUpdate` never re-runs the O(N) check itself.
+[[examples]]
+name      = "guardedVault"
+artifact  = "GuardedVault.sol:GuardedVault"
+# maxConcentrationBps: no depositor may hold more than 50% of total shares.
+ctor_args = ["$avs", "$sigChecker", "5000"]
+
+  # `settle` reverts with NotDepositor for an address that never deposited, and `deposit`
+  # credits msg.sender — so each depositor has to come from a different signer.
+  #
+  # Three depositors, not two: the concentration cap is checked against the post-state, and
+  # with only two equal depositors at a 50% cap every non-zero delta would breach it. At three
+  # the cap is 1500 of 3000 shares, leaving room for the transfer below.
+  [[examples.setup]]
+  sig    = "deposit(uint256)"
+  args   = ["1000"]
+  signer = 1
+
+  [[examples.setup]]
+  sig    = "deposit(uint256)"
+  args   = ["1000"]
+  signer = 2
+
+  [[examples.setup]]
+  sig    = "deposit(uint256)"
+  args   = ["1000"]
+  signer = 3
+
+  # Deltas must sum to zero or `settle` reverts with NonConservingSettle.
+  [[examples.exercise]]
+  label = "vault_settle_transfer"
+  sig   = "settle(address[],int256[])"
+  args  = [["$signer:1", "$signer:2"], ["100", "-100"]]
