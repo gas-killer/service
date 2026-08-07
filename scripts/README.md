@@ -163,24 +163,37 @@ cargo run -p scripts --bin run_scenario -- scripts/scenarios/generated/onchainLi
 
 Currently available:
 
-| Example | Status against the local stack |
-|---|---|
-| `guardedVault` | Runs green end to end. An O(N) invariant re-validated on every transition. |
-| `onchainLife` | Deploys and is routable, but its `step(1)` task does **not** render — see below. Conway's Life; heavy compute, tiny flat diff. |
+| Example | Required encoding | What it demonstrates |
+|---|---|---|
+| `guardedVault` | any | An O(N) invariant re-validated on every transition. Runs green end to end. |
+| `onchainLife` | **`prestate-net`** | Conway's Life: heavy compute, tiny flat diff. Deploys and is routable under any encoding, but only settles under `prestate-net` — see below. |
 
-**`onchainLife` currently exceeds the trace-based diff encoder.** The router derives the diff via
-`debug_traceCall`, and one generation of Life is ~16.9M gas. The structLog trace exhausts the
-anvil container and the process is OOM-killed (exit 137), so the task never reaches `ready`:
+**`onchainLife` requires `STATE_ENCODING=prestate-net`.**
+
+`legacy` and `canonical` derive the diff from a struct-log `debug_traceCall`, which costs
+`O(execution steps)` — and one generation of Life is ~16.5M gas. Measured on a stock anvil, that
+trace drives the process from 8 MB to 2.2 GB of RSS in 20s and still has not returned; inside the
+3.82 GiB compose container it is OOM-killed outright (`exit 137`), so the task never reaches
+`ready`:
 
 ```
 ERROR gas_killer_router::sequencer: failed to enrich task, dropping request
   error=Gas analysis failed: debug_trace_call failed: error sending request
 ```
 
-`generations` is already at its floor of 1, so this is a limit of the encoder rather than the
-manifest. The example repo's `docs/APPROACH-A-PRESTATE.md` describes the intended fix — a
-prestate diff extractor that avoids structLogs. The manifest entry is kept so the case stays
-one command to reproduce.
+`generations` is already at its floor of 1, so no manifest setting avoids this — the limit is the
+encoder. `prestate-net` reads the net diff from `prestateTracer`/`callTracer` instead, costing
+`O(changed slots)`: the same call returns in **0s with a 3-slot diff**, and the call tree has no
+target-depth frames, so it takes the net form rather than the canonical fallback.
+
+```bash
+STATE_ENCODING=prestate-net docker compose up -d --force-recreate   # node AND router together
+./scripts/examples/run_example.sh onchainLife
+```
+
+The encoding is consensus-critical — every node and the router must agree, since it changes the
+task digest. See the `STATE_ENCODING` block in `example.env`. Note that under `prestate-net` a
+node whose RPC lacks either tracer fails the task rather than downgrading.
 
 ### Adding an example
 

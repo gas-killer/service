@@ -32,9 +32,9 @@ signers = [
 
 # ── OnchainLife ──────────────────────────────────────────────────────────────────────────
 # Conway's Game of Life on a 64x64 toroidal board, stepped entirely on-chain. One generation
-# costs roughly 16.9M gas and two exceed a 30M block, but the resulting diff is at most 16
-# changed words plus the generation counter — the same size no matter how many generations the
-# operator stepped. The cost-collapse case.
+# costs ~16.5M gas (measured: 16,552,726) and two exceed a 30M block, but the resulting diff is
+# at most 16 changed words plus the generation counter — the same size no matter how many
+# generations the operator stepped. The cost-collapse case.
 [[examples]]
 name      = "onchainLife"
 artifact  = "OnchainLife.sol:OnchainLife"
@@ -50,21 +50,24 @@ ctor_args = [
   ],
 ]
 
-  # WARNING: this exercise does not currently complete against the local compose stack.
+  # REQUIRES STATE_ENCODING=prestate-net. Under the default `legacy` (and under `canonical`)
+  # this exercise cannot complete.
   #
-  # The router derives the diff by calling `debug_traceCall`, and one generation of Life is
-  # ~16.9M gas. The resulting structLog trace exhausted the anvil container (3.82 GiB) and the
-  # process was OOM-killed (exit 137), so the task never rendered a payload:
+  # Those encodings derive the diff from a struct-log `debug_traceCall`, which costs
+  # O(execution steps) — and one generation of Life is ~16.5M gas. Measured on a stock anvil,
+  # that trace drives the process from 8 MB to 2.2 GB of RSS in 20s and still has not returned;
+  # inside the 3.82 GiB compose container it is OOM-killed outright (exit 137), so the task
+  # never renders a payload:
   #
   #   ERROR gas_killer_router::sequencer: failed to enrich task, dropping request
   #     error=Gas analysis failed: debug_trace_call failed: error sending request
   #
-  # `generations` is the only parameter and 1 is already its floor, so there is no cheaper
-  # setting — the limit is the trace-based encoder, not the manifest. The example repo
-  # describes the intended fix in docs/APPROACH-A-PRESTATE.md (a prestate diff extractor that
-  # avoids structLogs entirely). Left in place so the case stays one command to reproduce.
+  # `generations` is already at its floor of 1, so no manifest setting avoids this — the limit
+  # is the encoder. `prestate-net` reads the net diff from prestateTracer/callTracer instead,
+  # costing O(changed slots): the same call returns in 0s with a 3-slot diff, and the call tree
+  # has no target-depth frames, so it takes the net form rather than the canonical fallback.
   #
-  # `guardedVault` below is the example that currently runs green end to end.
+  # `guardedVault` below runs green end to end under any of the three encodings.
   [[examples.exercise]]
   label = "life_step_1"
   sig   = "step(uint32)"

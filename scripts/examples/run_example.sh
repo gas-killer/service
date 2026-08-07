@@ -35,6 +35,18 @@ if ! curl -fsS --max-time 5 "$ROUTER_URL/healthz" >/dev/null 2>&1; then
 fi
 echo "✅ router healthy at $ROUTER_URL"
 
+# onchainLife's tracked function is ~16.5M gas. Only the prestate-net encoding, which reads a
+# net diff sized by changed slots, can extract it; the struct-log encoders behind legacy and
+# canonical exhaust the node first. Warn rather than block — the running stack's encoding is
+# what actually matters and this only sees the local environment.
+if [ "$EXAMPLE" = "onchainLife" ] && [ "${STATE_ENCODING:-legacy}" != "prestate-net" ]; then
+  echo "⚠️  STATE_ENCODING is '${STATE_ENCODING:-legacy}', but onchainLife only settles under 'prestate-net'." >&2
+  echo "   Expect the task to never reach 'ready' (the struct-log trace exhausts the node)." >&2
+  echo "   Recreate the stack with the encoding set on the nodes AND the router:" >&2
+  echo "     STATE_ENCODING=prestate-net docker compose up -d --force-recreate" >&2
+  echo >&2
+fi
+
 if [ "${SKIP_FETCH:-0}" != "1" ]; then
   "$REPO_ROOT/scripts/examples/fetch_examples.sh"
 else
