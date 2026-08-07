@@ -397,15 +397,27 @@ fn parse_signature_scheme(value: Option<&str>) -> SignatureScheme {
 }
 
 /// Reads the storage-update encoding from `STATE_ENCODING` (case-insensitive
-/// `legacy` | `canonical`), defaulting to [`StateEncoding::Legacy`].
+/// `legacy` | `canonical` | `prestate-net`), defaulting to [`StateEncoding::Legacy`].
 ///
 /// `canonical` emits canonical state slices before every external call and a
 /// final re-assertion slice, so a re-entrant call into a Gas Killer target
 /// observes the storage native execution would have had (see
-/// `gas_analyzer::compute_state_updates_canonical`). **Node and router must run
-/// the same value** — the encoding changes `storage_updates`, hence the task
-/// digest — so this is read from one env var threaded to both binaries.
-/// Panics on an unrecognized value rather than silently diverging digests.
+/// `gas_analyzer::compute_state_updates_canonical`).
+///
+/// `prestate-net` signs the target's *net* storage diff — one slot-sorted store per
+/// changed slot plus its logs — read from the `prestateTracer`/`callTracer` pair
+/// instead of a struct-log trace. It costs `O(changed slots)` rather than
+/// `O(execution steps)`, which is what makes heavy-compute tracked functions
+/// extractable at all: their struct-log trace is large enough to time out or exhaust
+/// the node. Calls the net form cannot represent (an external `CALL`, `CREATE`, or
+/// `SELFDESTRUCT` at target depth) fall back to the *canonical* encoder, and a node
+/// whose RPC lacks either tracer fails the task rather than quietly downgrading —
+/// see [`gas_analyzer::StateEncoding::PrestateNet`].
+///
+/// **Node and router must run the same value** — the encoding changes
+/// `storage_updates`, hence the task digest — so this is read from one env var
+/// threaded to both binaries. Panics on an unrecognized value rather than silently
+/// diverging digests.
 pub fn state_encoding() -> gas_analyzer::StateEncoding {
     parse_state_encoding(env::var("STATE_ENCODING").ok().as_deref())
 }
@@ -413,11 +425,18 @@ pub fn state_encoding() -> gas_analyzer::StateEncoding {
 /// Parses the `STATE_ENCODING` value (case-insensitive, trimmed). `None` / empty →
 /// `Legacy`. Panics on an unrecognized value rather than silently diverging the
 /// node's and router's digests.
+///
+/// Each encoding has exactly one accepted spelling. Alternates would let two
+/// operators believe they are configured identically while signing different bytes,
+/// which is the failure this panic exists to prevent.
 fn parse_state_encoding(raw: Option<&str>) -> gas_analyzer::StateEncoding {
     match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         None | Some("") | Some("legacy") => gas_analyzer::StateEncoding::Legacy,
         Some("canonical") => gas_analyzer::StateEncoding::Canonical,
-        Some(other) => panic!("STATE_ENCODING must be 'legacy' or 'canonical', got '{other}'"),
+        Some("prestate-net") => gas_analyzer::StateEncoding::PrestateNet,
+        Some(other) => {
+            panic!("STATE_ENCODING must be 'legacy', 'canonical', or 'prestate-net', got '{other}'")
+        }
     }
 }
 
@@ -765,12 +784,29 @@ mod tests {
             parse_state_encoding(Some("Canonical")),
             StateEncoding::Canonical
         );
+        assert_eq!(
+            parse_state_encoding(Some("prestate-net")),
+            StateEncoding::PrestateNet
+        );
+        assert_eq!(
+            parse_state_encoding(Some(" Prestate-Net ")),
+            StateEncoding::PrestateNet
+        );
     }
 
     #[test]
     #[should_panic(expected = "STATE_ENCODING must be")]
     fn state_encoding_rejects_unknown() {
         let _ = parse_state_encoding(Some("bogus"));
+    }
+
+    /// Each encoding has one spelling. A near-miss must panic rather than resolve, so an
+    /// operator who mistypes the value cannot end up signing a different representation
+    /// from the rest of the fleet.
+    #[test]
+    #[should_panic(expected = "STATE_ENCODING must be")]
+    fn state_encoding_rejects_a_near_miss_spelling() {
+        let _ = parse_state_encoding(Some("prestate_net"));
     }
 
     #[test]

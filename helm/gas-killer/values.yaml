@@ -26,6 +26,20 @@ global:
   # this "bls" for TESTNET/secretManager deployments (which restore only BLS keys).
   signatureScheme: "bls"
 
+  # Storage-update encoding: "legacy" (default), "canonical", or "prestate-net".
+  # Selects the signed representation of a task's storage mutations, so like
+  # signatureScheme every binary in the deployment must agree — it changes the task
+  # digest, and a rolling update that transiently mixes encodings fails quorum until
+  # it converges. Prefer recreating nodes and router together when changing it.
+  #
+  # "prestate-net" reads the target's net diff from prestateTracer/callTracer instead
+  # of a struct-log trace, which is what makes heavy-compute tracked functions
+  # extractable; it REQUIRES every node's and the router's RPC to support
+  # debug_traceCall with prestateTracer (diffMode) and callTracer (withLog), and fails
+  # the task rather than downgrading if they are missing. Hosted providers often gate
+  # prestateTracer to paid tiers — confirm before enabling.
+  stateEncoding: "legacy"
+
   # Number of operator nodes to deploy
   nodeCount: 3
 
