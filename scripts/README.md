@@ -139,10 +139,11 @@ library holds contracts that demonstrate different Gas Killer use cases. The `de
 binary builds them, deploys one wired to the local AVS, records its address where the rest of
 the tooling already looks, and writes a ready-to-run scenario file.
 
-One command, assuming the local stack is already up:
+One command, assuming the local stack is already up. `guardedVault` is the example to start with —
+it settles under the default encoding, whereas `onchainLife` needs `prestate-net` (see below):
 
 ```bash
-./scripts/examples/run_example.sh onchainLife
+./scripts/examples/run_example.sh guardedVault
 ```
 
 Or step by step:
@@ -155,10 +156,10 @@ Or step by step:
 cargo run -p scripts --bin deploy_example -- --dry-run
 
 # Deploy, assert the target is routable, run its setup calls, emit a scenario
-cargo run -p scripts --bin deploy_example -- --example onchainLife
+cargo run -p scripts --bin deploy_example -- --example guardedVault
 
 # Trigger a task, submit the rendered payload, confirm the transition landed
-cargo run -p scripts --bin run_scenario -- scripts/scenarios/generated/onchainLife.toml
+cargo run -p scripts --bin run_scenario -- scripts/scenarios/generated/guardedVault.toml
 ```
 
 Currently available:
@@ -241,13 +242,18 @@ does inherit `BLSSignatureChecker`), rejects the retriever by name, and probes f
 ```bash
 export AVS_DEPLOYMENT_PATH=config/.nodes/sepolia_deploy.json   # keeps local state intact
 cargo run -p scripts --bin deploy_example -- \
-  --example onchainLife \
+  --example guardedVault \
   --avs 0x... --sig-checker 0x... \
   --router-url https://testnet.gaskiller.xyz
 ```
 
-The deployment JSON is created if absent. `guardedVault`'s setup calls need several funded
-accounts, so replace the manifest's `signers` list before using it outside a local fork.
+The deployment JSON is created if absent. Both examples carry a constraint off a local fork:
+
+- **`guardedVault`** — `deposit` credits `msg.sender`, so its three depositors need three funded
+  accounts. Replace the manifest's `signers` list, which defaults to anvil's test keys.
+- **`onchainLife`** — needs the whole operator set running `prestate-net` *and* every operator's
+  RPC supporting `prestateTracer`/`callTracer`. That is a fleet-wide decision rather than a
+  per-deploy flag, so it is not something a single `deploy_example` invocation can arrange.
 
 ### `deploy_example` flags
 
