@@ -592,7 +592,7 @@ fn toml_string(value: &str) -> String {
 // On-chain steps
 // ---------------------------------------------------------------------------------------
 
-/// Rejects a signature checker that cannot actually verify signatures.
+/// Rejects a signature checker that is *demonstrably* not one.
 ///
 /// `GasKillerSDK.verifyAndUpdate` calls `checkSignatures` on whatever address the constructor
 /// was given. The `BLSSigCheckOperatorStateRetriever` recorded as `blsSigCheck` in the AVS
@@ -600,6 +600,14 @@ fn toml_string(value: &str) -> String {
 /// at settlement time — long after deployment, with nothing pointing at the cause. A real
 /// checker exposes `registryCoordinator()`; the retriever does not, which makes that getter a
 /// cheap discriminator.
+///
+/// This is a **shape** check, not an authenticity one, and the distinction matters: it
+/// establishes "has code and answers `registryCoordinator()`", not "soundly verifies quorum
+/// signatures". A permissive or mock checker that happens to expose that getter passes, and a
+/// target wired to one accepts *unsigned* diffs. Adequate for deploying example contracts to a
+/// fork or testnet, which is all this binary is for — see the scope note in `scripts/README.md`.
+/// Anything value-bearing needs the checker verified against the registry coordinator the AVS
+/// actually registered against, not merely asked whether it has the getter.
 async fn validate_sig_checker(provider: &DynProvider, checker: Address) -> Result<(), DynError> {
     let code = provider
         .get_code_at(checker)

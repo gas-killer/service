@@ -139,6 +139,17 @@ library holds contracts that demonstrate different Gas Killer use cases. The `de
 binary builds them, deploys one wired to the local AVS, records its address where the rest of
 the tooling already looks, and writes a ready-to-run scenario file.
 
+> **Scope: dev and test only. Do not use this to deploy a value-bearing target.**
+>
+> `deploy_example` validates the signature checker by *shape* — that it has code and answers
+> `registryCoordinator()`, which the `BLSSigCheckOperatorStateRetriever` does not. That catches
+> the two documented footguns, but it does not establish that the checker soundly verifies
+> quorum signatures. A permissive or mock checker exposing that getter passes the check, and a
+> target wired to one accepts **unsigned** diffs — total compromise of the thing the AVS exists
+> to guarantee. That trade-off is fine for example contracts on a fork or testnet, which is what
+> this is for. A production target needs the checker verified against the registry coordinator
+> the AVS actually registered against, plus the usual deployment review — not this harness.
+
 One command, assuming the local stack is already up. `guardedVault` is the example to start with —
 it settles under the default encoding, whereas `onchainLife` needs `prestate-net` (see below):
 
