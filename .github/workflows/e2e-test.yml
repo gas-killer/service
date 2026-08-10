@@ -30,6 +30,10 @@ jobs:
         #   - the aggregate-Schnorr path under the CANONICAL encoding settling a task that
         #     makes a re-entrant external call mid-transition — a green run proves
         #     re-entrancy settles safely end-to-end.
+        #   - the BLS path under the PRESTATE-NET encoding, which signs the target's net
+        #     storage diff read from prestateTracer/callTracer rather than a struct-log
+        #     trace. `ArraySummation.sum` makes no external call at target depth, so this
+        #     leg exercises the net form itself rather than its canonical fallback.
         include:
           - signature_scheme: bls
             state_encoding: legacy
@@ -40,6 +44,9 @@ jobs:
           - signature_scheme: schnorr
             state_encoding: canonical
             e2e_example: reentrant
+          - signature_scheme: bls
+            state_encoding: prestate-net
+            e2e_example: array-summation
 
     steps:
       - name: Checkout code
