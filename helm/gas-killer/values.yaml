@@ -38,6 +38,13 @@ global:
   # debug_traceCall with prestateTracer (diffMode) and callTracer (withLog), and fails
   # the task rather than downgrading if they are missing. Hosted providers often gate
   # prestateTracer to paid tiers — confirm before enabling.
+  #
+  # Support alone is not enough on a mixed fleet: the clients must also agree on
+  # tracer OUTPUT. callTracer log ordering depends on whether the client populates the
+  # global `index` (geth populates `position` instead), so two operators on different
+  # clients can order logs differently and fork the digest while both "supporting" the
+  # tracers. Until gas-analyzer#178 settles on one source, only enable this on a
+  # single-client fleet. See the STATE_ENCODING block in example.env.
   stateEncoding: "legacy"
 
   # Number of operator nodes to deploy
