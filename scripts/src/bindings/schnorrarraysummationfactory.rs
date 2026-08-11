@@ -6,5 +6,5 @@ use alloy::sol;
 sol! {
     #[sol(rpc, ignore_unlinked)]
     SchnorrArraySummationFactory,
-    "bindings/abis/SchnorrArraySummationFactory.json"
+    "src/bindings/abis/SchnorrArraySummationFactory.json"
 }

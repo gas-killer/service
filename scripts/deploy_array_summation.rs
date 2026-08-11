@@ -2,15 +2,15 @@ use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
-use bindings::arraysummationfactory::ArraySummationFactory;
-use bindings::reentrantcheckpointfactory::ReentrantCheckpointFactory;
-use bindings::schnorrarraysummationfactory::SchnorrArraySummationFactory;
-use bindings::schnorrstakeregistry::SchnorrStakeRegistry;
 use gas_killer_common::schnorr::{PrivateKey, private_key_from_hex};
 use gas_killer_common::{
     SignatureScheme, quorum_threshold_fraction, schnorr_notice_window, signature_scheme,
 };
 use rand::RngCore;
+use scripts::bindings::arraysummationfactory::ArraySummationFactory;
+use scripts::bindings::reentrantcheckpointfactory::ReentrantCheckpointFactory;
+use scripts::bindings::schnorrarraysummationfactory::SchnorrArraySummationFactory;
+use scripts::bindings::schnorrstakeregistry::SchnorrStakeRegistry;
 use serde::Deserialize;
 use std::env;
 use std::fs;

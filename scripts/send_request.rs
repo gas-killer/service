@@ -1,13 +1,13 @@
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolCall;
-use bindings::arraysummation::ArraySummation::sumCall;
-use bindings::reentrantcheckpoint::ReentrantCheckpoint::advanceCall;
-use bindings::task_payload::{
+use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
+use scripts::bindings::arraysummation::ArraySummation::sumCall;
+use scripts::bindings::reentrantcheckpoint::ReentrantCheckpoint::advanceCall;
+use scripts::task_payload::{
     DEFAULT_READY_TIMEOUT_SECS, submit_payload, submitter_key, task_status_url,
     wait_for_ready_payload,
 };
-use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
 use serde_json::json;
 use std::env;
 use std::fs;
@@ -31,7 +31,7 @@ async fn read_progress_value<P: Provider>(
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     if e2e_example_is_reentrant() {
         Ok(
-            bindings::reentrantcheckpoint::ReentrantCheckpoint::new(target, provider)
+            scripts::bindings::reentrantcheckpoint::ReentrantCheckpoint::new(target, provider)
                 .counter()
                 .call()
                 .await
@@ -40,7 +40,7 @@ async fn read_progress_value<P: Provider>(
         )
     } else {
         Ok(
-            bindings::arraysummation::ArraySummation::new(target, provider)
+            scripts::bindings::arraysummation::ArraySummation::new(target, provider)
                 .currentSum()
                 .call()
                 .await
@@ -303,7 +303,7 @@ async fn build_mock_request()
     // Read current stateTransitionCount to compute correct transition_index
     let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
     let array_contract =
-        bindings::arraysummation::ArraySummation::new(target_address, provider.clone());
+        scripts::bindings::arraysummation::ArraySummation::new(target_address, provider.clone());
     let current_count = array_contract
         .stateTransitionCount()
         .call()

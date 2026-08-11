@@ -1,9 +1,9 @@
-//! Shared support code for the `scripts` crate's binaries: `alloy::sol!` contract
-//! bindings generated from the vendored artifacts under `bindings/abis/`, plus
-//! hand-written helpers the binaries have in common.
-
-/// Polling and submission of router-rendered `verifyAndUpdate` payloads.
-pub mod task_payload;
+//! `alloy::sol!` contract bindings, generated at compile time from the Foundry artifacts
+//! vendored under `abis/`.
+//!
+//! Every module here is generated code, hence the blanket `allow`s: the macro emits Solidity
+//! naming (`sumCall`, `_0`) that Rust lint conventions would otherwise reject, and each
+//! binding exposes the contract's whole ABI whether or not a binary calls all of it.
 
 #[allow(
     non_camel_case_types,

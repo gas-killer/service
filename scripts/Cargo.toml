@@ -3,9 +3,9 @@ name = "scripts"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-name = "bindings"
-path = "bindings/mod.rs"
+# The lib is the conventional `src/lib.rs`, so it needs no [lib] override: it takes the
+# package name and is imported as `scripts::`. The binaries stay at the crate root and are
+# declared explicitly below, since they predate the lib.
 
 [[bin]]
 name = "deploy_array_summation"
