@@ -1,10 +1,13 @@
-//! Deploys contracts from the public `gas-killer/example-contracts` library and points the
-//! AVS at them.
+//! Deploys the Gas Killer example contracts and points the AVS at them.
 //!
-//! Unlike `deploy_array_summation`, nothing here is specific to one contract. Constructor
-//! argument *types* are read from the Foundry artifact's ABI at runtime and the *values* come
-//! from a TOML manifest, so adding an example is a manifest edit — no new Rust, no
-//! recompile. Fetch and build the artifacts first with `scripts/examples/fetch_examples.sh`.
+//! Nothing here is specific to one contract: constructor argument *types* are read from the
+//! Foundry artifact's ABI at runtime and the *values* come from a TOML manifest, so adding an
+//! example is a manifest edit — no new Rust, no recompile. Sources come from the public
+//! `gas-killer/example-contracts` library and from the Gas Killer SDK it vendors as a
+//! submodule; fetch and build both with `scripts/examples/fetch_examples.sh`.
+//!
+//! Deploying a Schnorr target additionally requires `setup_schnorr_operators` to have run,
+//! since it supplies the stake registry this resolves as `$deploy:schnorrStakeRegistry`.
 //!
 //! Each example goes through the same sequence:
 //!
@@ -74,10 +77,11 @@ struct Cli {
     #[arg(long = "example")]
     examples: Vec<String>,
 
-    /// Directory holding the Foundry `out/` tree built from the example contracts.
-    /// Defaults to `$EXAMPLES_DIR/out`, then `.examples/example-contracts/out`.
-    #[arg(long)]
-    artifacts: Option<PathBuf>,
+    /// Foundry `out/` tree to search for artifacts; repeatable, searched in order. Passing any
+    /// replaces the defaults, which are `$EXAMPLES_DIR/out` followed by the SDK submodule's
+    /// `lib/solidity-sdk/out` (both trees the fetch script builds).
+    #[arg(long = "artifacts")]
+    artifacts: Vec<PathBuf>,
 
     /// AVS deployment JSON to read wiring from and record deployed addresses into.
     /// Defaults to `$AVS_DEPLOYMENT_PATH`, then `config/.nodes/avs_deploy.json`.
@@ -127,19 +131,84 @@ struct Manifest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExampleSpec {
-    /// Key this contract is recorded under in the deployment JSON, and the name used for
-    /// `--example` and the generated scenario file.
+    /// Key the *target* contract is recorded under in the deployment JSON, and the name used
+    /// for `--example` and the generated scenario file.
     name: String,
-    /// Artifact to deploy, as `File.sol:Contract` or just `Contract`.
-    artifact: String,
+    /// Extra deployment-JSON key pointing at the same target address.
+    ///
+    /// The pre-existing tooling (`run_e2e_test.sh`, `send_request`,
+    /// `verify_message_hash_parity`, and the bare `local` scenario sentinel) all read
+    /// `addresses.arraySummation` regardless of which example is deployed, so an example
+    /// standing in for that role declares it here rather than every consumer learning the
+    /// example's own name.
+    #[serde(default)]
+    alias: Option<String>,
+    /// Single-contract form: the artifact to deploy. Mutually exclusive with `contracts`.
+    #[serde(default)]
+    artifact: Option<String>,
     #[serde(default)]
     ctor_args: Vec<ArgValue>,
-    /// Calls made after deployment to put the contract in a usable state.
+    /// Multi-contract form: deployed in declaration order, the last one being the Gas Killer
+    /// target. Earlier entries are supporting contracts the target's constructor references
+    /// via `$deployed:<label>`.
+    #[serde(default)]
+    contracts: Vec<ContractSpec>,
+    /// Calls made after deployment to put the target in a usable state.
     #[serde(default)]
     setup: Vec<CallSpec>,
     /// The tracked functions to drive through the AVS; one scenario request each.
     #[serde(default)]
     exercise: Vec<ExerciseSpec>,
+}
+
+/// One contract within an example's deployment sequence.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractSpec {
+    /// Deployment-JSON key for this contract, and the name `$deployed:<label>` resolves.
+    /// Defaults to the example's `name`, which is what the single-contract form relies on.
+    #[serde(default)]
+    label: Option<String>,
+    /// Artifact to deploy, as `File.sol:Contract` or just `Contract`.
+    artifact: String,
+    #[serde(default)]
+    ctor_args: Vec<ArgValue>,
+}
+
+impl ExampleSpec {
+    /// Normalises either manifest form into an ordered deployment sequence whose last element
+    /// is the Gas Killer target.
+    ///
+    /// The two forms are mutually exclusive rather than merged: silently combining a top-level
+    /// `artifact` with a `contracts` list would leave the target ambiguous.
+    fn contract_sequence(&self) -> Result<Vec<ContractSpec>, DynError> {
+        match (&self.artifact, self.contracts.is_empty()) {
+            (Some(artifact), true) => Ok(vec![ContractSpec {
+                label: Some(self.name.clone()),
+                artifact: artifact.clone(),
+                ctor_args: self.ctor_args.clone(),
+            }]),
+            (None, false) => {
+                if !self.ctor_args.is_empty() {
+                    return Err("`ctor_args` belongs to the contract it constructs; put it \
+                                inside the matching [[examples.contracts]] entry"
+                        .into());
+                }
+                let mut seq = self.contracts.clone();
+                // The target is recorded under the example name so `local:<name>` resolves it.
+                if let Some(target) = seq.last_mut() {
+                    target.label = Some(self.name.clone());
+                }
+                Ok(seq)
+            }
+            (Some(_), false) => Err(
+                "declare either `artifact` or `contracts`, not both — with both, which \
+                     contract is the target is ambiguous"
+                    .into(),
+            ),
+            (None, true) => Err("declare either `artifact` or a `contracts` list".into()),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,13 +259,21 @@ enum ArgValue {
 
 /// Everything needed to expand the `$…` placeholders a manifest may reference. Holds plain
 /// data so resolution is testable without a chain or a filesystem.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Resolver {
     avs: Option<Address>,
     sig_checker: Option<Address>,
     /// `addresses` from the AVS deployment JSON.
     deploy_addresses: BTreeMap<String, String>,
     signers: Vec<Address>,
+    /// Contracts deployed so far *within the current example*, keyed by their manifest label.
+    /// Populated as the sequence progresses, which is what lets a later contract's constructor
+    /// take an earlier one's address.
+    deployed: BTreeMap<String, Address>,
+    /// Under `--dry-run`, substitute a sentinel for wiring that cannot be resolved instead of
+    /// failing. A dry run exists to validate the manifest against the artifacts on a machine
+    /// with no deployed stack; a real run must still fail loudly on missing wiring.
+    dry_run: bool,
 }
 
 impl Resolver {
@@ -204,6 +281,7 @@ impl Resolver {
     ///
     /// - `$avs` / `$sigChecker` — the resolved constructor wiring
     /// - `$deploy:<key>` — any key under `addresses` in the deployment JSON
+    /// - `$deployed:<label>` — a contract deployed earlier in this same example
     /// - `$signer:<n>` — the address of the nth manifest signer
     /// - `$env:VAR` — an environment variable
     fn resolve(&self, raw: &str) -> Result<String, DynError> {
@@ -211,10 +289,41 @@ impl Resolver {
             return Ok(raw.to_string());
         };
 
+        // Checked before `deploy:` so the longer prefix wins — `deployed:` also starts with
+        // `deploy`, and `strip_prefix("deploy:")` would not match it, but ordering the arms
+        // this way keeps that independent of the exact spelling.
+        if let Some(label) = rest.strip_prefix("deployed:") {
+            return self
+                .deployed
+                .get(label)
+                .map(|a| format!("{a:?}"))
+                .ok_or_else(|| {
+                    format!(
+                        "$deployed:{label} has not been deployed yet in this example; declare it \
+                         in an earlier [[examples.contracts]] entry (available so far: {})",
+                        if self.deployed.is_empty() {
+                            "none".to_string()
+                        } else {
+                            self.deployed.keys().cloned().collect::<Vec<_>>().join(", ")
+                        }
+                    )
+                    .into()
+                });
+        }
         if let Some(key) = rest.strip_prefix("deploy:") {
-            return self.deploy_addresses.get(key).cloned().ok_or_else(|| {
-                format!("$deploy:{key} not found under `addresses` in the deployment JSON").into()
-            });
+            if let Some(found) = self.deploy_addresses.get(key) {
+                return Ok(found.clone());
+            }
+            if self.dry_run {
+                return Ok(format!("{DRY_RUN_PLACEHOLDER:?}"));
+            }
+            return Err(format!(
+                "$deploy:{key} not found under `addresses` in the deployment JSON — for \
+                 schnorrStakeRegistry, run the `setup_schnorr_operators` binary first (it \
+                 deploys the registry and registers the operator set, and must complete before \
+                 any target deploys)"
+            )
+            .into());
         }
         if let Some(idx) = rest.strip_prefix("signer:") {
             let idx: usize = idx
@@ -410,6 +519,34 @@ fn artifact_path(artifacts_dir: &Path, artifact: &str) -> PathBuf {
             .join(format!("{artifact}.sol"))
             .join(format!("{artifact}.json")),
     }
+}
+
+/// Finds an artifact across several Foundry `out/` trees, returning the first that exists.
+///
+/// There is more than one tree because the examples repo and the Gas Killer SDK it vendors as a
+/// submodule each build under their own `foundry.toml`, and both contribute examples. Their
+/// contract names are disjoint, so first-match is unambiguous in practice; the error lists every
+/// path tried, since "artifact not found" is otherwise indistinguishable from "wrong tree built".
+fn resolve_artifact(artifact_roots: &[PathBuf], artifact: &str) -> Result<PathBuf, DynError> {
+    let candidates: Vec<PathBuf> = artifact_roots
+        .iter()
+        .map(|root| artifact_path(root, artifact))
+        .collect();
+    candidates
+        .iter()
+        .find(|p| p.is_file())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "artifact `{artifact}` not found — run scripts/examples/fetch_examples.sh. Tried:\n{}",
+                candidates
+                    .iter()
+                    .map(|p| format!("  {}", p.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+            .into()
+        })
 }
 
 /// Reads an artifact and returns its ABI plus creation bytecode.
@@ -761,7 +898,7 @@ async fn main() -> Result<(), DynError> {
         .map_err(|e| format!("failed to parse manifest {}: {e}", cli.manifest.display()))?;
 
     let selected = select_examples(&manifest, &cli.examples)?;
-    let artifacts_dir = resolve_artifacts_dir(cli.artifacts.clone());
+    let artifact_roots = resolve_artifact_roots(&cli.artifacts);
     let deploy_json = resolve_deploy_json(cli.deploy_json.clone());
     let deploy_addresses = read_deploy_addresses(&deploy_json)?;
 
@@ -799,6 +936,9 @@ async fn main() -> Result<(), DynError> {
         sig_checker,
         deploy_addresses: deploy_addresses.clone(),
         signers: signers.iter().map(|s| s.address()).collect(),
+        // Filled in per-example by `deploy_one` as its contract sequence progresses.
+        deployed: BTreeMap::new(),
+        dry_run: cli.dry_run,
     };
 
     if cli.dry_run {
@@ -859,7 +999,7 @@ async fn main() -> Result<(), DynError> {
             example,
             &resolver,
             &signer_providers,
-            &artifacts_dir,
+            &artifact_roots,
             &deploy_json,
             &cli,
             &router_url,
@@ -879,29 +1019,19 @@ async fn deploy_one(
     example: &ExampleSpec,
     resolver: &Resolver,
     signer_providers: &[DynProvider],
-    artifacts_dir: &Path,
+    artifact_roots: &[PathBuf],
     deploy_json: &Path,
     cli: &Cli,
     router_url: &str,
 ) -> Result<(), DynError> {
-    let path = artifact_path(artifacts_dir, &example.artifact);
-    let (abi, bytecode) = load_artifact(&path)?;
-    println!("📦 artifact: {}", path.display());
+    let sequence = example.contract_sequence()?;
 
-    let ctor_args = example
-        .ctor_args
-        .iter()
-        .map(|a| resolve_arg(resolver, a))
-        .collect::<Result<Vec<_>, _>>()?;
-    let init_code = build_init_code(&abi, &bytecode, &ctor_args)?;
-    println!(
-        "🧱 init code: {} bytes ({} bytes of constructor arguments)",
-        init_code.len(),
-        init_code.len() - bytecode.len()
-    );
+    // `resolver` accumulates each deployment as the sequence progresses so a later
+    // constructor can reference an earlier contract via `$deployed:<label>`.
+    let mut resolver = resolver.clone();
 
-    // Encode the exercise calldata before deploying: a manifest typo should fail before a
-    // transaction is spent, not after.
+    // Encode the exercise calldata up front: a manifest typo should fail before a transaction
+    // is spent, not after. It cannot reference `$deployed:` for the same reason.
     let requests = example
         .exercise
         .iter()
@@ -909,7 +1039,7 @@ async fn deploy_one(
             let args = ex
                 .args
                 .iter()
-                .map(|a| resolve_arg(resolver, a))
+                .map(|a| resolve_arg(&resolver, a))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(ScenarioRequest {
                 label: ex.label.clone().unwrap_or_else(|| example.name.clone()),
@@ -926,7 +1056,82 @@ async fn deploy_one(
 
     let scenario_path = cli.scenario_dir.join(format!("{}.toml", example.name));
 
-    let Some(provider) = signer_providers.first() else {
+    // A dry run resolves and encodes every contract in the sequence but sends nothing, so a
+    // `$deployed:` reference has no address to expand to. Substitute a sentinel per contract
+    // so the rest of the encoding is still validated.
+    let dry_run = signer_providers.is_empty();
+
+    let mut target = Address::ZERO;
+    for (i, contract) in sequence.iter().enumerate() {
+        let label = contract
+            .label
+            .clone()
+            .unwrap_or_else(|| example.name.clone());
+        let is_target = i + 1 == sequence.len();
+
+        let path = resolve_artifact(artifact_roots, &contract.artifact)?;
+        let (abi, bytecode) = load_artifact(&path)?;
+        println!("📦 {label}: {}", path.display());
+
+        let ctor_args = contract
+            .ctor_args
+            .iter()
+            .map(|a| resolve_arg(&resolver, a))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("{label}: {e}"))?;
+        let init_code =
+            build_init_code(&abi, &bytecode, &ctor_args).map_err(|e| format!("{label}: {e}"))?;
+        println!(
+            "🧱 {label}: init code {} bytes ({} bytes of constructor arguments)",
+            init_code.len(),
+            init_code.len() - bytecode.len()
+        );
+
+        if dry_run {
+            resolver.deployed.insert(label.clone(), DRY_RUN_PLACEHOLDER);
+            continue;
+        }
+        let provider = &signer_providers[0];
+
+        let address = match reusable_address(cli, &resolver, &label, provider).await? {
+            Some(existing) => {
+                println!("♻️  reusing {existing:?} from addresses.{label}");
+                existing
+            }
+            None => {
+                let receipt = provider
+                    .send_transaction(TransactionRequest::default().with_deploy_code(init_code))
+                    .await
+                    .map_err(|e| format!("{label}: failed to send deployment transaction: {e}"))?
+                    .get_receipt()
+                    .await
+                    .map_err(|e| format!("{label}: deployment transaction was not mined: {e}"))?;
+                if !receipt.status() {
+                    return Err(format!(
+                        "{label}: deployment reverted (tx {:?}) — check the constructor arguments",
+                        receipt.transaction_hash
+                    )
+                    .into());
+                }
+                let address = receipt
+                    .contract_address
+                    .ok_or_else(|| format!("{label}: receipt carried no contract address"))?;
+                println!(
+                    "🚀 {label} deployed at {address:?} (tx {:?})",
+                    receipt.transaction_hash
+                );
+                address
+            }
+        };
+
+        resolver.deployed.insert(label.clone(), address);
+        record_deployed_address(deploy_json, &label, address)?;
+        if is_target {
+            target = address;
+        }
+    }
+
+    if dry_run {
         for request in &requests {
             println!(
                 "   ↳ {} → 0x{}",
@@ -939,39 +1144,11 @@ async fn deploy_one(
             &render_scenario(&example.name, router_url, &requests),
         )?;
         return Ok(());
-    };
+    }
+    let provider = &signer_providers[0];
 
-    let target = match reusable_address(cli, resolver, &example.name, provider).await? {
-        Some(existing) => {
-            println!("♻️  reusing {existing:?} from addresses.{}", example.name);
-            existing
-        }
-        None => {
-            let receipt = provider
-                .send_transaction(TransactionRequest::default().with_deploy_code(init_code))
-                .await
-                .map_err(|e| format!("failed to send deployment transaction: {e}"))?
-                .get_receipt()
-                .await
-                .map_err(|e| format!("deployment transaction was not mined: {e}"))?;
-            if !receipt.status() {
-                return Err(format!(
-                    "deployment reverted (tx {:?}) — check the constructor arguments",
-                    receipt.transaction_hash
-                )
-                .into());
-            }
-            let address = receipt
-                .contract_address
-                .ok_or("deployment receipt carried no contract address")?;
-            println!(
-                "🚀 deployed at {address:?} (tx {:?})",
-                receipt.transaction_hash
-            );
-            address
-        }
-    };
-
+    // Only the last contract is a Gas Killer target; supporting contracts (a re-entrancy
+    // observer, say) are plain contracts and would fail the ERC-165 gate.
     assert_routable(provider, target, exercise_selector).await?;
 
     if !example.setup.is_empty() {
@@ -985,11 +1162,15 @@ async fn deploy_one(
                     signer_providers.len()
                 )
             })?;
-            run_setup_call(call_provider, target, call, resolver).await?;
+            run_setup_call(call_provider, target, call, &resolver).await?;
         }
     }
 
-    record_deployed_address(deploy_json, &example.name, target)?;
+    // The alias points at the same target so the pre-existing consumers that hardcode
+    // `addresses.arraySummation` keep resolving whichever example was deployed.
+    if let Some(alias) = &example.alias {
+        record_deployed_address(deploy_json, alias, target)?;
+    }
     write_scenario(
         &scenario_path,
         &render_scenario(&example.name, router_url, &requests),
@@ -1120,14 +1301,26 @@ fn reject_retriever_as_checker(
     Ok(())
 }
 
-fn resolve_artifacts_dir(flag: Option<PathBuf>) -> PathBuf {
-    flag.or_else(|| {
-        std::env::var("EXAMPLES_DIR")
-            .ok()
-            .filter(|d| !d.trim().is_empty())
-            .map(|d| PathBuf::from(d).join("out"))
-    })
-    .unwrap_or_else(|| PathBuf::from(".examples/example-contracts/out"))
+/// Directory the SDK submodule's own examples build into, relative to the examples checkout.
+/// Kept in step with `SDK_SUBDIR` in `scripts/examples/fetch_examples.sh`.
+const SDK_OUT_SUBDIR: &str = "lib/solidity-sdk/out";
+
+/// The Foundry `out/` trees to search for artifacts, in order.
+///
+/// Explicit `--artifacts` flags replace the defaults entirely (repeatable, searched in order).
+/// Otherwise both trees the fetch script builds are searched: the examples repo's own, then the
+/// Gas Killer SDK submodule's, which carries the array-summation and reentrant-checkpoint
+/// examples.
+fn resolve_artifact_roots(flags: &[PathBuf]) -> Vec<PathBuf> {
+    if !flags.is_empty() {
+        return flags.to_vec();
+    }
+    let checkout = std::env::var("EXAMPLES_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".examples/example-contracts"));
+    vec![checkout.join("out"), checkout.join(SDK_OUT_SUBDIR)]
 }
 
 fn resolve_deploy_json(flag: Option<PathBuf>) -> PathBuf {
@@ -1156,6 +1349,8 @@ mod tests {
                 ADDR_A.to_string(),
             )]),
             signers: vec![ADDR_A.parse().unwrap(), ADDR_B.parse().unwrap()],
+            deployed: BTreeMap::from([("someObserver".to_string(), ADDR_B.parse().unwrap())]),
+            dry_run: false,
         }
     }
 
@@ -1193,6 +1388,156 @@ mod tests {
         // verify defaults to true so a generated scenario asserts an on-chain effect.
         assert!(example.exercise[0].verify);
         assert!(matches!(example.exercise[0].args[0], ArgValue::List(ref v) if v.len() == 2));
+    }
+
+    // ---- contract sequence (single vs multi form) ----
+
+    /// The single-artifact form must keep working untouched — it is what `guardedVault` and
+    /// `onchainLife` use, and it normalises to a one-element sequence labelled with the name.
+    #[test]
+    fn single_artifact_form_becomes_a_one_element_sequence() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [[examples]]
+            name = "guardedVault"
+            artifact = "GuardedVault.sol:GuardedVault"
+            ctor_args = ["$avs", "$sigChecker", "5000"]
+            "#,
+        )
+        .unwrap();
+
+        let seq = manifest.examples[0].contract_sequence().unwrap();
+        assert_eq!(seq.len(), 1);
+        assert_eq!(seq[0].label.as_deref(), Some("guardedVault"));
+        assert_eq!(seq[0].artifact, "GuardedVault.sol:GuardedVault");
+        assert_eq!(seq[0].ctor_args.len(), 3);
+    }
+
+    /// In the multi form the *last* entry is the target, so it is relabelled to the example
+    /// name — that is what makes `local:<name>` and the alias resolve to the right contract.
+    #[test]
+    fn multi_contract_form_labels_the_last_entry_as_the_target() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [[examples]]
+            name = "reentrantCheckpoint"
+            alias = "arraySummation"
+
+              [[examples.contracts]]
+              label = "reentrantObserver"
+              artifact = "ReentrantObserver.sol:ReentrantObserver"
+
+              [[examples.contracts]]
+              artifact = "ReentrantCheckpoint.sol:ReentrantCheckpoint"
+              ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "$deployed:reentrantObserver"]
+            "#,
+        )
+        .unwrap();
+
+        let example = &manifest.examples[0];
+        assert_eq!(example.alias.as_deref(), Some("arraySummation"));
+        let seq = example.contract_sequence().unwrap();
+        assert_eq!(seq.len(), 2);
+        assert_eq!(seq[0].label.as_deref(), Some("reentrantObserver"));
+        assert_eq!(seq[1].label.as_deref(), Some("reentrantCheckpoint"));
+    }
+
+    #[test]
+    fn declaring_both_forms_is_rejected_as_ambiguous() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [[examples]]
+            name = "x"
+            artifact = "X.sol:X"
+
+              [[examples.contracts]]
+              artifact = "Y.sol:Y"
+            "#,
+        )
+        .unwrap();
+        let err = manifest.examples[0]
+            .contract_sequence()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn declaring_neither_form_is_rejected() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [[examples]]
+            name = "x"
+            "#,
+        )
+        .unwrap();
+        let err = manifest.examples[0]
+            .contract_sequence()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("either `artifact` or a `contracts` list"),
+            "{err}"
+        );
+    }
+
+    /// Top-level `ctor_args` alongside `contracts` would silently apply to nothing.
+    #[test]
+    fn top_level_ctor_args_with_a_contracts_list_is_rejected() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [[examples]]
+            name = "x"
+            ctor_args = ["1"]
+
+              [[examples.contracts]]
+              artifact = "Y.sol:Y"
+            "#,
+        )
+        .unwrap();
+        let err = manifest.examples[0]
+            .contract_sequence()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("belongs to the contract it constructs"),
+            "{err}"
+        );
+    }
+
+    // ---- $deployed placeholder ----
+
+    #[test]
+    fn resolves_a_contract_deployed_earlier_in_the_same_example() {
+        let r = resolver();
+        assert_eq!(
+            r.resolve("$deployed:someObserver").unwrap(),
+            format!("{:?}", ADDR_B.parse::<Address>().unwrap())
+        );
+    }
+
+    /// A forward reference is the likely manifest mistake, so the error names what *is*
+    /// available rather than just failing.
+    #[test]
+    fn unknown_deployed_label_lists_what_is_available() {
+        let err = resolver()
+            .resolve("$deployed:notYet")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has not been deployed yet"), "{err}");
+        assert!(err.contains("someObserver"), "{err}");
+    }
+
+    /// `$deployed:` and `$deploy:` share a prefix; they must not be confused for each other.
+    #[test]
+    fn deployed_and_deploy_prefixes_stay_distinct() {
+        let r = resolver();
+        // `$deploy:` reads the deployment JSON…
+        assert_eq!(r.resolve("$deploy:registryCoordinator").unwrap(), ADDR_A);
+        // …and is not satisfied by a same-named in-example deployment.
+        assert!(r.resolve("$deploy:someObserver").is_err());
+        // The reverse also holds.
+        assert!(r.resolve("$deployed:registryCoordinator").is_err());
     }
 
     #[test]
@@ -1651,11 +1996,46 @@ mod tests {
         assert!(parse_wei("twelve").is_err());
     }
 
+    /// Explicit `--artifacts` flags replace the defaults rather than adding to them, so a
+    /// caller pointing at one tree does not silently also search another.
     #[test]
-    fn artifacts_dir_defaults_under_the_examples_checkout() {
+    fn explicit_artifact_roots_replace_the_defaults() {
         assert_eq!(
-            resolve_artifacts_dir(Some(PathBuf::from("custom/out"))),
-            PathBuf::from("custom/out")
+            resolve_artifact_roots(&[PathBuf::from("custom/out")]),
+            vec![PathBuf::from("custom/out")]
         );
+    }
+
+    /// With no flags, both trees the fetch script builds are searched — the examples repo's
+    /// own `out/` first, then the SDK submodule's, which carries array-summation and
+    /// reentrant-checkpoint.
+    #[test]
+    fn default_artifact_roots_cover_both_built_trees() {
+        // SAFETY: single-threaded test setting a variable only this test reads.
+        unsafe { std::env::set_var("EXAMPLES_DIR", "/tmp/ex") };
+        let roots = resolve_artifact_roots(&[]);
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/tmp/ex/out"),
+                PathBuf::from("/tmp/ex").join(SDK_OUT_SUBDIR),
+            ]
+        );
+        unsafe { std::env::remove_var("EXAMPLES_DIR") };
+    }
+
+    /// A missing artifact must name every path tried — otherwise "not found" is
+    /// indistinguishable from "you built the wrong tree".
+    #[test]
+    fn missing_artifact_lists_every_path_tried() {
+        let err = resolve_artifact(
+            &[PathBuf::from("/nope/a"), PathBuf::from("/nope/b")],
+            "Missing.sol:Missing",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("/nope/a/Missing.sol/Missing.json"), "{err}");
+        assert!(err.contains("/nope/b/Missing.sol/Missing.json"), "{err}");
+        assert!(err.contains("fetch_examples.sh"), "{err}");
     }
 }

@@ -110,3 +110,75 @@ ctor_args = ["$avs", "$sigChecker", "5000"]
   label = "vault_settle_transfer"
   sig   = "settle(address[],int256[])"
   args  = [["$signer:1", "$signer:2"], ["100", "-100"]]
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Examples from the Gas Killer SDK itself (lib/solidity-sdk, a submodule of the examples repo).
+# These are the targets the e2e matrix settles against.
+#
+# The SDK also ships factories for them, which this deliberately does not use: a factory's only
+# extra effect is a registry of what it deployed, which nothing in this repo reads, and reaching
+# one meant depending on a contract pre-deployed on Sepolia and inherited from the anvil fork's
+# prestate. Plain CREATE deploys from locally built artifacts keep CI self-contained.
+#
+# Each declares `alias = "arraySummation"` because run_e2e_test.sh, send_request,
+# verify_message_hash_parity, and the bare `local` scenario sentinel all read that one key
+# regardless of which example is deployed.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+# ── ArraySummation (BLS) ─────────────────────────────────────────────────────────────────
+# The default e2e target. Sums selected elements of an on-chain array under `trackState`.
+[[examples]]
+name      = "arraySummation"
+alias     = "arraySummation"
+artifact  = "ArraySummation.sol:ArraySummation"
+# (avs, blsSigChecker, arraySize, maxValue, seed) — sizes previously came from the
+# ARRAY_SUMMATION_{ARRAY_SIZE,MAX_VALUE,SEED} env vars.
+ctor_args = ["$avs", "$sigChecker", "100", "1000", "42"]
+
+  # send_request builds sum([base, base+1, base+2]) with a rotating base; a fixed triple is
+  # equivalent for a single round and keeps the manifest declarative.
+  [[examples.exercise]]
+  label = "array_summation_sum"
+  sig   = "sum(uint256[])"
+  args  = [["0", "1", "2"]]
+
+# ── SchnorrArraySummation ────────────────────────────────────────────────────────────────
+# The same workload verified against the SchnorrStakeRegistry rather than a BLS checker.
+# Requires SIGNATURE_SCHEME=schnorr and `setup_schnorr_operators` to have run first — it
+# deploys the registry and registers the operator set, writing addresses.schnorrStakeRegistry.
+[[examples]]
+name      = "schnorrArraySummation"
+alias     = "arraySummation"
+artifact  = "SchnorrArraySummation.sol:SchnorrArraySummation"
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "100", "1000", "42"]
+
+  [[examples.exercise]]
+  label = "schnorr_array_summation_sum"
+  sig   = "sum(uint256[])"
+  args  = [["0", "1", "2"]]
+
+# ── ReentrantCheckpoint + ReentrantObserver ──────────────────────────────────────────────
+# Two contracts: `advance()` re-enters the checkpoint through the observer mid-transition, so
+# settling it proves re-entrancy is safe under STATE_ENCODING=canonical. The observer is a plain
+# contract, not a Gas Killer target, so it is deployed first and only the checkpoint is asserted
+# routable.
+#
+# The SDK's factory deployed the pair atomically, but the dependency is one-directional —
+# `new ReentrantObserver()` takes no arguments and the checkpoint's constructor takes its
+# address — so a sequential CREATE reproduces the same wiring.
+[[examples]]
+name  = "reentrantCheckpoint"
+alias = "arraySummation"
+
+  [[examples.contracts]]
+  label     = "reentrantObserver"
+  artifact  = "ReentrantObserver.sol:ReentrantObserver"
+
+  [[examples.contracts]]
+  artifact  = "ReentrantCheckpoint.sol:ReentrantCheckpoint"
+  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "$deployed:reentrantObserver"]
+
+  [[examples.exercise]]
+  label = "reentrant_advance"
+  sig   = "advance()"
+  args  = []

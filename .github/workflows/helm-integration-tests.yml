@@ -73,7 +73,8 @@ jobs:
       # router startup and triggering tasks
       - name: Build test scripts
         run: |
-          cargo build --release -p scripts --bin deploy_array_summation
+          cargo build --release -p scripts --bin setup_schnorr_operators
+          cargo build --release -p scripts --bin deploy_example
           cargo build --release -p scripts --bin send_request
 
       - name: Build Docker images
@@ -486,13 +487,14 @@ jobs:
           export WS_RPC=ws://localhost:8545
           export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-          export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
-          export ARRAY_SUMMATION_ARRAY_SIZE=100
-          export ARRAY_SUMMATION_MAX_VALUE=1000
-          export ARRAY_SUMMATION_SEED=42
 
-          # Use pre-built binary for speed
-          ./target/release/deploy_array_summation
+          # The array sizing lives in scripts/examples/examples.toml now, and the target is a
+          # plain CREATE deploy from a locally built artifact — no pre-deployed factory.
+          ./scripts/examples/fetch_examples.sh
+
+          # No-op under bls; registers the operator set before any target deploys under schnorr.
+          ./target/release/setup_schnorr_operators
+          ./target/release/deploy_example --example arraySummation
 
           echo "ArraySummation deployment completed"
 

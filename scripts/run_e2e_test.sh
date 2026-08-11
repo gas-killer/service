@@ -98,7 +98,8 @@ echo "Logs directory: $LOG_DIR"
 # Step 1: Build scripts
 echo -e "${YELLOW}Step 1: Building scripts...${NC}"
 cd "$PROJECT_ROOT/scripts"
-cargo build --release -p scripts --bin deploy_array_summation
+cargo build --release -p scripts --bin setup_schnorr_operators
+cargo build --release -p scripts --bin deploy_example
 cargo build --release -p scripts --bin send_request
 cargo build --release -p scripts --bin verify_message_hash_parity
 cd "$PROJECT_ROOT"
@@ -167,9 +168,8 @@ cd "$PROJECT_ROOT/scripts"
 
 # Source environment and run deployment
 source ../.env
-# `source ../.env` may reset these to the example defaults; restore the caller's
-# choices so deploy_array_summation / send_request pick the right stack, encoding,
-# and example target.
+# `source ../.env` may reset these to the example defaults; restore the caller's choices so the
+# deploy and trigger binaries pick the right stack, encoding, and example target.
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
@@ -180,19 +180,48 @@ if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
     exit 1
 fi
 
-echo "Running ArraySummation deployment..."
-cargo run --release -p scripts --bin deploy_array_summation
+# Map the E2E_EXAMPLE selector onto a manifest entry. Under schnorr, array-summation means the
+# SchnorrArraySummation variant, which verifies against the stake registry rather than a BLS
+# checker; `reentrant` is schnorr-only by construction.
+case "$E2E_EXAMPLE:$SIGNATURE_SCHEME" in
+    array-summation:schnorr)          MANIFEST_EXAMPLE="schnorrArraySummation" ;;
+    array-summation:*)                MANIFEST_EXAMPLE="arraySummation" ;;
+    reentrant:*|reentrant-checkpoint:*) MANIFEST_EXAMPLE="reentrantCheckpoint" ;;
+    *)
+        echo -e "${RED}Unknown E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
+        exit 1
+        ;;
+esac
 
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}ArraySummation deployment completed successfully${NC}"
-else
-    echo -e "${RED}ArraySummation deployment failed${NC}"
+deploy_failed() {
+    echo -e "${RED}$1${NC}"
     echo -e "${YELLOW}Recent ethereum logs:${NC}"
     docker compose logs --tail=100 ethereum || true
     echo -e "${YELLOW}Recent eigenlayer logs:${NC}"
     docker compose logs --tail=100 eigenlayer || true
     exit 1
-fi
+}
+
+# Both binaries resolve the manifest, the built artifacts, and the generated scenario directory
+# relative to the repo root, so they run from there in a subshell — the steps after this one still
+# expect the working directory to be scripts/ with its `../`-relative deployment path.
+run_from_root() {
+    ( cd "$PROJECT_ROOT" \
+        && AVS_DEPLOYMENT_PATH="config/.nodes/avs_deploy.json" \
+           cargo run --release -p scripts "$@" )
+}
+
+# The Schnorr operator set must be registered before any target deploys: every registration
+# advances the registry's `effectiveBlock` watermark, and verification fail-closes for reference
+# blocks behind it. A no-op under SIGNATURE_SCHEME=bls, so it runs unconditionally.
+echo "Setting up the Schnorr operator set (no-op unless SIGNATURE_SCHEME=schnorr)..."
+run_from_root --bin setup_schnorr_operators \
+    || deploy_failed "Schnorr operator setup failed"
+
+echo "Deploying the $MANIFEST_EXAMPLE target..."
+run_from_root --bin deploy_example -- --example "$MANIFEST_EXAMPLE" \
+    || deploy_failed "$MANIFEST_EXAMPLE deployment failed"
+echo -e "${GREEN}$MANIFEST_EXAMPLE deployment completed successfully${NC}"
 
 # Extract deployed ArraySummation address from deployment JSON
 DEPLOY_JSON_PATH="$AVS_DEPLOYMENT_PATH"

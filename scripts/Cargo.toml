@@ -8,10 +8,6 @@ edition = "2024"
 # declared explicitly below, since they predate the lib.
 
 [[bin]]
-name = "deploy_array_summation"
-path = "deploy_array_summation.rs"
-
-[[bin]]
 name = "send_request"
 path = "send_request.rs"
 
@@ -22,6 +18,10 @@ path = "run_scenario.rs"
 [[bin]]
 name = "deploy_example"
 path = "deploy_example.rs"
+
+[[bin]]
+name = "setup_schnorr_operators"
+path = "setup_schnorr_operators.rs"
 
 [[bin]]
 name = "verify_message_hash_parity"

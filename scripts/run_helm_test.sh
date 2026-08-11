@@ -280,26 +280,33 @@ fi
 echo -e "${YELLOW}Step 10: Building test scripts...${NC}"
 
 cd "$PROJECT_ROOT/scripts"
-cargo build --release -p scripts --bin deploy_array_summation
+cargo build --release -p scripts --bin setup_schnorr_operators
+cargo build --release -p scripts --bin deploy_example
 cargo build --release -p scripts --bin send_request
 cd "$PROJECT_ROOT"
 
 # Step 11: Deploy ArraySummation contract
 echo -e "${YELLOW}Step 11: Deploying ArraySummation contract...${NC}"
 
-cd scripts
+# deploy_example resolves the manifest and the built artifacts relative to the repo root, so it
+# runs from there. The array sizing that used to come from ARRAY_SUMMATION_* env vars now lives in
+# scripts/examples/examples.toml, and the pre-deployed factory address is gone entirely — the
+# target is a plain CREATE deploy from a locally built artifact.
 export HTTP_RPC=http://localhost:8545
 export WS_RPC=ws://localhost:8545
-export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
-export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
-export ARRAY_SUMMATION_ARRAY_SIZE=100
-export ARRAY_SUMMATION_MAX_VALUE=1000
-export ARRAY_SUMMATION_SEED=42
+export AVS_DEPLOYMENT_PATH="config/.nodes/avs_deploy.json"
 export PRIVATE_KEY="$PRIVATE_KEY"
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME"
 
-cargo run --release -p scripts --bin deploy_array_summation
-cd "$PROJECT_ROOT"
+if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
+    MANIFEST_EXAMPLE="schnorrArraySummation"
+else
+    MANIFEST_EXAMPLE="arraySummation"
+fi
+
+# No-op under bls; registers the operator set before any target deploys under schnorr.
+cargo run --release -p scripts --bin setup_schnorr_operators
+cargo run --release -p scripts --bin deploy_example -- --example "$MANIFEST_EXAMPLE"
 
 echo -e "${GREEN}ArraySummation deployment completed${NC}"
 
