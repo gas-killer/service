@@ -16,6 +16,11 @@ test_processes.pids
 # Script build artifacts
 scripts/target
 
+# Example contracts checkout (fetched by scripts/examples/fetch_examples.sh) and the
+# scenario files deploy_example generates from it.
+/.examples
+scripts/scenarios/generated/
+
 # Helm chart dependencies (fetch via `helm dependency update`)
 helm/gas-killer/charts/*.tgz
 

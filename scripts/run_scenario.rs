@@ -1,6 +1,9 @@
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
+use bindings::task_payload::{
+    submit_payload, submitter_key, task_status_url, wait_for_ready_payload,
+};
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use reqwest::Client;
@@ -118,10 +121,19 @@ struct RequestConfig {
     /// Set to 0 to auto-fetch the current block from `http_rpc`.
     #[serde(default)]
     block_height: u64,
+    /// When true, poll `GET /tasks/{id}` after a 202 and submit the rendered payload.
+    ///
+    /// With `INGRESS=true` the router renders a `verifyAndUpdate` transaction rather than
+    /// broadcasting it, so nothing reaches the chain until a caller signs and sends that
+    /// payload. `verify` can therefore only ever time out unless this is set (or the router
+    /// runs in auto-execute mode, where something else broadcasts).
+    #[serde(default)]
+    submit: bool,
     /// When true, poll stateTransitionCount() after a 202 to confirm verifyAndUpdate ran.
     #[serde(default)]
     verify: bool,
-    /// How long to wait for on-chain confirmation (seconds, default: 150).
+    /// How long to wait, in seconds, for the payload to render and for the on-chain effect to
+    /// appear. Covers both waits when `submit = true` (default: 150).
     #[serde(default = "default_verify_timeout")]
     verify_timeout_secs: u64,
 }
@@ -232,12 +244,56 @@ async fn verify_on_chain(
     }
 }
 
+// ── Endpoints ─────────────────────────────────────────────────────────────────
+
+/// Where and how to reach the router and the chain, for the lifetime of a run.
+///
+/// Held behind `Arc`s so parallel-mode requests, which are spawned onto their own tasks and so
+/// must own everything they touch, can clone it cheaply.
+#[derive(Clone)]
+struct Endpoints {
+    client: Arc<Client>,
+    router_url: Arc<String>,
+    api_key: Arc<Option<String>>,
+    /// `None` when no request needs an RPC endpoint.
+    http_rpc: Arc<Option<String>>,
+}
+
+impl Endpoints {
+    fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref().filter(|k| !k.is_empty())
+    }
+
+    /// Waits for the router to render the task's payload, then signs and submits it.
+    ///
+    /// This is the step that actually puts `verifyAndUpdate` on-chain in ingress mode; the
+    /// router only prepares the transaction. Uses `FUNDED_KEY` in preference to `PRIVATE_KEY`.
+    async fn submit_rendered_payload(
+        &self,
+        task_id: &str,
+        ready_timeout_secs: u64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let http_rpc = self
+            .http_rpc
+            .as_deref()
+            .ok_or("`http_rpc` is required when `submit = true`")?;
+        let status_url = task_status_url(&self.router_url, task_id)?;
+        let payload = wait_for_ready_payload(
+            &self.client,
+            &status_url,
+            self.api_key(),
+            task_id,
+            ready_timeout_secs,
+        )
+        .await?;
+        submit_payload(&payload, http_rpc, &submitter_key()?).await
+    }
+}
+
 // ── Core execution ────────────────────────────────────────────────────────────
 
 async fn send_request(
-    client: &Client,
-    router_url: &str,
-    api_key: Option<&str>,
+    endpoints: &Endpoints,
     cfg: &RequestConfig,
     current_block: u64,
     provider: Option<&ReadOnlyProvider>,
@@ -334,12 +390,10 @@ async fn send_request(
         },
     };
 
-    let url = format!("{}/tasks", router_url.trim_end_matches('/'));
+    let url = format!("{}/tasks", endpoints.router_url.trim_end_matches('/'));
     let start = Instant::now();
-    let mut req = client.post(&url).json(&payload);
-    if let Some(key) = api_key
-        && !key.is_empty()
-    {
+    let mut req = endpoints.client.post(&url).json(&payload);
+    if let Some(key) = endpoints.api_key() {
         req = req.header("Authorization", format!("Bearer {key}"));
     }
     let resp = req.send().await;
@@ -348,8 +402,8 @@ async fn send_request(
     // The router acknowledges an accepted submission with `202 Accepted` and a
     // `{ task_id, status }` body; any other status carries an error envelope, surfaced verbatim
     // in the report.
-    let (status, api_success, message) = match resp {
-        Err(e) => (0u16, false, format!("connection error: {e}")),
+    let (status, api_success, message, task_id) = match resp {
+        Err(e) => (0u16, false, format!("connection error: {e}"), None),
         Ok(r) => {
             let status = r.status().as_u16();
             match r.text().await {
@@ -359,6 +413,7 @@ async fn send_request(
                             status,
                             true,
                             format!("{} (task {})", body.status, body.task_id),
+                            Some(body.task_id),
                         ),
                         Err(e) => {
                             let trimmed = body_text.trim();
@@ -367,7 +422,7 @@ async fn send_request(
                             } else {
                                 format!("{trimmed} (unparseable 202: {e})")
                             };
-                            (status, false, msg)
+                            (status, false, msg, None)
                         }
                     }
                 }
@@ -378,12 +433,42 @@ async fn send_request(
                     } else {
                         trimmed.to_string()
                     };
-                    (status, false, msg)
+                    (status, false, msg, None)
                 }
-                Err(e) => (status, false, format!("failed to read response body: {e}")),
+                Err(e) => (
+                    status,
+                    false,
+                    format!("failed to read response body: {e}"),
+                    None,
+                ),
             }
         }
     };
+
+    // Land the rendered payload before checking for its effect. Ordering matters: the verify
+    // poll below watches for a state transition that only this submission can cause.
+    if cfg.submit && api_success && status == 202 {
+        let outcome = match task_id.as_deref() {
+            Some(id) => {
+                println!("       Waiting for the rendered payload, then submitting...");
+                endpoints
+                    .submit_rendered_payload(id, cfg.verify_timeout_secs)
+                    .await
+                    .map_err(|e| format!("submit failed: {e}"))
+            }
+            None => Err("`submit = true` but the 202 carried no task_id".to_string()),
+        };
+        if let Err(e) = outcome {
+            return RequestResult {
+                label,
+                status,
+                api_success,
+                message,
+                elapsed,
+                on_chain: Some(OnChainResult::Error(e)),
+            };
+        }
+    }
 
     // Verify on-chain only if the API accepted the request
     let on_chain = if cfg.verify && api_success && status == 202 {
@@ -451,9 +536,7 @@ fn print_result(result: &RequestResult, index: usize, total: usize) {
 }
 
 async fn run_scenario(
-    client: Arc<Client>,
-    router_url: Arc<String>,
-    api_key: Arc<Option<String>>,
+    endpoints: &Endpoints,
     scenario: &Scenario,
     current_block: u64,
     provider: Option<Arc<ReadOnlyProvider>>,
@@ -473,16 +556,8 @@ async fn run_scenario(
         Mode::Serial => {
             let mut results = Vec::with_capacity(total);
             for (i, req_cfg) in scenario.requests.iter().enumerate() {
-                let result = send_request(
-                    &client,
-                    &router_url,
-                    api_key.as_deref(),
-                    req_cfg,
-                    current_block,
-                    provider.as_deref(),
-                    i,
-                )
-                .await;
+                let result =
+                    send_request(endpoints, req_cfg, current_block, provider.as_deref(), i).await;
                 print_result(&result, i, total);
                 results.push(result);
                 if i + 1 < total && scenario.delay_between_ms > 0 {
@@ -497,22 +572,12 @@ async fn run_scenario(
                 .iter()
                 .enumerate()
                 .map(|(i, req_cfg)| {
-                    let client = client.clone();
-                    let router_url = router_url.clone();
-                    let api_key = api_key.clone();
+                    let endpoints = endpoints.clone();
                     let req_cfg = req_cfg.clone();
                     let provider = provider.clone();
                     tokio::spawn(async move {
-                        send_request(
-                            &client,
-                            &router_url,
-                            api_key.as_deref(),
-                            &req_cfg,
-                            current_block,
-                            provider.as_deref(),
-                            i,
-                        )
-                        .await
+                        send_request(&endpoints, &req_cfg, current_block, provider.as_deref(), i)
+                            .await
                     })
                 })
                 .collect();
@@ -841,17 +906,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
+    // `submit` needs the RPC to send the rendered payload, the same way `verify` needs it to
+    // read the target's transition count.
     let needs_rpc = config
         .scenarios
         .iter()
         .flat_map(|s| s.requests.iter())
-        .any(|r| r.block_height == 0 || r.verify);
+        .any(|r| r.block_height == 0 || r.verify || r.submit);
 
     let provider: Option<Arc<ReadOnlyProvider>> = if needs_rpc {
-        let rpc = config
-            .http_rpc
-            .as_deref()
-            .ok_or("`http_rpc` is required when block_height = 0 or verify = true")?;
+        let rpc = config.http_rpc.as_deref().ok_or(
+            "`http_rpc` is required when block_height = 0, verify = true, or submit = true",
+        )?;
         Some(Arc::new(
             ProviderBuilder::new().connect_http(Url::parse(rpc)?),
         ))
@@ -876,19 +942,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if config.ingress_timeout_secs > 0 {
         client_builder = client_builder.timeout(Duration::from_secs(config.ingress_timeout_secs));
     }
-    let client = Arc::new(client_builder.build()?);
-    let router_url = Arc::new(config.router_url.clone());
-
     // The config field takes precedence; fall back to the environment so CI/automation can inject
     // a key without editing the scenario file.
-    let api_key = Arc::new(
-        config
-            .api_key
-            .clone()
-            .filter(|k| !k.is_empty())
-            .or_else(|| std::env::var("GAS_KILLER_API_KEY").ok())
-            .filter(|k| !k.is_empty()),
-    );
+    let api_key = config
+        .api_key
+        .clone()
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("GAS_KILLER_API_KEY").ok())
+        .filter(|k| !k.is_empty());
 
     println!("Router: {}", config.router_url);
     println!(
@@ -900,18 +961,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     );
 
+    let endpoints = Endpoints {
+        client: Arc::new(client_builder.build()?),
+        router_url: Arc::new(config.router_url.clone()),
+        api_key: Arc::new(api_key),
+        http_rpc: Arc::new(config.http_rpc.clone()),
+    };
+
     let mut all_results: Vec<RequestResult> = Vec::new();
 
     for scenario in &config.scenarios {
-        let results = run_scenario(
-            client.clone(),
-            router_url.clone(),
-            api_key.clone(),
-            scenario,
-            current_block,
-            provider.clone(),
-        )
-        .await;
+        let results = run_scenario(&endpoints, scenario, current_block, provider.clone()).await;
         print_scenario_summary(&results);
         all_results.extend(results);
     }
@@ -942,6 +1002,51 @@ mod tests {
             parse_local_sentinel("local").as_deref(),
             Some("arraySummation")
         );
+    }
+
+    /// Existing scenario files predate `submit` and must keep their current behaviour: the
+    /// runner posts the task and never sends a transaction of its own.
+    #[test]
+    fn submit_defaults_to_false_when_absent() {
+        let config: Config = toml::from_str(
+            r#"
+            [[scenarios]]
+            name = "smoke"
+
+              [[scenarios.requests]]
+              target_address = "local"
+              call_data      = "0xdeadbeef"
+              from_address   = "local"
+            "#,
+        )
+        .unwrap();
+
+        let request = &config.scenarios[0].requests[0];
+        assert!(!request.submit);
+        assert!(!request.verify);
+        assert_eq!(request.verify_timeout_secs, 150);
+    }
+
+    #[test]
+    fn submit_is_read_from_the_config() {
+        let config: Config = toml::from_str(
+            r#"
+            [[scenarios]]
+            name = "generated"
+
+              [[scenarios.requests]]
+              target_address = "local:onchainLife"
+              call_data      = "0xdeadbeef"
+              from_address   = "local"
+              submit         = true
+              verify         = true
+            "#,
+        )
+        .unwrap();
+
+        let request = &config.scenarios[0].requests[0];
+        assert!(request.submit);
+        assert!(request.verify);
     }
 
     #[test]

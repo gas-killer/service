@@ -20,14 +20,21 @@ name = "run_scenario"
 path = "run_scenario.rs"
 
 [[bin]]
+name = "deploy_example"
+path = "deploy_example.rs"
+
+[[bin]]
 name = "verify_message_hash_parity"
 path = "verify_message_hash_parity.rs"
 
 [dependencies]
 alloy = { workspace = true }
+alloy-dyn-abi = { workspace = true }
+alloy-json-abi = { workspace = true }
 ark-bn254 = { workspace = true }
 ark-ec = { workspace = true }
 ark-ff = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 dotenv = { workspace = true }
 gas-analyzer = { workspace = true }
 gas-killer-common = { workspace = true }
@@ -39,3 +46,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
