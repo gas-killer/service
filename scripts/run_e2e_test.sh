@@ -334,6 +334,46 @@ USER_TX_HASH=$(grep -oE 'landed: tx 0x[a-fA-F0-9]{64}' "$SEND_REQUEST_LOG" | sed
 
 if [ $TRIGGER_STATUS -eq 0 ]; then
     echo -e "${GREEN}✅ Array summation verified successfully - state was updated!${NC}"
+
+    # A settled transition does not by itself prove the re-entrancy example did its job: the
+    # target's counter advances whether or not the mid-transition call into the observer executed.
+    # `observe()` returns nothing, so against an address with no code the call succeeds silently —
+    # the settlement still lands and the leg still passes while having exercised nothing. The
+    # observer's own counter is the discriminator; the contract documents it as advancing only when
+    # the re-entrant call runs inside a real settlement.
+    if [ "$MANIFEST_EXAMPLE" = "reentrantCheckpoint" ]; then
+        echo "Verifying the mid-transition re-entrant call actually executed..."
+        command -v cast >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
+            || { echo -e "${RED}cast and jq are required to verify the re-entrancy${NC}"; exit 1; }
+
+        REENTRANT_JSON="$PROJECT_ROOT/config/.nodes/avs_deploy.json"
+        OBSERVER_ADDRESS=$(jq -r '.addresses.reentrantObserver // empty' "$REENTRANT_JSON")
+        CHECKPOINT_ADDRESS=$(jq -r '.addresses.reentrantCheckpoint // empty' "$REENTRANT_JSON")
+        if [ -z "$OBSERVER_ADDRESS" ] || [ -z "$CHECKPOINT_ADDRESS" ]; then
+            echo -e "${RED}reentrantObserver/reentrantCheckpoint missing from $REENTRANT_JSON${NC}"
+            exit 1
+        fi
+
+        cast_uint() {
+            cast call "$1" "$2" --rpc-url http://localhost:8545 | tr -d '[:space:]'
+        }
+        CONFIRMATIONS=$(cast_uint "$OBSERVER_ADDRESS" 'confirmations()(uint256)')
+        COUNTER=$(cast_uint "$CHECKPOINT_ADDRESS" 'counter()(uint256)')
+        LAST_OBSERVED=$(cast_uint "$CHECKPOINT_ADDRESS" 'lastObserved()(uint256)')
+        echo "  observer.confirmations=$CONFIRMATIONS counter=$COUNTER lastObserved=$LAST_OBSERVED"
+
+        if [ "$CONFIRMATIONS" -lt 1 ]; then
+            echo -e "${RED}❌ observer.confirmations is $CONFIRMATIONS — the re-entrant call never ran${NC}"
+            exit 1
+        fi
+        # `lastObserved` is written only after the re-entrant call returns, so equality with
+        # `counter` is what distinguishes a fully finalized transition from a partial one.
+        if [ "$LAST_OBSERVED" != "$COUNTER" ]; then
+            echo -e "${RED}❌ lastObserved ($LAST_OBSERVED) != counter ($COUNTER) — transition did not finalize${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}✅ Re-entrancy verified: observer confirmed the canonical intermediate state${NC}"
+    fi
 else
     echo -e "${RED}❌ Array summation verification failed - state was not updated within timeout.${NC}"
     echo -e "${YELLOW}Recent router logs:${NC}"
