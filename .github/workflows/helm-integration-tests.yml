@@ -492,9 +492,19 @@ jobs:
           # plain CREATE deploy from a locally built artifact — no pre-deployed factory.
           ./scripts/examples/fetch_examples.sh
 
+          # The two schemes need different targets: ArraySummation inherits GasKillerSDK and
+          # answers the BLS interface id, SchnorrArraySummation inherits SchnorrGasKillerSDK and
+          # verifies against the stake registry. Deploying the wrong one fails the router's
+          # ERC-165 admission gate.
+          if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
+            MANIFEST_EXAMPLE="schnorrArraySummation"
+          else
+            MANIFEST_EXAMPLE="arraySummation"
+          fi
+
           # No-op under bls; registers the operator set before any target deploys under schnorr.
           ./target/release/setup_schnorr_operators
-          ./target/release/deploy_example --example arraySummation
+          ./target/release/deploy_example --example "$MANIFEST_EXAMPLE"
 
           echo "ArraySummation deployment completed"
 
