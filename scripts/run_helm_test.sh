@@ -285,6 +285,12 @@ cargo build --release -p scripts --bin deploy_example
 cargo build --release -p scripts --bin send_request
 cd "$PROJECT_ROOT"
 
+# deploy_example needs Foundry artifacts for the target it deploys, and the example-contracts
+# checkout that produces them is gitignored — so a clean tree has none. Idempotent: a warm
+# checkout just re-checks the pinned revision and re-runs two incremental forge builds.
+echo -e "${YELLOW}Fetching and building the example contracts...${NC}"
+./scripts/examples/fetch_examples.sh
+
 # Step 11: Deploy ArraySummation contract
 echo -e "${YELLOW}Step 11: Deploying ArraySummation contract...${NC}"
 

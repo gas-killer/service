@@ -95,7 +95,7 @@ echo -e "${GREEN}Starting Gas Killer E2E Test${NC}"
 echo "Project root: $PROJECT_ROOT"
 echo "Logs directory: $LOG_DIR"
 
-# Step 1: Build scripts
+# Step 1: Build scripts and the example contracts they deploy
 echo -e "${YELLOW}Step 1: Building scripts...${NC}"
 cd "$PROJECT_ROOT/scripts"
 cargo build --release -p scripts --bin setup_schnorr_operators
@@ -103,6 +103,12 @@ cargo build --release -p scripts --bin deploy_example
 cargo build --release -p scripts --bin send_request
 cargo build --release -p scripts --bin verify_message_hash_parity
 cd "$PROJECT_ROOT"
+
+# deploy_example needs Foundry artifacts for the target it deploys, and the example-contracts
+# checkout that produces them is gitignored — so a clean tree (any CI runner) has none. Idempotent:
+# a warm checkout just re-checks the pinned revision and re-runs two incremental forge builds.
+echo -e "${YELLOW}Fetching and building the example contracts...${NC}"
+./scripts/examples/fetch_examples.sh
 
 # Step 2: Assume .env already exists and contains required values
 echo -e "${YELLOW}Step 2: Using existing .env without modification...${NC}"
