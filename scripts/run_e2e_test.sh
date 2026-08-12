@@ -229,6 +229,17 @@ run_from_root --bin deploy_example -- --example "$MANIFEST_EXAMPLE" \
     || deploy_failed "$MANIFEST_EXAMPLE deployment failed"
 echo -e "${GREEN}$MANIFEST_EXAMPLE deployment completed successfully${NC}"
 
+# Advance one block so no contract deployed above was created in the block the task will
+# reference. Anvil mines per transaction, so without this the reference block is exactly the last
+# deploy's block — and the off-chain replay reads account state at `reference_block - 1`, one block
+# behind the trace. Any contract created in the reference block therefore looks code-less to the
+# replay: a call to it returns empty data, which a caller decoding a return value surfaces as a
+# bare revert with no reason (`reentrantCheckpoint` hits this when its observer reads back
+# `counter()`), while a call expecting no return value silently succeeds and hides the skew.
+echo "Advancing one block so the task does not reference a deploy block..."
+cast rpc evm_mine --rpc-url http://localhost:8545 >/dev/null \
+    || deploy_failed "could not mine a block after deploying"
+
 # Extract deployed ArraySummation address from deployment JSON
 DEPLOY_JSON_PATH="$AVS_DEPLOYMENT_PATH"
 if command -v jq >/dev/null 2>&1; then
