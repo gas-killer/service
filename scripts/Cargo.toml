@@ -3,10 +3,6 @@ name = "scripts"
 version = "0.1.0"
 edition = "2024"
 
-# The lib is the conventional `src/lib.rs`, so it needs no [lib] override: it takes the
-# package name and is imported as `scripts::`. The binaries stay at the crate root and are
-# declared explicitly below, since they predate the lib.
-
 [[bin]]
 name = "send_request"
 path = "send_request.rs"
