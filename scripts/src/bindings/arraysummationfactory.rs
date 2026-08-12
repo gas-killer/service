@@ -5,5 +5,5 @@ use alloy::sol;
 sol! {
     #[sol(rpc, ignore_unlinked)]
     ArraySummationFactory,
-    "bindings/abis/ArraySummationFactory.json"
+    "src/bindings/abis/ArraySummationFactory.json"
 }

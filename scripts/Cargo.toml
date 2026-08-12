@@ -3,10 +3,6 @@ name = "scripts"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-name = "bindings"
-path = "bindings/mod.rs"
-
 [[bin]]
 name = "deploy_array_summation"
 path = "deploy_array_summation.rs"

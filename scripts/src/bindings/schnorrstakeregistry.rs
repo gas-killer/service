@@ -6,5 +6,5 @@ use alloy::sol;
 sol! {
     #[sol(rpc, ignore_unlinked)]
     SchnorrStakeRegistry,
-    "bindings/abis/SchnorrStakeRegistry.json"
+    "src/bindings/abis/SchnorrStakeRegistry.json"
 }

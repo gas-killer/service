@@ -1,12 +1,12 @@
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
-use bindings::task_payload::{
-    submit_payload, submitter_key, task_status_url, wait_for_ready_payload,
-};
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use reqwest::Client;
+use scripts::task_payload::{
+    submit_payload, submitter_key, task_status_url, wait_for_ready_payload,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
