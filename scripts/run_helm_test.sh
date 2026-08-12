@@ -295,9 +295,8 @@ echo -e "${YELLOW}Fetching and building the example contracts...${NC}"
 echo -e "${YELLOW}Step 11: Deploying ArraySummation contract...${NC}"
 
 # deploy_example resolves the manifest and the built artifacts relative to the repo root, so it
-# runs from there. The array sizing that used to come from ARRAY_SUMMATION_* env vars now lives in
-# scripts/examples/examples.toml, and the pre-deployed factory address is gone entirely — the
-# target is a plain CREATE deploy from a locally built artifact.
+# runs from there. The array sizing lives in scripts/examples/examples.toml as constructor
+# arguments, and the target is a plain CREATE deploy from a locally built artifact.
 export HTTP_RPC=http://localhost:8545
 export WS_RPC=ws://localhost:8545
 export AVS_DEPLOYMENT_PATH="config/.nodes/avs_deploy.json"

@@ -271,10 +271,8 @@ async fn build_mock_request()
     // Resolve the task target from the deploy JSON's scheme-agnostic `arraySummation` key,
     // which whichever deploy ran writes (aliasing it for the schnorr and re-entrancy targets).
     //
-    // Every failure here is reported against its actual cause. This used to fall through to a
-    // `0x…01` placeholder, which still failed — the target has no code, so the
-    // `stateTransitionCount()` read below errors — but it failed reporting the placeholder
-    // address instead of the missing key, which tells you nothing about what to fix.
+    // Every failure here names its actual cause — a missing file, an unparseable file, or an
+    // absent key — so a mis-wired deploy is distinguishable from a chain that never received one.
     let target_address: Address = {
         let path = env::var("AVS_DEPLOYMENT_PATH")
             .map_err(|_| "AVS_DEPLOYMENT_PATH is required to resolve the task target")?;

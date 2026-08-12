@@ -115,10 +115,9 @@ ctor_args = ["$avs", "$sigChecker", "5000"]
 # Examples from the Gas Killer SDK itself (lib/solidity-sdk, a submodule of the examples repo).
 # These are the targets the e2e matrix settles against.
 #
-# The SDK also ships factories for them, which this deliberately does not use: a factory's only
-# extra effect is a registry of what it deployed, which nothing in this repo reads, and reaching
-# one meant depending on a contract pre-deployed on Sepolia and inherited from the anvil fork's
-# prestate. Plain CREATE deploys from locally built artifacts keep CI self-contained.
+# Every target here is a plain CREATE deploy from a locally built artifact, so CI depends on
+# nothing surviving in the forked chain. The SDK also ships factories for these contracts; their
+# only extra effect is a registry of what they deployed, which nothing in this repo reads.
 #
 # Each declares `alias = "arraySummation"` because run_e2e_test.sh, send_request,
 # verify_message_hash_parity, and the bare `local` scenario sentinel all read that one key
@@ -131,8 +130,7 @@ ctor_args = ["$avs", "$sigChecker", "5000"]
 name      = "arraySummation"
 alias     = "arraySummation"
 artifact  = "ArraySummation.sol:ArraySummation"
-# (avs, blsSigChecker, arraySize, maxValue, seed) — sizes previously came from the
-# ARRAY_SUMMATION_{ARRAY_SIZE,MAX_VALUE,SEED} env vars.
+# (avs, blsSigChecker, arraySize, maxValue, seed)
 ctor_args = ["$avs", "$sigChecker", "100", "1000", "42"]
 
   # send_request builds sum([base, base+1, base+2]) with a rotating base; a fixed triple is
@@ -163,9 +161,9 @@ ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "100", "1000", "42"]
 # contract, not a Gas Killer target, so it is deployed first and only the checkpoint is asserted
 # routable.
 #
-# The SDK's factory deployed the pair atomically, but the dependency is one-directional —
-# `new ReentrantObserver()` takes no arguments and the checkpoint's constructor takes its
-# address — so a sequential CREATE reproduces the same wiring.
+# The dependency between them is one-directional — `new ReentrantObserver()` takes no arguments
+# and the checkpoint's constructor takes its address — so deploying them in sequence wires the
+# pair correctly without needing to create both in one transaction.
 [[examples]]
 name  = "reentrantCheckpoint"
 alias = "arraySummation"
