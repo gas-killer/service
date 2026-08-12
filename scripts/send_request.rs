@@ -268,28 +268,31 @@ async fn resolve_block_height<P: Provider>(
 
 async fn build_mock_request()
 -> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
-    // Try to source a real deployed ArraySummation address from AVS_DEPLOYMENT_PATH; fallback to placeholder
-    let target_address: Address = match env::var("AVS_DEPLOYMENT_PATH") {
-        Ok(path) => {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(deployment) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(addr) = deployment
-                        .get("addresses")
-                        .and_then(|a| a.get("arraySummation"))
-                        .and_then(|v| v.as_str())
-                    {
-                        addr.parse()?
-                    } else {
-                        "0x0000000000000000000000000000000000000001".parse()?
-                    }
-                } else {
-                    "0x0000000000000000000000000000000000000001".parse()?
-                }
-            } else {
-                "0x0000000000000000000000000000000000000001".parse()?
-            }
-        }
-        Err(_) => "0x0000000000000000000000000000000000000001".parse()?,
+    // Resolve the task target from the deploy JSON's scheme-agnostic `arraySummation` key,
+    // which whichever deploy ran writes (aliasing it for the schnorr and re-entrancy targets).
+    //
+    // Every failure here names its actual cause — a missing file, an unparseable file, or an
+    // absent key — so a mis-wired deploy is distinguishable from a chain that never received one.
+    let target_address: Address = {
+        let path = env::var("AVS_DEPLOYMENT_PATH")
+            .map_err(|_| "AVS_DEPLOYMENT_PATH is required to resolve the task target")?;
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read the deployment JSON at '{path}': {e}"))?;
+        let deployment: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("failed to parse the deployment JSON at '{path}': {e}"))?;
+        let raw = deployment
+            .get("addresses")
+            .and_then(|a| a.get("arraySummation"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "addresses.arraySummation is missing from '{path}' — deploy a target first \
+                     (deploy_example writes this key, aliased when the example is not \
+                     array-summation), or set GAS_KILLER_TARGET_ADDRESS to bypass this lookup"
+                )
+            })?;
+        raw.parse()
+            .map_err(|_| format!("addresses.arraySummation in '{path}' is not an address: {raw}"))?
     };
     // Use Anvil's default first unlocked account to ensure a signing credential exists in the spawned fork
     let from_address: Address = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse()?;

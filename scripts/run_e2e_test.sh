@@ -95,13 +95,20 @@ echo -e "${GREEN}Starting Gas Killer E2E Test${NC}"
 echo "Project root: $PROJECT_ROOT"
 echo "Logs directory: $LOG_DIR"
 
-# Step 1: Build scripts
+# Step 1: Build scripts and the example contracts they deploy
 echo -e "${YELLOW}Step 1: Building scripts...${NC}"
 cd "$PROJECT_ROOT/scripts"
-cargo build --release -p scripts --bin deploy_array_summation
+cargo build --release -p scripts --bin setup_schnorr_operators
+cargo build --release -p scripts --bin deploy_example
 cargo build --release -p scripts --bin send_request
 cargo build --release -p scripts --bin verify_message_hash_parity
 cd "$PROJECT_ROOT"
+
+# deploy_example needs Foundry artifacts for the target it deploys, and the example-contracts
+# checkout that produces them is gitignored — so a clean tree (any CI runner) has none. Idempotent:
+# a warm checkout just re-checks the pinned revision and re-runs two incremental forge builds.
+echo -e "${YELLOW}Fetching and building the example contracts...${NC}"
+./scripts/examples/fetch_examples.sh
 
 # Step 2: Assume .env already exists and contains required values
 echo -e "${YELLOW}Step 2: Using existing .env without modification...${NC}"
@@ -167,9 +174,8 @@ cd "$PROJECT_ROOT/scripts"
 
 # Source environment and run deployment
 source ../.env
-# `source ../.env` may reset these to the example defaults; restore the caller's
-# choices so deploy_array_summation / send_request pick the right stack, encoding,
-# and example target.
+# `source ../.env` may reset these to the example defaults; restore the caller's choices so the
+# deploy and trigger binaries pick the right stack, encoding, and example target.
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
@@ -180,19 +186,59 @@ if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
     exit 1
 fi
 
-echo "Running ArraySummation deployment..."
-cargo run --release -p scripts --bin deploy_array_summation
+# Map the E2E_EXAMPLE selector onto a manifest entry. Under schnorr, array-summation means the
+# SchnorrArraySummation variant, which verifies against the stake registry rather than a BLS
+# checker; `reentrant` is schnorr-only by construction.
+case "$E2E_EXAMPLE:$SIGNATURE_SCHEME" in
+    array-summation:schnorr)          MANIFEST_EXAMPLE="schnorrArraySummation" ;;
+    array-summation:*)                MANIFEST_EXAMPLE="arraySummation" ;;
+    reentrant:*|reentrant-checkpoint:*) MANIFEST_EXAMPLE="reentrantCheckpoint" ;;
+    *)
+        echo -e "${RED}Unknown E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
+        exit 1
+        ;;
+esac
 
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}ArraySummation deployment completed successfully${NC}"
-else
-    echo -e "${RED}ArraySummation deployment failed${NC}"
+deploy_failed() {
+    echo -e "${RED}$1${NC}"
     echo -e "${YELLOW}Recent ethereum logs:${NC}"
     docker compose logs --tail=100 ethereum || true
     echo -e "${YELLOW}Recent eigenlayer logs:${NC}"
     docker compose logs --tail=100 eigenlayer || true
     exit 1
-fi
+}
+
+# Both binaries resolve the manifest, the built artifacts, and the generated scenario directory
+# relative to the repo root, so they run from there in a subshell — the steps after this one still
+# expect the working directory to be scripts/ with its `../`-relative deployment path.
+run_from_root() {
+    ( cd "$PROJECT_ROOT" \
+        && AVS_DEPLOYMENT_PATH="config/.nodes/avs_deploy.json" \
+           cargo run --release -p scripts "$@" )
+}
+
+# The Schnorr operator set must be registered before any target deploys: every registration
+# advances the registry's `effectiveBlock` watermark, and verification fail-closes for reference
+# blocks behind it. A no-op under SIGNATURE_SCHEME=bls, so it runs unconditionally.
+echo "Setting up the Schnorr operator set (no-op unless SIGNATURE_SCHEME=schnorr)..."
+run_from_root --bin setup_schnorr_operators \
+    || deploy_failed "Schnorr operator setup failed"
+
+echo "Deploying the $MANIFEST_EXAMPLE target..."
+run_from_root --bin deploy_example -- --example "$MANIFEST_EXAMPLE" \
+    || deploy_failed "$MANIFEST_EXAMPLE deployment failed"
+echo -e "${GREEN}$MANIFEST_EXAMPLE deployment completed successfully${NC}"
+
+# Advance one block so no contract deployed above was created in the block the task will
+# reference. Anvil mines per transaction, so without this the reference block is exactly the last
+# deploy's block — and the off-chain replay reads account state at `reference_block - 1`, one block
+# behind the trace. Any contract created in the reference block therefore looks code-less to the
+# replay: a call to it returns empty data, which a caller decoding a return value surfaces as a
+# bare revert with no reason (`reentrantCheckpoint` hits this when its observer reads back
+# `counter()`), while a call expecting no return value silently succeeds and hides the skew.
+echo "Advancing one block so the task does not reference a deploy block..."
+cast rpc evm_mine --rpc-url http://localhost:8545 >/dev/null \
+    || deploy_failed "could not mine a block after deploying"
 
 # Extract deployed ArraySummation address from deployment JSON
 DEPLOY_JSON_PATH="$AVS_DEPLOYMENT_PATH"
@@ -288,6 +334,46 @@ USER_TX_HASH=$(grep -oE 'landed: tx 0x[a-fA-F0-9]{64}' "$SEND_REQUEST_LOG" | sed
 
 if [ $TRIGGER_STATUS -eq 0 ]; then
     echo -e "${GREEN}✅ Array summation verified successfully - state was updated!${NC}"
+
+    # A settled transition does not by itself prove the re-entrancy example did its job: the
+    # target's counter advances whether or not the mid-transition call into the observer executed.
+    # `observe()` returns nothing, so against an address with no code the call succeeds silently —
+    # the settlement still lands and the leg still passes while having exercised nothing. The
+    # observer's own counter is the discriminator; the contract documents it as advancing only when
+    # the re-entrant call runs inside a real settlement.
+    if [ "$MANIFEST_EXAMPLE" = "reentrantCheckpoint" ]; then
+        echo "Verifying the mid-transition re-entrant call actually executed..."
+        command -v cast >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
+            || { echo -e "${RED}cast and jq are required to verify the re-entrancy${NC}"; exit 1; }
+
+        REENTRANT_JSON="$PROJECT_ROOT/config/.nodes/avs_deploy.json"
+        OBSERVER_ADDRESS=$(jq -r '.addresses.reentrantObserver // empty' "$REENTRANT_JSON")
+        CHECKPOINT_ADDRESS=$(jq -r '.addresses.reentrantCheckpoint // empty' "$REENTRANT_JSON")
+        if [ -z "$OBSERVER_ADDRESS" ] || [ -z "$CHECKPOINT_ADDRESS" ]; then
+            echo -e "${RED}reentrantObserver/reentrantCheckpoint missing from $REENTRANT_JSON${NC}"
+            exit 1
+        fi
+
+        cast_uint() {
+            cast call "$1" "$2" --rpc-url http://localhost:8545 | tr -d '[:space:]'
+        }
+        CONFIRMATIONS=$(cast_uint "$OBSERVER_ADDRESS" 'confirmations()(uint256)')
+        COUNTER=$(cast_uint "$CHECKPOINT_ADDRESS" 'counter()(uint256)')
+        LAST_OBSERVED=$(cast_uint "$CHECKPOINT_ADDRESS" 'lastObserved()(uint256)')
+        echo "  observer.confirmations=$CONFIRMATIONS counter=$COUNTER lastObserved=$LAST_OBSERVED"
+
+        if [ "$CONFIRMATIONS" -lt 1 ]; then
+            echo -e "${RED}❌ observer.confirmations is $CONFIRMATIONS — the re-entrant call never ran${NC}"
+            exit 1
+        fi
+        # `lastObserved` is written only after the re-entrant call returns, so equality with
+        # `counter` is what distinguishes a fully finalized transition from a partial one.
+        if [ "$LAST_OBSERVED" != "$COUNTER" ]; then
+            echo -e "${RED}❌ lastObserved ($LAST_OBSERVED) != counter ($COUNTER) — transition did not finalize${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}✅ Re-entrancy verified: observer confirmed the canonical intermediate state${NC}"
+    fi
 else
     echo -e "${RED}❌ Array summation verification failed - state was not updated within timeout.${NC}"
     echo -e "${YELLOW}Recent router logs:${NC}"

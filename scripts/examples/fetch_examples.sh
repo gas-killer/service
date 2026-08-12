@@ -22,10 +22,22 @@ EXAMPLES_REPO="${EXAMPLES_REPO:-https://github.com/gas-killer/example-contracts}
 EXAMPLES_REF="${EXAMPLES_REF:-f9aa0a6020ec7b3e28db47999ece8ba54b3847f6}"
 EXAMPLES_DIR="${EXAMPLES_DIR:-.examples/example-contracts}"
 
-# Contracts the manifest expects to exist once the build finishes.
+# The Gas Killer SDK is a submodule of the examples repo, and it carries its own examples
+# (array-summation, reentrant-checkpoint) that the manifest also deploys. It builds under its own
+# foundry.toml — via_ir = true, versus via_ir = false in the examples repo — so the two trees are
+# built separately in place rather than by merging profiles.
+SDK_SUBDIR="lib/solidity-sdk"
+
+# Contracts the manifest expects once the build finishes, per tree.
 EXPECTED_ARTIFACTS=(
   "OnchainLife.sol/OnchainLife.json"
   "GuardedVault.sol/GuardedVault.json"
+)
+EXPECTED_SDK_ARTIFACTS=(
+  "ArraySummation.sol/ArraySummation.json"
+  "SchnorrArraySummation.sol/SchnorrArraySummation.json"
+  "ReentrantCheckpoint.sol/ReentrantCheckpoint.json"
+  "ReentrantObserver.sol/ReentrantObserver.json"
 )
 
 if ! command -v forge >/dev/null 2>&1; then
@@ -54,26 +66,37 @@ git -C "$EXAMPLES_DIR" checkout --detach "$EXAMPLES_REF" 2>/dev/null \
 echo "🔗 syncing submodules (recursive)"
 git -C "$EXAMPLES_DIR" submodule update --init --recursive
 
-echo "🔨 building with forge"
+echo "🔨 building the example contracts"
 (cd "$EXAMPLES_DIR" && forge build)
 
+echo "🔨 building the SDK's own examples ($SDK_SUBDIR)"
+(cd "$EXAMPLES_DIR/$SDK_SUBDIR" && forge build)
+
 missing=0
-for artifact in "${EXPECTED_ARTIFACTS[@]}"; do
-  if [ ! -f "$EXAMPLES_DIR/out/$artifact" ]; then
-    echo "❌ expected artifact missing: $EXAMPLES_DIR/out/$artifact" >&2
-    missing=1
-  fi
-done
+check_artifacts() {
+  local root="$1"; shift
+  for artifact in "$@"; do
+    if [ ! -f "$root/$artifact" ]; then
+      echo "❌ expected artifact missing: $root/$artifact" >&2
+      missing=1
+    fi
+  done
+}
+check_artifacts "$EXAMPLES_DIR/out" "${EXPECTED_ARTIFACTS[@]}"
+check_artifacts "$EXAMPLES_DIR/$SDK_SUBDIR/out" "${EXPECTED_SDK_ARTIFACTS[@]}"
 if [ "$missing" -ne 0 ]; then
   echo "The manifest at scripts/examples/examples.toml may be out of date with the checkout." >&2
   exit 1
 fi
 
 resolved="$(git -C "$EXAMPLES_DIR" rev-parse HEAD)"
+sdk_resolved="$(git -C "$EXAMPLES_DIR/$SDK_SUBDIR" rev-parse HEAD)"
 echo
 echo "✅ example contracts built at $resolved"
 echo "   artifacts: $EXAMPLES_DIR/out"
+echo "✅ SDK examples built at $sdk_resolved"
+echo "   artifacts: $EXAMPLES_DIR/$SDK_SUBDIR/out"
 echo
 echo "Next:"
 echo "   cargo run -p scripts --bin deploy_example -- --dry-run"
-echo "   cargo run -p scripts --bin deploy_example -- --example onchainLife"
+echo "   cargo run -p scripts --bin deploy_example -- --example guardedVault"

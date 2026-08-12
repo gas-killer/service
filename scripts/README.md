@@ -175,10 +175,28 @@ cargo run -p scripts --bin run_scenario -- scripts/scenarios/generated/guardedVa
 
 Currently available:
 
-| Example | Required encoding | What it demonstrates |
-|---|---|---|
-| `guardedVault` | any | An O(N) invariant re-validated on every transition. Runs green end to end. |
-| `onchainLife` | **`prestate-net`** | Conway's Life: heavy compute, tiny flat diff. Deploys and is routable under any encoding, but only settles under `prestate-net` — see below. |
+| Example | Scheme | Required encoding | What it demonstrates |
+|---|---|---|---|
+| `guardedVault` | bls | any | An O(N) invariant re-validated on every transition. |
+| `onchainLife` | bls | **`prestate-net`** | Conway's Life: heavy compute, tiny flat diff. Routable under any encoding but only settles under `prestate-net` — see below. |
+| `arraySummation` | bls | any | The default e2e target: sums selected array elements under `trackState`. |
+| `schnorrArraySummation` | schnorr | any | The same workload verified against the `SchnorrStakeRegistry`. |
+| `reentrantCheckpoint` | schnorr | `canonical` | Two contracts — `advance()` re-enters through an observer mid-transition. |
+
+The last three come from the Gas Killer SDK, which the examples repo vendors as a submodule;
+`fetch_examples.sh` builds both trees and `deploy_example` searches both `out/` directories.
+
+**Schnorr examples need the operator set registered first.** That is a separate phase, because
+every registration advances the registry's `effectiveBlock` watermark and verification
+fail-closes for reference blocks behind it:
+
+```bash
+SIGNATURE_SCHEME=schnorr cargo run -p scripts --bin setup_schnorr_operators   # no-op under bls
+SIGNATURE_SCHEME=schnorr cargo run -p scripts --bin deploy_example -- --example schnorrArraySummation
+```
+
+`setup_schnorr_operators` deploys the `SchnorrStakeRegistry` and records it as
+`addresses.schnorrStakeRegistry`, which the manifest resolves via `$deploy:schnorrStakeRegistry`.
 
 **`onchainLife` requires `STATE_ENCODING=prestate-net`.**
 
