@@ -39,7 +39,7 @@ fn digest_cache_key(task: &GasKillerTaskData) -> DigestCacheKey {
         task.call_data.clone(),
     )
 }
-use gas_analyzer::{EvmSketchExecutorCache, call_to_encoded_state_updates_with_evmsketch_mode};
+use gas_analyzer::{EvmSketchExecutorCache, call_to_encoded_state_updates_with_evmsketch_profiled};
 
 /// Prometheus metrics for validator timing, exposed on the node's /metrics endpoint.
 pub struct ValidatorMetrics {
@@ -130,6 +130,11 @@ pub struct GasKillerValidator {
     /// reads it from `STATE_ENCODING` on both binaries. See
     /// [`crate::config::state_encoding`].
     state_encoding: gas_analyzer::StateEncoding,
+    /// Gas limits the tracked function is simulated under. Like `state_encoding` it must be
+    /// identical on the node and router (it changes the derived `storage_updates`, hence the
+    /// digest); the production `new()` path reads it from `GK_SIM_PROFILE` on both binaries.
+    /// See [`crate::config::sim_profile`].
+    sim_profile: gas_analyzer::SimProfile,
 }
 
 impl GasKillerValidator {
@@ -158,6 +163,7 @@ impl GasKillerValidator {
             // Production path: node and router both call `new()`, so reading the
             // env here keeps their encoding (and therefore their digests) in sync.
             state_encoding: crate::config::state_encoding(),
+            sim_profile: crate::config::sim_profile(),
         })
     }
 
@@ -177,6 +183,7 @@ impl GasKillerValidator {
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             state_encoding: gas_analyzer::StateEncoding::Legacy,
+            sim_profile: gas_analyzer::SimProfile::Chain,
         }
     }
 
@@ -192,6 +199,7 @@ impl GasKillerValidator {
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             state_encoding: gas_analyzer::StateEncoding::Legacy,
+            sim_profile: gas_analyzer::SimProfile::Chain,
         }
     }
 
@@ -410,12 +418,13 @@ impl GasKillerValidator {
         // The executor cache eliminates the build cost on repeated requests at the
         // same block height.
         let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_evmsketch_mode(
+            call_to_encoded_state_updates_with_evmsketch_profiled(
                 &self.executor_cache,
                 rpc_url,
                 tx_request,
                 block_height,
                 self.state_encoding,
+                self.sim_profile,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;

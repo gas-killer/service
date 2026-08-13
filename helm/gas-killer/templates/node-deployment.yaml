@@ -259,6 +259,10 @@ spec:
             # the router's — it changes the task digest.
             - name: STATE_ENCODING
               value: {{ default "legacy" $root.Values.global.stateEncoding | quote }}
+            # Simulation profile (chain | unbounded-v1); must match the router's — it
+            # changes the task digest.
+            - name: GK_SIM_PROFILE
+              value: {{ default "chain" $root.Values.global.simProfile | quote }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}

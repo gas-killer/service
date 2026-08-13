@@ -96,6 +96,7 @@ See `values.yaml` for all available configuration options.
 | `global.environment` | Environment mode (LOCAL or TESTNET) | `LOCAL` |
 | `global.nodeCount` | Number of operator nodes | `3` |
 | `global.initTimeout` | Init container timeout in seconds | `300` |
+| `global.simProfile` | Tracked-function simulation profile (`chain` or `unbounded-v1`), shared by the router and every node so their signed payloads agree. `unbounded-v1` simulates under the pinned unbounded gas limits, allowing functions whose direct execution exceeds the block gas limit; it needs the RPC's execution cap lifted and pairs with `global.stateEncoding=prestate-net`. | `chain` |
 | `secrets.forkUrl` | Anvil fork URL (required for LOCAL mode) | `""` |
 | `secrets.privateKey` | Deployer private key | `""` |
 | `secrets.fundedKey` | Funded account private key | `""` |

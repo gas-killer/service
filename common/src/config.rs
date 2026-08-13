@@ -440,6 +440,46 @@ fn parse_state_encoding(raw: Option<&str>) -> gas_analyzer::StateEncoding {
     }
 }
 
+/// Reads the tracked-function simulation profile from `GK_SIM_PROFILE` (case-insensitive
+/// `chain` | `unbounded-v1`), defaulting to [`SimProfile::Chain`].
+///
+/// Where [`state_encoding`] selects how a task's storage mutations are *represented*, this
+/// selects the gas limits they are *derived under* — independent axes, both consensus
+/// parameters.
+///
+/// `unbounded-v1` simulates with the pinned unbounded block/tx gas limits, so a tracked
+/// function whose direct execution costs more than a real block can still be analyzed. What it
+/// produces stays bounded: applying the payload on-chain must fit the profile's gas budget and
+/// contain no `CREATE`, or the analysis hard-errors rather than signing a task nobody can
+/// settle. The gas *estimate* for applying it is still priced under the real chain's limits,
+/// because `verifyAndUpdate` lands in a real block. It additionally requires the RPC serving
+/// `debug_traceCall` to have its own execution cap lifted (`anvil --disable-block-gas-limit`,
+/// `geth --rpc.gascap=0`); without that the heavy call runs out of gas inside the tracer.
+///
+/// **Node and router must run the same value** — the profile changes the derived
+/// `storage_updates`, hence the task digest — so this is read from one env var threaded to
+/// both binaries. Panics on an unrecognized value rather than silently diverging digests.
+pub fn sim_profile() -> gas_analyzer::SimProfile {
+    parse_sim_profile(env::var("GK_SIM_PROFILE").ok().as_deref())
+}
+
+/// Parses the `GK_SIM_PROFILE` value (case-insensitive, trimmed). `None` / empty → `Chain`.
+/// Panics on an unrecognized value rather than silently diverging the node's and router's
+/// digests.
+///
+/// The env spelling carries the `-v1` suffix that the upstream variant name does not: the
+/// unbounded limits are pinned protocol constants, so a future revision of them is a new
+/// accepted value here rather than a silent change in meaning for an existing one.
+fn parse_sim_profile(raw: Option<&str>) -> gas_analyzer::SimProfile {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("chain") => gas_analyzer::SimProfile::Chain,
+        Some("unbounded-v1") => gas_analyzer::SimProfile::Unbounded,
+        Some(other) => {
+            panic!("GK_SIM_PROFILE must be 'chain' or 'unbounded-v1', got '{other}'")
+        }
+    }
+}
+
 /// Default quorum threshold numerator/denominator used when `QUORUM_THRESHOLD` /
 /// `THRESHOLD_DENOMINATOR` are unset or malformed.
 pub const DEFAULT_QUORUM_THRESHOLD_NUMERATOR: u64 = 2;
@@ -807,6 +847,38 @@ mod tests {
     #[should_panic(expected = "STATE_ENCODING must be")]
     fn state_encoding_rejects_a_near_miss_spelling() {
         let _ = parse_state_encoding(Some("prestate_net"));
+    }
+
+    #[test]
+    fn sim_profile_parsing() {
+        use gas_analyzer::SimProfile;
+        assert_eq!(parse_sim_profile(None), SimProfile::Chain);
+        assert_eq!(parse_sim_profile(Some("")), SimProfile::Chain);
+        assert_eq!(parse_sim_profile(Some("chain")), SimProfile::Chain);
+        assert_eq!(parse_sim_profile(Some(" CHAIN ")), SimProfile::Chain);
+        assert_eq!(
+            parse_sim_profile(Some("unbounded-v1")),
+            SimProfile::Unbounded
+        );
+        assert_eq!(
+            parse_sim_profile(Some(" Unbounded-V1 ")),
+            SimProfile::Unbounded
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "GK_SIM_PROFILE must be")]
+    fn sim_profile_rejects_unknown() {
+        let _ = parse_sim_profile(Some("bogus"));
+    }
+
+    /// The bare variant name is deliberately NOT accepted: the env value pins which revision of
+    /// the unbounded constants the fleet agreed on, and an unversioned spelling would keep
+    /// resolving across a future change to them.
+    #[test]
+    #[should_panic(expected = "GK_SIM_PROFILE must be")]
+    fn sim_profile_rejects_an_unversioned_spelling() {
+        let _ = parse_sim_profile(Some("unbounded"));
     }
 
     #[test]
