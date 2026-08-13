@@ -30,3 +30,8 @@ terraform.tfstate.*
 router.db
 router.db-*
 /data/
+# Local dev override (e.g. platform pin for Apple Silicon p2p); never committed
+docker-compose.override.yml
+.gk-solidity-sdk/
+docker-compose.fleet.yml
+config/config.fleet.json

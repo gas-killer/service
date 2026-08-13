@@ -61,6 +61,13 @@ services:
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       # Simulation profile for tracked-function analysis; router and all nodes must agree.
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
+      # Sharded inference (gas_killer_common::shard): segment work poll +
+      # validator gate. Enabled when the harness exports GK_SHARD_URL and
+      # GK_SHARD_CONSUMER (empty = disabled).
+      - GK_SHARD_URL=${GK_SHARD_URL:-}
+      - GK_SHARD_OPERATOR_ID=0
+      - GK_SHARD_CONSUMER=${GK_SHARD_CONSUMER:-}
+      - GK_SHARD_POLL_MS=${GK_SHARD_POLL_MS:-300}
     volumes:
       - ./config/.nodes/operator_keys/testacc1.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
@@ -97,6 +104,13 @@ services:
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       # Simulation profile for tracked-function analysis; router and all nodes must agree.
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
+      # Sharded inference (gas_killer_common::shard): segment work poll +
+      # validator gate. Enabled when the harness exports GK_SHARD_URL and
+      # GK_SHARD_CONSUMER (empty = disabled).
+      - GK_SHARD_URL=${GK_SHARD_URL:-}
+      - GK_SHARD_OPERATOR_ID=1
+      - GK_SHARD_CONSUMER=${GK_SHARD_CONSUMER:-}
+      - GK_SHARD_POLL_MS=${GK_SHARD_POLL_MS:-300}
     volumes:
       - ./config/.nodes/operator_keys/testacc2.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
@@ -127,6 +141,13 @@ services:
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       # Simulation profile for tracked-function analysis; router and all nodes must agree.
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
+      # Sharded inference (gas_killer_common::shard): segment work poll +
+      # validator gate. Enabled when the harness exports GK_SHARD_URL and
+      # GK_SHARD_CONSUMER (empty = disabled).
+      - GK_SHARD_URL=${GK_SHARD_URL:-}
+      - GK_SHARD_OPERATOR_ID=2
+      - GK_SHARD_CONSUMER=${GK_SHARD_CONSUMER:-}
+      - GK_SHARD_POLL_MS=${GK_SHARD_POLL_MS:-300}
     volumes:
       - ./config/.nodes/operator_keys/testacc3.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes:/app/.nodes:ro
@@ -163,6 +184,9 @@ services:
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       # Simulation profile for tracked-function analysis; router and all nodes must agree.
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
+      # Sharded-inference coordinator (gas_killer_router::shard) on /shard/*.
+      - GK_SHARD_K=${GK_SHARD_K:-2}
+      - GK_SHARD_OPERATORS=${GK_SHARD_OPERATORS:-3}
       # /app is owned by the non-root container user; /data is reserved for the Kubernetes
       # PVC mount and is not writable here.
       - DATA_DIR=/app/data
@@ -177,6 +201,6 @@ services:
       - "sleep 45 && exec gas-killer-router --key-file /app/router_orchestrator.json --port 3000"
     ports:
       - "4000:3000"
-      - "8080:8080"
-      - "8081:8081"  # metrics / healthz
+      - "${ROUTER_PUBLIC_PORT:-8080}:8080"
+      - "${ROUTER_INTERNAL_PORT:-8081}:8081"  # metrics / healthz / shard
     restart: unless-stopped

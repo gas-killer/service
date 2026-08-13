@@ -1,0 +1,121 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gk-register-pod
+  namespace: tenop
+spec:
+  restartPolicy: Never
+  containers:
+  - name: register-only
+    image: ghcr.io/breadchaincoop/eigenlayer:latest
+    imagePullPolicy: IfNotPresent
+    command:
+    - /bin/bash
+    - -c
+    - "set -uo pipefail\nLOG=/root/.nodes/register.log\n{\necho \"=== register-only\
+      \ job $(date -Iseconds) ===\"\nexport RPC_URL=\"${REGISTER_RPC_OVERRIDE:-$HTTP_RPC}\"\
+      \ncd /bls-middleware/contracts\ncp ~/.nodes/avs_deploy.json avs_deploy.json\n\
+      export REGISTRY_COORDINATOR_ADDRESS=$(jq -r '.addresses.registryCoordinator'\
+      \ avs_deploy.json)\nexport SERVICE_MANAGER_ADDRESS=$(jq -r '.addresses.IncredibleSquaringServiceManager'\
+      \ avs_deploy.json)\nexport AVS_SERVICE_MANAGER_WRAPPER_ADDRESS=$(jq -r '.addresses.avsServiceManagerWrapper\
+      \ // .addresses.AVSServiceManagerWrapper // empty' avs_deploy.json)\nSTAKE_REGISTRY=$(jq\
+      \ -r '.addresses.stakeRegistry' avs_deploy.json)\necho \"rc=$REGISTRY_COORDINATOR_ADDRESS\
+      \ sm=$SERVICE_MANAGER_ADDRESS wrap=$AVS_SERVICE_MANAGER_WRAPPER_ADDRESS sr=$STAKE_REGISTRY\"\
+      \nFAIL=0\nfor i in $(seq 1 10); do\n  echo \"--- operator $i ---\"\n  cp ~/.nodes/operator_keys/testacc${i}.private.ecdsa.key.json\
+      \ private.ecdsa.json\n  cp ~/.nodes/operator_keys/testacc${i}.private.bls.key.json\
+      \ private.bls.json\n  export OPERATOR_PRIVATE_KEY=$(jq -r .privateKey private.ecdsa.json)\n\
+      \  OPERATOR_ADDRESS=$(cast wallet address --private-key $OPERATOR_PRIVATE_KEY)\n\
+      \  export OPERATOR_ID=\"testacc${i}\"\n  W=$(cast call $STAKE_REGISTRY \"weightOfOperatorForQuorum(uint8,address)(uint96)\"\
+      \ 0 $OPERATOR_ADDRESS --rpc-url $RPC_URL 2>/dev/null || echo 0)\n  if [ \"${W%%\
+      \ *}\" != \"0\" ]; then echo \"operator $i already has weight $W \u2014 skipping\"\
+      ; continue; fi\n  OK=0\n  for a in 1 2 3; do\n    if [ \"$a\" = \"2\" ]; then\
+      \ export SKIP_ALLOCATION=false; else export SKIP_ALLOCATION=true; fi\n    echo\
+      \ \"register attempt $a for $OPERATOR_ADDRESS (SKIP_ALLOCATION=$SKIP_ALLOCATION)\"\
+      \n    forge script script/RegisterOperator.s.sol --rpc-url \"$RPC_URL\" --private-key\
+      \ $OPERATOR_PRIVATE_KEY --isolate --slow --skip-simulation --broadcast 2>&1\
+      \ | tail -25\n    RC=$?\n    W=$(cast call $STAKE_REGISTRY \"weightOfOperatorForQuorum(uint8,address)(uint96)\"\
+      \ 0 $OPERATOR_ADDRESS --rpc-url $RPC_URL 2>/dev/null || echo 0)\n    echo \"\
+      attempt $a rc=$RC weight=$W\"\n    if [ \"${W%% *}\" != \"0\" ]; then OK=1;\
+      \ break; fi\n    sleep 10\n  done\n  if [ $OK -ne 1 ]; then echo \"FAILED to\
+      \ register operator $i\"; FAIL=1; continue; fi\n  echo \"Operator $i weight\
+      \ in quorum: $W\"\ndone\nif [ $FAIL -eq 0 ]; then\n  chmod -R 755 /root/.nodes;\
+      \ chmod 644 /root/.nodes/avs_deploy.json /root/.nodes/operator_keys/*.json\n\
+      \  touch /root/.nodes/.setup_complete; chmod 644 /root/.nodes/.setup_complete\n\
+      \  echo \"=== ALL 10 REGISTERED \u2014 setup marker created ===\"\nelse\n  echo\
+      \ \"=== REGISTER-ONLY FAILED ===\"; exit 1\nfi\n} 2>&1 | tee -a $LOG\nexit ${PIPESTATUS[0]}\n"
+    env:
+    - name: ENVIRONMENT
+      value: TESTNET
+    - name: HTTP_RPC
+      valueFrom:
+        secretKeyRef:
+          name: gas-killer-secret
+          key: HTTP_RPC
+    - name: TEST_ACCOUNTS
+      value: '10'
+    - name: PRIVATE_KEY
+      valueFrom:
+        secretKeyRef:
+          name: gas-killer-secret
+          key: PRIVATE_KEY
+    - name: FUNDED_KEY
+      valueFrom:
+        secretKeyRef:
+          name: gas-killer-secret
+          key: FUNDED_KEY
+    - name: DELEGATION_MANAGER_ADDRESS
+      value: '0xD4A7E1Bd8015057293f0D0A557088c286942e84b'
+    - name: STRATEGY_MANAGER_ADDRESS
+      value: '0x2E3D6c0744b10eb0A4e6F679F71554a39Ec47a5D'
+    - name: LST_CONTRACT_ADDRESS
+      value: '0x00c71b0fcadE911B2feeE9912De4Fe19eB04ca56'
+    - name: LST_STRATEGY_ADDRESS
+      value: '0x8b29d91e67b013e855EaFe0ad704aC4Ab086a574'
+    - name: ALLOCATION_MANAGER_ADDRESS
+      value: '0x42583067658071247ec8CE0A516A58f682002d07'
+    - name: QUORUM_THRESHOLD
+      value: '2'
+    - name: THRESHOLD_DENOMINATOR
+      value: '3'
+    - name: BLOCK_STALE_MEASURE
+      value: '300'
+    - name: SKIP_ALLOCATION
+      value: 'true'
+    - name: REGISTER_RPC_OVERRIDE
+      value: https://ethereum-sepolia-rpc.publicnode.com
+    volumeMounts:
+    - name: shared-data
+      mountPath: /root/.nodes
+    - name: config
+      mountPath: /bls-middleware/contracts/docker/eigenlayer/config.json
+      subPath: config.json
+      readOnly: true
+    - name: register-hardened
+      mountPath: /register.sh
+      subPath: register.sh
+    - name: reg-patched
+      mountPath: /bls-middleware/contracts/script/RegisterOperator.s.sol
+      subPath: RegisterOperator.s.sol
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+      requests:
+        cpu: 500m
+        memory: 1Gi
+  volumes:
+  - name: shared-data
+    persistentVolumeClaim:
+      claimName: gas-killer-shared-data
+  - name: config
+    configMap:
+      name: gas-killer-config
+  - name: register-hardened
+    configMap:
+      name: register-hardened
+      defaultMode: 493
+  - name: reg-patched
+    configMap:
+      name: register-operator-patched
+  nodeSelector:
+    role: tenop

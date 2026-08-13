@@ -1,0 +1,1800 @@
+//! Sharded-inference segment channel: the router's shard coordinator splits one
+//! LLM inference into hash-committed segments (`Qwen3SegEngine.forwardRange` /
+//! `argmaxRange` view calls) and assigns each to a k-of-N operator committee.
+//! Operator nodes poll `GET /shard/work?operator=<id>` (the same sidecar pattern
+//! as the prewarm channel: nodes have no ingress, they poll the router's internal
+//! server), execute the pre-encoded view call against their own simulation RPC,
+//! and `POST /shard/result` with the raw returndata. All DAG logic — planning,
+//! committee assignment, boundary-state threading, argmax merging, commit-chain
+//! assembly — lives router-side; the node stays a dumb, cache-keeping executor.
+//!
+//! The trust hook is the VALIDATOR GATE: when a round's task targets the
+//! configured sharded consumer (`GK_SHARD_CONSUMER`), the node refuses to sign
+//! unless it can fetch the commit chain for the task's `pipelineRoot`, re-derive
+//! the root from the segment commitments, confirm the answer ids, and confirm
+//! that every segment it executed itself is present with exactly the digest it
+//! computed locally. An operator signature over a sharded round therefore means
+//! "I verified the chain, and I personally executed my committee's share of it".
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
+
+use alloy::rpc::types::TransactionRequest;
+use alloy::sol;
+use alloy::sol_types::SolCall;
+use alloy_primitives::{Address, B256, keccak256};
+use gas_analyzer::{EvmSketchExecutorCache, LocalStateCache, SimProfile, call_view_local_multi};
+
+sol! {
+    /// Mirror of `Qwen3Seg.Span` (solidity-sdk).
+    struct SegSpan {
+        uint256 maxPos;
+        uint256 posLo;
+        uint256 posHi;
+        uint256 layerLo;
+        uint256 layerHi;
+    }
+
+    /// Mirror of `Qwen3Seg.Call` (solidity-sdk).
+    struct SegCall {
+        SegSpan span;
+        uint32[] tokenIds;
+        bytes xIn;
+        bytes kvIn;
+        bytes32 expectXIn;
+        bytes32 expectKvIn;
+    }
+
+    /// Mirror of `Qwen3SegEngine.forwardRange` (solidity-sdk).
+    function forwardRange(
+        address rootDirectory,
+        bytes32 manifestHash,
+        bytes32[3] packedConfig,
+        SegCall q
+    ) external view returns (bytes memory xOut, bytes memory kvAppend, bytes32 chk);
+
+    /// Mirror of `Qwen3SegEngine.argmaxRange` (solidity-sdk).
+    function argmaxRange(
+        address rootDirectory,
+        bytes32 manifestHash,
+        bytes32[3] packedConfig,
+        bytes memory xbFinal,
+        uint256 vocabLo,
+        uint256 vocabHi
+    ) external view returns (int256 bestScore, uint256 bestId);
+
+    /// Mirror of `GasKillerChatSharded.fulfil` (solidity-sdk) — the tracked,
+    /// pure-commit settlement function whose calldata the validator gate decodes.
+    /// Shared by the 0.6B (`GasKillerChatSharded`) and 35B
+    /// (`GasKillerChat35Sharded`) consumers: identical signature/selector, only
+    /// the CHAT_DOMAIN differs, so one gate decoder serves both. Selector
+    /// 0x9c98c06e (pinned in `common/tests/shard_selectors.rs`).
+    function fulfil(
+        uint32[] promptIds,
+        uint256 maxNewTokens,
+        uint32[] answerIds,
+        bytes32 pipelineRoot
+    ) external;
+
+    /// Mirror of `GasKillerChatSharded.fulfilResumed` (solidity-sdk, consumer
+    /// commit 2a2071c) — settles a resumed answer that reused a warmed prefix's
+    /// per-stage boundary state. `prefixRoot` binds the settled prefix pipeline
+    /// this run threaded from; the validator gate re-derives the resumed chain,
+    /// fetches the prefix chain, and binds the actual per-stage terminal state
+    /// (see [`ShardState::verify_resume_lineage`]). Selector 0x6c4d43bc.
+    function fulfilResumed(
+        uint32[] promptIds,
+        uint256 maxNewTokens,
+        uint32[] answerIds,
+        bytes32 pipelineRoot,
+        bytes32 prefixRoot
+    ) external;
+
+    /// Mirror of `GasKillerChatSharded.settledRoots` (solidity-sdk) — the
+    /// on-chain set of pipeline roots settled by a prior
+    /// `fulfil`/`fulfilResumed`/`settlePrefix`. The consumer contract enforces
+    /// that a `fulfilResumed`'s `prefixRoot` is a member; the validator gate can
+    /// additionally read it as a complementary check, but the mandatory binding
+    /// is the actual per-stage terminal state (see
+    /// [`ShardState::verify_resume_lineage`]). Selector 0x56408a4f.
+    function settledRoots(bytes32 root) external view returns (bool settled);
+
+    /// Mirror of `GasKillerChatSharded.settlePrefix` (solidity-sdk, consumer
+    /// commit 2a2071c) — a pure-commit round that admits a committee-executed,
+    /// PREFILL-ONLY prefix chain's root into `settledRoots`, so a later
+    /// `fulfilResumed` may thread from it. The validator gate verifies the warm
+    /// chain (own executed share + the prefill-only shape — no decode/argmax,
+    /// no answer) before signing; that "I verified + I executed my share" of a
+    /// run that STOPPED at the prefix is what makes admitting the root
+    /// trustworthy. Selector 0x7e8de12c; emits
+    /// `PrefixSettled(uint256 indexed transitionIndex, bytes32 indexed prefixRoot, uint32[] prefixIds)`.
+    function settlePrefix(uint32[] prefixIds, bytes32 prefixRoot) external;
+}
+
+/// Build `settlePrefix(prefixIds, prefixRoot)` calldata — the settlement a
+/// warm-prefix run submits through the normal round path (exactly as the
+/// harness submits `fulfil` calldata) to admit `prefixRoot` into `settledRoots`.
+pub fn encode_settle_prefix(prefix_ids: &[u32], prefix_root: B256) -> Vec<u8> {
+    settlePrefixCall {
+        prefixIds: prefix_ids.to_vec(),
+        prefixRoot: prefix_root,
+    }
+    .abi_encode()
+}
+
+/// Engine-v3 (Qwen3.5-35B-A3B, `Qwen35SegEngine`) segment ABI. Kept in its own
+/// module because alloy's `sol!` derives the call struct name from the function
+/// name (`forwardRange`/`argmaxRange`), so the 0.6B and 35B families would
+/// otherwise collide. Two differences vs the 0.6B ABI above: (1) `packedConfig`
+/// is `bytes32[4]` — SPEC §10 adds a 4th packed word; (2) the segment carries a
+/// unified `stateIn`/`stateAppend` (full-attention KV **and** DeltaNet recurrent
+/// snapshots), not the KV-only `kvIn`.
+///
+/// The return SHAPE is identical to the 0.6B forward — `(bytes, bytes, bytes32)`
+/// — so `seg_chk(Forward, ..)` (third head word) is model-agnostic and needs no
+/// change. Selectors are pinned in `common/tests/shard_selectors.rs` (forwardRange
+/// 0x4faab046, argmaxRange 0x18d6ba7d — from the Qwen35Seg engine, commit 916ad17).
+pub mod seg35 {
+    use alloy::sol;
+
+    sol! {
+        /// Mirror of `Qwen35Seg.Span`.
+        struct Span35 {
+            uint256 maxPos;
+            uint256 posLo;
+            uint256 posHi;
+            uint256 layerLo;
+            uint256 layerHi;
+        }
+
+        /// Mirror of `Qwen35Seg.Call` — note `stateIn`/`expectStateIn` (unified
+        /// full-attention KV + DeltaNet conv/S snapshots) replacing `kvIn`.
+        struct Call35 {
+            Span35 span;
+            uint32[] tokenIds;
+            bytes xIn;
+            bytes stateIn;
+            bytes32 expectXIn;
+            bytes32 expectStateIn;
+        }
+
+        /// Mirror of `Qwen35SegEngine.forwardRange`.
+        function forwardRange(
+            address rootDirectory,
+            bytes32 manifestHash,
+            bytes32[4] packedConfig,
+            Call35 q
+        ) external view returns (bytes memory xOut, bytes memory stateAppend, bytes32 chk);
+
+        /// Mirror of `Qwen35SegEngine.argmaxRange`.
+        function argmaxRange(
+            address rootDirectory,
+            bytes32 manifestHash,
+            bytes32[4] packedConfig,
+            bytes memory xbFinal,
+            uint256 vocabLo,
+            uint256 vocabHi
+        ) external view returns (int256 bestScore, uint256 bestId);
+    }
+}
+
+/// Segment kind, mirrored in job/chain records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SegKind {
+    Forward,
+    Argmax,
+}
+
+/// One unit of work for an operator: a pre-encoded view call. The node never
+/// interprets the model — it executes `eth_call{to, data, gas}` and returns the
+/// raw returndata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardJob {
+    pub infer_id: String,
+    pub seg_id: u64,
+    pub kind: SegKind,
+    pub to: Address,
+    #[serde(with = "hex_bytes")]
+    pub data: Vec<u8>,
+    pub gas: u64,
+}
+
+/// `GET /shard/work?operator=<id>` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardWork {
+    pub jobs: Vec<ShardJob>,
+}
+
+/// The pinned local-execution environment segment view calls run through
+/// under `GK_SIM_EXECUTOR=local` — built by
+/// [`crate::GasKillerValidator::local_view_ctx`] from the validator's OWN
+/// caches and config, so a segment executes in exactly the environment the
+/// tracked-function path uses: same memoized manifest-verified mmap overlay
+/// mounts, same pinned [`SimProfile`], same lazy remote-state backend.
+///
+/// This is what makes phantom-overlay models (the ~34GB Qwen3.5-35B-A3B)
+/// servable as segments at all: their chunks exist on no RPC node, so a
+/// plain `eth_call` reads empty code — the overlay must mount in-process.
+#[derive(Clone)]
+pub struct LocalViewCtx {
+    pub executor_cache: Arc<EvmSketchExecutorCache>,
+    pub local_state_cache: Arc<LocalStateCache>,
+    pub sim_profile: SimProfile,
+    /// One `(weights_path, tokenizer_path, manifest)` spec per pinned model
+    /// (`GK_OVERLAY_WEIGHTS[_N]`/...). Empty mounts nothing — segments then
+    /// see only base chain state, correct for consumers without overlays.
+    pub overlay_files: Vec<(String, String, B256)>,
+}
+
+/// `POST /shard/result` body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardResultMsg {
+    pub infer_id: String,
+    pub seg_id: u64,
+    pub operator: u32,
+    #[serde(with = "hex_bytes")]
+    pub returndata: Vec<u8>,
+}
+
+/// One link of the commit chain, as served at `GET /shard/chain/<root>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainEntry {
+    pub seg_id: u64,
+    pub kind: SegKind,
+    pub committee: Vec<u32>,
+    pub chk: B256,
+    pub returndata_hash: B256,
+    /// For a `Forward` segment: the `keccak256(stateIn)` commitment of the
+    /// boundary state this segment threaded FROM (the engine verifies
+    /// `keccak(stateIn) == expectStateIn` in-engine). Zero for argmax segments
+    /// and for a forward segment that threaded from empty state. The resume
+    /// lineage gate binds a resumed run's first-pass forward segments to the
+    /// prefix run's terminal state through this field. Not folded into
+    /// `pipeline_root` (see [`ShardChain::derive_root`]) — it is gate metadata
+    /// anchored per-node by the executed-segment digest check.
+    #[serde(default)]
+    pub expect_state_in: B256,
+}
+
+/// The full commit chain for one sharded inference. `pipeline_root` is the
+/// keccak fold of every entry's `chk` in `seg_id` order — exactly what the
+/// consumer's `fulfil` calldata carries and what the validator gate re-derives.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardChain {
+    pub infer_id: String,
+    pub consumer: Address,
+    pub prompt_ids: Vec<u32>,
+    pub max_new: u64,
+    pub answer_ids: Vec<u32>,
+    pub pipeline_root: B256,
+    pub entries: Vec<ChainEntry>,
+    /// Set on a RESUMED run: the settled prefix pipeline root this run threaded
+    /// from (matches the `prefixRoot` of `fulfilResumed`). `None` for a fresh
+    /// (non-resumed) run and for a prefix warm chain itself.
+    #[serde(default)]
+    pub prefix_root: Option<B256>,
+    /// Number of leading prompt positions supplied by a warmed prefix. On a
+    /// PREFIX warm chain this is the prefix length (== `prompt_ids.len()`); on a
+    /// RESUMED run it is how many positions of `prompt_ids` were skipped (the
+    /// first prefill pass covers `[prefix_len, prompt_ids.len())`). Zero for a
+    /// fresh run.
+    #[serde(default)]
+    pub prefix_len: u64,
+    /// Per-stage terminal boundary-state commitment (`keccak256(state_in)`),
+    /// indexed by stage. On a PREFIX warm chain: the state after prefilling
+    /// `[0, prefix_len)` — exactly the `expectStateIn` a resume must thread
+    /// from. On a RESUMED run: the commitment its first-pass forward segments
+    /// threaded from (equal, by construction, to the prefix chain's). Empty for
+    /// a fresh run.
+    #[serde(default)]
+    pub stage_state_commitments: Vec<B256>,
+}
+
+impl ShardChain {
+    /// Re-derives the pipeline root from the entries (keccak over the
+    /// concatenated segment commitments in seg_id order).
+    pub fn derive_root(&self) -> B256 {
+        let mut sorted: Vec<&ChainEntry> = self.entries.iter().collect();
+        sorted.sort_by_key(|e| e.seg_id);
+        let mut buf = Vec::with_capacity(sorted.len() * 32);
+        for e in &sorted {
+            buf.extend_from_slice(e.chk.as_slice());
+        }
+        keccak256(&buf)
+    }
+}
+
+/// What a node remembers about a segment it executed: enough to later verify
+/// the router-assembled chain against its own computation.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutedSeg {
+    pub returndata_hash: B256,
+    pub chk: B256,
+    /// For a `Forward` segment, the `expectStateIn` this node's engine verified
+    /// (`keccak(stateIn) == expectStateIn`), extracted from the segment
+    /// calldata. Zero for argmax. The resume lineage gate cross-checks a
+    /// resumed first-pass segment's chain `expect_state_in` against this
+    /// engine-anchored value, so the state binding is grounded in execution —
+    /// not merely in coordinator-served metadata.
+    pub expect_state_in: B256,
+}
+
+/// Node-side shard state, shared between the poll/execute loop (writer) and the
+/// validator gate (reader).
+#[derive(Debug)]
+pub struct ShardState {
+    /// This operator's id in the coordinator's committee space (0..N).
+    pub operator_id: u32,
+    /// Optional sharded-consumer allowlist. `Some(addr)` gates only rounds
+    /// targeting that address; `None` gates any round whose calldata is a
+    /// `fulfil(...)` call — which lets sharding be enabled at node startup
+    /// (before the consumer is deployed), so the p2p mesh forms once instead
+    /// of being torn by a mid-run node recreation.
+    pub consumer: Option<Address>,
+    /// Base URL of the router's internal server, e.g. `http://router:8081`.
+    pub router_base: String,
+    /// Weight-sharding capability advertisement. `layer_range = Some((lo, hi))`
+    /// means this worker HOLDS only layers `[lo, hi)` of the model (a
+    /// weight-shard slice) and may execute only segments whose layer span it
+    /// covers; `None` (the default) means "full model" — today's behavior, no
+    /// advertisement sent, so the router falls back to unrestricted committee
+    /// rotation. `has_embedding`/`has_classifier` advertise the embedding
+    /// (layer-0) stage and the vocab-classifier (argmax) capability, which for a
+    /// weight-shard fleet live only on the first/last slice respectively.
+    pub layer_range: Option<(u64, u64)>,
+    pub has_embedding: bool,
+    pub has_classifier: bool,
+    executed: Mutex<HashMap<(String, u64), ExecutedSeg>>,
+}
+
+impl ShardState {
+    pub fn new(operator_id: u32, consumer: Option<Address>, router_base: String) -> Self {
+        Self {
+            operator_id,
+            consumer,
+            router_base,
+            layer_range: None,
+            has_embedding: false,
+            has_classifier: false,
+            executed: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Advertise this worker's held weight-shard slice (env
+    /// `GK_SHARD_LAYER_LO`/`GK_SHARD_LAYER_HI`/`GK_SHARD_HAS_EMBEDDING`/
+    /// `GK_SHARD_HAS_CLASSIFIER`). The values are appended to the work-poll query
+    /// so the router's layer-affinity planner learns the fleet layout without a
+    /// separate registration round-trip.
+    pub fn with_capabilities(
+        mut self,
+        layer_range: Option<(u64, u64)>,
+        has_embedding: bool,
+        has_classifier: bool,
+    ) -> Self {
+        self.layer_range = layer_range;
+        self.has_embedding = has_embedding;
+        self.has_classifier = has_classifier;
+        self
+    }
+
+    /// Whether this task is a sharded-settlement round this node must gate:
+    /// calldata is a `fulfil(...)`, `fulfilResumed(...)`, or `settlePrefix(...)`
+    /// call and (when a consumer allowlist is configured) it targets that
+    /// consumer.
+    pub fn gates(&self, target: Address, call_data: &[u8]) -> bool {
+        let sel_matches = call_data.len() >= 4
+            && (call_data[0..4] == fulfilCall::SELECTOR
+                || call_data[0..4] == fulfilResumedCall::SELECTOR
+                || call_data[0..4] == settlePrefixCall::SELECTOR);
+        sel_matches && self.consumer.map(|c| c == target).unwrap_or(true)
+    }
+
+    pub fn record(&self, infer_id: &str, seg_id: u64, seg: ExecutedSeg) {
+        self.executed
+            .lock()
+            .expect("shard executed lock poisoned")
+            .insert((infer_id.to_string(), seg_id), seg);
+    }
+
+    pub fn executed(&self, infer_id: &str, seg_id: u64) -> Option<ExecutedSeg> {
+        self.executed
+            .lock()
+            .expect("shard executed lock poisoned")
+            .get(&(infer_id.to_string(), seg_id))
+            .copied()
+    }
+
+    /// The validator gate. Dispatches on the settlement selector:
+    ///
+    /// - `fulfil(...)`         — a fresh (non-resumed) answer.
+    /// - `fulfilResumed(...)`  — an answer that reused a warmed prefix; the
+    ///   base checks below PLUS the resume LINEAGE binding (see
+    ///   [`Self::verify_resume_lineage`]).
+    ///
+    /// In both cases the base verification fetches the commit chain for the
+    /// calldata's `pipelineRoot` from the router and verifies:
+    /// 1. the chain's derived root matches both the served and calldata roots,
+    /// 2. the chain's answer/prompt ids match the calldata,
+    /// 3. every entry whose committee includes this operator matches the
+    ///    digest this node computed when it executed that segment itself,
+    /// 4. this node actually executed at least one segment of the chain.
+    ///
+    /// Any failure returns Err — the caller must refuse to sign.
+    pub async fn verify_fulfil_task(&self, call_data: &[u8]) -> Result<()> {
+        let sel = if call_data.len() >= 4 {
+            &call_data[0..4]
+        } else {
+            bail!("shard gate: calldata too short for a settlement selector");
+        };
+        let is_resumed = sel == fulfilResumedCall::SELECTOR;
+        let is_settle_prefix = sel == settlePrefixCall::SELECTOR;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .context("shard gate: building HTTP client")?;
+
+        if is_settle_prefix {
+            return self.verify_settle_prefix_task(&client, call_data).await;
+        }
+
+        if is_resumed {
+            let call = fulfilResumedCall::abi_decode(call_data)
+                .context("shard gate: calldata is not fulfilResumed()")?;
+            let root = call.pipelineRoot;
+            let prefix_root = call.prefixRoot;
+            if root == B256::ZERO {
+                bail!("shard gate: zero pipeline root");
+            }
+            if prefix_root == B256::ZERO {
+                bail!("shard gate: fulfilResumed with zero prefix root");
+            }
+            let resumed = self.fetch_chain(&client, root).await?;
+            self.verify_base_chain(&resumed, &call.promptIds, &call.answerIds, root)?;
+
+            // The prefix pipeline this run threaded from must itself be a
+            // committee-verified chain (re-derived from its own entries). Do NOT
+            // trust settledRoots[prefixRoot] alone — bind the ACTUAL per-stage
+            // terminal state below.
+            let prefix = self.fetch_chain(&client, prefix_root).await?;
+            let derived = prefix.derive_root();
+            if derived != prefix_root || prefix.pipeline_root != prefix_root {
+                bail!(
+                    "shard gate: prefix root mismatch (calldata {prefix_root}, served {}, derived {derived})",
+                    prefix.pipeline_root
+                );
+            }
+            // If this node executed any of the prefix's own segments, they must
+            // match too (same anchor as the resumed chain).
+            self.verify_own_segments(&prefix)?;
+            self.verify_resume_lineage(&resumed, &prefix, prefix_root)?;
+            info!(
+                pipeline_root = %root,
+                prefix_root = %prefix_root,
+                prefix_len = resumed.prefix_len,
+                "shard gate: verified RESUMED commit chain — prefix ids + per-stage terminal state bound"
+            );
+            Ok(())
+        } else {
+            let call = fulfilCall::abi_decode(call_data).context(
+                "shard gate: task targets the sharded consumer but calldata is not fulfil()",
+            )?;
+            let root = call.pipelineRoot;
+            if root == B256::ZERO {
+                bail!("shard gate: zero pipeline root");
+            }
+            let chain = self.fetch_chain(&client, root).await?;
+            self.verify_base_chain(&chain, &call.promptIds, &call.answerIds, root)?;
+            info!(
+                pipeline_root = %root,
+                total_segments = chain.entries.len(),
+                "shard gate: verified commit chain — my executed segments match, root and answer ids check out"
+            );
+            Ok(())
+        }
+    }
+
+    /// Fetch the commit chain for `root` from the router's `/shard/chain/<root>`.
+    async fn fetch_chain(&self, client: &reqwest::Client, root: B256) -> Result<ShardChain> {
+        let url = format!("{}/shard/chain/{root}", self.router_base);
+        client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("shard gate: GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("shard gate: GET {url}"))?
+            .json()
+            .await
+            .context("shard gate: decoding chain")
+    }
+
+    /// Base checks common to `fulfil` and `fulfilResumed`: root re-derivation,
+    /// answer/prompt id equality, own-segment digest match, and non-empty own
+    /// participation.
+    fn verify_base_chain(
+        &self,
+        chain: &ShardChain,
+        prompt_ids: &[u32],
+        answer_ids: &[u32],
+        root: B256,
+    ) -> Result<()> {
+        let derived = chain.derive_root();
+        if derived != root || chain.pipeline_root != root {
+            bail!(
+                "shard gate: root mismatch (calldata {root}, served {}, derived {derived})",
+                chain.pipeline_root
+            );
+        }
+        if chain.answer_ids != answer_ids {
+            bail!(
+                "shard gate: answer ids mismatch (chain {:?}, calldata {:?})",
+                chain.answer_ids,
+                answer_ids
+            );
+        }
+        if chain.prompt_ids != prompt_ids {
+            bail!("shard gate: prompt ids mismatch");
+        }
+        let own = self.verify_own_segments(chain)?;
+        if own == 0 {
+            bail!(
+                "shard gate: I executed no segment of pipeline {root} — refusing to attest work I never saw"
+            );
+        }
+        Ok(())
+    }
+
+    /// Verify every chain entry whose committee includes this operator against
+    /// the digest this node computed when it executed that segment. Returns the
+    /// count of own segments. Does NOT require own participation (the caller
+    /// decides): a node may not have executed any of a *prefix* chain's segments.
+    fn verify_own_segments(&self, chain: &ShardChain) -> Result<usize> {
+        let mut own = 0usize;
+        for entry in &chain.entries {
+            if !entry.committee.contains(&self.operator_id) {
+                continue;
+            }
+            let Some(mine) = self.executed(&chain.infer_id, entry.seg_id) else {
+                bail!(
+                    "shard gate: chain claims I executed segment {} of {} but I have no record of it",
+                    entry.seg_id,
+                    chain.infer_id
+                );
+            };
+            if mine.returndata_hash != entry.returndata_hash || mine.chk != entry.chk {
+                bail!(
+                    "shard gate: segment {} digest mismatch (mine chk {} vs chain {})",
+                    entry.seg_id,
+                    mine.chk,
+                    entry.chk
+                );
+            }
+            // For a resumed first-pass forward segment, the chain's claimed
+            // threaded-from commitment must equal the one THIS node's engine
+            // verified (`keccak(stateIn) == expectStateIn`) — grounding the
+            // lineage binding in execution, not coordinator-served metadata.
+            if entry.expect_state_in != B256::ZERO
+                && mine.expect_state_in != B256::ZERO
+                && mine.expect_state_in != entry.expect_state_in
+            {
+                bail!(
+                    "shard gate: segment {} expectStateIn mismatch (mine {} vs chain {})",
+                    entry.seg_id,
+                    mine.expect_state_in,
+                    entry.expect_state_in
+                );
+            }
+            own += 1;
+        }
+        Ok(own)
+    }
+
+    /// Resume LINEAGE verification (the mandatory correctness fix for the resume
+    /// path). Given a RESUMED chain and the PREFIX chain it claims to have
+    /// threaded from, binds them so a resumed answer cannot silently smuggle a
+    /// different prefix:
+    ///
+    /// (a) **Prompt-prefix equality** — the resumed run's leading `prefix_len`
+    ///     prompt ids equal the prefix run's prompt ids (the prefix content).
+    /// (b) **Per-stage terminal-state binding** — the resumed run's first-pass
+    ///     forward segments thread from EXACTLY the prefix run's per-stage
+    ///     terminal state commitments (`stage_state_commitments`), which are
+    ///     the `expectStateIn` an honest resume must use. This is bound both as
+    ///     the whole-vector equality AND per first-pass segment, and (via
+    ///     [`Self::verify_own_segments`]) anchored to what this node's engine
+    ///     actually verified for segments it executed.
+    ///
+    /// The prefix chain's own root re-derivation (committee verification) is
+    /// checked by the caller before this runs.
+    pub fn verify_resume_lineage(
+        &self,
+        resumed: &ShardChain,
+        prefix: &ShardChain,
+        prefix_root: B256,
+    ) -> Result<()> {
+        // The resumed chain must declare it resumed from this prefix root.
+        match resumed.prefix_root {
+            Some(r) if r == prefix_root => {}
+            other => bail!(
+                "shard gate: resumed chain prefix_root {other:?} != calldata prefixRoot {prefix_root}"
+            ),
+        }
+        let prefix_len = resumed.prefix_len;
+        if prefix_len == 0 {
+            bail!("shard gate: resumed chain declares zero prefix_len");
+        }
+        // (a) prompt-prefix equality — the prefix chain IS the cached prefix.
+        if prefix.prompt_ids.len() as u64 != prefix_len {
+            bail!(
+                "shard gate: prefix chain length {} != resumed prefix_len {prefix_len}",
+                prefix.prompt_ids.len()
+            );
+        }
+        if (resumed.prompt_ids.len() as u64) < prefix_len {
+            bail!("shard gate: resumed prompt shorter than declared prefix_len {prefix_len}");
+        }
+        if resumed.prompt_ids[..prefix_len as usize] != prefix.prompt_ids[..] {
+            bail!("shard gate: resumed prompt prefix != cached prefix ids");
+        }
+        // (b) per-stage terminal-state binding.
+        let commits = &prefix.stage_state_commitments;
+        if commits.is_empty() {
+            bail!("shard gate: prefix chain carries no per-stage terminal state commitments");
+        }
+        if resumed.stage_state_commitments != *commits {
+            bail!(
+                "shard gate: resumed run's threaded-from state commitments do not match the prefix's terminal state"
+            );
+        }
+        // Bind each first-pass forward segment (seg_id 0..stages) to the prefix
+        // terminal state for its stage. The first prefill pass numbers its
+        // forward segments 0..S by stage (see the coordinator's deterministic
+        // seg-id formulas), so seg_id doubles as the stage index here.
+        let stages = commits.len() as u64;
+        for entry in &resumed.entries {
+            if entry.kind != SegKind::Forward || entry.seg_id >= stages {
+                continue;
+            }
+            let want = commits[entry.seg_id as usize];
+            if entry.expect_state_in != want {
+                bail!(
+                    "shard gate: resumed first-pass segment {} threads from {} but the prefix's stage-{} terminal state is {want}",
+                    entry.seg_id,
+                    entry.expect_state_in,
+                    entry.seg_id
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Gate a `settlePrefix` round: the pure-commit settlement that admits a
+    /// PREFILL-ONLY prefix chain's root into `settledRoots`. Applies the same
+    /// "I verified the chain AND executed my share" guarantee as `fulfil` to the
+    /// WARM chain, PLUS confirms the chain STOPPED at the prefix (no
+    /// decode/argmax, no answer) — so the root admitted into `settledRoots`
+    /// represents a pure prefix terminal state a later `fulfilResumed` may
+    /// thread from.
+    async fn verify_settle_prefix_task(
+        &self,
+        client: &reqwest::Client,
+        call_data: &[u8],
+    ) -> Result<()> {
+        let call = settlePrefixCall::abi_decode(call_data)
+            .context("shard gate: calldata is not settlePrefix()")?;
+        let root = call.prefixRoot;
+        if root == B256::ZERO {
+            bail!("shard gate: settlePrefix with zero prefix root");
+        }
+        let chain = self.fetch_chain(client, root).await?;
+
+        // Committee verification: re-derive the root from the served chain.
+        let derived = chain.derive_root();
+        if derived != root || chain.pipeline_root != root {
+            bail!(
+                "shard gate: prefix root mismatch (calldata {root}, served {}, derived {derived})",
+                chain.pipeline_root
+            );
+        }
+        // The settled prefix ids must be exactly the warm chain's prompt ids.
+        if chain.prompt_ids != call.prefixIds {
+            bail!("shard gate: settlePrefix prefix ids != warm chain prompt ids");
+        }
+        // PREFILL-ONLY shape: it stopped at the prefix.
+        Self::verify_prefill_only(&chain)?;
+        // "I executed my share" — same anchor as fulfil.
+        let own = self.verify_own_segments(&chain)?;
+        if own == 0 {
+            bail!(
+                "shard gate: I executed no segment of prefix {root} — refusing to attest a prefix I never helped compute"
+            );
+        }
+        info!(
+            prefix_root = %root,
+            prefix_len = chain.prompt_ids.len(),
+            segments = chain.entries.len(),
+            "shard gate: verified settlePrefix — prefill-only warm chain, my executed segments match"
+        );
+        Ok(())
+    }
+
+    /// A warm/prefix chain must have STOPPED at the prefix: only `Forward`
+    /// segments (no decode/argmax), no answer ids, per-stage terminal state
+    /// commitments recorded, and no `prefix_root` of its own. This is what
+    /// distinguishes a resumable prefix (a pure prefill terminal state) from a
+    /// full answer that decoded past the prefix (whose DeltaNet REPLACE
+    /// snapshot cannot be truncated back to the prefix).
+    fn verify_prefill_only(chain: &ShardChain) -> Result<()> {
+        if !chain.answer_ids.is_empty() {
+            bail!(
+                "shard gate: not prefill-only — prefix chain carries {} answer id(s)",
+                chain.answer_ids.len()
+            );
+        }
+        if let Some(bad) = chain.entries.iter().find(|e| e.kind != SegKind::Forward) {
+            bail!(
+                "shard gate: not prefill-only — prefix chain segment {} is {:?} (a decode/argmax segment)",
+                bad.seg_id,
+                bad.kind
+            );
+        }
+        if chain.stage_state_commitments.is_empty() {
+            bail!("shard gate: prefix chain carries no per-stage terminal state commitments");
+        }
+        if chain.prefix_root.is_some() {
+            bail!(
+                "shard gate: prefix chain unexpectedly declares its own prefix_root (a resumed run, not a warm)"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Extracts the segment commitment from a job's raw returndata. `forwardRange`
+/// returns `(bytes, bytes, bytes32)`, so `chk` is the third head word; argmax
+/// segments get a synthetic commitment binding the job calldata to its result.
+pub fn seg_chk(kind: SegKind, job_data: &[u8], returndata: &[u8]) -> Result<B256> {
+    match kind {
+        SegKind::Forward => {
+            if returndata.len() < 96 {
+                bail!("forward returndata too short: {}", returndata.len());
+            }
+            Ok(B256::from_slice(&returndata[64..96]))
+        }
+        SegKind::Argmax => {
+            let mut buf = Vec::with_capacity(24 + job_data.len() + returndata.len());
+            buf.extend_from_slice(b"gaskiller.seg.argmax.v1");
+            buf.extend_from_slice(keccak256(job_data).as_slice());
+            buf.extend_from_slice(returndata);
+            Ok(keccak256(&buf))
+        }
+    }
+}
+
+/// Extract the `expectStateIn` commitment a `Forward` segment threads FROM,
+/// from its pre-encoded calldata. Model-agnostic: tries the 0.6B ABI
+/// (`expectKvIn`) then the 35B ABI (`expectStateIn`) — the node executes
+/// segments without knowing the model family. Returns zero for argmax jobs or
+/// calldata that matches neither forward ABI (the gate treats a zero here as
+/// "no threaded-from binding recorded").
+pub fn forward_expect_state_in(kind: SegKind, job_data: &[u8]) -> B256 {
+    if kind != SegKind::Forward {
+        return B256::ZERO;
+    }
+    if let Ok(call) = forwardRangeCall::abi_decode(job_data) {
+        return call.q.expectKvIn;
+    }
+    if let Ok(call) = seg35::forwardRangeCall::abi_decode(job_data) {
+        return call.q.expectStateIn;
+    }
+    B256::ZERO
+}
+
+/// Poll interval for the node's shard loop (`GK_SHARD_POLL_MS`, default 500).
+fn shard_poll_interval() -> Duration {
+    let ms = std::env::var("GK_SHARD_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(500);
+    Duration::from_millis(ms)
+}
+
+/// The Phase-4 fast path: execute the segment through the `gk-fast-view` sidecar
+/// (revm-41 + revmc AOT/JIT), returning byte-identical returndata to
+/// [`local_view_call`]'s interpreter path but on the compiled engine artifact.
+///
+/// ## Why a sidecar (the co-link blocker)
+///
+/// `gk-fast-view` is on revm-41 + revmc; this service is pinned to revm-31 via
+/// the SP1/reth entanglement. Two revm majors export incompatible copies of the
+/// same types (`AccountInfo`, `Bytecode`, `ExecutionResult`, the `Database`
+/// traits) and cannot be linked into one binary, so the fast executor lives in a
+/// standalone crate with its own `Cargo.lock` and is invoked out-of-process.
+///
+/// ## What is passed
+///
+/// An overlay-mode seg-engine view call (`rootDirectory == address(0)`) reads
+/// only (a) the engine contract's own code and (b) overlay chunk accounts served
+/// from the mounted weights. So the base state the sidecar needs is just the
+/// engine bytecode, fetched here via `eth_getCode` and handed over inline; the
+/// multi-gigabyte weights come from the same local `overlay_files` this validator
+/// already mmap-mounts. The sidecar issues no RPC of its own.
+///
+/// `GK_FAST_VIEW_BIN` overrides the binary path (default `gk-fast-view` on
+/// `PATH`); `GK_FAST_VIEW_SPEC` overrides the hardfork the engine is compiled +
+/// executed under (default `CANCUN`) and MUST match the chain's spec.
+async fn fast_view_call(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    ctx: &LocalViewCtx,
+    job: &ShardJob,
+) -> Result<Vec<u8>> {
+    use std::fmt::Write as _;
+
+    let engine_code = eth_get_code(client, rpc_url, job.to).await?;
+    if engine_code.is_empty() {
+        bail!(
+            "seg engine {} has no code at head; gk-fast-view cannot compile it",
+            job.to
+        );
+    }
+    let spec = std::env::var("GK_FAST_VIEW_SPEC").unwrap_or_else(|_| "CANCUN".to_string());
+    let profile = match ctx.sim_profile {
+        SimProfile::Chain => "Chain",
+        SimProfile::UnboundedV1 => "UnboundedV1",
+        SimProfile::UnboundedV1Xl => "UnboundedV1Xl",
+    };
+
+    // Build the `gk_fast_view::job` text format. `from` is the zero address —
+    // the interpreter path builds its tx with no `from` (defaults to zero), so
+    // matching it keeps CALLER identical.
+    let mut jt = String::new();
+    let _ = writeln!(jt, "spec {spec}");
+    let _ = writeln!(jt, "profile {profile}");
+    let _ = writeln!(jt, "from {}", "0".repeat(40));
+    let _ = writeln!(jt, "to {}", hex::encode(job.to.as_slice()));
+    let _ = writeln!(jt, "input {}", hex::encode(&job.data));
+    let _ = writeln!(jt, "gas {}", job.gas);
+    let _ = writeln!(
+        jt,
+        "account {} {}",
+        hex::encode(job.to.as_slice()),
+        hex::encode(&engine_code)
+    );
+    // Base contracts the engine calls INTO beyond itself. The 35B engine
+    // STATICCALLs a separately-deployed `Qwen35SegForward` (EIP-170 split);
+    // without its code inlined the fast executor sees an empty account there
+    // and the segment reverts after burning ~236B gas (observed live), while
+    // the interpreter — which reads the full fork state — succeeds. The
+    // sidecar's base state is EmptyDB + these explicit accounts, so every
+    // dependency must be listed: GK_FAST_VIEW_EXTRA_ACCOUNTS, comma-separated
+    // addresses, each fetched at head exactly like the engine. A configured
+    // address with no code is a loud error (misconfig must not silently
+    // degrade to the interpreter).
+    if let Ok(extra) = std::env::var("GK_FAST_VIEW_EXTRA_ACCOUNTS") {
+        for addr_s in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let addr: Address = addr_s
+                .parse()
+                .with_context(|| format!("GK_FAST_VIEW_EXTRA_ACCOUNTS: bad address {addr_s:?}"))?;
+            let code = eth_get_code(client, rpc_url, addr).await?;
+            if code.is_empty() {
+                bail!(
+                    "GK_FAST_VIEW_EXTRA_ACCOUNTS address {addr} has no code at head \
+                     (is the fork missing it?)"
+                );
+            }
+            let _ = writeln!(
+                jt,
+                "account {} {}",
+                hex::encode(addr.as_slice()),
+                hex::encode(&code)
+            );
+        }
+    }
+    for (weights, tokenizer, manifest) in &ctx.overlay_files {
+        let _ = writeln!(
+            jt,
+            "mount_files {weights} {tokenizer} {}",
+            hex::encode(manifest.as_slice())
+        );
+    }
+
+    let bin = std::env::var("GK_FAST_VIEW_BIN").unwrap_or_else(|_| "gk-fast-view".to_string());
+    let seg_id = job.seg_id;
+    // Liveness watchdog: a wedged-but-alive daemon (stuck mid-job, pipe still
+    // open) would otherwise block this caller — and, via the sidecar Mutex,
+    // every other fast-path segment — forever, with the interpreter fallback
+    // structurally unreachable (it needs an `Err`; a blocked read never
+    // returns). On timeout we SIGKILL the daemon by pid from OUTSIDE the
+    // Mutex: the blocked holder's read turns into EOF, its error path drops
+    // the dead daemon (fresh respawn on next use), and THIS segment falls
+    // back to the interpreter. The default matches the coordinator's segment
+    // ceiling — legitimate cold jobs (34GB mount verify + JIT codegen) run
+    // minutes, so the ceiling only catches genuine wedges.
+    let timeout_secs: u64 = std::env::var("GK_FAST_VIEW_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7200);
+    let task = tokio::task::spawn_blocking(move || fast_view_sidecar_call(&bin, &jt));
+    let returndata = match tokio::time::timeout(Duration::from_secs(timeout_secs), task).await {
+        Ok(joined) => joined.context("gk-fast-view sidecar task panicked")??,
+        Err(_elapsed) => {
+            let pid = FAST_VIEW_SIDECAR_PID.load(std::sync::atomic::Ordering::SeqCst);
+            if pid != 0 {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status();
+            }
+            bail!(
+                "gk-fast-view sidecar wedged: no response in {timeout_secs}s \
+                 (GK_FAST_VIEW_TIMEOUT_SECS); killed pid {pid} so the next \
+                 fast-path call respawns — this segment falls back to the interpreter"
+            );
+        }
+    };
+    debug!(seg_id, bytes = returndata.len(), "gk-fast-view fast path served segment");
+    Ok(returndata)
+}
+
+// ============================================================================
+// Persistent gk-fast-view sidecar (compile-once daemon client)
+// ============================================================================
+//
+// The engine bytecode JIT-compile (~116s of LLVM codegen on the real ~20KB seg
+// engine) dominates a segment's wall time. The sidecar memoizes the compiled fn
+// by codehash WITHIN a process, so the fix is to stop spawning a fresh one-shot
+// process per segment (which recompiled every time) and instead keep ONE
+// long-lived `gk-fast-view --serve` daemon per node that compiles the engine on
+// its first job and serves every subsequent segment on the cached artifact.
+//
+// ## Concurrency choice: one process behind a Mutex (not a pool)
+//
+// The node runs segments concurrently (`GK_SHARD_NODE_CONCURRENCY`, default 3).
+// A single `--serve` process is single-threaded per JIT context, so we serialize
+// all fast-path segments through it behind a `Mutex`. This is deliberate: the
+// COMPILE is the cost, not execution — a pool of N daemons would each pay the
+// ~116s codegen independently (N x the one-time cost) for marginal concurrency
+// on the cheap (~1s) execution. Serializing behind one Mutex pays codegen ONCE
+// and every later segment is fast; concurrent segments just queue on the lock.
+// (Correctness-over-cleverness, per the task's guidance.)
+//
+// Robustness: an `ERR` frame is a per-job execution failure (revert/halt) — the
+// daemon stays healthy, we surface it as `Err` and the caller
+// (`local_view_call`) falls back to the revm-31 interpreter. An IO error (broken
+// pipe / dead process) drops the daemon and respawns once, then retries; a second
+// failure returns `Err` so the interpreter fallback still kicks in.
+
+/// The single per-node persistent sidecar, lazily spawned on first fast-path use.
+static FAST_VIEW_SIDECAR: OnceLock<Mutex<Option<FastViewSidecar>>> = OnceLock::new();
+
+/// PID of the live sidecar (0 = none). Lets the watchdog in [`fast_view_call`]
+/// SIGKILL a wedged-but-alive daemon from OUTSIDE the Mutex — whose holder is
+/// blocked in pipe IO and therefore can never release it on its own.
+static FAST_VIEW_SIDECAR_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn fast_view_sidecar_cell() -> &'static Mutex<Option<FastViewSidecar>> {
+    FAST_VIEW_SIDECAR.get_or_init(|| Mutex::new(None))
+}
+
+/// A live `gk-fast-view --serve` child with its framed stdin/stdout pipes.
+struct FastViewSidecar {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+/// Parsed response frame from the daemon.
+enum SidecarResp {
+    /// `OK` frame — decoded returndata.
+    Ok(Vec<u8>),
+    /// `ERR` frame — a per-job execution failure (revert/halt/parse); the daemon
+    /// is still healthy.
+    Err(String),
+}
+
+impl FastViewSidecar {
+    fn spawn(bin: &str) -> Result<Self> {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(bin)
+            .arg("--serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit()) // daemon diagnostics (compile logs) -> our stderr
+            .spawn()
+            .with_context(|| {
+                format!("spawn gk-fast-view --serve binary `{bin}` (set GK_FAST_VIEW_BIN?)")
+            })?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("gk-fast-view --serve: no stdin handle")?;
+        let stdout = std::io::BufReader::new(
+            child
+                .stdout
+                .take()
+                .context("gk-fast-view --serve: no stdout handle")?,
+        );
+        FAST_VIEW_SIDECAR_PID.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+        Ok(FastViewSidecar { child, stdin, stdout })
+    }
+
+    /// Send one framed job, read one framed response. Any IO/protocol failure is
+    /// an `Err` tagged with whether the request was already fully sent (see
+    /// [`SidecarIoError`]); a well-formed OK/ERR frame is `Ok(resp)`.
+    fn exchange(&mut self, job_text: &str) -> std::result::Result<SidecarResp, SidecarIoError> {
+        use std::io::{BufRead as _, Read as _, Write as _};
+        let send = |err: anyhow::Error| SidecarIoError { request_sent: false, err };
+        let recv = |err: anyhow::Error| SidecarIoError { request_sent: true, err };
+
+        // request frame: "<byte_len>\n" then the job bytes
+        write!(self.stdin, "{}\n", job_text.len())
+            .context("gk-fast-view: write frame len")
+            .map_err(send)?;
+        self.stdin
+            .write_all(job_text.as_bytes())
+            .context("gk-fast-view: write job frame")
+            .map_err(send)?;
+        self.stdin
+            .flush()
+            .context("gk-fast-view: flush job frame")
+            .map_err(send)?;
+
+        // response frame: "<STATUS> <byte_len>\n" then payload bytes
+        let mut header = String::new();
+        let n = self
+            .stdout
+            .read_line(&mut header)
+            .context("gk-fast-view: read response header")
+            .map_err(recv)?;
+        if n == 0 {
+            return Err(recv(anyhow::anyhow!(
+                "gk-fast-view --serve closed stdout (EOF before response)"
+            )));
+        }
+        let header = header.trim();
+        let (status, len_str) = header
+            .split_once(' ')
+            .with_context(|| format!("gk-fast-view: malformed response header {header:?}"))
+            .map_err(recv)?;
+        let len: usize = len_str
+            .parse()
+            .with_context(|| format!("gk-fast-view: bad response length {len_str:?}"))
+            .map_err(recv)?;
+        let mut payload = vec![0u8; len];
+        self.stdout
+            .read_exact(&mut payload)
+            .context("gk-fast-view: read response payload")
+            .map_err(recv)?;
+
+        match status {
+            "OK" => {
+                let hex_str = std::str::from_utf8(&payload)
+                    .context("gk-fast-view: OK payload not utf-8 hex")
+                    .map_err(recv)?;
+                let bytes = hex::decode(hex_str.trim())
+                    .context("gk-fast-view: OK payload not hex returndata")
+                    .map_err(recv)?;
+                Ok(SidecarResp::Ok(bytes))
+            }
+            "ERR" => Ok(SidecarResp::Err(String::from_utf8_lossy(&payload).into_owned())),
+            other => Err(recv(anyhow::anyhow!(
+                "gk-fast-view: unknown response status {other:?}"
+            ))),
+        }
+    }
+}
+
+/// An IO/protocol failure in [`FastViewSidecar::exchange`], tagged by whether
+/// the daemon may already have STARTED executing the job (failure after the
+/// request was fully sent). Retrying a started job on a fresh daemon re-pays
+/// its full cost — and if the job itself wedged the daemon (watchdog-killed),
+/// resending it would wedge the replacement with nobody left to time it out —
+/// so only pre-send failures are retried; post-send failures fall back to the
+/// interpreter.
+struct SidecarIoError {
+    request_sent: bool,
+    err: anyhow::Error,
+}
+
+impl Drop for FastViewSidecar {
+    fn drop(&mut self) {
+        // Closing stdin lets the daemon exit on EOF; kill+reap in case it's mid-job.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        // Clear the watchdog pid only if it is still ours (a replacement may
+        // already have registered its own).
+        let _ = FAST_VIEW_SIDECAR_PID.compare_exchange(
+            self.child.id(),
+            0,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
+/// Serve `job_text` through the persistent per-node `gk-fast-view --serve`
+/// daemon (compile-once, run-many), returning the raw returndata. Blocking —
+/// call from `spawn_blocking`. Serializes all fast-path segments through one
+/// process behind a `Mutex` (see the module note above). Respawns once on a dead
+/// process; a per-job `ERR` (revert/halt) is returned as `Err` so the caller
+/// falls back to the interpreter.
+fn fast_view_sidecar_call(bin: &str, job_text: &str) -> Result<Vec<u8>> {
+    let cell = fast_view_sidecar_cell();
+    // Recover from a poisoned lock by discarding any (possibly mid-frame) daemon.
+    let mut guard = match cell.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            let mut g = poisoned.into_inner();
+            *g = None;
+            g
+        }
+    };
+
+    // Up to two attempts: a PRE-SEND IO error (dead pipe from an idle-crashed
+    // daemon) drops+respawns and resends. A POST-SEND failure is never retried
+    // — the job may have wedged the daemon (watchdog-killed), and resending it
+    // would wedge the replacement with nobody left to time it out; the caller
+    // falls back to the interpreter instead.
+    let mut last_io_err: Option<anyhow::Error> = None;
+    for attempt in 0..2 {
+        if guard.is_none() {
+            *guard = Some(FastViewSidecar::spawn(bin)?);
+        }
+        let sidecar = guard.as_mut().expect("just ensured Some");
+        match sidecar.exchange(job_text) {
+            Ok(SidecarResp::Ok(bytes)) => return Ok(bytes),
+            Ok(SidecarResp::Err(msg)) => {
+                // Per-job execution error; daemon is healthy, keep it alive.
+                bail!("gk-fast-view sidecar job error: {msg}");
+            }
+            Err(SidecarIoError { request_sent, err }) => {
+                *guard = None; // drops (kills+reaps) the dead daemon
+                if request_sent {
+                    return Err(err.context(
+                        "gk-fast-view sidecar died mid-job (not retried on a fresh \
+                         daemon; this segment falls back to the interpreter)",
+                    ));
+                }
+                warn!(
+                    attempt,
+                    error = %err,
+                    "gk-fast-view --serve send failed; respawning sidecar and retrying"
+                );
+                last_io_err = Some(err);
+            }
+        }
+    }
+    Err(last_io_err
+        .unwrap_or_else(|| anyhow::anyhow!("gk-fast-view sidecar failed"))
+        .context("gk-fast-view sidecar failed after respawn"))
+}
+
+/// Fetch a contract's deployed bytecode at head via JSON-RPC `eth_getCode` — the
+/// engine bytecode the fast-view sidecar compiles and runs the segment on.
+async fn eth_get_code(client: &reqwest::Client, rpc_url: &str, addr: Address) -> Result<Vec<u8>> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_getCode",
+        "params": [format!("{addr}"), "latest"],
+    });
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("eth_getCode POST {rpc_url}"))?
+        .error_for_status()?
+        .json()
+        .await
+        .context("eth_getCode: decoding JSON-RPC response")?;
+    if let Some(err) = resp.get("error") {
+        bail!("eth_getCode error: {err}");
+    }
+    let hex_str = resp
+        .get("result")
+        .and_then(|r| r.as_str())
+        .context("eth_getCode: missing result")?;
+    hex::decode(hex_str.trim_start_matches("0x")).context("eth_getCode: result not hex")
+}
+
+/// Executes one pre-encoded view call via plain JSON-RPC `eth_call` with an
+/// explicit gas override (segments run under the lifted simulation gas budget,
+/// exactly like tracked-function analysis; they are `view`, so no state risk).
+async fn eth_call(client: &reqwest::Client, rpc_url: &str, job: &ShardJob) -> Result<Vec<u8>> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [{
+            "to": format!("{}", job.to),
+            "data": format!("0x{}", hex::encode(&job.data)),
+            "gas": format!("0x{:x}", job.gas),
+        }, "latest"],
+    });
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("eth_call POST {rpc_url}"))?
+        .error_for_status()?
+        .json()
+        .await
+        .context("eth_call: decoding JSON-RPC response")?;
+    if let Some(err) = resp.get("error") {
+        bail!("eth_call error: {err}");
+    }
+    let hex_str = resp
+        .get("result")
+        .and_then(|r| r.as_str())
+        .context("eth_call: missing result")?;
+    hex::decode(hex_str.trim_start_matches("0x")).context("eth_call: result not hex")
+}
+
+/// Fetches the latest block number from `rpc_url` — the pin for the local
+/// executor's block-scoped state backend. Segment view calls read only
+/// immutable code (the deployed seg engine + the mounted overlay), so ANY
+/// recent block yields byte-identical output across committee members; the
+/// pin exists because the analyzer's caches are block-keyed.
+async fn eth_block_number(client: &reqwest::Client, rpc_url: &str) -> Result<u64> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_blockNumber",
+        "params": [],
+    });
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("eth_blockNumber POST {rpc_url}"))?
+        .error_for_status()?
+        .json()
+        .await
+        .context("eth_blockNumber: decoding JSON-RPC response")?;
+    if let Some(err) = resp.get("error") {
+        bail!("eth_blockNumber error: {err}");
+    }
+    let hex_str = resp
+        .get("result")
+        .and_then(|r| r.as_str())
+        .context("eth_blockNumber: missing result")?;
+    u64::from_str_radix(hex_str.trim_start_matches("0x"), 16)
+        .context("eth_blockNumber: result not hex")
+}
+
+/// Executes one pre-encoded segment view call IN-PROCESS through the
+/// analyzer's local executor with the validator's pinned overlay mounts
+/// (`GK_SIM_EXECUTOR=local`), returning the raw returndata — the local twin
+/// of [`eth_call`]. The RPC serves only as the lazy base-state backend (the
+/// deployed seg engine's code); the model weights come from the mmap mounts.
+///
+/// Safe to await directly on the shared 2-worker runtime:
+/// `call_view_local_multi` runs its entire blocking half — the segment's
+/// minutes of revm compute AND the first call's one-time streaming-keccak
+/// mount verification over the full artifact files — on the blocking pool
+/// (the analyzer takes the state cache as an `Arc` precisely for this), so
+/// /healthz and P2P never starve (the PR#319 incident class).
+async fn local_view_call(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    ctx: &LocalViewCtx,
+    job: &ShardJob,
+) -> Result<Vec<u8>> {
+    // Phase-4 fast executor (opt-in): when `GK_SHARD_FAST_EXECUTOR=1`, dispatch
+    // the segment to the revm-41 + revmc `gk-fast-view` sidecar (compile the
+    // fixed engine bytecode once, run the view call on the compiled artifact —
+    // the biggest per-segment latency lever). It CANNOT be linked in-process
+    // (the service is pinned to revm-31 via the SP1/reth entanglement; the fast
+    // path needs revm-41 + revmc + LLVM — two revm majors cannot co-link), so it
+    // runs as a separate binary the node shells out to. The consensus contract
+    // is upheld by `gk-fast-view`'s differential test: its returndata is
+    // byte-identical to this interpreter path's. ANY fast-path failure (binary
+    // missing, RPC hiccup, mismatch) falls back to the interpreter below, so the
+    // default build/behaviour is never at risk.
+    if std::env::var("GK_SHARD_FAST_EXECUTOR").as_deref() == Ok("1") {
+        match fast_view_call(client, rpc_url, ctx, job).await {
+            Ok(out) => return Ok(out),
+            Err(e) => warn!(
+                error = %e,
+                seg_id = job.seg_id,
+                to = %job.to,
+                "gk-fast-view fast executor failed; falling back to revm-31 interpreter",
+            ),
+        }
+    }
+
+    let block_number = eth_block_number(client, rpc_url).await?;
+    let tx_request = TransactionRequest::default()
+        .to(job.to)
+        .input(alloy_primitives::Bytes::copy_from_slice(&job.data).into())
+        .gas_limit(job.gas);
+    call_view_local_multi(
+        &ctx.executor_cache,
+        Arc::clone(&ctx.local_state_cache),
+        rpc_url,
+        tx_request,
+        block_number,
+        ctx.sim_profile,
+        &ctx.overlay_files,
+    )
+    .await
+    .map(|bytes| bytes.to_vec())
+}
+
+/// Runs forever: polls the router's shard work queue for this operator,
+/// executes each job — in-process through the analyzer's local executor with
+/// the pinned overlay mounts when `view_ctx` is set (`GK_SIM_EXECUTOR=local`),
+/// else as plain `eth_call` against `rpc_url` — records the digests locally
+/// (for the validator gate), and posts the raw returndata back to the router.
+///
+/// Intended to be spawned on the node when `GK_SHARD_URL` is set.
+pub async fn run_shard_loop(
+    state: std::sync::Arc<ShardState>,
+    rpc_url: String,
+    view_ctx: Option<LocalViewCtx>,
+) {
+    let interval = shard_poll_interval();
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "shard loop: failed to build HTTP client; sharding disabled");
+            return;
+        }
+    };
+    // Advertise the held weight-shard slice on the work poll (if configured), so
+    // the router's layer-affinity planner assigns this worker only segments whose
+    // layer span it covers. A full-model worker (no layer range) sends just its
+    // operator id — exactly today's behavior.
+    let mut work_url = format!(
+        "{}/shard/work?operator={}",
+        state.router_base, state.operator_id
+    );
+    if let Some((lo, hi)) = state.layer_range {
+        use std::fmt::Write as _;
+        let _ = write!(
+            work_url,
+            "&layer_lo={lo}&layer_hi={hi}&has_embedding={}&has_classifier={}",
+            state.has_embedding, state.has_classifier
+        );
+    }
+    let result_url = format!("{}/shard/result", state.router_base);
+    // Concurrent-job budget per node (`GK_SHARD_NODE_CONCURRENCY`, default 3):
+    // sized so a 3-operator fleet can keep a 4-stage k=2 wavefront saturated
+    // (4 stages x 2 executions / 3 operators < 3) without oversubscribing the
+    // node's CPUs — each in-flight job is one single-threaded revm pass.
+    let concurrency: usize = std::env::var("GK_SHARD_NODE_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(3);
+    let job_slots = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    info!(
+        operator = state.operator_id,
+        work_url = %work_url,
+        layer_range = ?state.layer_range,
+        poll_ms = interval.as_millis() as u64,
+        executor = if view_ctx.is_some() { "local" } else { "rpc" },
+        overlay_models = view_ctx.as_ref().map(|c| c.overlay_files.len()).unwrap_or(0),
+        concurrency,
+        "shard loop started"
+    );
+
+    loop {
+        let work = match client.get(&work_url).send().await {
+            Ok(resp) if resp.status() == reqwest::StatusCode::NO_CONTENT => None,
+            Ok(resp) => match resp.error_for_status() {
+                Ok(ok) => ok.json::<ShardWork>().await.ok(),
+                Err(e) => {
+                    debug!(error = %e, "shard poll failed; retrying");
+                    None
+                }
+            },
+            Err(e) => {
+                debug!(error = %e, "shard poll failed; retrying");
+                None
+            }
+        };
+
+        if let Some(work) = work {
+            for job in work.jobs {
+                // Execute jobs CONCURRENTLY (bounded by the semaphore): the
+                // router's pipeline wavefront assigns one operator segments
+                // from several stages at once, and a committee member must
+                // not serialize behind a long segment it shares an operator
+                // with. The heavy compute already rides the blocking pool
+                // (local_view_call), so a spawned task per job costs one
+                // permit, not a runtime worker.
+                let permit = match Arc::clone(&job_slots).acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => return, // semaphore closed: shutting down
+                };
+                let client = client.clone();
+                let rpc_url = rpc_url.clone();
+                let view_ctx = view_ctx.clone();
+                let state = Arc::clone(&state);
+                let result_url = result_url.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let started = std::time::Instant::now();
+                    let executed = match &view_ctx {
+                        Some(ctx) => local_view_call(&client, &rpc_url, ctx, &job).await,
+                        None => eth_call(&client, &rpc_url, &job).await,
+                    };
+                    match executed {
+                        Ok(returndata) => {
+                            let rd_hash = keccak256(&returndata);
+                            match seg_chk(job.kind, &job.data, &returndata) {
+                                Ok(chk) => {
+                                    state.record(
+                                        &job.infer_id,
+                                        job.seg_id,
+                                        ExecutedSeg {
+                                            returndata_hash: rd_hash,
+                                            chk,
+                                            expect_state_in: forward_expect_state_in(
+                                                job.kind, &job.data,
+                                            ),
+                                        },
+                                    );
+                                    info!(
+                                        infer_id = %job.infer_id,
+                                        seg_id = job.seg_id,
+                                        kind = ?job.kind,
+                                        elapsed_ms = started.elapsed().as_millis() as u64,
+                                        chk = %chk,
+                                        "shard: executed segment"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(seg_id = job.seg_id, error = %e, "shard: bad returndata shape");
+                                    return;
+                                }
+                            }
+                            let msg = ShardResultMsg {
+                                infer_id: job.infer_id.clone(),
+                                seg_id: job.seg_id,
+                                operator: state.operator_id,
+                                returndata,
+                            };
+                            // A 35B segment result is tens of MB; losing the
+                            // POST silently kills the whole inference (the
+                            // committee wait times out). Retry with backoff.
+                            let mut posted = false;
+                            for attempt in 1..=5u32 {
+                                match client
+                                    .post(&result_url)
+                                    .json(&msg)
+                                    .send()
+                                    .await
+                                    .and_then(|r| r.error_for_status())
+                                {
+                                    Ok(_) => {
+                                        posted = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            seg_id = job.seg_id,
+                                            attempt,
+                                            error = %e,
+                                            "shard: failed to post result; retrying"
+                                        );
+                                        tokio::time::sleep(Duration::from_secs(2 * attempt as u64))
+                                            .await;
+                                    }
+                                }
+                            }
+                            if !posted {
+                                warn!(
+                                    seg_id = job.seg_id,
+                                    "shard: result post gave up after 5 attempts"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                infer_id = %job.infer_id,
+                                seg_id = job.seg_id,
+                                error = %e,
+                                "shard: segment execution failed"
+                            );
+                        }
+                    }
+                });
+            }
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Hex (de)serialization for byte payloads in the JSON channel.
+mod hex_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&format!("0x{}", hex::encode(bytes)))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(de)?;
+        hex::decode(s.trim_start_matches("0x")).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(seg_id: u64, chk_byte: u8, committee: Vec<u32>) -> ChainEntry {
+        ChainEntry {
+            seg_id,
+            kind: SegKind::Forward,
+            committee,
+            chk: B256::from([chk_byte; 32]),
+            returndata_hash: B256::from([chk_byte ^ 0xFF; 32]),
+            expect_state_in: B256::ZERO,
+        }
+    }
+
+    fn chain(entries: Vec<ChainEntry>) -> ShardChain {
+        let mut c = ShardChain {
+            infer_id: "inf-1".into(),
+            consumer: Address::from([9u8; 20]),
+            prompt_ids: vec![7, 42, 99, 3],
+            max_new: 6,
+            answer_ids: vec![196, 73, 233],
+            pipeline_root: B256::ZERO,
+            entries,
+            prefix_root: None,
+            prefix_len: 0,
+            stage_state_commitments: Vec::new(),
+        };
+        c.pipeline_root = c.derive_root();
+        c
+    }
+
+    #[test]
+    fn derive_root_is_order_independent_of_entry_listing() {
+        let a = chain(vec![entry(0, 1, vec![0, 1]), entry(1, 2, vec![1, 2])]);
+        let b = chain(vec![entry(1, 2, vec![1, 2]), entry(0, 1, vec![0, 1])]);
+        assert_eq!(a.derive_root(), b.derive_root());
+    }
+
+    #[test]
+    fn gates_fires_on_fulfil_selector_respecting_allowlist() {
+        let addr = Address::from([9u8; 20]);
+        let other = Address::from([8u8; 20]);
+        let mut fulfil = fulfilCall::SELECTOR.to_vec();
+        fulfil.extend_from_slice(&[0u8; 32]);
+        let not_fulfil = vec![0xAA, 0xBB, 0xCC, 0xDD, 0x00];
+
+        let mut resumed = fulfilResumedCall::SELECTOR.to_vec();
+        resumed.extend_from_slice(&[0u8; 32]);
+
+        // No allowlist: any fulfil / fulfilResumed call is gated, non-fulfil is not.
+        let any = ShardState::new(0, None, "http://r".into());
+        assert!(any.gates(addr, &fulfil));
+        assert!(any.gates(other, &fulfil));
+        assert!(any.gates(addr, &resumed));
+        assert!(!any.gates(addr, &not_fulfil));
+
+        // Allowlist: only the configured consumer's fulfil calls.
+        let scoped = ShardState::new(0, Some(addr), "http://r".into());
+        assert!(scoped.gates(addr, &fulfil));
+        assert!(!scoped.gates(other, &fulfil));
+        assert!(!scoped.gates(addr, &not_fulfil));
+    }
+
+    #[test]
+    fn forward_chk_is_third_head_word() {
+        // ABI head for (bytes, bytes, bytes32): [off_x][off_kv][chk]...
+        let mut rd = vec![0u8; 192];
+        rd[95] = 0xAB;
+        let chk = seg_chk(SegKind::Forward, &[], &rd).unwrap();
+        assert_eq!(chk.as_slice()[31], 0xAB);
+    }
+
+    #[test]
+    fn argmax_chk_binds_job_and_result() {
+        let a = seg_chk(SegKind::Argmax, b"job1", b"res1").unwrap();
+        let b = seg_chk(SegKind::Argmax, b"job2", b"res1").unwrap();
+        let c = seg_chk(SegKind::Argmax, b"job1", b"res2").unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+    }
+
+    fn commit(b: u8) -> B256 {
+        B256::from([b; 32])
+    }
+
+    fn prefix_chain(prompt: Vec<u32>, commits: Vec<B256>) -> ShardChain {
+        let stages = commits.len() as u64;
+        let entries: Vec<ChainEntry> = (0..stages)
+            .map(|s| entry(s, 0x10 + s as u8, vec![0]))
+            .collect();
+        let mut c = ShardChain {
+            infer_id: "prefix-1".into(),
+            consumer: Address::from([9u8; 20]),
+            prompt_ids: prompt.clone(),
+            max_new: 0,
+            answer_ids: vec![],
+            pipeline_root: B256::ZERO,
+            entries,
+            prefix_root: None,
+            prefix_len: prompt.len() as u64,
+            stage_state_commitments: commits,
+        };
+        c.pipeline_root = c.derive_root();
+        c
+    }
+
+    fn resumed_chain(
+        prompt: Vec<u32>,
+        prefix_len: u64,
+        prefix_root: B256,
+        commits: Vec<B256>,
+    ) -> ShardChain {
+        let stages = commits.len() as u64;
+        let mut entries: Vec<ChainEntry> = (0..stages)
+            .map(|s| {
+                let mut e = entry(s, 0x20 + s as u8, vec![0]);
+                e.expect_state_in = commits[s as usize];
+                e
+            })
+            .collect();
+        // A decode-round argmax segment (id beyond the first prefill pass).
+        entries.push(ChainEntry {
+            seg_id: stages,
+            kind: SegKind::Argmax,
+            committee: vec![0],
+            chk: commit(0x30),
+            returndata_hash: commit(0x31),
+            expect_state_in: B256::ZERO,
+        });
+        let mut c = ShardChain {
+            infer_id: "resume-1".into(),
+            consumer: Address::from([9u8; 20]),
+            prompt_ids: prompt,
+            max_new: 4,
+            answer_ids: vec![50, 60],
+            pipeline_root: B256::ZERO,
+            entries,
+            prefix_root: Some(prefix_root),
+            prefix_len,
+            stage_state_commitments: commits,
+        };
+        c.pipeline_root = c.derive_root();
+        c
+    }
+
+    #[test]
+    fn resume_lineage_accepts_matching_prefix() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        let resumed = resumed_chain(vec![1, 2, 3, 4, 5], 3, prefix.pipeline_root, commits);
+        let node = ShardState::new(7, None, "http://r".into());
+        node.verify_resume_lineage(&resumed, &prefix, prefix.pipeline_root)
+            .expect("honest resume must verify");
+    }
+
+    #[test]
+    fn resume_lineage_rejects_prompt_prefix_mismatch() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        // Resumed prompt's first `prefix_len` ids differ from the cached prefix.
+        let resumed = resumed_chain(vec![1, 9, 3, 4, 5], 3, prefix.pipeline_root, commits);
+        let node = ShardState::new(7, None, "http://r".into());
+        let err = node
+            .verify_resume_lineage(&resumed, &prefix, prefix.pipeline_root)
+            .unwrap_err();
+        assert!(err.to_string().contains("prefix"), "{err}");
+    }
+
+    #[test]
+    fn resume_lineage_rejects_state_commitment_mismatch() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let mut prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        // The prefix's terminal state is tampered — no longer what the resumed
+        // run threaded from.
+        prefix.stage_state_commitments[0] = commit(0xCC);
+        let resumed = resumed_chain(vec![1, 2, 3, 4, 5], 3, prefix.pipeline_root, commits);
+        let node = ShardState::new(7, None, "http://r".into());
+        let err = node
+            .verify_resume_lineage(&resumed, &prefix, prefix.pipeline_root)
+            .unwrap_err();
+        assert!(err.to_string().contains("state"), "{err}");
+    }
+
+    #[test]
+    fn resume_lineage_rejects_segment_threaded_from_mismatch() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        let mut resumed = resumed_chain(vec![1, 2, 3, 4, 5], 3, prefix.pipeline_root, commits);
+        // A first-pass forward segment claims to thread from the wrong state
+        // (while the whole-vector commitments still match) — caught per-segment.
+        resumed.entries[0].expect_state_in = commit(0xEE);
+        let node = ShardState::new(7, None, "http://r".into());
+        let err = node
+            .verify_resume_lineage(&resumed, &prefix, prefix.pipeline_root)
+            .unwrap_err();
+        assert!(err.to_string().contains("threads from"), "{err}");
+    }
+
+    #[test]
+    fn settle_prefix_accepts_prefill_only_warm_chain() {
+        // A warm chain the coordinator produces: only Forward segments, no
+        // answer ids, per-stage terminal commitments, no prefix_root of its own.
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits);
+        ShardState::verify_prefill_only(&prefix).expect("honest warm chain is prefill-only");
+    }
+
+    #[test]
+    fn settle_prefix_rejects_chain_with_answer_ids() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let mut prefix = prefix_chain(vec![1, 2, 3], commits);
+        prefix.answer_ids = vec![42]; // decoded past the prefix
+        let err = ShardState::verify_prefill_only(&prefix).unwrap_err();
+        assert!(err.to_string().contains("prefill-only"), "{err}");
+    }
+
+    #[test]
+    fn settle_prefix_rejects_chain_with_argmax_segment() {
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let mut prefix = prefix_chain(vec![1, 2, 3], commits);
+        // Splice in an argmax segment — evidence the run decoded, not prefill-only.
+        prefix.entries.push(ChainEntry {
+            seg_id: 2,
+            kind: SegKind::Argmax,
+            committee: vec![0],
+            chk: commit(0x40),
+            returndata_hash: commit(0x41),
+            expect_state_in: B256::ZERO,
+        });
+        prefix.pipeline_root = prefix.derive_root();
+        let err = ShardState::verify_prefill_only(&prefix).unwrap_err();
+        assert!(err.to_string().contains("prefill-only"), "{err}");
+    }
+
+    #[test]
+    fn settle_prefix_rejects_resumed_chain_as_prefix() {
+        // A resumed run (declares its own prefix_root) must not pose as a warm.
+        let commits = vec![commit(0xAA), commit(0xBB)];
+        let prefix = prefix_chain(vec![1, 2, 3], commits.clone());
+        let resumed = resumed_chain(vec![1, 2, 3, 4], 3, prefix.pipeline_root, commits);
+        let err = ShardState::verify_prefill_only(&resumed).unwrap_err();
+        // The resumed chain has an argmax segment AND a prefix_root — either
+        // disqualifies it; the argmax check fires first.
+        assert!(err.to_string().contains("prefill-only"), "{err}");
+    }
+
+    #[test]
+    fn job_json_round_trips() {
+        let job = ShardJob {
+            infer_id: "inf-1".into(),
+            seg_id: 3,
+            kind: SegKind::Forward,
+            to: Address::from([1u8; 20]),
+            data: vec![0xDE, 0xAD],
+            gas: 1 << 40,
+        };
+        let json = serde_json::to_string(&job).unwrap();
+        let back: ShardJob = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.seg_id, 3);
+        assert_eq!(back.data, vec![0xDE, 0xAD]);
+        assert!(json.contains("0xdead"));
+    }
+}

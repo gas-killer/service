@@ -1,0 +1,135 @@
+# Live default-namespace drift capture — 2026-07-16
+#
+# WHAT THIS IS: a values file that, applied ON TOP OF the gas-killer release's
+# existing values (helm get values gas-killer -o yaml), makes the chart render
+# the LIVE default-namespace demo env — closing the gap between rev-46 of the
+# release and the kubectl-set drift accumulated since (images, GK_SHARD_* /
+# GK_OVERLAY_* / fast-executor env, VM pinning). Usage:
+#
+#   helm get values gas-killer -o yaml > /tmp/release-values.yaml   # SENSITIVE
+#   helm upgrade gas-killer ./helm/gas-killer \
+#     -f /tmp/release-values.yaml -f helm/gas-killer/default-live-overrides.yaml
+#
+# NOT COVERED BY THE CHART (do not expect helm to manage these): the sim-fork
+# stack — qwen-sim-fork (anvil fork on :8547 proxying publicnode), gk-sim-proxy
+# (/forkhead + trace routing on :8545), gk-sim-proxy-src, qwen-overlay-ensurer —
+# lives in deploy/testnet-default/sim-fork-stack.yaml, and the gk-shard-bridge
+# deployment + crons live in bridge/k8s.yaml. Both are plain kubectl-applied
+# manifests, not chart templates.
+#
+# ENV NOTES:
+#  - The GK_OVERLAY_* sextet here points at /app/.nodes/{qwen35,qwen06}/ on the
+#    shared-data PVC (weights pre-staged there for mmap free-weight-sharding),
+#    NOT the chart's overlay.enabled emptyDir-download flow — which is why it is
+#    expressed via extraEnv and overlay.enabled stays false in the release.
+#  - Router and nodes intentionally use DIFFERENT GK_SHARD_CONSUMER values:
+#    router gates on the 35B consumer, nodes on the 0.6B sharded consumer.
+
+# --------------------------------------------------------------------------
+# Images (live drift: release rev-46 had ghcr pr-319 for both)
+# --------------------------------------------------------------------------
+router:
+  image:
+    tag: router-pr-321
+  # !!! FRAGILE: pins the pod to ONE VM by hostname. The high-mem ops node is
+  # !!! not durable — node-pool upgrades/recreations rename it, and the demo
+  # !!! teardown ("demo expiry") strips this selector entirely. Re-check the
+  # !!! hostname (kubectl get nodes) before every apply; drop the key to let
+  # !!! the scheduler place freely.
+  nodeSelector:
+    kubernetes.io/hostname: gke-gas-killer-ops-highmem-1c128d1b-6v89
+  extraEnv:
+    # Raised reference-block staleness window (in blocks) — multi-hour sharded
+    # rounds outlive the 300-block default baked into the router.
+    - name: BLOCK_STALE_MEASURE
+      value: "50000"
+    # Multi-overlay mmap mounts from the shared-data PVC (see ENV NOTES above).
+    # Slot 1 = Qwen3.5-35B-A3B, slot 2 = Qwen3-0.6B; manifests are the pinned
+    # keccak(keccak(weights) || keccak(tokenizer)) commitments.
+    - name: GK_OVERLAY_WEIGHTS
+      value: "/app/.nodes/qwen35/weights.bin"
+    - name: GK_OVERLAY_TOKENIZER
+      value: "/app/.nodes/qwen35/tokenizer.bin"
+    - name: GK_OVERLAY_MANIFEST
+      value: "0x7bdf4876a6861287521dadab3d3870f74dfa557507ed200d49f75bcb09f01fa9"
+    - name: GK_OVERLAY_WEIGHTS_2
+      value: "/app/.nodes/qwen06/weights.bin"
+    - name: GK_OVERLAY_TOKENIZER_2
+      value: "/app/.nodes/qwen06/tokenizer.bin"
+    - name: GK_OVERLAY_MANIFEST_2
+      value: "0x23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
+
+node:
+  image:
+    # gk-fast: revmc AOT node image from Artifact Registry (not ghcr).
+    repository: us-east4-docker.pkg.dev/gas-killer-testnet/gk-fast/node-fast
+    tag: v6
+  # !!! FRAGILE: same single-VM hostname pin as the router — see the warning
+  # !!! there. Demo expiry strips it.
+  nodeSelector:
+    kubernetes.io/hostname: gke-gas-killer-ops-highmem-1c128d1b-6v89
+  extraEnv:
+    # Same multi-overlay mmap sextet as the router (pinned simulation
+    # environment: router and ALL nodes must mount the same model set).
+    - name: GK_OVERLAY_WEIGHTS
+      value: "/app/.nodes/qwen35/weights.bin"
+    - name: GK_OVERLAY_TOKENIZER
+      value: "/app/.nodes/qwen35/tokenizer.bin"
+    - name: GK_OVERLAY_MANIFEST
+      value: "0x7bdf4876a6861287521dadab3d3870f74dfa557507ed200d49f75bcb09f01fa9"
+    - name: GK_OVERLAY_WEIGHTS_2
+      value: "/app/.nodes/qwen06/weights.bin"
+    - name: GK_OVERLAY_TOKENIZER_2
+      value: "/app/.nodes/qwen06/tokenizer.bin"
+    - name: GK_OVERLAY_MANIFEST_2
+      value: "0x23216cb9ed9ef2b4bc20c84d27b68fa62ab194fc0845dfa707836f48ec4a7ae9"
+    # Shard executor arming: poll the router's internal health port for
+    # segments and gate fulfil() signing on having executed some.
+    - name: GK_SHARD_URL
+      value: "http://gas-killer-router:8081"
+    # Node-side gate scopes to the 0.6B sharded consumer (differs from the
+    # router's shard.consumer on purpose — see ENV NOTES).
+    - name: GK_SHARD_CONSUMER
+      value: "0xd3f7F985F14f1942Fb09e5735e5499FEFF56E80b"
+    - name: GK_SHARD_NODE_CONCURRENCY
+      value: "3"
+    # revmc AOT fast path for segment view calls (gk-fast image only).
+    - name: GK_SHARD_FAST_EXECUTOR
+      value: "1"
+    # Extra account preloaded into the fast view executor's state.
+    - name: GK_FAST_VIEW_EXTRA_ACCOUNTS
+      value: "0x5097fA57CdB792e188a086EB79d3Ef5DC495679b"
+  # node-N <-> shard operator id N-1 (keys are 1-based node indices).
+  extraEnvPerNode:
+    "1":
+      - name: GK_SHARD_OPERATOR_ID
+        value: "0"
+    "2":
+      - name: GK_SHARD_OPERATOR_ID
+        value: "1"
+    "3":
+      - name: GK_SHARD_OPERATOR_ID
+        value: "2"
+
+# --------------------------------------------------------------------------
+# Router shard coordinator (chart-native GK_SHARD_* rendering — the chart
+# already emits these on the router from shard.*, so they are NOT duplicated
+# via router.extraEnv). workers stays [] : no shard-worker pods in this env,
+# the three registered operator nodes are the executors.
+# --------------------------------------------------------------------------
+shard:
+  enabled: true
+  model: "qwen3-0.6b"
+  alignStages: true
+  k: 2
+  operators: 3
+  gas: "8796093022208"           # 2^43 — matches unbounded-v1-xl's ceiling
+  consumer: "0xfd0EF988216D0346BF115530387021c1b699336d"   # 35B consumer (router gate)
+  segmentTimeoutSecs: 7200
+  workers: []
+
+# Live RPC drift (kubectl-switched off Alchemy after its monthly quota 429'd;
+# drpc serves eth_call + archive state — but NOT eth_getProof, which is why the
+# sim fork itself forks from publicnode, see deploy/testnet-default/).
+secrets:
+  httpRpc: https://sepolia.drpc.org

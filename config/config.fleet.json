@@ -1,0 +1,43 @@
+{
+    "quorum": {
+        "minimumStake": "1",
+        "maxOperatorCount": 10,
+        "kickBIPsOfOperatorStake": 10000,
+        "kickBIPsOfTotalStake": 100
+    },
+    "metadata": {
+        "uri": "metadataURI"
+    },
+    "operators": {
+        "testacc1": {
+            "socketAddress": "node-1:3001"
+        },
+        "testacc2": {
+            "socketAddress": "node-2:3002"
+        },
+        "testacc3": {
+            "socketAddress": "node-3:3003"
+        },
+        "testacc4": {
+            "socketAddress": "node-4:3004"
+        },
+        "testacc5": {
+            "socketAddress": "node-5:3005"
+        },
+        "testacc6": {
+            "socketAddress": "node-6:3006"
+        },
+        "testacc7": {
+            "socketAddress": "node-7:3007"
+        },
+        "testacc8": {
+            "socketAddress": "node-8:3008"
+        },
+        "testacc9": {
+            "socketAddress": "node-9:3009"
+        },
+        "testacc10": {
+            "socketAddress": "node-10:3010"
+        }
+    }
+}

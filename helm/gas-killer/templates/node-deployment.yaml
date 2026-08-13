@@ -31,6 +31,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with $root.Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if $root.Values.secretManager.enabled }}
       serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" $root) $root.Values.secretManager.serviceAccountName }}
       {{- end }}
@@ -325,6 +329,20 @@ spec:
               value: {{ $root.Values.node.p2pMessageBacklog | quote }}
             - name: P2P_MESSAGES_PER_SECOND
               value: {{ $root.Values.node.p2pMessagesPerSecond | quote }}
+            {{- with $root.Values.node.extraEnv }}
+            # Generic env passthrough (node.extraEnv): appended verbatim to EVERY
+            # node so any env drift is values-expressible without a chart change.
+            # Later entries win on name collision (Kubernetes env semantics), so
+            # these can also override the chart-rendered vars above.
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with (dig ($nodeIndex | toString) list ($root.Values.node.extraEnvPerNode | default dict)) }}
+            # Per-node env passthrough (node.extraEnvPerNode."{{ $nodeIndex }}"),
+            # keyed by 1-based node index like node.socketAddressOverrides — for
+            # vars that differ per node (e.g. GK_SHARD_OPERATOR_ID). Rendered
+            # after node.extraEnv, so per-node entries win on collision.
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}

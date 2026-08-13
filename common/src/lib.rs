@@ -3,6 +3,7 @@ pub mod config;
 pub mod local_exec_shim;
 pub mod prewarm;
 pub mod providers;
+pub mod shard;
 pub mod task_data;
 pub mod validator;
 
@@ -15,6 +16,9 @@ pub use config::{
 pub use local_exec_shim::{SimExecutor, prefer_mmap_overlay, sim_executor_from_env};
 pub use prewarm::{PrewarmSlot, PrewarmSnapshot, PrewarmTask, run_prewarm_loop};
 pub use providers::{build_read_providers, chain_rpc_urls_from_env};
+pub use shard::{
+    LocalViewCtx, ShardChain, ShardJob, ShardResultMsg, ShardState, ShardWork, run_shard_loop,
+};
 pub use task_data::GasKillerTaskData;
 pub use validator::{GasKillerValidator, ValidatorMetrics};
 

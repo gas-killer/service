@@ -2,8 +2,12 @@ use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
 use ark_serialize::CanonicalDeserialize;
 use axum::{
-    Json, Router, extract::State, http::StatusCode, http::header, response::IntoResponse,
-    routing::get,
+    Json, Router,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    http::header,
+    response::IntoResponse,
+    routing::{get, post},
 };
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{PublicKey, get_signer};
@@ -25,6 +29,7 @@ use gas_killer_common::{
 };
 use gas_killer_router::GasKillerOrchestratorBuilder;
 use gas_killer_router::metrics::MetricsCollector;
+use gas_killer_router::shard::{InferRequest, ShardCoordinator};
 use governor::Quota;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -44,6 +49,8 @@ struct HealthState {
     /// Latest ingress-accepted task, served at GET /prewarm so operator nodes can
     /// start simulating at ingress time (see gas_killer_common::prewarm).
     prewarm: Arc<PrewarmSlot>,
+    /// Sharded-inference coordinator behind /shard/* (see gas_killer_router::shard).
+    shard: Arc<ShardCoordinator>,
 }
 
 /// Liveness probe — always 200 if the process is running.
@@ -80,6 +87,109 @@ async fn prewarm_handler(State(s): State<HealthState>) -> axum::response::Respon
     match s.prewarm.snapshot() {
         Some(snapshot) => Json(snapshot).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+/// Sharded-inference entrypoint: plans one inference as a committee-executed
+/// segment DAG, drives it to completion through the polling operators, and
+/// returns the answer + pipeline root (chain served at /shard/chain/<root>).
+async fn shard_infer_handler(
+    State(s): State<HealthState>,
+    Json(req): Json<InferRequest>,
+) -> axum::response::Response {
+    match s.shard.run_inference(req).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "shard: inference failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response()
+        }
+    }
+}
+
+/// Prefix WARM entrypoint: runs a PREFILL-ONLY pass over the request's
+/// `prompt_ids` (the fixed chat-template prefix), caches each stage's terminal
+/// boundary state keyed `(model, keccak(prefix_ids))`, and returns the
+/// committee-verified `prefix_root`. A later `/shard/infer` with `prefix_len`
+/// set then reuses that state and only prefills the NEW tokens.
+async fn shard_prefix_handler(
+    State(s): State<HealthState>,
+    Json(req): Json<InferRequest>,
+) -> axum::response::Response {
+    match s.shard.warm_prefix(req).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "shard: prefix warm failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ShardWorkQuery {
+    operator: u32,
+    /// Weight-shard capability advertisement (present iff the worker holds a
+    /// layer slice). `layer_lo` + `layer_hi` together enable layer-affinity
+    /// scheduling for this operator; the flags mark the embedding / classifier
+    /// stage holder. See gas_killer_common::shard::run_shard_loop.
+    layer_lo: Option<u64>,
+    layer_hi: Option<u64>,
+    #[serde(default)]
+    has_embedding: bool,
+    #[serde(default)]
+    has_classifier: bool,
+}
+
+/// Segment work feed for one operator (same sidecar pattern as /prewarm).
+async fn shard_work_handler(
+    State(s): State<HealthState>,
+    Query(q): Query<ShardWorkQuery>,
+) -> axum::response::Response {
+    if let (Some(layer_lo), Some(layer_hi)) = (q.layer_lo, q.layer_hi) {
+        s.shard.advertise(
+            q.operator,
+            gas_killer_router::shard::WorkerCaps {
+                layer_lo,
+                layer_hi,
+                has_embedding: q.has_embedding,
+                has_classifier: q.has_classifier,
+            },
+        );
+    }
+    let jobs = s.shard.take_work(q.operator);
+    if jobs.is_empty() {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        Json(gas_killer_common::shard::ShardWork { jobs }).into_response()
+    }
+}
+
+/// Segment result sink for operators.
+async fn shard_result_handler(
+    State(s): State<HealthState>,
+    Json(msg): Json<gas_killer_common::shard::ShardResultMsg>,
+) -> StatusCode {
+    s.shard.put_result(msg);
+    StatusCode::OK
+}
+
+/// Live progress feed for in-flight sharded inferences — segments done vs the
+/// plan's total, per run. Polled by the bridge to enrich ask status with REAL
+/// progress; returns `{"active": []}` when idle.
+async fn shard_active_handler(State(s): State<HealthState>) -> axum::response::Response {
+    Json(s.shard.active_snapshot()).into_response()
+}
+
+/// Commit chain lookup by pipeline root, for the node validator gate.
+async fn shard_chain_handler(
+    State(s): State<HealthState>,
+    Path(root): Path<String>,
+) -> axum::response::Response {
+    let Ok(root) = root.parse::<alloy_primitives::B256>() else {
+        return (StatusCode::BAD_REQUEST, "bad root").into_response();
+    };
+    match s.shard.chain(root) {
+        Some(chain) => Json(chain).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -368,6 +478,7 @@ fn main() {
             context: health_ctx,
             metrics: Arc::clone(&metrics),
             prewarm: prewarm_slot,
+            shard: Arc::new(ShardCoordinator::from_env()),
         };
         healthz_ctx.spawn(move |_| async move {
             let app = Router::new()
@@ -375,6 +486,17 @@ fn main() {
                 .route("/readyz", get(readyz_handler))
                 .route("/metrics", get(metrics_handler))
                 .route("/prewarm", get(prewarm_handler))
+                .route("/shard/infer", post(shard_infer_handler))
+                .route("/shard/prefix", post(shard_prefix_handler))
+                .route("/shard/work", get(shard_work_handler))
+                .route("/shard/result", post(shard_result_handler))
+                .route("/shard/active", get(shard_active_handler))
+                .route("/shard/chain/:root", get(shard_chain_handler))
+                // Sharded 35B segments thread DeltaNet boundary snapshots
+                // (~2.2MB/layer, ~20MB per 12-layer segment, ~40MB hex-JSON):
+                // axum's 2MB default body limit silently kills the operators'
+                // /shard/result POSTs at the transport.
+                .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024))
                 .with_state(health_state);
             match TcpListener::bind(healthz_addr).await {
                 Ok(listener) => {

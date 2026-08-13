@@ -1,0 +1,43 @@
+# RECONSTRUCTION (2026-07-21): bridge/k8s.yaml references serviceAccountName
+# demo-expiry, but the ServiceAccount/RBAC were created imperatively and never
+# exported. These are the k8s-side permissions the cron script needs (delete the
+# sim stack, strip node pins, self-suspend). The GKE REST calls in the same script
+# (node-pool delete / default-pool resize) do NOT go through RBAC — they
+# authenticate as the NODE's default compute service account via the metadata
+# server, which therefore needs cluster-admin-level IAM (nodePools.delete /
+# nodePools.setSize) on project gas-killer-testnet.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo-expiry
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: demo-expiry
+  namespace: default
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo-expiry
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: demo-expiry
+subjects:
+  - kind: ServiceAccount
+    name: demo-expiry
+    namespace: default

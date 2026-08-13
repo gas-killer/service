@@ -116,6 +116,11 @@ pub struct GasKillerValidator {
     executor_cache: Arc<EvmSketchExecutorCache>,
     /// Optional Prometheus metrics — injected on the node, absent on the router.
     validator_metrics: Option<Arc<ValidatorMetrics>>,
+    /// Node-side sharded-inference state (`GK_SHARD_*`). When set, rounds whose
+    /// task targets the sharded consumer are gated: the node refuses to sign
+    /// unless the segment commit chain verifies against the segments this node
+    /// executed itself (see crate::shard::ShardState::verify_fulfil_task).
+    shard: Option<Arc<crate::shard::ShardState>>,
     /// Simulation profile for tracked-function analysis. `UnboundedV1` lifts the
     /// simulated gas limits to the pinned protocol constants (see gas-analyzer's
     /// docs/UNBOUNDED_MODE.md), enabling tracked functions whose direct execution
@@ -448,6 +453,7 @@ impl GasKillerValidator {
             prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
+            shard: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: {
                 let executor = sim_executor_from_env();
@@ -506,6 +512,7 @@ impl GasKillerValidator {
             prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
+            shard: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
             overlay_files: Vec::new(),
@@ -537,6 +544,7 @@ impl GasKillerValidator {
             prewarm_inflight: Arc::new(StdMutex::new(HashSet::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
+            shard: None,
             sim_profile: sim_profile_from_env(),
             overlay_env: overlay_env_from_env(),
             overlay_files: Vec::new(),
@@ -562,12 +570,58 @@ impl GasKillerValidator {
         self
     }
 
+    /// Attaches node-side sharded-inference state; rounds targeting the sharded
+    /// consumer are then gated on commit-chain verification before signing.
+    pub fn with_shard_state(mut self, shard: Arc<crate::shard::ShardState>) -> Self {
+        self.shard = Some(shard);
+        self
+    }
+
     /// Returns the RPC URL for the default chain
     pub fn rpc_url(&self) -> &str {
         self.chain_rpc_urls
             .get(&self.default_chain)
             .map(|s| s.as_str())
             .unwrap_or("")
+    }
+
+    /// The local view-call context for the sharded segment executor, or
+    /// `None` under `GK_SIM_EXECUTOR=rpc` (segments then execute as plain
+    /// `eth_call` against the simulation RPC — the historical path, which
+    /// requires the model to be materialized ON that RPC, e.g. setCode'd
+    /// into a harness anvil).
+    ///
+    /// Under `local`, segment view calls run in-process through the SAME
+    /// pinned environment as tracked-function analysis: the shared executor
+    /// and state caches (so segments reuse the validator's memoized,
+    /// manifest-verified mmap mounts rather than re-verifying ~35GB of
+    /// artifacts), the pinned `SimProfile`, and every configured overlay
+    /// artifact spec. This is what makes phantom-overlay models servable as
+    /// segments at all: no RPC node hosts their chunks.
+    ///
+    /// Panics when `local` is combined with an in-RAM overlay
+    /// (`GK_OVERLAY_MMAP=false`): the segment executor only mounts from
+    /// files, and silently running segments WITHOUT the configured overlay
+    /// would fork the committee. Same fail-loud rationale as
+    /// [`sim_profile_from_env`].
+    pub fn local_view_ctx(&self) -> Option<crate::shard::LocalViewCtx> {
+        match self.sim_executor {
+            SimExecutor::Rpc => None,
+            SimExecutor::Local => {
+                assert!(
+                    self.overlay_env.is_none(),
+                    "sharded segment execution under GK_SIM_EXECUTOR=local requires mmap \
+                     overlays (GK_OVERLAY_MMAP=true, the default) — the in-RAM overlay is \
+                     not mountable for segment view calls"
+                );
+                Some(crate::shard::LocalViewCtx {
+                    executor_cache: Arc::clone(&self.executor_cache),
+                    local_state_cache: Arc::clone(&self.local_state_cache),
+                    sim_profile: self.sim_profile,
+                    overlay_files: self.overlay_files.clone(),
+                })
+            }
+        }
     }
 
     /// Returns the RPC URL for a specific chain
@@ -1131,6 +1185,23 @@ impl GasKillerValidator {
         // Validate message format and decode
         let aggregation = self.validate_message_format(msg).await?;
         let task_data = &aggregation.metadata;
+
+        // Sharded-inference gate: a round targeting the sharded settlement
+        // consumer is only signable if the segment commit chain behind its
+        // pipelineRoot verifies — including that the digests of every segment
+        // THIS node executed match the chain. Erroring here means this node
+        // never signs the round.
+        if let Some(shard) = &self.shard
+            && shard.gates(task_data.target_address, &task_data.call_data)
+        {
+            shard
+                .verify_fulfil_task(&task_data.call_data)
+                .await
+                .map_err(|e| {
+                    warn!(target_address = %task_data.target_address, error = %e, "shard gate: REFUSING to sign");
+                    e
+                })?;
+        }
 
         let cache_key = (task_data.transition_index, task_data.block_height);
 
