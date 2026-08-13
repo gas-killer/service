@@ -74,7 +74,7 @@ ctor_args = [
   sig   = "step(uint32)"
   args  = ["1"]
 
-  # ALSO REQUIRES GK_SIM_PROFILE=unbounded-v1. Three generations is ~49.7M gas, so a direct
+  # ALSO REQUIRES GK_SIM_PROFILE=unbounded. Three generations is ~49.7M gas, so a direct
   # call cannot be mined in a 30M block and the simulation itself only completes under the
   # unbounded profile's lifted gas limits (and against an RPC whose execution cap is lifted —
   # `anvil --disable-block-gas-limit`). Under the default `chain` profile this request fails

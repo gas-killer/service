@@ -47,21 +47,21 @@ global:
   # single-client fleet. See the STATE_ENCODING block in example.env.
   stateEncoding: "legacy"
 
-  # Tracked-function simulation profile: "chain" (default) or "unbounded-v1". Selects the
+  # Tracked-function simulation profile: "chain" (default) or "unbounded". Selects the
   # gas limits the tracked function is SIMULATED under, where stateEncoding selects how the
   # resulting mutations are represented — independent axes, but this one is equally a
   # consensus parameter: it changes the derived storage_updates and hence the task digest,
   # so every node and the router must agree. An unrecognized value panics the binary at
   # startup rather than defaulting, so a typo crash-loops instead of forking the quorum.
   #
-  # "unbounded-v1" simulates under the pinned unbounded gas limits, letting the fleet settle
+  # "unbounded" simulates under the pinned unbounded gas limits, letting the fleet settle
   # tracked functions whose direct execution costs more than a block's gas limit. It
   # REQUIRES the RPC serving debug_traceCall to have its execution cap lifted, and pairs
   # with stateEncoding: "prestate-net" (a struct-log trace of an above-block-limit call is
   # what it avoids). See the GK_SIM_PROFILE block in example.env and gas-analyzer
   # docs/UNBOUNDED_MODE.md.
   #
-  # DO NOT set this to unbounded-v1 on a production fleet yet. Three preconditions are still
+  # DO NOT set this to unbounded on a production fleet yet. Three preconditions are still
   # open, tracked in gas-killer/service#356:
   #   1. The SP1 fraud-proof guest must bind the same lifted limits (sp1-contract-call#12).
   #      A guest checking against real header limits while operators simulate under lifted
@@ -74,9 +74,9 @@ global:
   simProfile: "chain"
 
   # Acknowledges that the ethereum image's entrypoint starts Anvil with
-  # --disable-block-gas-limit, which simProfile: "unbounded-v1" needs in LOCAL mode to execute an
+  # --disable-block-gas-limit, which simProfile: "unbounded" needs in LOCAL mode to execute an
   # above-block-limit call at all. The chart cannot supply that flag — it lives in the image — so
-  # rendering fails on the LOCAL + unbounded-v1 combination until this is set. That turns a
+  # rendering fails on the LOCAL + unbounded combination until this is set. That turns a
   # runtime failure of every heavy task into an install-time error. Irrelevant for TESTNET, where
   # the RPC is external and its cap is the operator's responsibility.
   localAnvilUnboundedReady: false

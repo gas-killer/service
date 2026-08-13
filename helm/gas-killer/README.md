@@ -96,8 +96,8 @@ See `values.yaml` for all available configuration options.
 | `global.environment` | Environment mode (LOCAL or TESTNET) | `LOCAL` |
 | `global.nodeCount` | Number of operator nodes | `3` |
 | `global.initTimeout` | Init container timeout in seconds | `300` |
-| `global.simProfile` | Tracked-function simulation profile (`chain` or `unbounded-v1`), shared by the router and every node so their signed payloads agree. `unbounded-v1` simulates under the pinned unbounded gas limits, allowing functions whose direct execution exceeds the block gas limit; it needs the RPC's execution cap lifted and pairs with `global.stateEncoding=prestate-net`. **Not production-ready — see the preconditions in `values.yaml` and gas-killer/service#356.** | `chain` |
-| `global.localAnvilUnboundedReady` | Confirms the ethereum image starts Anvil with `--disable-block-gas-limit`. Rendering fails on `global.environment=LOCAL` with `global.simProfile=unbounded-v1` until this is set, since that flag lives in the image rather than the chart. | `false` |
+| `global.simProfile` | Tracked-function simulation profile (`chain` or `unbounded`), shared by the router and every node so their signed payloads agree. `unbounded` simulates under the pinned unbounded gas limits, allowing functions whose direct execution exceeds the block gas limit; it needs the RPC's execution cap lifted and pairs with `global.stateEncoding=prestate-net`. **Not production-ready — see the preconditions in `values.yaml` and gas-killer/service#356.** | `chain` |
+| `global.localAnvilUnboundedReady` | Confirms the ethereum image starts Anvil with `--disable-block-gas-limit`. Rendering fails on `global.environment=LOCAL` with `global.simProfile=unbounded` until this is set, since that flag lives in the image rather than the chart. | `false` |
 | `secrets.forkUrl` | Anvil fork URL (required for LOCAL mode) | `""` |
 | `secrets.privateKey` | Deployer private key | `""` |
 | `secrets.fundedKey` | Funded account private key | `""` |

@@ -364,7 +364,7 @@ spec:
             # the nodes' — it changes the task digest.
             - name: STATE_ENCODING
               value: {{ default "legacy" .Values.global.stateEncoding | quote }}
-            # Simulation profile (chain | unbounded-v1); must match the nodes' — it
+            # Simulation profile (chain | unbounded); must match the nodes' — it
             # changes the task digest.
             - name: GK_SIM_PROFILE
               value: {{ include "gas-killer.simProfile" . | quote }}

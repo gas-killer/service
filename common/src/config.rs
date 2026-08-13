@@ -441,13 +441,13 @@ fn parse_state_encoding(raw: Option<&str>) -> gas_analyzer::StateEncoding {
 }
 
 /// Reads the tracked-function simulation profile from `GK_SIM_PROFILE` (case-insensitive
-/// `chain` | `unbounded-v1`), defaulting to [`SimProfile::Chain`].
+/// `chain` | `unbounded`), defaulting to [`SimProfile::Chain`].
 ///
 /// Where [`state_encoding`] selects how a task's storage mutations are *represented*, this
 /// selects the gas limits they are *derived under* — independent axes, both consensus
 /// parameters.
 ///
-/// `unbounded-v1` simulates with the pinned unbounded block/tx gas limits, so a tracked
+/// `unbounded` simulates with the pinned unbounded block/tx gas limits, so a tracked
 /// function whose direct execution costs more than a real block can still be analyzed. What it
 /// produces stays bounded: applying the payload on-chain must fit the profile's gas budget and
 /// contain no `CREATE`, or the analysis hard-errors rather than signing a task nobody can
@@ -467,15 +467,16 @@ pub fn sim_profile() -> gas_analyzer::SimProfile {
 /// Panics on an unrecognized value rather than silently diverging the node's and router's
 /// digests.
 ///
-/// The env spelling carries the `-v1` suffix that the upstream variant name does not: the
-/// unbounded limits are pinned protocol constants, so a future revision of them is a new
-/// accepted value here rather than a silent change in meaning for an existing one.
+/// The accepted spellings match [`gas_analyzer::SimProfile`]'s variants, so the config value and
+/// the enum it selects are named the same thing. Each profile has exactly one accepted spelling:
+/// an alternate would let two operators believe they are configured identically while deriving
+/// different bytes, which is the failure this panic exists to prevent.
 fn parse_sim_profile(raw: Option<&str>) -> gas_analyzer::SimProfile {
     match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         None | Some("") | Some("chain") => gas_analyzer::SimProfile::Chain,
-        Some("unbounded-v1") => gas_analyzer::SimProfile::Unbounded,
+        Some("unbounded") => gas_analyzer::SimProfile::Unbounded,
         Some(other) => {
-            panic!("GK_SIM_PROFILE must be 'chain' or 'unbounded-v1', got '{other}'")
+            panic!("GK_SIM_PROFILE must be 'chain' or 'unbounded', got '{other}'")
         }
     }
 }
@@ -856,12 +857,9 @@ mod tests {
         assert_eq!(parse_sim_profile(Some("")), SimProfile::Chain);
         assert_eq!(parse_sim_profile(Some("chain")), SimProfile::Chain);
         assert_eq!(parse_sim_profile(Some(" CHAIN ")), SimProfile::Chain);
+        assert_eq!(parse_sim_profile(Some("unbounded")), SimProfile::Unbounded);
         assert_eq!(
-            parse_sim_profile(Some("unbounded-v1")),
-            SimProfile::Unbounded
-        );
-        assert_eq!(
-            parse_sim_profile(Some(" Unbounded-V1 ")),
+            parse_sim_profile(Some(" Unbounded ")),
             SimProfile::Unbounded
         );
     }
@@ -872,13 +870,13 @@ mod tests {
         let _ = parse_sim_profile(Some("bogus"));
     }
 
-    /// The bare variant name is deliberately NOT accepted: the env value pins which revision of
-    /// the unbounded constants the fleet agreed on, and an unversioned spelling would keep
-    /// resolving across a future change to them.
+    /// `unbounded-v1` was the spelling while the profile was in development. It must fail loudly
+    /// rather than resolve or fall back to `chain`, so a config carried over from that period
+    /// stops the binary instead of silently deriving digests the rest of the fleet will not match.
     #[test]
     #[should_panic(expected = "GK_SIM_PROFILE must be")]
-    fn sim_profile_rejects_an_unversioned_spelling() {
-        let _ = parse_sim_profile(Some("unbounded"));
+    fn sim_profile_rejects_the_development_era_spelling() {
+        let _ = parse_sim_profile(Some("unbounded-v1"));
     }
 
     #[test]

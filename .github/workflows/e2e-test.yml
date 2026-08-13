@@ -56,7 +56,7 @@ jobs:
           - signature_scheme: bls
             state_encoding: prestate-net
             e2e_example: onchain-life
-            sim_profile: unbounded-v1
+            sim_profile: unbounded
             anvil_extra_args: --disable-block-gas-limit
 
     steps:

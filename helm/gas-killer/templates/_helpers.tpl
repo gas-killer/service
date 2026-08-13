@@ -53,7 +53,7 @@ Simulation profile (GK_SIM_PROFILE) shared by the router and every node. Both de
 this one helper, so they cannot be given different values — a divergence would change the derived
 storage_updates on one side and fork the quorum's digests.
 
-Rejects the LOCAL + unbounded-v1 combination unless it is explicitly acknowledged. The profile
+Rejects the LOCAL + unbounded combination unless it is explicitly acknowledged. The profile
 lifts the gas limits a tracked function is SIMULATED under, but executing an above-block-limit
 call also needs the node serving debug_traceCall to have its own execution cap lifted. In LOCAL
 mode that node is the bundled Anvil, whose flags come from the ethereum image's entrypoint rather
@@ -62,11 +62,11 @@ heavy task fails analysis at runtime instead of at install time.
 */}}
 {{- define "gas-killer.simProfile" -}}
 {{- $profile := .Values.global.simProfile | default "chain" -}}
-{{- if not (has $profile (list "chain" "unbounded-v1")) -}}
-{{- fail (printf "global.simProfile must be \"chain\" or \"unbounded-v1\", got %q" $profile) -}}
+{{- if not (has $profile (list "chain" "unbounded")) -}}
+{{- fail (printf "global.simProfile must be \"chain\" or \"unbounded\", got %q" $profile) -}}
 {{- end -}}
-{{- if and (eq $profile "unbounded-v1") (eq .Values.global.environment "LOCAL") (not .Values.global.localAnvilUnboundedReady) -}}
-{{- fail "global.simProfile=unbounded-v1 in LOCAL mode requires the bundled Anvil to run with --disable-block-gas-limit, which comes from the ethereum image's entrypoint and not this chart. Set global.localAnvilUnboundedReady=true to confirm the image provides it." -}}
+{{- if and (eq $profile "unbounded") (eq .Values.global.environment "LOCAL") (not .Values.global.localAnvilUnboundedReady) -}}
+{{- fail "global.simProfile=unbounded in LOCAL mode requires the bundled Anvil to run with --disable-block-gas-limit, which comes from the ethereum image's entrypoint and not this chart. Set global.localAnvilUnboundedReady=true to confirm the image provides it." -}}
 {{- end -}}
 {{- $profile -}}
 {{- end }}

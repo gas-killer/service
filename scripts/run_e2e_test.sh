@@ -27,12 +27,12 @@ export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 echo "Signature scheme: $SIGNATURE_SCHEME_CHOICE"
 
 # STATE_ENCODING (legacy|canonical|prestate-net), E2E_EXAMPLE
-# (array-summation|reentrant|onchain-life) and GK_SIM_PROFILE (chain|unbounded-v1) follow the
+# (array-summation|reentrant|onchain-life) and GK_SIM_PROFILE (chain|unbounded) follow the
 # same capture-then-re-export discipline as SIGNATURE_SCHEME so the containers AND the
 # host-side deploy/send binaries agree. `reentrant` deploys a ReentrantCheckpoint whose
 # task re-enters mid-transition; pair it with `canonical` to prove re-entrancy is safe.
 # `onchain-life` deploys an OnchainLife and settles a 3-generation step, whose direct
-# execution exceeds a 30M block; it requires GK_SIM_PROFILE=unbounded-v1,
+# execution exceeds a 30M block; it requires GK_SIM_PROFILE=unbounded,
 # STATE_ENCODING=prestate-net, and ANVIL_EXTRA_ARGS=--disable-block-gas-limit.
 STATE_ENCODING_CHOICE="${STATE_ENCODING:-legacy}"
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
@@ -281,7 +281,7 @@ fi
 # risen past it). That direction is safe for both assertions: a workload above 30M is the weaker
 # claim to prove in 7a, and staying under 30M is the stricter bar to clear in 10b.
 NOMINAL_BLOCK_GAS_LIMIT=30000000
-if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded-v1" ]; then
+if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded" ]; then
     echo -e "${YELLOW}Step 7a: Asserting a direct call exceeds the block gas limit...${NC}"
     if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
         echo -e "${RED}No target address resolved; cannot estimate the direct call${NC}"
@@ -296,7 +296,7 @@ if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded-v1" ]; then
             DIRECT_ARG="$ONCHAIN_LIFE_GENERATIONS_CHOICE"
             ;;
         *)
-            echo -e "${RED}GK_SIM_PROFILE=unbounded-v1 has no above-block-limit call defined for E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
+            echo -e "${RED}GK_SIM_PROFILE=unbounded has no above-block-limit call defined for E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
             exit 1
             ;;
     esac
@@ -433,7 +433,7 @@ if [ $TRIGGER_STATUS -eq 0 ]; then
     # Step 10b (unbounded profile only): close the claim step 7a opened. The transition that
     # could not be executed directly in a block has landed as one small verifyAndUpdate, so the
     # receipt's gasUsed is the on-chain cost of an above-block-limit computation.
-    if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded-v1" ]; then
+    if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded" ]; then
         echo -e "${YELLOW}Step 10b: Asserting verifyAndUpdate landed far below the block gas limit...${NC}"
         if [ -z "$USER_TX_HASH" ]; then
             echo -e "${RED}Could not find the verifyAndUpdate tx hash in send_request's output${NC}"
