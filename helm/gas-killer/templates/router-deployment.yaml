@@ -367,7 +367,7 @@ spec:
             # Simulation profile (chain | unbounded-v1); must match the nodes' — it
             # changes the task digest.
             - name: GK_SIM_PROFILE
-              value: {{ default "chain" .Values.global.simProfile | quote }}
+              value: {{ include "gas-killer.simProfile" . | quote }}
             - name: PRIVATE_KEY
               valueFrom:
                 secretKeyRef:

@@ -262,7 +262,7 @@ spec:
             # Simulation profile (chain | unbounded-v1); must match the router's — it
             # changes the task digest.
             - name: GK_SIM_PROFILE
-              value: {{ default "chain" $root.Values.global.simProfile | quote }}
+              value: {{ include "gas-killer.simProfile" $root | quote }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}
