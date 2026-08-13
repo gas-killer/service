@@ -3,6 +3,7 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolCall;
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
 use scripts::bindings::arraysummation::ArraySummation::sumCall;
+use scripts::bindings::onchainlife::OnchainLife::stepCall;
 use scripts::bindings::reentrantcheckpoint::ReentrantCheckpoint::advanceCall;
 use scripts::task_payload::{
     DEFAULT_READY_TIMEOUT_SECS, submit_payload, submitter_key, task_status_url,
@@ -23,8 +24,23 @@ fn e2e_example_is_reentrant() -> bool {
     )
 }
 
+/// True when `E2E_EXAMPLE=onchain-life` selects the Game of Life target (an `OnchainLife`,
+/// task `step(uint32)`, progress read via `generation()`).
+fn e2e_example_is_onchain_life() -> bool {
+    matches!(
+        env::var("E2E_EXAMPLE").map(|v| v.trim().to_ascii_lowercase()),
+        Ok(ref v) if v == "onchain-life" || v == "onchainlife"
+    )
+}
+
+/// Generations per `step` for the Game of Life target. At ~16.5M gas each, three puts a direct
+/// call above a 30M block while the diff it produces stays at 16 board words plus the
+/// generation counter — the property the unbounded-profile leg asserts.
+const ONCHAIN_LIFE_GENERATIONS: u32 = 3;
+
 /// Read the target's "progress" value — the state the e2e watches for change to confirm a
-/// task settled. `counter()` for the re-entrancy target, `currentSum()` otherwise.
+/// task settled. `counter()` for the re-entrancy target, `generation()` for the Game of Life
+/// one, `currentSum()` otherwise.
 async fn read_progress_value<P: Provider>(
     target: Address,
     provider: &P,
@@ -36,6 +52,15 @@ async fn read_progress_value<P: Provider>(
                 .call()
                 .await
                 .map_err(|e| format!("Failed to read counter(): {}", e))?
+                .to::<u64>(),
+        )
+    } else if e2e_example_is_onchain_life() {
+        Ok(
+            scripts::bindings::onchainlife::OnchainLife::new(target, provider)
+                .generation()
+                .call()
+                .await
+                .map_err(|e| format!("Failed to read generation(): {}", e))?
                 .to::<u64>(),
         )
     } else {
@@ -331,10 +356,20 @@ async fn build_mock_request()
         current_count
     );
     // The re-entrancy target's task is the no-arg `advance()`, which re-enters itself
-    // mid-transition; the array-summation target's task is `sum(indexes)`.
+    // mid-transition; the Game of Life target's is `step(generations)`; the array-summation
+    // target's is `sum(indexes)`.
     let call_data = if e2e_example_is_reentrant() {
         println!("Using ReentrantCheckpoint.advance() for transition_index={current_count}");
         advanceCall {}.abi_encode().to_vec()
+    } else if e2e_example_is_onchain_life() {
+        println!(
+            "Using OnchainLife.step({ONCHAIN_LIFE_GENERATIONS}) for transition_index={current_count}"
+        );
+        stepCall {
+            generations: ONCHAIN_LIFE_GENERATIONS,
+        }
+        .abi_encode()
+        .to_vec()
     } else {
         sumCall { indexes }.abi_encode().to_vec()
     };

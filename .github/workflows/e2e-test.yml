@@ -34,6 +34,12 @@ jobs:
         #     storage diff read from prestateTracer/callTracer rather than a struct-log
         #     trace. `ArraySummation.sum` makes no external call at target depth, so this
         #     leg exercises the net form itself rather than its canonical fallback.
+        #   - the UNBOUNDED simulation profile settling an OnchainLife 3-generation step,
+        #     whose direct execution costs ~49.7M gas and therefore cannot be mined in a 30M
+        #     block at all. run_e2e_test.sh asserts both halves: step 7a that a direct call
+        #     exceeds the block limit, step 10b that the same transition's verifyAndUpdate
+        #     receipt used a small fraction of one. Needs prestate-net (a struct-log trace of
+        #     that call exhausts the container) and an anvil whose execution cap is lifted.
         include:
           - signature_scheme: bls
             state_encoding: legacy
@@ -47,6 +53,11 @@ jobs:
           - signature_scheme: bls
             state_encoding: prestate-net
             e2e_example: array-summation
+          - signature_scheme: bls
+            state_encoding: prestate-net
+            e2e_example: onchain-life
+            sim_profile: unbounded-v1
+            anvil_extra_args: --disable-block-gas-limit
 
     steps:
       - name: Checkout code
@@ -98,6 +109,9 @@ jobs:
           SIGNATURE_SCHEME: ${{ matrix.signature_scheme }}
           STATE_ENCODING: ${{ matrix.state_encoding }}
           E2E_EXAMPLE: ${{ matrix.e2e_example }}
+          # Unset on every leg but the unbounded one, where an empty value means the default.
+          GK_SIM_PROFILE: ${{ matrix.sim_profile || 'chain' }}
+          ANVIL_EXTRA_ARGS: ${{ matrix.anvil_extra_args }}
         run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log; exit ${PIPESTATUS[0]}
 
       - name: Show router logs

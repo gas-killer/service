@@ -37,6 +37,7 @@ signers = [
 # generations the operator stepped. The cost-collapse case.
 [[examples]]
 name      = "onchainLife"
+alias     = "arraySummation"
 artifact  = "OnchainLife.sol:OnchainLife"
 # uint256[16] seed: the board, four 64-bit rows per word. Word 0 carries a standard glider at
 # cells (1,0) (2,1) (0,2) (1,2) (2,2), i.e. the sum of 1 << (y * 64 + x).
@@ -72,6 +73,19 @@ ctor_args = [
   label = "life_step_1"
   sig   = "step(uint32)"
   args  = ["1"]
+
+  # ALSO REQUIRES GK_SIM_PROFILE=unbounded-v1. Three generations is ~49.7M gas, so a direct
+  # call cannot be mined in a 30M block and the simulation itself only completes under the
+  # unbounded profile's lifted gas limits (and against an RPC whose execution cap is lifted —
+  # `anvil --disable-block-gas-limit`). Under the default `chain` profile this request fails
+  # in analysis while `life_step_1` above still passes; that contrast is the point.
+  #
+  # The diff it produces is the same size as the one-generation diff — at most 16 board words
+  # plus the counter — which is what makes the transition landable at all.
+  [[examples.exercise]]
+  label = "life_step_3"
+  sig   = "step(uint32)"
+  args  = ["3"]
 
 # ── GuardedVault ─────────────────────────────────────────────────────────────────────────
 # A vault whose every state transition re-validates an O(N) global invariant. Operators

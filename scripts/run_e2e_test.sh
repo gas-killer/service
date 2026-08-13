@@ -26,15 +26,21 @@ SIGNATURE_SCHEME_CHOICE="${SIGNATURE_SCHEME:-bls}"
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 echo "Signature scheme: $SIGNATURE_SCHEME_CHOICE"
 
-# STATE_ENCODING (legacy|canonical) and E2E_EXAMPLE (array-summation|reentrant) follow the
+# STATE_ENCODING (legacy|canonical|prestate-net), E2E_EXAMPLE
+# (array-summation|reentrant|onchain-life) and GK_SIM_PROFILE (chain|unbounded-v1) follow the
 # same capture-then-re-export discipline as SIGNATURE_SCHEME so the containers AND the
 # host-side deploy/send binaries agree. `reentrant` deploys a ReentrantCheckpoint whose
 # task re-enters mid-transition; pair it with `canonical` to prove re-entrancy is safe.
+# `onchain-life` deploys an OnchainLife and settles a 3-generation step, whose direct
+# execution exceeds a 30M block; it requires GK_SIM_PROFILE=unbounded-v1,
+# STATE_ENCODING=prestate-net, and ANVIL_EXTRA_ARGS=--disable-block-gas-limit.
 STATE_ENCODING_CHOICE="${STATE_ENCODING:-legacy}"
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
 E2E_EXAMPLE_CHOICE="${E2E_EXAMPLE:-array-summation}"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
-echo "State encoding: $STATE_ENCODING_CHOICE | e2e example: $E2E_EXAMPLE_CHOICE"
+GK_SIM_PROFILE_CHOICE="${GK_SIM_PROFILE:-chain}"
+export GK_SIM_PROFILE="$GK_SIM_PROFILE_CHOICE"
+echo "State encoding: $STATE_ENCODING_CHOICE | e2e example: $E2E_EXAMPLE_CHOICE | sim profile: $GK_SIM_PROFILE_CHOICE"
 
 # Track if test passed
 TEST_PASSED=false
@@ -179,6 +185,7 @@ source ../.env
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
+export GK_SIM_PROFILE="$GK_SIM_PROFILE_CHOICE"
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
@@ -193,6 +200,7 @@ case "$E2E_EXAMPLE:$SIGNATURE_SCHEME" in
     array-summation:schnorr)          MANIFEST_EXAMPLE="schnorrArraySummation" ;;
     array-summation:*)                MANIFEST_EXAMPLE="arraySummation" ;;
     reentrant:*|reentrant-checkpoint:*) MANIFEST_EXAMPLE="reentrantCheckpoint" ;;
+    onchain-life:*|onchainlife:*)     MANIFEST_EXAMPLE="onchainLife" ;;
     *)
         echo -e "${RED}Unknown E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
         exit 1
@@ -254,6 +262,42 @@ else
     echo "Discovered ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
     # Set as the default target for Gas Killer trigger helper
     export GAS_KILLER_TARGET_ADDRESS="$ARRAY_SUMMATION_ADDRESS"
+fi
+
+# Step 7a (unbounded profile only): establish the premise — the tracked function cannot be
+# executed directly in a real block, because estimating it alone costs more than the mainnet
+# block gas limit. Step 10b then shows the same transition landing in one small
+# verifyAndUpdate. Together they are the unbounded-mode claim. The estimate itself only
+# completes because the anvil service runs with --disable-block-gas-limit
+# (ANVIL_EXTRA_ARGS); against a stock node it would fail as out-of-gas.
+MAINNET_BLOCK_GAS_LIMIT=30000000
+if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded-v1" ]; then
+    echo -e "${YELLOW}Step 7a: Asserting a direct call exceeds the block gas limit...${NC}"
+    if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
+        echo -e "${RED}No target address resolved; cannot estimate the direct call${NC}"
+        exit 1
+    fi
+    # Must match the call send_request submits for this example, or the two halves of the
+    # claim would be measuring different transitions.
+    case "$E2E_EXAMPLE" in
+        onchain-life|onchainlife)
+            DIRECT_SIG="step(uint32)"
+            DIRECT_ARG="3"
+            ;;
+        *)
+            echo -e "${RED}GK_SIM_PROFILE=unbounded-v1 has no above-block-limit call defined for E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
+            exit 1
+            ;;
+    esac
+    DIRECT_GAS=$(cast estimate "$ARRAY_SUMMATION_ADDRESS" "$DIRECT_SIG" "$DIRECT_ARG" \
+        --rpc-url http://localhost:8545) \
+        || deploy_failed "cast estimate of the direct $DIRECT_SIG call failed"
+    echo "Direct $DIRECT_SIG call needs $DIRECT_GAS gas (mainnet block limit: $MAINNET_BLOCK_GAS_LIMIT)"
+    if [ -z "$DIRECT_GAS" ] || [ "$DIRECT_GAS" -le "$MAINNET_BLOCK_GAS_LIMIT" ]; then
+        echo -e "${RED}Expected the direct call to exceed the block gas limit; raise the workload${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Direct execution cannot fit in a real block ($DIRECT_GAS > $MAINNET_BLOCK_GAS_LIMIT gas)${NC}"
 fi
 
 cd "$PROJECT_ROOT"
@@ -373,6 +417,29 @@ if [ $TRIGGER_STATUS -eq 0 ]; then
             exit 1
         fi
         echo -e "${GREEN}✅ Re-entrancy verified: observer confirmed the canonical intermediate state${NC}"
+    fi
+
+    # Step 10b (unbounded profile only): close the claim step 7a opened. The transition that
+    # could not be executed directly in a block has landed as one small verifyAndUpdate, so the
+    # receipt's gasUsed is the on-chain cost of an above-block-limit computation.
+    if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded-v1" ]; then
+        echo -e "${YELLOW}Step 10b: Asserting verifyAndUpdate landed far below the block gas limit...${NC}"
+        if [ -z "$USER_TX_HASH" ]; then
+            echo -e "${RED}Could not find the verifyAndUpdate tx hash in send_request's output${NC}"
+            exit 1
+        fi
+        VU_GAS=$(cast receipt "$USER_TX_HASH" gasUsed --rpc-url http://localhost:8545 | tr -d '[:space:]')
+        # Normalize a possible 0x form to decimal so the comparisons below are arithmetic.
+        VU_GAS=$((VU_GAS))
+        if [ "$VU_GAS" -le 0 ]; then
+            echo -e "${RED}❌ Could not read gasUsed for $USER_TX_HASH${NC}"
+            exit 1
+        fi
+        if [ "$VU_GAS" -ge "$MAINNET_BLOCK_GAS_LIMIT" ]; then
+            echo -e "${RED}❌ verifyAndUpdate used $VU_GAS gas — expected well under $MAINNET_BLOCK_GAS_LIMIT${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}✅ Unbounded transition settled: ${VU_GAS} gas on-chain vs ${DIRECT_GAS} gas to execute directly (~$((DIRECT_GAS / VU_GAS))x less)${NC}"
     fi
 else
     echo -e "${RED}❌ Array summation verification failed - state was not updated within timeout.${NC}"
