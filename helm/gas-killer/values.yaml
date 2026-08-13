@@ -58,11 +58,28 @@ global:
   # tracked functions whose direct execution costs more than a block's gas limit. It
   # REQUIRES the RPC serving debug_traceCall to have its execution cap lifted, and pairs
   # with stateEncoding: "prestate-net" (a struct-log trace of an above-block-limit call is
-  # what it avoids). In LOCAL mode the bundled Anvil needs --disable-block-gas-limit, which
-  # lives in the ethereum image's entrypoint rather than this chart — the profile alone does
-  # not lift the L1's own limit. See the GK_SIM_PROFILE block in example.env and
-  # gas-analyzer docs/UNBOUNDED_MODE.md.
+  # what it avoids). See the GK_SIM_PROFILE block in example.env and gas-analyzer
+  # docs/UNBOUNDED_MODE.md.
+  #
+  # DO NOT set this to unbounded-v1 on a production fleet yet. Three preconditions are still
+  # open, tracked in gas-killer/service#356:
+  #   1. The SP1 fraud-proof guest must bind the same lifted limits (sp1-contract-call#12).
+  #      A guest checking against real header limits while operators simulate under lifted
+  #      ones would judge an honest operator's payload invalid — i.e. false slashing.
+  #   2. The payload gate's per-byte dispatch constant needs re-measuring against a real
+  #      verifyAndUpdate rather than the analyzer's estimator handler (gas-analyzer#166).
+  #   3. Every operator's debug_traceCall RPC needs its own execution cap lifted.
+  # And because the profile changes the task digest, flipping it is a coordinated fleet-wide
+  # change rather than a rolling one: a partially migrated fleet fails quorum until it converges.
   simProfile: "chain"
+
+  # Acknowledges that the ethereum image's entrypoint starts Anvil with
+  # --disable-block-gas-limit, which simProfile: "unbounded-v1" needs in LOCAL mode to execute an
+  # above-block-limit call at all. The chart cannot supply that flag — it lives in the image — so
+  # rendering fails on the LOCAL + unbounded-v1 combination until this is set. That turns a
+  # runtime failure of every heavy task into an install-time error. Irrelevant for TESTNET, where
+  # the RPC is external and its cap is the operator's responsibility.
+  localAnvilUnboundedReady: false
 
   # Number of operator nodes to deploy
   nodeCount: 3
