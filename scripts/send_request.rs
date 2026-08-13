@@ -33,10 +33,34 @@ fn e2e_example_is_onchain_life() -> bool {
     )
 }
 
-/// Generations per `step` for the Game of Life target. At ~16.5M gas each, three puts a direct
-/// call above a 30M block while the diff it produces stays at 16 board words plus the
-/// generation counter — the property the unbounded-profile leg asserts.
-const ONCHAIN_LIFE_GENERATIONS: u32 = 3;
+/// Generations per `step` for the Game of Life target when `ONCHAIN_LIFE_GENERATIONS` is unset.
+/// At ~16.5M gas each, three puts a direct call above a 30M block while the diff it produces
+/// stays at 16 board words plus the generation counter — the property the unbounded-profile leg
+/// asserts.
+const DEFAULT_ONCHAIN_LIFE_GENERATIONS: u32 = 3;
+
+/// Generations to `step`, read from `ONCHAIN_LIFE_GENERATIONS`.
+///
+/// `run_e2e_test.sh` exports this and estimates the same generation count in its step 7a, so the
+/// call it proves unmineable is the call submitted here. The two halves of the unbounded claim
+/// only mean anything if they measure one transition, which is why the count is read rather than
+/// hardcoded on both sides.
+fn onchain_life_generations() -> u32 {
+    parse_onchain_life_generations(env::var("ONCHAIN_LIFE_GENERATIONS").ok().as_deref())
+}
+
+/// Parses the `ONCHAIN_LIFE_GENERATIONS` value (trimmed). `None` / empty →
+/// [`DEFAULT_ONCHAIN_LIFE_GENERATIONS`]. Panics on a non-numeric value rather than falling back:
+/// silently substituting the default would settle a different transition than step 7a estimated,
+/// leaving the proof measuring two different calls while still passing.
+fn parse_onchain_life_generations(raw: Option<&str>) -> u32 {
+    match raw.map(str::trim) {
+        None | Some("") => DEFAULT_ONCHAIN_LIFE_GENERATIONS,
+        Some(value) => value
+            .parse()
+            .unwrap_or_else(|_| panic!("ONCHAIN_LIFE_GENERATIONS must be a u32, got '{value}'")),
+    }
+}
 
 /// Read the target's "progress" value — the state the e2e watches for change to confirm a
 /// task settled. `counter()` for the re-entrancy target, `generation()` for the Game of Life
@@ -362,14 +386,9 @@ async fn build_mock_request()
         println!("Using ReentrantCheckpoint.advance() for transition_index={current_count}");
         advanceCall {}.abi_encode().to_vec()
     } else if e2e_example_is_onchain_life() {
-        println!(
-            "Using OnchainLife.step({ONCHAIN_LIFE_GENERATIONS}) for transition_index={current_count}"
-        );
-        stepCall {
-            generations: ONCHAIN_LIFE_GENERATIONS,
-        }
-        .abi_encode()
-        .to_vec()
+        let generations = onchain_life_generations();
+        println!("Using OnchainLife.step({generations}) for transition_index={current_count}");
+        stepCall { generations }.abi_encode().to_vec()
     } else {
         sumCall { indexes }.abi_encode().to_vec()
     };
@@ -387,4 +406,36 @@ async fn build_mock_request()
     };
 
     Ok(GasKillerTaskRequest { body })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn onchain_life_generations_parsing() {
+        assert_eq!(
+            parse_onchain_life_generations(None),
+            DEFAULT_ONCHAIN_LIFE_GENERATIONS
+        );
+        assert_eq!(
+            parse_onchain_life_generations(Some("")),
+            DEFAULT_ONCHAIN_LIFE_GENERATIONS
+        );
+        assert_eq!(
+            parse_onchain_life_generations(Some("   ")),
+            DEFAULT_ONCHAIN_LIFE_GENERATIONS
+        );
+        assert_eq!(parse_onchain_life_generations(Some("5")), 5);
+        assert_eq!(parse_onchain_life_generations(Some(" 12 ")), 12);
+    }
+
+    /// A non-numeric value must not fall back to the default: step 7a estimates the count it was
+    /// given while this binary would settle a different one, and the leg would pass while its two
+    /// halves measured different transitions.
+    #[test]
+    #[should_panic(expected = "ONCHAIN_LIFE_GENERATIONS must be a u32")]
+    fn onchain_life_generations_rejects_a_non_numeric_value() {
+        let _ = parse_onchain_life_generations(Some("abc"));
+    }
 }

@@ -40,6 +40,11 @@ E2E_EXAMPLE_CHOICE="${E2E_EXAMPLE:-array-summation}"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
 GK_SIM_PROFILE_CHOICE="${GK_SIM_PROFILE:-chain}"
 export GK_SIM_PROFILE="$GK_SIM_PROFILE_CHOICE"
+# Generations for the onchain-life target's `step(uint32)`. This is the single source for both
+# halves of the unbounded proof: step 7a estimates this many generations and send_request submits
+# this many, so they cannot drift into measuring different transitions.
+ONCHAIN_LIFE_GENERATIONS_CHOICE="${ONCHAIN_LIFE_GENERATIONS:-3}"
+export ONCHAIN_LIFE_GENERATIONS="$ONCHAIN_LIFE_GENERATIONS_CHOICE"
 echo "State encoding: $STATE_ENCODING_CHOICE | e2e example: $E2E_EXAMPLE_CHOICE | sim profile: $GK_SIM_PROFILE_CHOICE"
 
 # Track if test passed
@@ -186,6 +191,7 @@ export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
 export GK_SIM_PROFILE="$GK_SIM_PROFILE_CHOICE"
+export ONCHAIN_LIFE_GENERATIONS="$ONCHAIN_LIFE_GENERATIONS_CHOICE"
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
@@ -265,12 +271,16 @@ else
 fi
 
 # Step 7a (unbounded profile only): establish the premise — the tracked function cannot be
-# executed directly in a real block, because estimating it alone costs more than the mainnet
-# block gas limit. Step 10b then shows the same transition landing in one small
-# verifyAndUpdate. Together they are the unbounded-mode claim. The estimate itself only
-# completes because the anvil service runs with --disable-block-gas-limit
-# (ANVIL_EXTRA_ARGS); against a stock node it would fail as out-of-gas.
-MAINNET_BLOCK_GAS_LIMIT=30000000
+# executed directly in a real block, because estimating it alone costs more than a block's gas
+# limit. Step 10b then shows the same transition landing in one small verifyAndUpdate. Together
+# they are the unbounded-mode claim. The estimate itself only completes because the anvil service
+# runs with --disable-block-gas-limit (ANVIL_EXTRA_ARGS); against a stock node it would fail as
+# out-of-gas.
+#
+# 30M is an illustrative reference point rather than any chain's live limit (mainnet has since
+# risen past it). That direction is safe for both assertions: a workload above 30M is the weaker
+# claim to prove in 7a, and staying under 30M is the stricter bar to clear in 10b.
+NOMINAL_BLOCK_GAS_LIMIT=30000000
 if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded-v1" ]; then
     echo -e "${YELLOW}Step 7a: Asserting a direct call exceeds the block gas limit...${NC}"
     if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
@@ -278,11 +288,12 @@ if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded-v1" ]; then
         exit 1
     fi
     # Must match the call send_request submits for this example, or the two halves of the
-    # claim would be measuring different transitions.
+    # claim would be measuring different transitions. send_request reads the same
+    # ONCHAIN_LIFE_GENERATIONS exported above.
     case "$E2E_EXAMPLE" in
         onchain-life|onchainlife)
             DIRECT_SIG="step(uint32)"
-            DIRECT_ARG="3"
+            DIRECT_ARG="$ONCHAIN_LIFE_GENERATIONS_CHOICE"
             ;;
         *)
             echo -e "${RED}GK_SIM_PROFILE=unbounded-v1 has no above-block-limit call defined for E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
@@ -292,12 +303,12 @@ if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded-v1" ]; then
     DIRECT_GAS=$(cast estimate "$ARRAY_SUMMATION_ADDRESS" "$DIRECT_SIG" "$DIRECT_ARG" \
         --rpc-url http://localhost:8545) \
         || deploy_failed "cast estimate of the direct $DIRECT_SIG call failed"
-    echo "Direct $DIRECT_SIG call needs $DIRECT_GAS gas (mainnet block limit: $MAINNET_BLOCK_GAS_LIMIT)"
-    if [ -z "$DIRECT_GAS" ] || [ "$DIRECT_GAS" -le "$MAINNET_BLOCK_GAS_LIMIT" ]; then
-        echo -e "${RED}Expected the direct call to exceed the block gas limit; raise the workload${NC}"
+    echo "Direct $DIRECT_SIG call with $DIRECT_ARG generations needs $DIRECT_GAS gas (nominal block limit: $NOMINAL_BLOCK_GAS_LIMIT)"
+    if [ -z "$DIRECT_GAS" ] || [ "$DIRECT_GAS" -le "$NOMINAL_BLOCK_GAS_LIMIT" ]; then
+        echo -e "${RED}Expected the direct call to exceed the block gas limit; raise ONCHAIN_LIFE_GENERATIONS${NC}"
         exit 1
     fi
-    echo -e "${GREEN}✅ Direct execution cannot fit in a real block ($DIRECT_GAS > $MAINNET_BLOCK_GAS_LIMIT gas)${NC}"
+    echo -e "${GREEN}✅ Direct execution cannot fit in a real block ($DIRECT_GAS > $NOMINAL_BLOCK_GAS_LIMIT gas)${NC}"
 fi
 
 cd "$PROJECT_ROOT"
@@ -435,8 +446,8 @@ if [ $TRIGGER_STATUS -eq 0 ]; then
             echo -e "${RED}❌ Could not read gasUsed for $USER_TX_HASH${NC}"
             exit 1
         fi
-        if [ "$VU_GAS" -ge "$MAINNET_BLOCK_GAS_LIMIT" ]; then
-            echo -e "${RED}❌ verifyAndUpdate used $VU_GAS gas — expected well under $MAINNET_BLOCK_GAS_LIMIT${NC}"
+        if [ "$VU_GAS" -ge "$NOMINAL_BLOCK_GAS_LIMIT" ]; then
+            echo -e "${RED}❌ verifyAndUpdate used $VU_GAS gas — expected well under $NOMINAL_BLOCK_GAS_LIMIT${NC}"
             exit 1
         fi
         echo -e "${GREEN}✅ Unbounded transition settled: ${VU_GAS} gas on-chain vs ${DIRECT_GAS} gas to execute directly (~$((DIRECT_GAS / VU_GAS))x less)${NC}"
