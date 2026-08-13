@@ -1,10 +1,7 @@
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::sol_types::SolCall;
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
-use scripts::bindings::arraysummation::ArraySummation::sumCall;
-use scripts::bindings::onchainlife::OnchainLife::stepCall;
-use scripts::bindings::reentrantcheckpoint::ReentrantCheckpoint::advanceCall;
+use scripts::e2e_example::E2eExample;
 use scripts::task_payload::{
     DEFAULT_READY_TIMEOUT_SECS, submit_payload, submitter_key, task_status_url,
     wait_for_ready_payload,
@@ -13,91 +10,6 @@ use serde_json::json;
 use std::env;
 use std::fs;
 use url::Url;
-
-/// True when `E2E_EXAMPLE=reentrant` selects the re-entrancy demonstration target
-/// (a `ReentrantCheckpoint`, task `advance()`, progress read via `counter()`) instead of
-/// the default array-summation one (`sum(uint256[])`, progress via `currentSum()`).
-fn e2e_example_is_reentrant() -> bool {
-    matches!(
-        env::var("E2E_EXAMPLE").map(|v| v.trim().to_ascii_lowercase()),
-        Ok(ref v) if v == "reentrant" || v == "reentrant-checkpoint"
-    )
-}
-
-/// True when `E2E_EXAMPLE=onchain-life` selects the Game of Life target (an `OnchainLife`,
-/// task `step(uint32)`, progress read via `generation()`).
-fn e2e_example_is_onchain_life() -> bool {
-    matches!(
-        env::var("E2E_EXAMPLE").map(|v| v.trim().to_ascii_lowercase()),
-        Ok(ref v) if v == "onchain-life" || v == "onchainlife"
-    )
-}
-
-/// Generations per `step` for the Game of Life target when `ONCHAIN_LIFE_GENERATIONS` is unset.
-/// At ~16.5M gas each, three puts a direct call above a 30M block while the diff it produces
-/// stays at 16 board words plus the generation counter — the property the unbounded-profile leg
-/// asserts.
-const DEFAULT_ONCHAIN_LIFE_GENERATIONS: u32 = 3;
-
-/// Generations to `step`, read from `ONCHAIN_LIFE_GENERATIONS`.
-///
-/// `run_e2e_test.sh` exports this and estimates the same generation count in its step 7a, so the
-/// call it proves unmineable is the call submitted here. The two halves of the unbounded claim
-/// only mean anything if they measure one transition, which is why the count is read rather than
-/// hardcoded on both sides.
-fn onchain_life_generations() -> u32 {
-    parse_onchain_life_generations(env::var("ONCHAIN_LIFE_GENERATIONS").ok().as_deref())
-}
-
-/// Parses the `ONCHAIN_LIFE_GENERATIONS` value (trimmed). `None` / empty →
-/// [`DEFAULT_ONCHAIN_LIFE_GENERATIONS`]. Panics on a non-numeric value rather than falling back:
-/// silently substituting the default would settle a different transition than step 7a estimated,
-/// leaving the proof measuring two different calls while still passing.
-fn parse_onchain_life_generations(raw: Option<&str>) -> u32 {
-    match raw.map(str::trim) {
-        None | Some("") => DEFAULT_ONCHAIN_LIFE_GENERATIONS,
-        Some(value) => value
-            .parse()
-            .unwrap_or_else(|_| panic!("ONCHAIN_LIFE_GENERATIONS must be a u32, got '{value}'")),
-    }
-}
-
-/// Read the target's "progress" value — the state the e2e watches for change to confirm a
-/// task settled. `counter()` for the re-entrancy target, `generation()` for the Game of Life
-/// one, `currentSum()` otherwise.
-async fn read_progress_value<P: Provider>(
-    target: Address,
-    provider: &P,
-) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    if e2e_example_is_reentrant() {
-        Ok(
-            scripts::bindings::reentrantcheckpoint::ReentrantCheckpoint::new(target, provider)
-                .counter()
-                .call()
-                .await
-                .map_err(|e| format!("Failed to read counter(): {}", e))?
-                .to::<u64>(),
-        )
-    } else if e2e_example_is_onchain_life() {
-        Ok(
-            scripts::bindings::onchainlife::OnchainLife::new(target, provider)
-                .generation()
-                .call()
-                .await
-                .map_err(|e| format!("Failed to read generation(): {}", e))?
-                .to::<u64>(),
-        )
-    } else {
-        Ok(
-            scripts::bindings::arraysummation::ArraySummation::new(target, provider)
-                .currentSum()
-                .call()
-                .await
-                .map_err(|e| format!("Failed to read currentSum(): {}", e))?
-                .to::<u64>(),
-        )
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -217,9 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .into());
     }
 
-    // Capture the target's progress value before posting the task; a settled task changes
-    // it (currentSum for array-summation, counter for the re-entrancy target).
-    let initial_sum = read_progress_value(request.body.target_address, &provider).await?;
+    // Capture the target's progress value before posting the task; a settled task changes it.
+    // Which state that is depends on the target — see `E2eExample::read_progress_value`.
+    let example = E2eExample::from_env();
+    let initial_sum = example
+        .read_progress_value(request.body.target_address, &provider)
+        .await?;
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
         .unwrap_or_else(|_| "http://localhost:8080/tasks".to_string());
@@ -283,9 +198,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     submit_payload(&payload, &http_rpc, &submit_key).await?;
 
     // Confirm the on-chain effect: the target's progress value must move after the
-    // user-submitted verifyAndUpdate (currentSum for array-summation, counter for the
-    // re-entrancy target).
-    let final_sum = read_progress_value(request.body.target_address, &provider).await?;
+    // user-submitted verifyAndUpdate.
+    let final_sum = example
+        .read_progress_value(request.body.target_address, &provider)
+        .await?;
     if final_sum == initial_sum {
         return Err(format!(
             "target progress unchanged ({final_sum}) after submitting the payload; verifyAndUpdate had no effect"
@@ -363,35 +279,7 @@ async fn build_mock_request()
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
         .to::<u64>();
 
-    // Use different indexes based on transition_index to get different sums each time
-    // Offset by 3 for each new trigger: [0,1,2], [3,4,5], [6,7,8], etc.
-    // Array has 100 elements, so we can do ~33 unique triggers
-    let base_idx = (current_count * 3) % 97; // Stay within bounds of 100 element array
-    let indexes = vec![
-        U256::from(base_idx),
-        U256::from(base_idx + 1),
-        U256::from(base_idx + 2),
-    ];
-    println!(
-        "Using indexes [{}, {}, {}] for transition_index={}",
-        base_idx,
-        base_idx + 1,
-        base_idx + 2,
-        current_count
-    );
-    // The re-entrancy target's task is the no-arg `advance()`, which re-enters itself
-    // mid-transition; the Game of Life target's is `step(generations)`; the array-summation
-    // target's is `sum(indexes)`.
-    let call_data = if e2e_example_is_reentrant() {
-        println!("Using ReentrantCheckpoint.advance() for transition_index={current_count}");
-        advanceCall {}.abi_encode().to_vec()
-    } else if e2e_example_is_onchain_life() {
-        let generations = onchain_life_generations();
-        println!("Using OnchainLife.step({generations}) for transition_index={current_count}");
-        stepCall { generations }.abi_encode().to_vec()
-    } else {
-        sumCall { indexes }.abi_encode().to_vec()
-    };
+    let call_data = E2eExample::from_env().call_data(current_count);
 
     // Resolve block_height for deterministic execution
     let block_height = resolve_block_height(&provider).await?;
@@ -406,36 +294,4 @@ async fn build_mock_request()
     };
 
     Ok(GasKillerTaskRequest { body })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn onchain_life_generations_parsing() {
-        assert_eq!(
-            parse_onchain_life_generations(None),
-            DEFAULT_ONCHAIN_LIFE_GENERATIONS
-        );
-        assert_eq!(
-            parse_onchain_life_generations(Some("")),
-            DEFAULT_ONCHAIN_LIFE_GENERATIONS
-        );
-        assert_eq!(
-            parse_onchain_life_generations(Some("   ")),
-            DEFAULT_ONCHAIN_LIFE_GENERATIONS
-        );
-        assert_eq!(parse_onchain_life_generations(Some("5")), 5);
-        assert_eq!(parse_onchain_life_generations(Some(" 12 ")), 12);
-    }
-
-    /// A non-numeric value must not fall back to the default: step 7a estimates the count it was
-    /// given while this binary would settle a different one, and the leg would pass while its two
-    /// halves measured different transitions.
-    #[test]
-    #[should_panic(expected = "ONCHAIN_LIFE_GENERATIONS must be a u32")]
-    fn onchain_life_generations_rejects_a_non_numeric_value() {
-        let _ = parse_onchain_life_generations(Some("abc"));
-    }
 }
