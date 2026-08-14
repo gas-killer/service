@@ -318,7 +318,12 @@ async fn build_mock_request()
         U256::from(base_idx + 1),
         U256::from(base_idx + 2),
     ];
-    println!("Using ArraySummation.sum([{base_idx}, ..]) for transition_index={current_count}");
+    println!(
+        "Using ArraySummation.sum([{}, {}, {}]) for transition_index={current_count}",
+        base_idx,
+        base_idx + 1,
+        base_idx + 2
+    );
     let call_data = sumCall { indexes }.abi_encode().to_vec();
 
     // Resolve block_height for deterministic execution
