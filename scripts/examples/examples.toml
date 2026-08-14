@@ -16,6 +16,14 @@
 #   $signer:<n>    the address of signers[n] below
 #   $env:VAR       an environment variable
 #
+# `alias` records the deployed target's address under a SECOND key in the deployment JSON.
+# It exists because run_e2e_test.sh, send_request, verify_message_hash_parity, and
+# run_scenario's bare `local` sentinel each hardcode one lookup key — `arraySummation` — to
+# find "the Gas Killer target that was just deployed". So every example those tools must drive
+# declares `alias = "arraySummation"` whatever contract it actually deploys; without it they
+# cannot resolve the target at all. The key is named after the first example to exist rather
+# than after what it means, so an example whose name looks unrelated to its alias is expected.
+#
 # Adding an example is an edit here plus an entry in EXPECTED_ARTIFACTS in
 # fetch_examples.sh. No Rust changes.
 
@@ -133,9 +141,7 @@ ctor_args = ["$avs", "$sigChecker", "5000"]
 # nothing surviving in the forked chain. The SDK also ships factories for these contracts; their
 # only extra effect is a registry of what they deployed, which nothing in this repo reads.
 #
-# Each declares `alias = "arraySummation"` because run_e2e_test.sh, send_request,
-# verify_message_hash_parity, and the bare `local` scenario sentinel all read that one key
-# regardless of which example is deployed.
+# Each declares `alias = "arraySummation"` — see the alias note in the header above.
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 
 # ── ArraySummation (BLS) ─────────────────────────────────────────────────────────────────
