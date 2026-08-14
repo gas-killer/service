@@ -7,5 +7,8 @@
 /// `src/bindings/abis/`.
 pub mod bindings;
 
+/// Resolving the deployed Gas Killer target out of the AVS deployment JSON.
+pub mod deployment;
+
 /// Polling and submission of router-rendered `verifyAndUpdate` payloads.
 pub mod task_payload;

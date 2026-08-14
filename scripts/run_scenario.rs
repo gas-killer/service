@@ -4,6 +4,7 @@ use alloy::signers::local::PrivateKeySigner;
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use reqwest::Client;
+use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
 use scripts::task_payload::{
     submit_payload, submitter_key, task_status_url, wait_for_ready_payload,
 };
@@ -734,7 +735,7 @@ fn fetch_configmap_value(configmap: &str, key: &str) -> Result<String, String> {
 /// Parse a `local` target_address sentinel into the deployment-JSON key it maps to.
 ///
 /// Returns `None` for any other value (i.e. a literal address). Supported forms:
-///   "local"        → key "arraySummation"
+///   "local"        → the deployed-target key
 ///   "local:<key>"  → that key under `addresses`
 fn parse_local_sentinel(value: &str) -> Option<String> {
     let rest = if value == "local" {
@@ -743,7 +744,7 @@ fn parse_local_sentinel(value: &str) -> Option<String> {
         value.strip_prefix("local:")?
     };
     Some(if rest.is_empty() {
-        "arraySummation".to_string()
+        TARGET_ADDRESS_KEY.to_string()
     } else {
         rest.to_string()
     })
@@ -761,13 +762,18 @@ fn fetch_local_deploy_address(key: &str) -> Result<String, String> {
     })?;
     let json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("failed to parse '{path}': {e}"))?;
-    json.get("addresses")
-        .and_then(|a| a.get(key))
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            format!("deployment JSON '{path}' has no addresses.{key} — has the deploy run?")
-        })
+    // The deployed-target key resolves through the shared lookup so it picks up the same
+    // fallback every other tool uses; any other key is read verbatim.
+    let address = if key == TARGET_ADDRESS_KEY {
+        target_address(&json)
+    } else {
+        json.get("addresses")
+            .and_then(|a| a.get(key))
+            .and_then(|v| v.as_str())
+    };
+    address.map(str::to_string).ok_or_else(|| {
+        format!("deployment JSON '{path}' has no addresses.{key} — has the deploy run?")
+    })
 }
 
 /// Derive the address of the `PRIVATE_KEY` the local stack signs with.
@@ -997,10 +1003,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_sentinel_defaults_to_array_summation() {
+    fn local_sentinel_defaults_to_the_target_key() {
         assert_eq!(
             parse_local_sentinel("local").as_deref(),
-            Some("arraySummation")
+            Some(TARGET_ADDRESS_KEY)
         );
     }
 

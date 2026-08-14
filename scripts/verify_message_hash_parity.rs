@@ -1,9 +1,9 @@
 //! Asserts that `GasKillerTaskData::build_payload_hash` is byte-identical to the deployed
 //! contract's `getMessageHash` across a range of payload shapes.
 //!
-//! Run against a chain with a GasKiller target contract deployed (the e2e stack deploys
-//! ArraySummation). Reads `HTTP_RPC` and the target address from `GAS_KILLER_TARGET_ADDRESS`
-//! (falling back to `addresses.arraySummation` in `AVS_DEPLOYMENT_PATH`).
+//! Run against a chain with a GasKiller target contract deployed (the e2e stack deploys one).
+//! Reads `HTTP_RPC` and the target address from `GAS_KILLER_TARGET_ADDRESS` (falling back to the
+//! deployed-target key in `AVS_DEPLOYMENT_PATH`).
 //!
 //! Exits non-zero on any mismatch so the e2e workflow fails.
 
@@ -11,6 +11,7 @@ use alloy::primitives::{Address, Bytes, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use gas_killer_common::GasKillerTaskData;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
+use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
 use std::env;
 use std::fs;
 use url::Url;
@@ -93,7 +94,7 @@ async fn main() -> Result<(), BoxError> {
 }
 
 /// Resolves the target contract address from `GAS_KILLER_TARGET_ADDRESS`, falling back to the
-/// `addresses.arraySummation` field of the deployment JSON at `AVS_DEPLOYMENT_PATH`.
+/// deployed-target key of the deployment JSON at `AVS_DEPLOYMENT_PATH`.
 fn resolve_target_address() -> Result<Address, BoxError> {
     if let Ok(addr) = env::var("GAS_KILLER_TARGET_ADDRESS")
         && !addr.is_empty()
@@ -106,11 +107,9 @@ fn resolve_target_address() -> Result<Address, BoxError> {
     )?;
     let content = fs::read_to_string(&path).map_err(|e| format!("failed to read {path}: {e}"))?;
     let deployment: serde_json::Value = serde_json::from_str(&content)?;
-    let addr = deployment
-        .get("addresses")
-        .and_then(|a| a.get("arraySummation"))
-        .and_then(|v| v.as_str())
-        .ok_or("addresses.arraySummation not found in deployment JSON")?;
+    let addr = target_address(&deployment).ok_or_else(|| {
+        format!("addresses.{TARGET_ADDRESS_KEY} not found in the deployment JSON at {path}")
+    })?;
     Ok(addr.parse()?)
 }
 

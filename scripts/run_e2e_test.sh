@@ -254,20 +254,23 @@ echo "Advancing one block so the task does not reference a deploy block..."
 cast rpc evm_mine --rpc-url http://localhost:8545 >/dev/null \
     || deploy_failed "could not mine a block after deploying"
 
-# Extract deployed ArraySummation address from deployment JSON
+# Extract the deployed target's address from the deployment JSON. deploy_example records
+# whichever example it deployed under `gasKillerTarget` (the manifest's `alias`), so this one
+# lookup works for every example. `arraySummation` is read as a fallback for deployment JSONs
+# written before that key was named for its role.
 DEPLOY_JSON_PATH="$AVS_DEPLOYMENT_PATH"
 if command -v jq >/dev/null 2>&1; then
-    ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.arraySummation // empty' "$DEPLOY_JSON_PATH")
+    TARGET_ADDRESS=$(jq -r '.addresses.gasKillerTarget // .addresses.arraySummation // empty' "$DEPLOY_JSON_PATH")
 else
-    ARRAY_SUMMATION_ADDRESS=$(grep -o '"arraySummation"\s*:\s*"[^"]*"' "$DEPLOY_JSON_PATH" | sed 's/.*"arraySummation"\s*:\s*"\([^"]*\)"/\1/')
+    TARGET_ADDRESS=$(grep -o '"\(gasKillerTarget\|arraySummation\)"[[:space:]]*:[[:space:]]*"[^"]*"' "$DEPLOY_JSON_PATH" | head -1 | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/')
 fi
 
-if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
-    echo -e "${YELLOW}Warning: Could not determine ArraySummation address from $DEPLOY_JSON_PATH${NC}"
+if [ -z "$TARGET_ADDRESS" ]; then
+    echo -e "${YELLOW}Warning: Could not determine the target address from $DEPLOY_JSON_PATH${NC}"
 else
-    echo "Discovered ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
+    echo "Discovered target address: $TARGET_ADDRESS"
     # Set as the default target for Gas Killer trigger helper
-    export GAS_KILLER_TARGET_ADDRESS="$ARRAY_SUMMATION_ADDRESS"
+    export GAS_KILLER_TARGET_ADDRESS="$TARGET_ADDRESS"
 fi
 
 # Step 7a (unbounded profile only): establish the premise — the tracked function cannot be
@@ -283,7 +286,7 @@ fi
 NOMINAL_BLOCK_GAS_LIMIT=30000000
 if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded" ]; then
     echo -e "${YELLOW}Step 7a: Asserting a direct call exceeds the block gas limit...${NC}"
-    if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
+    if [ -z "$TARGET_ADDRESS" ]; then
         echo -e "${RED}No target address resolved; cannot estimate the direct call${NC}"
         exit 1
     fi
@@ -300,7 +303,7 @@ if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded" ]; then
             exit 1
             ;;
     esac
-    DIRECT_GAS=$(cast estimate "$ARRAY_SUMMATION_ADDRESS" "$DIRECT_SIG" "$DIRECT_ARG" \
+    DIRECT_GAS=$(cast estimate "$TARGET_ADDRESS" "$DIRECT_SIG" "$DIRECT_ARG" \
         --rpc-url http://localhost:8545) \
         || deploy_failed "cast estimate of the direct $DIRECT_SIG call failed"
     echo "Direct $DIRECT_SIG call with $DIRECT_ARG generations needs $DIRECT_GAS gas (nominal block limit: $NOMINAL_BLOCK_GAS_LIMIT)"

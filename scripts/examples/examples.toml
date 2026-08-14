@@ -17,12 +17,10 @@
 #   $env:VAR       an environment variable
 #
 # `alias` records the deployed target's address under a SECOND key in the deployment JSON.
-# It exists because run_e2e_test.sh, send_request, verify_message_hash_parity, and
-# run_scenario's bare `local` sentinel each hardcode one lookup key — `arraySummation` — to
-# find "the Gas Killer target that was just deployed". So every example those tools must drive
-# declares `alias = "arraySummation"` whatever contract it actually deploys; without it they
-# cannot resolve the target at all. The key is named after the first example to exist rather
-# than after what it means, so an example whose name looks unrelated to its alias is expected.
+# run_e2e_test.sh, send_request, verify_message_hash_parity, and run_scenario's bare `local`
+# sentinel all resolve the target through one well-known key, `gasKillerTarget`, so they work
+# against whichever example was deployed without learning its name. Any example those tools
+# must drive declares `alias = "gasKillerTarget"`; without it they cannot resolve the target.
 #
 # Adding an example is an edit here plus an entry in EXPECTED_ARTIFACTS in
 # fetch_examples.sh. No Rust changes.
@@ -45,7 +43,7 @@ signers = [
 # generations the operator stepped. The cost-collapse case.
 [[examples]]
 name      = "onchainLife"
-alias     = "arraySummation"
+alias     = "gasKillerTarget"
 artifact  = "OnchainLife.sol:OnchainLife"
 # uint256[16] seed: the board, four 64-bit rows per word. Word 0 carries a standard glider at
 # cells (1,0) (2,1) (0,2) (1,2) (2,2), i.e. the sum of 1 << (y * 64 + x).
@@ -141,14 +139,14 @@ ctor_args = ["$avs", "$sigChecker", "5000"]
 # nothing surviving in the forked chain. The SDK also ships factories for these contracts; their
 # only extra effect is a registry of what they deployed, which nothing in this repo reads.
 #
-# Each declares `alias = "arraySummation"` — see the alias note in the header above.
+# Each declares `alias = "gasKillerTarget"` — see the alias note in the header above.
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 
 # ── ArraySummation (BLS) ─────────────────────────────────────────────────────────────────
 # The default e2e target. Sums selected elements of an on-chain array under `trackState`.
 [[examples]]
 name      = "arraySummation"
-alias     = "arraySummation"
+alias     = "gasKillerTarget"
 artifact  = "ArraySummation.sol:ArraySummation"
 # (avs, blsSigChecker, arraySize, maxValue, seed)
 ctor_args = ["$avs", "$sigChecker", "100", "1000", "42"]
@@ -166,7 +164,7 @@ ctor_args = ["$avs", "$sigChecker", "100", "1000", "42"]
 # deploys the registry and registers the operator set, writing addresses.schnorrStakeRegistry.
 [[examples]]
 name      = "schnorrArraySummation"
-alias     = "arraySummation"
+alias     = "gasKillerTarget"
 artifact  = "SchnorrArraySummation.sol:SchnorrArraySummation"
 ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "100", "1000", "42"]
 
@@ -186,7 +184,7 @@ ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "100", "1000", "42"]
 # pair correctly without needing to create both in one transaction.
 [[examples]]
 name  = "reentrantCheckpoint"
-alias = "arraySummation"
+alias = "gasKillerTarget"
 
   [[examples.contracts]]
   label     = "reentrantObserver"

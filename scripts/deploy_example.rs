@@ -136,10 +136,10 @@ struct ExampleSpec {
     name: String,
     /// Extra deployment-JSON key pointing at the same target address.
     ///
-    /// The pre-existing tooling (`run_e2e_test.sh`, `send_request`,
-    /// `verify_message_hash_parity`, and the bare `local` scenario sentinel) all read
-    /// `addresses.arraySummation` regardless of which example is deployed, so an example
-    /// standing in for that role declares it here rather than every consumer learning the
+    /// `run_e2e_test.sh`, `send_request`, `verify_message_hash_parity`, and the bare `local`
+    /// scenario sentinel all resolve the target through one well-known key
+    /// (`scripts::deployment::TARGET_ADDRESS_KEY`) regardless of which example is deployed, so an
+    /// example standing in for that role declares it here rather than every consumer learning the
     /// example's own name.
     #[serde(default)]
     alias: Option<String>,
@@ -1166,8 +1166,8 @@ async fn deploy_one(
         }
     }
 
-    // The alias points at the same target so the pre-existing consumers that hardcode
-    // `addresses.arraySummation` keep resolving whichever example was deployed.
+    // The alias points at the same target so the consumers that resolve through the
+    // well-known target key keep working whichever example was deployed.
     if let Some(alias) = &example.alias {
         record_deployed_address(deploy_json, alias, target)?;
     }
@@ -1421,7 +1421,7 @@ mod tests {
             r#"
             [[examples]]
             name = "reentrantCheckpoint"
-            alias = "arraySummation"
+            alias = "gasKillerTarget"
 
               [[examples.contracts]]
               label = "reentrantObserver"
@@ -1435,7 +1435,7 @@ mod tests {
         .unwrap();
 
         let example = &manifest.examples[0];
-        assert_eq!(example.alias.as_deref(), Some("arraySummation"));
+        assert_eq!(example.alias.as_deref(), Some("gasKillerTarget"));
         let seq = example.contract_sequence().unwrap();
         assert_eq!(seq.len(), 2);
         assert_eq!(seq[0].label.as_deref(), Some("reentrantObserver"));
@@ -1804,7 +1804,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{"lastUpdate":{"block_number":"7"},"addresses":{"arraySummation":"0x1234"}}"#,
+            r#"{"lastUpdate":{"block_number":"7"},"addresses":{"gasKillerTarget":"0x1234"}}"#,
         )
         .unwrap();
 
@@ -1814,7 +1814,7 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["lastUpdate"]["block_number"], "7");
-        assert_eq!(written["addresses"]["arraySummation"], "0x1234");
+        assert_eq!(written["addresses"]["gasKillerTarget"], "0x1234");
         assert_eq!(written["addresses"]["onchainLife"], format!("{deployed:?}"));
     }
 

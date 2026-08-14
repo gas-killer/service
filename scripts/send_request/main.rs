@@ -1,6 +1,7 @@
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
+use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
 use scripts::task_payload::{
     DEFAULT_READY_TIMEOUT_SECS, submit_payload, submitter_key, task_status_url,
     wait_for_ready_payload,
@@ -236,7 +237,7 @@ async fn resolve_block_height<P: Provider>(
 
 async fn build_mock_request()
 -> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
-    // Resolve the task target from the deploy JSON's scheme-agnostic `arraySummation` key,
+    // Resolve the task target from the deploy JSON's scheme-agnostic target key,
     // which whichever deploy ran writes (aliasing it for the schnorr and re-entrancy targets).
     //
     // Every failure here names its actual cause — a missing file, an unparseable file, or an
@@ -248,19 +249,16 @@ async fn build_mock_request()
             .map_err(|e| format!("failed to read the deployment JSON at '{path}': {e}"))?;
         let deployment: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse the deployment JSON at '{path}': {e}"))?;
-        let raw = deployment
-            .get("addresses")
-            .and_then(|a| a.get("arraySummation"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                format!(
-                    "addresses.arraySummation is missing from '{path}' — deploy a target first \
-                     (deploy_example writes this key, aliased when the example is not \
-                     array-summation), or set GAS_KILLER_TARGET_ADDRESS to bypass this lookup"
-                )
-            })?;
-        raw.parse()
-            .map_err(|_| format!("addresses.arraySummation in '{path}' is not an address: {raw}"))?
+        let raw = target_address(&deployment).ok_or_else(|| {
+            format!(
+                "addresses.{TARGET_ADDRESS_KEY} is missing from '{path}' — deploy a target first \
+                 (deploy_example records it there for whichever example it deployed), or set \
+                 GAS_KILLER_TARGET_ADDRESS to bypass this lookup"
+            )
+        })?;
+        raw.parse().map_err(|_| {
+            format!("addresses.{TARGET_ADDRESS_KEY} in '{path}' is not an address: {raw}")
+        })?
     };
     // Use Anvil's default first unlocked account to ensure a signing credential exists in the spawned fork
     let from_address: Address = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse()?;
