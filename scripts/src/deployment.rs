@@ -9,21 +9,15 @@
 /// The `addresses` key the deployed Gas Killer target is recorded under.
 pub const TARGET_ADDRESS_KEY: &str = "gasKillerTarget";
 
-/// The key deployments used before the target key was named for its role rather than for the
-/// first example that filled it. Read as a fallback so a deployment JSON produced by an older
-/// `deploy_example` still resolves; droppable once every live deployment has been re-run.
-pub const LEGACY_TARGET_ADDRESS_KEY: &str = "arraySummation";
-
-/// Reads the target address out of a parsed deployment JSON, preferring
-/// [`TARGET_ADDRESS_KEY`] and falling back to [`LEGACY_TARGET_ADDRESS_KEY`].
+/// Reads the target address out of a parsed deployment JSON.
 ///
-/// Returns `None` when neither key is present or the value is not a string; callers report the
-/// missing-key case themselves, since the remedy differs per tool.
+/// Returns `None` when the key is absent or its value is not a string; callers report that
+/// themselves, since the remedy differs per tool. A deployment JSON predating this key resolves
+/// by re-running `deploy_example`, or is bypassed with `GAS_KILLER_TARGET_ADDRESS`.
 pub fn target_address(deployment: &serde_json::Value) -> Option<&str> {
-    let addresses = deployment.get("addresses")?;
-    addresses
+    deployment
+        .get("addresses")?
         .get(TARGET_ADDRESS_KEY)
-        .or_else(|| addresses.get(LEGACY_TARGET_ADDRESS_KEY))
         .and_then(|v| v.as_str())
 }
 
@@ -38,23 +32,12 @@ mod tests {
         assert_eq!(target_address(&deployment), Some("0x1234"));
     }
 
+    /// Only this key resolves. A deployment JSON carrying some other example's address under its
+    /// own name is not a target — reading one would drive a contract the caller never selected.
     #[test]
-    fn falls_back_to_the_legacy_key() {
-        let deployment = json!({"addresses": {LEGACY_TARGET_ADDRESS_KEY: "0xabcd"}});
-        assert_eq!(target_address(&deployment), Some("0xabcd"));
-    }
-
-    /// A deployment carrying both — one written by the current `deploy_example` over an older
-    /// file — must resolve the current key, not whichever happens to be found first.
-    #[test]
-    fn prefers_the_target_key_over_the_legacy_one() {
-        let deployment = json!({
-            "addresses": {
-                LEGACY_TARGET_ADDRESS_KEY: "0xstale",
-                TARGET_ADDRESS_KEY: "0xcurrent",
-            }
-        });
-        assert_eq!(target_address(&deployment), Some("0xcurrent"));
+    fn ignores_other_address_keys() {
+        let deployment = json!({"addresses": {"arraySummation": "0xabcd"}});
+        assert_eq!(target_address(&deployment), None);
     }
 
     #[test]

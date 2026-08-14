@@ -521,9 +521,8 @@ jobs:
           # step and exported via GITHUB_ENV.
 
           # Get the deployed target's address. deploy_example records whichever example it
-          # deployed under `gasKillerTarget`; `arraySummation` is read as a fallback for
-          # deployment JSONs written before that key was named for its role.
-          ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.gasKillerTarget // .addresses.arraySummation // empty' "$AVS_DEPLOYMENT_PATH")
+          # deployed under `gasKillerTarget`, so this one lookup works for every example.
+          ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.gasKillerTarget // empty' "$AVS_DEPLOYMENT_PATH")
           if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
             echo "❌ no deployed target address in $AVS_DEPLOYMENT_PATH"
             exit 1

@@ -251,13 +251,12 @@ cast rpc evm_mine --rpc-url http://localhost:8545 >/dev/null \
 
 # Extract the deployed target's address from the deployment JSON. deploy_example records
 # whichever example it deployed under `gasKillerTarget` (the manifest's `alias`), so this one
-# lookup works for every example. `arraySummation` is read as a fallback for deployment JSONs
-# written before that key was named for its role.
+# lookup works for every example.
 DEPLOY_JSON_PATH="$AVS_DEPLOYMENT_PATH"
 if command -v jq >/dev/null 2>&1; then
-    TARGET_ADDRESS=$(jq -r '.addresses.gasKillerTarget // .addresses.arraySummation // empty' "$DEPLOY_JSON_PATH")
+    TARGET_ADDRESS=$(jq -r '.addresses.gasKillerTarget // empty' "$DEPLOY_JSON_PATH")
 else
-    TARGET_ADDRESS=$(grep -o '"\(gasKillerTarget\|arraySummation\)"[[:space:]]*:[[:space:]]*"[^"]*"' "$DEPLOY_JSON_PATH" | head -1 | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/')
+    TARGET_ADDRESS=$(grep -o '"gasKillerTarget"[[:space:]]*:[[:space:]]*"[^"]*"' "$DEPLOY_JSON_PATH" | head -1 | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/')
 fi
 
 if [ -z "$TARGET_ADDRESS" ]; then
