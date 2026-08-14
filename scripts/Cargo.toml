@@ -5,9 +5,7 @@ edition = "2024"
 
 [[bin]]
 name = "send_request"
-# The only binary here with a submodule of its own (the e2e example catalogue), so it gets a
-# directory; the others are single files at the crate root.
-path = "send_request/main.rs"
+path = "send_request.rs"
 
 [[bin]]
 name = "run_scenario"

@@ -1,6 +1,9 @@
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
+use alloy::sol_types::SolCall;
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
+use scripts::bindings::arraysummation::ArraySummation::sumCall;
 use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
 use scripts::task_payload::{
     DEFAULT_READY_TIMEOUT_SECS, submit_payload, submitter_key, task_status_url,
@@ -11,9 +14,25 @@ use std::env;
 use std::fs;
 use url::Url;
 
-mod e2e_example;
-
-use e2e_example::E2eExample;
+/// Reads the ArraySummation target's running total — the state a settled task moves, and so what
+/// this binary watches to confirm the transition landed.
+///
+/// This binary triggers the array-summation target only. The e2e matrix drives every other
+/// example through `run_scenario` and the generated scenarios, which verify against the SDK's
+/// `stateTransitionCount()` and need no per-contract getter.
+async fn read_current_sum<P: Provider>(
+    target: Address,
+    provider: &P,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(
+        scripts::bindings::arraysummation::ArraySummation::new(target, provider)
+            .currentSum()
+            .call()
+            .await
+            .map_err(|e| format!("Failed to read currentSum(): {e}"))?
+            .to::<u64>(),
+    )
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -134,11 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Capture the target's progress value before posting the task; a settled task changes it.
-    // Which state that is depends on the target — see `E2eExample::read_progress_value`.
-    let example = E2eExample::from_env();
-    let initial_sum = example
-        .read_progress_value(request.body.target_address, &provider)
-        .await?;
+    let initial_sum = read_current_sum(request.body.target_address, &provider).await?;
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
         .unwrap_or_else(|_| "http://localhost:8080/tasks".to_string());
@@ -203,9 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Confirm the on-chain effect: the target's progress value must move after the
     // user-submitted verifyAndUpdate.
-    let final_sum = example
-        .read_progress_value(request.body.target_address, &provider)
-        .await?;
+    let final_sum = read_current_sum(request.body.target_address, &provider).await?;
     if final_sum == initial_sum {
         return Err(format!(
             "target progress unchanged ({final_sum}) after submitting the payload; verifyAndUpdate had no effect"
@@ -269,18 +282,27 @@ async fn build_mock_request()
         .map_err(|_| "HTTP_RPC environment variable is required for mock mode")?;
     let rpc_url = Url::parse(&rpc)?;
 
-    // Read current stateTransitionCount to compute correct transition_index
+    // Read current stateTransitionCount to compute correct transition_index. It is declared by
+    // the SDK every target inherits, so this reads through the SDK binding rather than any one
+    // example's.
     let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
-    let array_contract =
-        scripts::bindings::arraysummation::ArraySummation::new(target_address, provider.clone());
-    let current_count = array_contract
+    let current_count = GasKillerSDK::new(target_address, provider.clone())
         .stateTransitionCount()
         .call()
         .await
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
         .to::<u64>();
 
-    let call_data = E2eExample::from_env().call_data(current_count);
+    // Offset by 3 per trigger — [0,1,2], [3,4,5], … — so repeated runs against one deployment
+    // produce different sums. The deployed array holds 100 elements.
+    let base_idx = (current_count * 3) % 97;
+    let indexes = vec![
+        U256::from(base_idx),
+        U256::from(base_idx + 1),
+        U256::from(base_idx + 2),
+    ];
+    println!("Using ArraySummation.sum([{base_idx}, ..]) for transition_index={current_count}");
+    let call_data = sumCall { indexes }.abi_encode().to_vec();
 
     // Resolve block_height for deterministic execution
     let block_height = resolve_block_height(&provider).await?;
