@@ -1,11 +1,14 @@
-//! The example targets the e2e can settle against, and how to drive each one.
+//! The example targets `send_request` can settle against, and how to drive each one.
 //!
 //! `E2E_EXAMPLE` picks which contract `run_e2e_test.sh` deploys from the manifest and which
-//! transition the binaries then submit against it. Every target needs the same two
+//! transition this binary then submits against it. Every target needs the same two
 //! contract-specific things — the task calldata, and the piece of state the e2e watches for change
-//! to confirm the transition settled — so they live together here rather than as parallel `if`
-//! chains inside a binary. Adding a target is a variant plus the match arms the compiler then
-//! demands, instead of remembering every place that branches on the example.
+//! to confirm the transition settled — so they live together in one enum rather than as parallel
+//! `if` chains. Adding a target is a variant plus the match arms the compiler then demands,
+//! instead of remembering every place that branches on the example.
+//!
+//! A submodule of the binary rather than part of the `scripts` library: `send_request` is the only
+//! consumer, and the library is for what several binaries share. Promote it if that changes.
 //!
 //! The shell script maps the same `E2E_EXAMPLE` values onto manifest entry names for the deploy
 //! step; that mapping stays there because `deploy_example` takes the manifest name directly.
@@ -16,9 +19,9 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use alloy::sol_types::SolCall;
 
-use crate::bindings::arraysummation::ArraySummation;
-use crate::bindings::onchainlife::OnchainLife;
-use crate::bindings::reentrantcheckpoint::ReentrantCheckpoint;
+use scripts::bindings::arraysummation::ArraySummation;
+use scripts::bindings::onchainlife::OnchainLife;
+use scripts::bindings::reentrantcheckpoint::ReentrantCheckpoint;
 
 /// Generations per `step` for [`E2eExample::OnchainLife`] when `ONCHAIN_LIFE_GENERATIONS` is
 /// unset. At ~16.5M gas each, three puts a direct call above a 30M block while the diff it

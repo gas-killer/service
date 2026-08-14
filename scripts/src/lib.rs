@@ -7,9 +7,5 @@
 /// `src/bindings/abis/`.
 pub mod bindings;
 
-/// The example targets the e2e settles against (`E2E_EXAMPLE`), and the per-contract calldata and
-/// progress reads that drive each one.
-pub mod e2e_example;
-
 /// Polling and submission of router-rendered `verifyAndUpdate` payloads.
 pub mod task_payload;

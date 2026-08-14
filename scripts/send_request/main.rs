@@ -1,7 +1,6 @@
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
-use scripts::e2e_example::E2eExample;
 use scripts::task_payload::{
     DEFAULT_READY_TIMEOUT_SECS, submit_payload, submitter_key, task_status_url,
     wait_for_ready_payload,
@@ -10,6 +9,10 @@ use serde_json::json;
 use std::env;
 use std::fs;
 use url::Url;
+
+mod e2e_example;
+
+use e2e_example::E2eExample;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
