@@ -279,6 +279,8 @@ fi
 # risen past it). That direction is safe for both assertions: a workload above 30M is the weaker
 # claim to prove in 7a, and staying under 30M is the stricter bar to clear in 10b.
 NOMINAL_BLOCK_GAS_LIMIT=30000000
+# Anvil's first unlocked dev account, used as the estimate's sender.
+ANVIL_FUNDED_ACCOUNT=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded" ]; then
     echo -e "${YELLOW}Step 7a: Asserting a direct call exceeds the block gas limit...${NC}"
     if [ -z "$TARGET_ADDRESS" ]; then
@@ -299,9 +301,17 @@ if [ "$GK_SIM_PROFILE_CHOICE" = "unbounded" ]; then
         echo -e "${RED}Could not read a call_data value from $SCENARIO_FILE${NC}"
         exit 1
     fi
-    DIRECT_GAS=$(cast estimate "$TARGET_ADDRESS" --data "$DIRECT_CALLDATA" \
+    # eth_estimateGas rather than `cast estimate`, which takes a signature and arguments and has
+    # no option for pre-encoded calldata. `from` is Anvil's first funded account, matching the
+    # sender the scenario submits with. The response is a quoted hex string.
+    DIRECT_GAS_HEX=$(cast rpc eth_estimateGas \
+        "{\"to\":\"$TARGET_ADDRESS\",\"from\":\"$ANVIL_FUNDED_ACCOUNT\",\"data\":\"$DIRECT_CALLDATA\"}" \
         --rpc-url http://localhost:8545) \
-        || deploy_failed "cast estimate of the direct call failed"
+        || deploy_failed "eth_estimateGas of the direct call failed"
+    # Strip the JSON quotes in-shell; piping to tr would mask cast's exit status above.
+    DIRECT_GAS_HEX=${DIRECT_GAS_HEX//\"/}
+    DIRECT_GAS=$(cast to-dec "$DIRECT_GAS_HEX") \
+        || deploy_failed "could not convert the gas estimate '$DIRECT_GAS_HEX' to decimal"
     echo "Direct call ${DIRECT_CALLDATA:0:10} needs $DIRECT_GAS gas (nominal block limit: $NOMINAL_BLOCK_GAS_LIMIT)"
     if [ -z "$DIRECT_GAS" ] || [ "$DIRECT_GAS" -le "$NOMINAL_BLOCK_GAS_LIMIT" ]; then
         echo -e "${RED}Expected the direct call to exceed the block gas limit; raise the workload in the manifest exercise${NC}"
