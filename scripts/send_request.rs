@@ -1,3 +1,21 @@
+//! Submits one Gas Killer task to the router, then submits the payload it renders and confirms the
+//! transition landed on-chain.
+//!
+//! Two modes:
+//!
+//! - **Explicit** — with `GAS_KILLER_TARGET_ADDRESS`, `GAS_KILLER_CALL_DATA`,
+//!   `GAS_KILLER_FROM_ADDRESS`, and `GAS_KILLER_TRANSITION_INDEX` all set, it triggers exactly that
+//!   call against that target. Nothing here is contract-specific: the calldata comes from the
+//!   caller and the on-chain check reads `stateTransitionCount()`, which the SDK declares on every
+//!   target.
+//! - **Default** — with any of those unset, it resolves the deployed target from the deployment
+//!   JSON and triggers the array-summation exercise (`sum` over a rotating slice), which is what
+//!   makes it a one-command smoke test of a local or Helm stack.
+//!
+//! For driving any other example, prefer `run_scenario` with the scenario `deploy_example` renders
+//! from `scripts/examples/examples.toml` — that path takes its calldata from the manifest, so no
+//! example's transition is defined twice.
+
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolCall;
@@ -14,24 +32,23 @@ use std::env;
 use std::fs;
 use url::Url;
 
-/// Reads the ArraySummation target's running total — the state a settled task moves, and so what
-/// this binary watches to confirm the transition landed.
+/// Reads the target's settled-transition counter — the state this binary watches to confirm a task
+/// landed.
 ///
-/// This binary triggers the array-summation target only. The e2e matrix drives every other
-/// example through `run_scenario` and the generated scenarios, which verify against the SDK's
-/// `stateTransitionCount()` and need no per-contract getter.
-async fn read_current_sum<P: Provider>(
+/// `stateTransitionCount()` is declared by the SDK every target inherits, so the check works for
+/// whatever contract the caller points at. It is also the stricter signal: a contract-specific
+/// getter can legitimately hold its value across a transition (summing a zero-valued slice, say),
+/// while the counter advances on every settlement.
+async fn read_transition_count<P: Provider>(
     target: Address,
     provider: &P,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(
-        scripts::bindings::arraysummation::ArraySummation::new(target, provider)
-            .currentSum()
-            .call()
-            .await
-            .map_err(|e| format!("Failed to read currentSum(): {e}"))?
-            .to::<u64>(),
-    )
+    Ok(GasKillerSDK::new(target, provider)
+        .stateTransitionCount()
+        .call()
+        .await
+        .map_err(|e| format!("Failed to read stateTransitionCount(): {e}"))?
+        .to::<u64>())
 }
 
 #[tokio::main]
@@ -129,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         selector_hex
     );
 
-    // Prepare provider for reading the target's progress value.
+    // Prepare provider for reading the target's transition counter.
     let rpc_for_read = env::var("HTTP_RPC")?;
     let rpc_url_for_read = Url::parse(&rpc_for_read)?;
     let provider = ProviderBuilder::new().connect_http(rpc_url_for_read);
@@ -152,8 +169,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .into());
     }
 
-    // Capture the target's progress value before posting the task; a settled task changes it.
-    let initial_sum = read_current_sum(request.body.target_address, &provider).await?;
+    // Capture the counter before posting the task; a settled task advances it.
+    let initial_count = read_transition_count(request.body.target_address, &provider).await?;
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
         .unwrap_or_else(|_| "http://localhost:8080/tasks".to_string());
@@ -201,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .filter(|k| !k.is_empty());
 
     // Poll until the task is `ready`, extract the rendered payload, submit it with a funded key,
-    // then confirm the on-chain effect by checking `currentSum` moved.
+    // then confirm the on-chain effect by checking the transition counter advanced.
     let http_rpc = env::var("HTTP_RPC")?;
     let submit_key = submitter_key()?;
 
@@ -216,18 +233,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     submit_payload(&payload, &http_rpc, &submit_key).await?;
 
-    // Confirm the on-chain effect: the target's progress value must move after the
-    // user-submitted verifyAndUpdate.
-    let final_sum = read_current_sum(request.body.target_address, &provider).await?;
-    if final_sum == initial_sum {
+    // Confirm the on-chain effect: the counter must advance after the user-submitted
+    // verifyAndUpdate.
+    let final_count = read_transition_count(request.body.target_address, &provider).await?;
+    if final_count == initial_count {
         return Err(format!(
-            "target progress unchanged ({final_sum}) after submitting the payload; verifyAndUpdate had no effect"
+            "stateTransitionCount unchanged ({final_count}) after submitting the payload; verifyAndUpdate had no effect"
         )
         .into());
     }
     println!(
-        "✅ SUCCESS: target progress changed {} → {} after the user-submitted verifyAndUpdate (task {})",
-        initial_sum, final_sum, task_id
+        "✅ SUCCESS: stateTransitionCount advanced {} → {} after the user-submitted verifyAndUpdate (task {})",
+        initial_count, final_count, task_id
     );
     Ok(())
 }
