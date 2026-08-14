@@ -69,25 +69,27 @@ ctor_args = [
   #   ERROR gas_killer_router::sequencer: failed to enrich task, dropping request
   #     error=Gas analysis failed: debug_trace_call failed: error sending request
   #
-  # `generations` is already at its floor of 1, so no manifest setting avoids this — the limit
-  # is the encoder. `prestate-net` reads the net diff from prestateTracer/callTracer instead,
-  # costing O(changed slots): the same call returns in 0s with a 3-slot diff, and the call tree
-  # has no target-depth frames, so it takes the net form rather than the canonical fallback.
+  # Even one generation cannot be traced that way, so no lower `generations` avoids this — the
+  # limit is the encoder. `prestate-net` reads the net diff from prestateTracer/callTracer
+  # instead, costing O(changed slots): the same call returns in 0s with a 3-slot diff, and the
+  # call tree has no target-depth frames, so it takes the net form rather than the canonical
+  # fallback.
   #
   # `guardedVault` below runs green end to end under any of the three encodings.
-  [[examples.exercise]]
-  label = "life_step_1"
-  sig   = "step(uint32)"
-  args  = ["1"]
-
-  # ALSO REQUIRES GK_SIM_PROFILE=unbounded. Three generations is ~49.7M gas, so a direct
-  # call cannot be mined in a 30M block and the simulation itself only completes under the
-  # unbounded profile's lifted gas limits (and against an RPC whose execution cap is lifted —
-  # `anvil --disable-block-gas-limit`). Under the default `chain` profile this request fails
-  # in analysis while `life_step_1` above still passes; that contrast is the point.
   #
-  # The diff it produces is the same size as the one-generation diff — at most 16 board words
-  # plus the counter — which is what makes the transition landable at all.
+  # ALSO REQUIRES GK_SIM_PROFILE=unbounded. Three generations is ~49.4M gas (measured
+  # 49,432,726), so a direct call cannot be mined in a 30M block and the simulation itself only
+  # completes under the unbounded profile's lifted gas limits — and against an RPC whose own
+  # execution cap is lifted (`anvil --disable-block-gas-limit`). Under the default `chain`
+  # profile it fails in analysis, which is what makes this the unbounded leg's target.
+  #
+  # The diff it produces is the same size as a one-generation diff — at most 16 board words plus
+  # the counter — which is what makes an unmineable computation landable at all.
+  #
+  # ONE exercise, deliberately: run_scenario resolves `block_height = 0` once for the whole file
+  # and reuses it, so in a serial multi-request scenario every request after the first carries a
+  # reference block that the preceding settlement has already advanced past, and the router
+  # rejects the rendered payload as PAYLOAD_EXPIRED. Tracked in gas-killer/service#357.
   [[examples.exercise]]
   label = "life_step_3"
   sig   = "step(uint32)"
