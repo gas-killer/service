@@ -887,6 +887,14 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// stale set. The guarantee is best-effort for the same reason it is only a guarantee for the
     /// announced path — `registerOperator` / `deregisterOperator` bypass the notice window
     /// entirely and emit `ForcedMutation`.
+    ///
+    /// Both reads happen per render. The registry address looks memoizable per target the way
+    /// [`Self::interface_cache`] memoizes ERC-165 support, but the two differ: a contract's
+    /// supported interfaces are immutable, whereas `SchnorrGasKillerSDK` keeps its registry in
+    /// storage behind an `internal` setter, so a target is free to expose an owner-gated path that
+    /// re-points it. A memoized address would survive that for the lifetime of the process and read
+    /// the horizon off a registry the target no longer uses — failing open, and silently. Rendering
+    /// runs once per completed round, so the second call is not on a hot path.
     async fn schnorr_mutation_horizon(&self, provider: P, target_addr: Address) -> Option<U256> {
         let sdk = SchnorrGasKillerSDK::new(target_addr, provider.clone());
         let registry_addr = match sdk.schnorrRegistry().call().await {
