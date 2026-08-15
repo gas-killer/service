@@ -2213,6 +2213,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b193af5b67834b676abd72466a96c1024e6a6ad978a1f484bd90b85c94041351"
 dependencies = [
  "clap_builder",
+ "clap_derive",
 ]
 
 [[package]]
@@ -2225,6 +2226,18 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+]
+
+[[package]]
+name = "clap_derive"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1110bd8a634a1ab8cb04345d8d878267d57c3cf1b38d91b71af6686408bbca6a"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4015,7 +4028,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#24051bce1251b890f0f2f4f0141026bfb52aca59"
+source = "git+https://github.com/gas-killer/gas-analyzer#30f4ed58ad810d802de487a87f42b1cf80499f97"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -4030,7 +4043,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#24051bce1251b890f0f2f4f0141026bfb52aca59"
+source = "git+https://github.com/gas-killer/gas-analyzer#30f4ed58ad810d802de487a87f42b1cf80499f97"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -4046,7 +4059,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#24051bce1251b890f0f2f4f0141026bfb52aca59"
+source = "git+https://github.com/gas-killer/gas-analyzer#30f4ed58ad810d802de487a87f42b1cf80499f97"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -4071,7 +4084,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#24051bce1251b890f0f2f4f0141026bfb52aca59"
+source = "git+https://github.com/gas-killer/gas-analyzer#30f4ed58ad810d802de487a87f42b1cf80499f97"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -8174,9 +8187,12 @@ name = "scripts"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-dyn-abi",
+ "alloy-json-abi",
  "ark-bn254",
  "ark-ec",
  "ark-ff 0.5.0",
+ "clap",
  "dotenv",
  "gas-analyzer-evmsketch",
  "gas-killer-common",
@@ -8185,6 +8201,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.8.23",
  "url",

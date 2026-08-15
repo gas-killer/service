@@ -255,6 +255,14 @@ spec:
             # Quorum signature scheme (bls | schnorr); must match the router's.
             - name: SIGNATURE_SCHEME
               value: {{ default "bls" $root.Values.global.signatureScheme | quote }}
+            # Storage-update encoding (legacy | canonical | prestate-net); must match
+            # the router's — it changes the task digest.
+            - name: STATE_ENCODING
+              value: {{ default "legacy" $root.Values.global.stateEncoding | quote }}
+            # Simulation profile (chain | unbounded); must match the router's — it
+            # changes the task digest.
+            - name: GK_SIM_PROFILE
+              value: {{ include "gas-killer.simProfile" $root | quote }}
           ports:
             - name: node
               containerPort: {{ $nodePort }}

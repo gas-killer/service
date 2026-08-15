@@ -12,7 +12,7 @@ services:
         anvil --fork-url $FORK_URL --host 0.0.0.0 --port 8545 --code-size-limit 65536 \
           --timeout 120000 \
           --retries 5 \
-          --compute-units-per-second 300
+          --compute-units-per-second 300 ${ANVIL_EXTRA_ARGS:-}
 
   eigenlayer:
     platform: linux/amd64
@@ -78,6 +78,7 @@ services:
       - STORAGE_DIR=/app/data
       - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
+      - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
       - ./config/.nodes/operator_keys/testacc1.private.bls.key.json:/app/key.json:ro
       # secp256k1 Schnorr signing key (used only in SIGNATURE_SCHEME=schnorr; the
@@ -123,6 +124,7 @@ services:
       - STORAGE_DIR=/app/data
       - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
+      - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
       - ./config/.nodes/operator_keys/testacc2.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes/operator_keys/testacc2.private.ecdsa.key.json:/app/schnorr_key.json:ro
@@ -158,6 +160,7 @@ services:
       - STORAGE_DIR=/app/data
       - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
+      - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
       - ./config/.nodes/operator_keys/testacc3.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes/operator_keys/testacc3.private.ecdsa.key.json:/app/schnorr_key.json:ro
@@ -207,6 +210,7 @@ services:
       # Blocks past the reference block for which a rendered task payload stays valid.
       - PAYLOAD_BLOCK_BUFFER=${PAYLOAD_BLOCK_BUFFER:-50}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
+      - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
       - ./config/.nodes:/app/.nodes:ro
       - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro

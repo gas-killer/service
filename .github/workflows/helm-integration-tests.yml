@@ -73,7 +73,8 @@ jobs:
       # router startup and triggering tasks
       - name: Build test scripts
         run: |
-          cargo build --release -p scripts --bin deploy_array_summation
+          cargo build --release -p scripts --bin setup_schnorr_operators
+          cargo build --release -p scripts --bin deploy_example
           cargo build --release -p scripts --bin send_request
 
       - name: Build Docker images
@@ -486,13 +487,24 @@ jobs:
           export WS_RPC=ws://localhost:8545
           export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-          export ARRAY_SUMMATION_FACTORY_ADDRESS="0xF7ded769418Ec1Db4DA3bd2d47ab72ce2296A032"
-          export ARRAY_SUMMATION_ARRAY_SIZE=100
-          export ARRAY_SUMMATION_MAX_VALUE=1000
-          export ARRAY_SUMMATION_SEED=42
 
-          # Use pre-built binary for speed
-          ./target/release/deploy_array_summation
+          # The array sizing lives in scripts/examples/examples.toml as constructor arguments,
+          # and the target is a plain CREATE deploy from a locally built artifact.
+          ./scripts/examples/fetch_examples.sh
+
+          # The two schemes need different targets: ArraySummation inherits GasKillerSDK and
+          # answers the BLS interface id, SchnorrArraySummation inherits SchnorrGasKillerSDK and
+          # verifies against the stake registry. Deploying the wrong one fails the router's
+          # ERC-165 admission gate.
+          if [ "$SIGNATURE_SCHEME" = "schnorr" ]; then
+            MANIFEST_EXAMPLE="schnorrArraySummation"
+          else
+            MANIFEST_EXAMPLE="arraySummation"
+          fi
+
+          # No-op under bls; registers the operator set before any target deploys under schnorr.
+          ./target/release/setup_schnorr_operators
+          ./target/release/deploy_example --example "$MANIFEST_EXAMPLE"
 
           echo "ArraySummation deployment completed"
 
@@ -508,9 +520,14 @@ jobs:
           # send_request authenticates /trigger with GAS_KILLER_API_KEY, minted in the admin-flow
           # step and exported via GITHUB_ENV.
 
-          # Get ArraySummation address from deployment file
-          ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.arraySummation' "$AVS_DEPLOYMENT_PATH")
-          echo "ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
+          # Get the deployed target's address. deploy_example records whichever example it
+          # deployed under `gasKillerTarget`, so this one lookup works for every example.
+          ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.gasKillerTarget // empty' "$AVS_DEPLOYMENT_PATH")
+          if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
+            echo "❌ no deployed target address in $AVS_DEPLOYMENT_PATH"
+            exit 1
+          fi
+          echo "Target address: $ARRAY_SUMMATION_ADDRESS"
 
           # Get initial stateTransitionCount
           INITIAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 | tr -d '[:space:]')
