@@ -29,14 +29,15 @@ pub mod schnorrstakeregistry;
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::U256;
     use alloy::sol_types::SolCall;
 
     /// The router declares `nextPossibleMutationBlock` by hand
     /// (`gas_killer_common::bindings::schnorrstakeregistry`) instead of vendoring the registry's ABI
     /// artifact a second time. This crate does carry that artifact, because it deploys the registry,
-    /// so comparing the two selectors pins the hand-written declaration against the real ABI.
+    /// so comparing the two declarations pins the hand-written one against the real ABI.
     ///
-    /// Without this, an upstream rename would leave the router's call reverting at runtime and
+    /// Without this, an upstream change would leave the router's call reverting at runtime and
     /// silently falling back to unclamped payload validity — a warning in the logs rather than a
     /// failure.
     #[test]
@@ -45,5 +46,20 @@ mod tests {
             gas_killer_common::bindings::schnorrstakeregistry::ISchnorrStakeRegistry::nextPossibleMutationBlockCall::SELECTOR,
             crate::bindings::schnorrstakeregistry::SchnorrStakeRegistry::nextPossibleMutationBlockCall::SELECTOR,
         );
+
+        // A selector covers the function name and its argument types, so the assertion above says
+        // nothing about what the call returns. Encoding a return with the artifact's declaration
+        // and decoding it with the router's pins that half too: a narrowed or restructured return
+        // type fails to compile here, and any decode divergence fails the round-trip. `U256::MAX`
+        // is the value under test because it is the sentinel the clamp keys on — an unscheduled
+        // horizon.
+        let encoded = crate::bindings::schnorrstakeregistry::SchnorrStakeRegistry::nextPossibleMutationBlockCall::abi_encode_returns(
+            &U256::MAX,
+        );
+        let decoded = gas_killer_common::bindings::schnorrstakeregistry::ISchnorrStakeRegistry::nextPossibleMutationBlockCall::abi_decode_returns(
+            &encoded,
+        )
+        .expect("router declaration must decode the artifact's return");
+        assert_eq!(decoded, U256::MAX);
     }
 }
