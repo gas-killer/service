@@ -16,6 +16,12 @@
 #   $signer:<n>    the address of signers[n] below
 #   $env:VAR       an environment variable
 #
+# `alias` records the deployed target's address under a SECOND key in the deployment JSON.
+# run_e2e_test.sh, send_request, verify_message_hash_parity, and run_scenario's bare `local`
+# sentinel all resolve the target through one well-known key, `gasKillerTarget`, so they work
+# against whichever example was deployed without learning its name. Any example those tools
+# must drive declares `alias = "gasKillerTarget"`; without it they cannot resolve the target.
+#
 # Adding an example is an edit here plus an entry in EXPECTED_ARTIFACTS in
 # fetch_examples.sh. No Rust changes.
 
@@ -37,6 +43,7 @@ signers = [
 # generations the operator stepped. The cost-collapse case.
 [[examples]]
 name      = "onchainLife"
+alias     = "gasKillerTarget"
 artifact  = "OnchainLife.sol:OnchainLife"
 # uint256[16] seed: the board, four 64-bit rows per word. Word 0 carries a standard glider at
 # cells (1,0) (2,1) (0,2) (1,2) (2,2), i.e. the sum of 1 << (y * 64 + x).
@@ -62,16 +69,31 @@ ctor_args = [
   #   ERROR gas_killer_router::sequencer: failed to enrich task, dropping request
   #     error=Gas analysis failed: debug_trace_call failed: error sending request
   #
-  # `generations` is already at its floor of 1, so no manifest setting avoids this — the limit
-  # is the encoder. `prestate-net` reads the net diff from prestateTracer/callTracer instead,
-  # costing O(changed slots): the same call returns in 0s with a 3-slot diff, and the call tree
-  # has no target-depth frames, so it takes the net form rather than the canonical fallback.
+  # Even one generation cannot be traced that way, so no lower `generations` avoids this — the
+  # limit is the encoder. `prestate-net` reads the net diff from prestateTracer/callTracer
+  # instead, costing O(changed slots): the same call returns in 0s with a 3-slot diff, and the
+  # call tree has no target-depth frames, so it takes the net form rather than the canonical
+  # fallback.
   #
   # `guardedVault` below runs green end to end under any of the three encodings.
+  #
+  # ALSO REQUIRES GK_SIM_PROFILE=unbounded. Three generations is ~49.4M gas (measured
+  # 49,432,726), so a direct call cannot be mined in a 30M block and the simulation itself only
+  # completes under the unbounded profile's lifted gas limits — and against an RPC whose own
+  # execution cap is lifted (`anvil --disable-block-gas-limit`). Under the default `chain`
+  # profile it fails in analysis, which is what makes this the unbounded leg's target.
+  #
+  # The diff it produces is the same size as a one-generation diff — at most 16 board words plus
+  # the counter — which is what makes an unmineable computation landable at all.
+  #
+  # ONE exercise, deliberately: run_scenario resolves `block_height = 0` once for the whole file
+  # and reuses it, so in a serial multi-request scenario every request after the first carries a
+  # reference block that the preceding settlement has already advanced past, and the router
+  # rejects the rendered payload as PAYLOAD_EXPIRED. Tracked in gas-killer/service#357.
   [[examples.exercise]]
-  label = "life_step_1"
+  label = "life_step_3"
   sig   = "step(uint32)"
-  args  = ["1"]
+  args  = ["3"]
 
 # ── GuardedVault ─────────────────────────────────────────────────────────────────────────
 # A vault whose every state transition re-validates an O(N) global invariant. Operators
@@ -119,16 +141,14 @@ ctor_args = ["$avs", "$sigChecker", "5000"]
 # nothing surviving in the forked chain. The SDK also ships factories for these contracts; their
 # only extra effect is a registry of what they deployed, which nothing in this repo reads.
 #
-# Each declares `alias = "arraySummation"` because run_e2e_test.sh, send_request,
-# verify_message_hash_parity, and the bare `local` scenario sentinel all read that one key
-# regardless of which example is deployed.
+# Each declares `alias = "gasKillerTarget"` — see the alias note in the header above.
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 
 # ── ArraySummation (BLS) ─────────────────────────────────────────────────────────────────
 # The default e2e target. Sums selected elements of an on-chain array under `trackState`.
 [[examples]]
 name      = "arraySummation"
-alias     = "arraySummation"
+alias     = "gasKillerTarget"
 artifact  = "ArraySummation.sol:ArraySummation"
 # (avs, blsSigChecker, arraySize, maxValue, seed)
 ctor_args = ["$avs", "$sigChecker", "100", "1000", "42"]
@@ -146,7 +166,7 @@ ctor_args = ["$avs", "$sigChecker", "100", "1000", "42"]
 # deploys the registry and registers the operator set, writing addresses.schnorrStakeRegistry.
 [[examples]]
 name      = "schnorrArraySummation"
-alias     = "arraySummation"
+alias     = "gasKillerTarget"
 artifact  = "SchnorrArraySummation.sol:SchnorrArraySummation"
 ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "100", "1000", "42"]
 
@@ -166,7 +186,7 @@ ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "100", "1000", "42"]
 # pair correctly without needing to create both in one transaction.
 [[examples]]
 name  = "reentrantCheckpoint"
-alias = "arraySummation"
+alias = "gasKillerTarget"
 
   [[examples.contracts]]
   label     = "reentrantObserver"

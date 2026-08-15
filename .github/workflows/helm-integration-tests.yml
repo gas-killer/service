@@ -520,9 +520,14 @@ jobs:
           # send_request authenticates /trigger with GAS_KILLER_API_KEY, minted in the admin-flow
           # step and exported via GITHUB_ENV.
 
-          # Get ArraySummation address from deployment file
-          ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.arraySummation' "$AVS_DEPLOYMENT_PATH")
-          echo "ArraySummation address: $ARRAY_SUMMATION_ADDRESS"
+          # Get the deployed target's address. deploy_example records whichever example it
+          # deployed under `gasKillerTarget`, so this one lookup works for every example.
+          ARRAY_SUMMATION_ADDRESS=$(jq -r '.addresses.gasKillerTarget // empty' "$AVS_DEPLOYMENT_PATH")
+          if [ -z "$ARRAY_SUMMATION_ADDRESS" ]; then
+            echo "❌ no deployed target address in $AVS_DEPLOYMENT_PATH"
+            exit 1
+          fi
+          echo "Target address: $ARRAY_SUMMATION_ADDRESS"
 
           # Get initial stateTransitionCount
           INITIAL_COUNT=$(cast call "$ARRAY_SUMMATION_ADDRESS" "stateTransitionCount()(uint256)" --rpc-url http://localhost:8545 | tr -d '[:space:]')

@@ -1,9 +1,28 @@
+//! Submits one Gas Killer task to the router, then submits the payload it renders and confirms the
+//! transition landed on-chain.
+//!
+//! Two modes:
+//!
+//! - **Explicit** — with `GAS_KILLER_TARGET_ADDRESS`, `GAS_KILLER_CALL_DATA`,
+//!   `GAS_KILLER_FROM_ADDRESS`, and `GAS_KILLER_TRANSITION_INDEX` all set, it triggers exactly that
+//!   call against that target. Nothing here is contract-specific: the calldata comes from the
+//!   caller and the on-chain check reads `stateTransitionCount()`, which the SDK declares on every
+//!   target.
+//! - **Default** — with any of those unset, it resolves the deployed target from the deployment
+//!   JSON and triggers the array-summation exercise (`sum` over a rotating slice), which is what
+//!   makes it a one-command smoke test of a local or Helm stack.
+//!
+//! For driving any other example, prefer `run_scenario` with the scenario `deploy_example` renders
+//! from `scripts/examples/examples.toml` — that path takes its calldata from the manifest, so no
+//! example's transition is defined twice.
+
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolCall;
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
 use scripts::bindings::arraysummation::ArraySummation::sumCall;
-use scripts::bindings::reentrantcheckpoint::ReentrantCheckpoint::advanceCall;
+use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
 use scripts::task_payload::{
     DEFAULT_READY_TIMEOUT_SECS, submit_payload, submitter_key, task_status_url,
     wait_for_ready_payload,
@@ -13,41 +32,23 @@ use std::env;
 use std::fs;
 use url::Url;
 
-/// True when `E2E_EXAMPLE=reentrant` selects the re-entrancy demonstration target
-/// (a `ReentrantCheckpoint`, task `advance()`, progress read via `counter()`) instead of
-/// the default array-summation one (`sum(uint256[])`, progress via `currentSum()`).
-fn e2e_example_is_reentrant() -> bool {
-    matches!(
-        env::var("E2E_EXAMPLE").map(|v| v.trim().to_ascii_lowercase()),
-        Ok(ref v) if v == "reentrant" || v == "reentrant-checkpoint"
-    )
-}
-
-/// Read the target's "progress" value — the state the e2e watches for change to confirm a
-/// task settled. `counter()` for the re-entrancy target, `currentSum()` otherwise.
-async fn read_progress_value<P: Provider>(
+/// Reads the target's settled-transition counter — the state this binary watches to confirm a task
+/// landed.
+///
+/// `stateTransitionCount()` is declared by the SDK every target inherits, so the check works for
+/// whatever contract the caller points at. It is also the stricter signal: a contract-specific
+/// getter can legitimately hold its value across a transition (summing a zero-valued slice, say),
+/// while the counter advances on every settlement.
+async fn read_transition_count<P: Provider>(
     target: Address,
     provider: &P,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    if e2e_example_is_reentrant() {
-        Ok(
-            scripts::bindings::reentrantcheckpoint::ReentrantCheckpoint::new(target, provider)
-                .counter()
-                .call()
-                .await
-                .map_err(|e| format!("Failed to read counter(): {}", e))?
-                .to::<u64>(),
-        )
-    } else {
-        Ok(
-            scripts::bindings::arraysummation::ArraySummation::new(target, provider)
-                .currentSum()
-                .call()
-                .await
-                .map_err(|e| format!("Failed to read currentSum(): {}", e))?
-                .to::<u64>(),
-        )
-    }
+    Ok(GasKillerSDK::new(target, provider)
+        .stateTransitionCount()
+        .call()
+        .await
+        .map_err(|e| format!("Failed to read stateTransitionCount(): {e}"))?
+        .to::<u64>())
 }
 
 #[tokio::main]
@@ -145,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         selector_hex
     );
 
-    // Prepare provider for reading the target's progress value.
+    // Prepare provider for reading the target's transition counter.
     let rpc_for_read = env::var("HTTP_RPC")?;
     let rpc_url_for_read = Url::parse(&rpc_for_read)?;
     let provider = ProviderBuilder::new().connect_http(rpc_url_for_read);
@@ -168,9 +169,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .into());
     }
 
-    // Capture the target's progress value before posting the task; a settled task changes
-    // it (currentSum for array-summation, counter for the re-entrancy target).
-    let initial_sum = read_progress_value(request.body.target_address, &provider).await?;
+    // Capture the counter before posting the task; a settled task advances it.
+    let initial_count = read_transition_count(request.body.target_address, &provider).await?;
 
     let url = env::var("GAS_KILLER_TRIGGER_URL")
         .unwrap_or_else(|_| "http://localhost:8080/tasks".to_string());
@@ -218,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .filter(|k| !k.is_empty());
 
     // Poll until the task is `ready`, extract the rendered payload, submit it with a funded key,
-    // then confirm the on-chain effect by checking `currentSum` moved.
+    // then confirm the on-chain effect by checking the transition counter advanced.
     let http_rpc = env::var("HTTP_RPC")?;
     let submit_key = submitter_key()?;
 
@@ -233,19 +233,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     submit_payload(&payload, &http_rpc, &submit_key).await?;
 
-    // Confirm the on-chain effect: the target's progress value must move after the
-    // user-submitted verifyAndUpdate (currentSum for array-summation, counter for the
-    // re-entrancy target).
-    let final_sum = read_progress_value(request.body.target_address, &provider).await?;
-    if final_sum == initial_sum {
+    // Confirm the on-chain effect: the counter must advance after the user-submitted
+    // verifyAndUpdate.
+    let final_count = read_transition_count(request.body.target_address, &provider).await?;
+    if final_count == initial_count {
         return Err(format!(
-            "target progress unchanged ({final_sum}) after submitting the payload; verifyAndUpdate had no effect"
+            "stateTransitionCount unchanged ({final_count}) after submitting the payload; verifyAndUpdate had no effect"
         )
         .into());
     }
     println!(
-        "✅ SUCCESS: target progress changed {} → {} after the user-submitted verifyAndUpdate (task {})",
-        initial_sum, final_sum, task_id
+        "✅ SUCCESS: stateTransitionCount advanced {} → {} after the user-submitted verifyAndUpdate (task {})",
+        initial_count, final_count, task_id
     );
     Ok(())
 }
@@ -268,7 +267,7 @@ async fn resolve_block_height<P: Provider>(
 
 async fn build_mock_request()
 -> Result<GasKillerTaskRequest, Box<dyn std::error::Error + Send + Sync>> {
-    // Resolve the task target from the deploy JSON's scheme-agnostic `arraySummation` key,
+    // Resolve the task target from the deploy JSON's scheme-agnostic target key,
     // which whichever deploy ran writes (aliasing it for the schnorr and re-entrancy targets).
     //
     // Every failure here names its actual cause — a missing file, an unparseable file, or an
@@ -280,19 +279,16 @@ async fn build_mock_request()
             .map_err(|e| format!("failed to read the deployment JSON at '{path}': {e}"))?;
         let deployment: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| format!("failed to parse the deployment JSON at '{path}': {e}"))?;
-        let raw = deployment
-            .get("addresses")
-            .and_then(|a| a.get("arraySummation"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                format!(
-                    "addresses.arraySummation is missing from '{path}' — deploy a target first \
-                     (deploy_example writes this key, aliased when the example is not \
-                     array-summation), or set GAS_KILLER_TARGET_ADDRESS to bypass this lookup"
-                )
-            })?;
-        raw.parse()
-            .map_err(|_| format!("addresses.arraySummation in '{path}' is not an address: {raw}"))?
+        let raw = target_address(&deployment).ok_or_else(|| {
+            format!(
+                "addresses.{TARGET_ADDRESS_KEY} is missing from '{path}' — deploy a target first \
+                 (deploy_example records it there for whichever example it deployed), or set \
+                 GAS_KILLER_TARGET_ADDRESS to bypass this lookup"
+            )
+        })?;
+        raw.parse().map_err(|_| {
+            format!("addresses.{TARGET_ADDRESS_KEY} in '{path}' is not an address: {raw}")
+        })?
     };
     // Use Anvil's default first unlocked account to ensure a signing credential exists in the spawned fork
     let from_address: Address = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse()?;
@@ -303,41 +299,32 @@ async fn build_mock_request()
         .map_err(|_| "HTTP_RPC environment variable is required for mock mode")?;
     let rpc_url = Url::parse(&rpc)?;
 
-    // Read current stateTransitionCount to compute correct transition_index
+    // Read current stateTransitionCount to compute correct transition_index. It is declared by
+    // the SDK every target inherits, so this reads through the SDK binding rather than any one
+    // example's.
     let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
-    let array_contract =
-        scripts::bindings::arraysummation::ArraySummation::new(target_address, provider.clone());
-    let current_count = array_contract
+    let current_count = GasKillerSDK::new(target_address, provider.clone())
         .stateTransitionCount()
         .call()
         .await
         .map_err(|e| format!("Failed to read stateTransitionCount: {}", e))?
         .to::<u64>();
 
-    // Use different indexes based on transition_index to get different sums each time
-    // Offset by 3 for each new trigger: [0,1,2], [3,4,5], [6,7,8], etc.
-    // Array has 100 elements, so we can do ~33 unique triggers
-    let base_idx = (current_count * 3) % 97; // Stay within bounds of 100 element array
+    // Offset by 3 per trigger — [0,1,2], [3,4,5], … — so repeated runs against one deployment
+    // produce different sums. The deployed array holds 100 elements.
+    let base_idx = (current_count * 3) % 97;
     let indexes = vec![
         U256::from(base_idx),
         U256::from(base_idx + 1),
         U256::from(base_idx + 2),
     ];
     println!(
-        "Using indexes [{}, {}, {}] for transition_index={}",
+        "Using ArraySummation.sum([{}, {}, {}]) for transition_index={current_count}",
         base_idx,
         base_idx + 1,
-        base_idx + 2,
-        current_count
+        base_idx + 2
     );
-    // The re-entrancy target's task is the no-arg `advance()`, which re-enters itself
-    // mid-transition; the array-summation target's task is `sum(indexes)`.
-    let call_data = if e2e_example_is_reentrant() {
-        println!("Using ReentrantCheckpoint.advance() for transition_index={current_count}");
-        advanceCall {}.abi_encode().to_vec()
-    } else {
-        sumCall { indexes }.abi_encode().to_vec()
-    };
+    let call_data = sumCall { indexes }.abi_encode().to_vec();
 
     // Resolve block_height for deterministic execution
     let block_height = resolve_block_height(&provider).await?;
