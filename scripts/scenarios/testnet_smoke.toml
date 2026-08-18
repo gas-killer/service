@@ -24,4 +24,10 @@ delay_between_ms = 0
   transition_index    = "auto"
   value               = "0"
   block_height        = 0
+  # The router runs with INGRESS=true, so it renders the verifyAndUpdate transaction
+  # and serves it as a payload rather than broadcasting it. Nothing reaches the chain
+  # until a caller signs and sends that payload, so verify can only time out without
+  # this. Signing uses $FUNDED_KEY, falling back to $PRIVATE_KEY.
+  submit              = true
   verify              = true
+  verify_timeout_secs = 300
