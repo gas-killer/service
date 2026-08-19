@@ -475,6 +475,22 @@ data:
           }
         },
         {
+          "id": 33,
+          "type": "stat",
+          "title": "Tasks Expired (total)",
+          "description": "Tasks settled expired by the TTL sweep: queued tasks the queue never reached before their block reference went stale, plus ready payloads no client collected. Sustained growth means the queue is not draining ahead of the staleness window \u2014 raise capacity or lower submission rate rather than raising TASK_TTL_SECONDS.",
+          "gridPos": { "x": 18, "y": 50, "w": 6, "h": 8 },
+          "targets": [{
+            "expr": "gas_killer_tasks_expired_total",
+            "legendFormat": "tasks"
+          }],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "background",
+            "graphMode": "area"
+          }
+        },
+        {
           "id": 50,
           "type": "text",
           "title": "Executor Phase Breakdown",

@@ -399,6 +399,14 @@ router:
     # get 429 with a Retry-After header. Counters are in-memory and reset on restart
     # (RATE_LIMIT_RPM).
     rateLimitRpm: "60"
+    # Seconds a task may sit without reaching a terminal state before a background sweep (every
+    # 60s) settles it as expired. A queued task past its TTL has a block_height too stale to
+    # aggregate into a payload the contract accepts, and a ready payload nobody collected keeps
+    # blocking resubmission for its transition index; expiring both frees the capacity for work
+    # that can still land. A processing task is never cancelled mid-round. Watch
+    # gas_killer_tasks_expired_total — sustained expiries mean the queue is not draining ahead of
+    # the staleness window (TASK_TTL_SECONDS).
+    taskTtlSeconds: "300"
   # AVS identity metadata served at GET /avs-metadata.
   # Set metadata.uri in config.json to the public URL of this endpoint
   # (e.g. https://api.gaskiller.xyz/avs-metadata) before calling updateAVSMetadataURI.

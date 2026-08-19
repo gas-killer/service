@@ -208,6 +208,28 @@ pub fn max_queue_depth() -> usize {
         .unwrap_or(DEFAULT_MAX_QUEUE_DEPTH)
 }
 
+/// Default lifetime, in seconds, of a task that has not reached a terminal state.
+///
+/// Every task pins a `block_height` that goes stale as the chain advances, so a task that waits
+/// long enough can no longer produce a payload the chain will accept. The TTL bounds that wait:
+/// a task still queued after it elapses is settled `expired` rather than aggregated into a
+/// payload that would revert, and a `ready` payload nobody collected is swept so it stops
+/// occupying the deduplication slot for its transition index. Configurable via
+/// `TASK_TTL_SECONDS`.
+pub const DEFAULT_TASK_TTL_SECS: u64 = 300;
+
+/// Reads the task TTL from `TASK_TTL_SECONDS`, defaulting to [`DEFAULT_TASK_TTL_SECS`]. Zero or
+/// unparseable values fall back to the default, since a TTL of zero would expire every task
+/// before the sequencer could dequeue it.
+pub fn task_ttl() -> std::time::Duration {
+    let secs = env::var("TASK_TTL_SECONDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_TASK_TTL_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Default per-API-key request rate on the ingress `POST /tasks` endpoint, in requests per
 /// minute. Applied to every key that was not issued with an explicit override, so one client
 /// cannot monopolise the shared task queue. Configurable via `RATE_LIMIT_RPM`.

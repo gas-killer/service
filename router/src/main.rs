@@ -44,8 +44,9 @@ use gas_killer_common::{
     ack_messages_per_second, agg_activity_timeout, agg_window, load_key_from_file,
     p2p_message_backlog, p2p_quota_period, quorum_threshold_fraction, rebroadcast_interval,
     round_timeout, schnorr_messages_per_second, schnorr_stage_timeout, signature_scheme,
-    storage_directory,
+    storage_directory, task_ttl,
 };
+use gas_killer_router::expiry::run_expiry_sweeper;
 use gas_killer_router::factories::{
     create_ingress, create_schnorr_submitter, create_submitter, requeue_incomplete_tasks,
 };
@@ -419,6 +420,17 @@ fn main() {
             requeue_incomplete_tasks(store, &ingress.sender, &ingress.queue_depth)
                 .await
                 .expect("Failed to re-enqueue incomplete tasks");
+
+            // Bound how long a task can hold state that can no longer produce a submittable
+            // payload: queued tasks the queue never reached in time, and ready payloads nobody
+            // collected. The sequencer re-checks each task's status when it dequeues, so a task
+            // swept while sitting in the channel is dropped instead of dispatched.
+            let sweeper_store = store.clone();
+            let sweeper_metrics = Arc::clone(&metrics);
+            let ttl = task_ttl();
+            context
+                .child("task_expiry")
+                .spawn(move |_| run_expiry_sweeper(sweeper_store, sweeper_metrics, ttl));
         }
         let _task_sender = ingress.sender;
 
