@@ -26,6 +26,12 @@ use crate::ingress::GasKillerTaskRequestBody;
 const TASK_COLUMNS: &str = "id, key_id, status, target_address, call_data, transition_index, \
      from_address, value, block_height, payload, bundle, error, created_at, updated_at";
 
+/// Columns written by every task insert. Shared by [`SqliteStore::create_task`] and
+/// [`SqliteStore::create_task_deduplicated`] so a new column is added to both inserts at once
+/// rather than diverging silently.
+const TASK_INSERT_COLUMNS: &str = "id, key_id, status, target_address, call_data, \
+     transition_index, from_address, value, block_height";
+
 /// Lifecycle state of a task as it moves through aggregation.
 ///
 /// The string forms are the on-the-wire values (via serde) and the values persisted in the
@@ -94,6 +100,14 @@ pub struct Task {
     pub updated_at: i64,
 }
 
+/// Outcome of a deduplicated submission: the task the client polls, and whether the submission
+/// collapsed onto an existing task (`true`) rather than creating a fresh one (`false`).
+#[derive(Debug, Clone)]
+pub struct SubmittedTask {
+    pub task: Task,
+    pub deduplicated: bool,
+}
+
 /// Raw column values as read from SQLite, before Ethereum types are parsed back out of their
 /// text encodings. Kept private; callers only ever see [`Task`].
 #[derive(FromRow)]
@@ -151,6 +165,11 @@ impl SqliteStore {
     /// Returns the created [`Task`], including the store-assigned timestamps.
     ///
     /// Fails if `key_id` does not reference an existing key (enforced by the foreign key).
+    ///
+    /// Inserts unconditionally. Route explicit-`transition_index` submissions through
+    /// [`SqliteStore::create_task_deduplicated`] instead, so the one-active-task-per
+    /// `(key_id, target_address, transition_index)` invariant that ingress deduplication relies on
+    /// keeps holding.
     pub async fn create_task(
         &self,
         key_id: &str,
@@ -158,13 +177,11 @@ impl SqliteStore {
     ) -> anyhow::Result<Task> {
         let id = Uuid::new_v4().to_string();
 
-        let (created_at, updated_at): (i64, i64) = sqlx::query_as(
-            "INSERT INTO tasks \
-             (id, key_id, status, target_address, call_data, transition_index, from_address, \
-              value, block_height) \
+        let (created_at, updated_at): (i64, i64) = sqlx::query_as(&format!(
+            "INSERT INTO tasks ({TASK_INSERT_COLUMNS}) \
              VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8) \
              RETURNING created_at, updated_at",
-        )
+        ))
         .bind(&id)
         .bind(key_id)
         .bind(request.target_address.to_string())
@@ -188,6 +205,156 @@ impl SqliteStore {
             created_at,
             updated_at,
         })
+    }
+
+    /// Persists a task for the given API key, collapsing a duplicate submission onto the existing
+    /// task instead of creating a second one.
+    ///
+    /// A client that retries after a timeout submits the same logical request twice. Without
+    /// deduplication both tasks pass validation, but only the first to reach the chain succeeds —
+    /// the second's `transition_index` is already consumed — so the retry races a doomed
+    /// transaction. Keying idempotency on `(key_id, target_address, transition_index)` makes the
+    /// retry safe: it returns the existing task rather than creating a duplicate.
+    ///
+    /// A match counts as a duplicate only while it is in flight (`queued`/`processing`) or `ready`.
+    /// A `failed` or `expired` task is not a duplicate — its work must be re-run — so a submission
+    /// matching one creates a fresh task. Deduplication applies only to an explicit
+    /// `transition_index`; an `auto` (NULL) request leaves the slot for the server to resolve at
+    /// dequeue time, so two `auto` submissions are distinct requests that each take their own slot
+    /// (safe parallel submissions) and are never collapsed.
+    ///
+    /// The duplicate check and the insert are one atomic statement — an `INSERT ... SELECT` guarded
+    /// by `WHERE NOT EXISTS` — so a concurrent retry cannot slip between them. SQLite serializes
+    /// writers, so a racer that loses observes the winner's committed row, inserts nothing, and this
+    /// method returns that task as the deduplicated result.
+    pub async fn create_task_deduplicated(
+        &self,
+        key_id: &str,
+        request: &GasKillerTaskRequestBody,
+    ) -> anyhow::Result<SubmittedTask> {
+        self.create_task_deduplicated_hooked(key_id, request, || async {})
+            .await
+    }
+
+    /// Core of [`SqliteStore::create_task_deduplicated`], with a test seam. `on_blocked_insert`
+    /// runs after an insert is turned away by the guard and before the duplicate is read back —
+    /// the window in which the blocking task can go terminal — letting tests force that transition
+    /// and assert the retry yields a fresh task rather than an error.
+    async fn create_task_deduplicated_hooked<F, Fut>(
+        &self,
+        key_id: &str,
+        request: &GasKillerTaskRequestBody,
+        mut on_blocked_insert: F,
+    ) -> anyhow::Result<SubmittedTask>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        // Auto submissions carry no idempotency key, so they always create a fresh task.
+        let Some(transition_index) = request.transition_index else {
+            let task = self.create_task(key_id, request).await?;
+            return Ok(SubmittedTask {
+                task,
+                deduplicated: false,
+            });
+        };
+
+        // The guard can block the insert (an active duplicate exists) yet the read-back find
+        // nothing, when that duplicate transitions to a terminal status in the window between the
+        // two statements. That window is correlated with the slow round the client is retrying, so
+        // rather than surface a transient error we re-attempt: the blocker is now terminal, so the
+        // next insert's `NOT EXISTS` passes and creates the fresh task the state machine implies.
+        // Bounded so a pathologically churning slot cannot loop forever.
+        const MAX_INSERT_ATTEMPTS: usize = 3;
+        for _ in 0..MAX_INSERT_ATTEMPTS {
+            let id = Uuid::new_v4().to_string();
+            let inserted: Option<(i64, i64)> = sqlx::query_as(&format!(
+                "INSERT INTO tasks ({TASK_INSERT_COLUMNS}) \
+                 SELECT ?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8 \
+                 WHERE NOT EXISTS ( \
+                     SELECT 1 FROM tasks \
+                     WHERE key_id = ?2 AND target_address = ?3 AND transition_index = ?5 \
+                       AND status IN ('queued', 'processing', 'ready') \
+                 ) \
+                 RETURNING created_at, updated_at",
+            ))
+            .bind(&id)
+            .bind(key_id)
+            .bind(request.target_address.to_string())
+            .bind(request.call_data.as_slice())
+            .bind(transition_index as i64)
+            .bind(request.from_address.to_string())
+            .bind(request.value.to_string())
+            .bind(request.block_height as i64)
+            .fetch_optional(self.pool())
+            .await
+            .context("inserting task with deduplication")?;
+
+            match inserted {
+                Some((created_at, updated_at)) => {
+                    return Ok(SubmittedTask {
+                        task: Task {
+                            id,
+                            key_id: key_id.to_string(),
+                            status: TaskStatus::Queued,
+                            request: request.clone(),
+                            payload: None,
+                            bundle: None,
+                            error: None,
+                            created_at,
+                            updated_at,
+                        },
+                        deduplicated: false,
+                    });
+                }
+                // The guard's `NOT EXISTS` was false: an active task already covers this work.
+                None => {
+                    on_blocked_insert().await;
+                    if let Some(task) = self
+                        .active_duplicate_task(key_id, request.target_address, transition_index)
+                        .await?
+                    {
+                        return Ok(SubmittedTask {
+                            task,
+                            deduplicated: true,
+                        });
+                    }
+                    // The blocker went terminal between the insert and the read-back; loop to
+                    // re-attempt the insert, which now sees no active duplicate.
+                }
+            }
+        }
+
+        anyhow::bail!(
+            "deduplication insert blocked without an active duplicate across \
+             {MAX_INSERT_ATTEMPTS} attempts"
+        )
+    }
+
+    /// Finds the active task a duplicate submission collapses onto: the newest `queued`,
+    /// `processing`, or `ready` task for `(key_id, target_address, transition_index)`. Terminal
+    /// (`failed`/`expired`) tasks are excluded so their work can be re-submitted. Returns `None`
+    /// when no such task exists.
+    async fn active_duplicate_task(
+        &self,
+        key_id: &str,
+        target_address: Address,
+        transition_index: u64,
+    ) -> anyhow::Result<Option<Task>> {
+        let row: Option<TaskRow> = sqlx::query_as(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks \
+             WHERE key_id = ?1 AND target_address = ?2 AND transition_index = ?3 \
+               AND status IN ('queued', 'processing', 'ready') \
+             ORDER BY created_at DESC, id LIMIT 1",
+        ))
+        .bind(key_id)
+        .bind(target_address.to_string())
+        .bind(transition_index as i64)
+        .fetch_optional(self.pool())
+        .await
+        .context("finding active duplicate task")?;
+
+        row.map(Task::try_from).transpose()
     }
 
     /// Fetches a task by id, or `None` if no such task exists. The returned task carries its
@@ -654,5 +821,320 @@ mod tests {
     fn status_serializes_snake_case() {
         let json = serde_json::to_string(&TaskStatus::Processing).unwrap();
         assert_eq!(json, r#""processing""#);
+    }
+
+    // -- deduplication --
+
+    #[tokio::test]
+    async fn dedup_collapses_onto_queued() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        let first = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        assert!(!first.deduplicated, "the first submission creates a task");
+
+        let second = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        assert!(
+            second.deduplicated,
+            "a retry while the task is queued collapses onto it"
+        );
+        assert_eq!(second.task.id, first.task.id);
+
+        let listed = store.list_tasks_for_key(&key, None, 100, 0).await.unwrap();
+        assert_eq!(listed.len(), 1, "no duplicate row is created");
+    }
+
+    #[tokio::test]
+    async fn dedup_collapses_onto_processing() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        let first = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        store
+            .update_task_status(&first.task.id, TaskStatus::Processing)
+            .await
+            .unwrap();
+
+        let second = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        assert!(second.deduplicated);
+        assert_eq!(second.task.id, first.task.id);
+        assert_eq!(second.task.status, TaskStatus::Processing);
+    }
+
+    #[tokio::test]
+    async fn dedup_collapses_onto_ready() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        let first = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        store
+            .mark_task_ready(&first.task.id, "0xcafe")
+            .await
+            .unwrap();
+
+        let second = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        assert!(second.deduplicated, "a ready task still absorbs a retry");
+        assert_eq!(second.task.id, first.task.id);
+        assert_eq!(second.task.status, TaskStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn dedup_resubmits_after_failed() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        let first = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        store
+            .mark_task_failed(&first.task.id, "aggregation timed out")
+            .await
+            .unwrap();
+
+        let second = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        assert!(
+            !second.deduplicated,
+            "a failed task is not a duplicate, so its work can be re-submitted"
+        );
+        assert_ne!(second.task.id, first.task.id);
+        assert_eq!(second.task.status, TaskStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn dedup_resubmits_after_expired() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        let first = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        store
+            .mark_task_expired(&first.task.id, "payload validity window elapsed")
+            .await
+            .unwrap();
+
+        let second = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        assert!(
+            !second.deduplicated,
+            "an expired task is not a duplicate, so its work can be re-submitted"
+        );
+        assert_ne!(second.task.id, first.task.id);
+    }
+
+    #[tokio::test]
+    async fn dedup_is_scoped_per_key() {
+        let store = store().await;
+        let key_a = key_id(&store).await;
+        let key_b = key_id(&store).await;
+
+        let a = store
+            .create_task_deduplicated(&key_a, &request())
+            .await
+            .unwrap();
+        let b = store
+            .create_task_deduplicated(&key_b, &request())
+            .await
+            .unwrap();
+        assert!(!a.deduplicated);
+        assert!(
+            !b.deduplicated,
+            "the same request under a different key is distinct work"
+        );
+        assert_ne!(a.task.id, b.task.id);
+    }
+
+    #[tokio::test]
+    async fn dedup_distinguishes_transition_index() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        let mut first_req = request();
+        first_req.transition_index = Some(1);
+        let mut second_req = request();
+        second_req.transition_index = Some(2);
+
+        let first = store
+            .create_task_deduplicated(&key, &first_req)
+            .await
+            .unwrap();
+        let second = store
+            .create_task_deduplicated(&key, &second_req)
+            .await
+            .unwrap();
+        assert!(!first.deduplicated);
+        assert!(
+            !second.deduplicated,
+            "a different transition_index is different work"
+        );
+        assert_ne!(first.task.id, second.task.id);
+    }
+
+    #[tokio::test]
+    async fn dedup_distinguishes_target_address() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        let mut first_req = request();
+        first_req.target_address = Address::from([0xaa; 20]);
+        let mut second_req = request();
+        second_req.target_address = Address::from([0xbb; 20]);
+
+        let first = store
+            .create_task_deduplicated(&key, &first_req)
+            .await
+            .unwrap();
+        let second = store
+            .create_task_deduplicated(&key, &second_req)
+            .await
+            .unwrap();
+        assert!(!first.deduplicated);
+        assert!(
+            !second.deduplicated,
+            "a different target_address is different work"
+        );
+        assert_ne!(first.task.id, second.task.id);
+    }
+
+    #[tokio::test]
+    async fn auto_transition_index_never_deduplicates() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let mut req = request();
+        req.transition_index = None;
+
+        let first = store.create_task_deduplicated(&key, &req).await.unwrap();
+        let second = store.create_task_deduplicated(&key, &req).await.unwrap();
+        assert!(!first.deduplicated);
+        assert!(
+            !second.deduplicated,
+            "auto submissions each take their own slot and are never collapsed"
+        );
+        assert_ne!(first.task.id, second.task.id);
+
+        let listed = store.list_tasks_for_key(&key, None, 100, 0).await.unwrap();
+        assert_eq!(
+            listed.len(),
+            2,
+            "both auto submissions persist distinct rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_duplicate_submissions_collapse_to_one_task() {
+        // A real file-backed store (WAL, multi-connection pool) so the racing submissions run on
+        // separate connections — the in-memory store is capped at one connection and would
+        // serialize them, hiding the concurrency the atomic insert must survive.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteStore::connect_at(&dir.path().join("router.db"))
+            .await
+            .expect("file store should open and migrate");
+        let key = key_id(&store).await;
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let store = store.clone();
+            let key = key.clone();
+            handles.push(tokio::spawn(async move {
+                store
+                    .create_task_deduplicated(&key, &request())
+                    .await
+                    .expect("concurrent dedup submission should succeed")
+            }));
+        }
+
+        let mut created = 0usize;
+        let mut ids = std::collections::HashSet::new();
+        for handle in handles {
+            let submission = handle.await.unwrap();
+            if !submission.deduplicated {
+                created += 1;
+            }
+            ids.insert(submission.task.id);
+        }
+
+        assert_eq!(
+            created, 1,
+            "exactly one concurrent submission may create the task"
+        );
+        assert_eq!(
+            ids.len(),
+            1,
+            "every concurrent submission returns the same task id"
+        );
+
+        let listed = store.list_tasks_for_key(&key, None, 100, 0).await.unwrap();
+        assert_eq!(listed.len(), 1, "only one row exists after the race");
+    }
+
+    #[tokio::test]
+    async fn dedup_retries_to_fresh_task_when_blocker_goes_terminal_mid_check() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        // An active task occupies the slot, so the next submission's insert is turned away.
+        let blocker = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+
+        // Drive the blocker terminal exactly once, in the window between the blocked insert and the
+        // read-back, reproducing the race: the read-back then finds no active duplicate, so the
+        // loop must re-insert rather than error.
+        let fired = std::cell::Cell::new(false);
+        let submission = store
+            .create_task_deduplicated_hooked(&key, &request(), || {
+                let store = store.clone();
+                let blocker_id = blocker.task.id.clone();
+                let first = !fired.replace(true);
+                async move {
+                    if first {
+                        store
+                            .mark_task_failed(&blocker_id, "aggregation timed out")
+                            .await
+                            .unwrap();
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            !submission.deduplicated,
+            "the blocker went terminal, so the retry creates a fresh task rather than a 500"
+        );
+        assert_ne!(submission.task.id, blocker.task.id);
+        assert_eq!(submission.task.status, TaskStatus::Queued);
+
+        let active = store
+            .list_tasks_for_key(&key, Some(TaskStatus::Queued), 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1, "only the fresh task remains active");
     }
 }

@@ -3,7 +3,7 @@ use crate::metrics::MetricsCollector;
 use crate::rate_limit::KeyRateLimiter;
 use crate::sequencer::{QueuedTask, TaskQueueDepth, TaskSender};
 use crate::store::{
-    ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, SqliteStore, Task, TaskStatus,
+    ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, SqliteStore, SubmittedTask, Task, TaskStatus,
 };
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
@@ -618,11 +618,17 @@ impl GasKillerTaskRequest {
 }
 
 /// Body returned by `POST /tasks` (and its deprecated alias `POST /trigger`) when a task is
-/// accepted: the id the client polls for status, and the task's initial state.
+/// accepted: the id the client polls for status, and the task's current state.
+///
+/// `deduplicated` is `true` when the submission collapsed onto an existing in-flight or `ready`
+/// task rather than creating a new one — a retry keyed on `(key_id, target_address,
+/// transition_index)` is idempotent, returning the original task id with a `200 OK`. A fresh
+/// submission carries `false` and a `202 Accepted`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskAcceptedResponse {
     pub task_id: String,
     pub status: TaskStatus,
+    pub deduplicated: bool,
 }
 
 /// `Retry-After` estimate (seconds) returned alongside a `503 QUEUE_FULL`. The router drains
@@ -789,13 +795,38 @@ pub async fn submit_task_handler(
     let store = require_store(&state)?;
     let key_id = auth.ok_or_else(ApiError::unauthorized)?.id;
 
-    let task = store
-        .create_task(&key_id, &request.body)
+    let SubmittedTask { task, deduplicated } = store
+        .create_task_deduplicated(&key_id, &request.body)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to persist task");
             ApiError::internal("Internal error: failed to persist task")
         })?;
+
+    // A retry that collapsed onto an existing task must not be enqueued a second time — the
+    // original submission already owns a queue slot (or has settled). Release this request's
+    // reserved slot (the guard drops uncommitted) and hand back the existing task with `200 OK`,
+    // so the client polls the same id idempotently.
+    if deduplicated {
+        info!(
+            task_id = %task.id,
+            status = ?task.status,
+            target_address = %request.body.target_address,
+            transition_index = ?request.body.transition_index,
+            "Task deduplicated onto existing submission"
+        );
+        if let Some(m) = &state.metrics {
+            m.ingress_deduplicated.inc();
+        }
+        return Ok((
+            StatusCode::OK,
+            Json(TaskAcceptedResponse {
+                task_id: task.id,
+                status: task.status,
+                deduplicated: true,
+            }),
+        ));
+    }
 
     info!(
         task_id = %task.id,
@@ -824,6 +855,7 @@ pub async fn submit_task_handler(
         Json(TaskAcceptedResponse {
             task_id: task.id,
             status: task.status,
+            deduplicated: false,
         }),
     ))
 }
@@ -1605,12 +1637,18 @@ mod tests {
         }
 
         fn valid_body() -> String {
+            valid_body_with_index(0)
+        }
+
+        /// A valid submission body pinned to an explicit `transition_index`, so successive
+        /// submissions are distinct work rather than deduplicated retries of the same request.
+        fn valid_body_with_index(transition_index: u64) -> String {
             serde_json::json!({
                 "body": {
                     "target_address": "0x0000000000000000000000000000000000000001",
                     "from_address":   "0x0000000000000000000000000000000000000002",
                     "call_data":      [0xAB, 0xCD, 0xEF, 0x01],
-                    "transition_index": 0,
+                    "transition_index": transition_index,
                     "value": "0x0",
                     "block_height": 1
                 }
@@ -1971,15 +2009,15 @@ mod tests {
 
         #[tokio::test]
         async fn test_valid_request_does_not_leave_extra_tasks() {
-            // Two sequential valid requests → queue should hold exactly two tasks.
+            // Two sequential valid requests for distinct work → queue should hold exactly two tasks.
             let (app, store, mut receiver) = make_app_with_store(None).await;
             let created = store.create_api_key(None, None).await.unwrap();
 
             app.clone()
-                .oneshot(bearer_request(&valid_body(), &created.key))
+                .oneshot(bearer_request(&valid_body_with_index(0), &created.key))
                 .await
                 .unwrap();
-            app.oneshot(bearer_request(&valid_body(), &created.key))
+            app.oneshot(bearer_request(&valid_body_with_index(1), &created.key))
                 .await
                 .unwrap();
 
@@ -2338,6 +2376,120 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn duplicate_submission_returns_200_and_does_not_reenqueue() {
+            let (app, store, mut rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+
+            let first = app
+                .clone()
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::ACCEPTED);
+            let first_body = accepted_body(first).await;
+            assert!(
+                !first_body.deduplicated,
+                "a fresh submission is not deduplicated"
+            );
+            assert!(
+                rx.try_recv().is_ok(),
+                "the first submission enqueues a task"
+            );
+
+            // Same request again: a retry collapses onto the in-flight task.
+            let second = app
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(
+                second.status(),
+                StatusCode::OK,
+                "a deduplicated retry answers 200 OK, not 202"
+            );
+            let second_body = accepted_body(second).await;
+            assert!(second_body.deduplicated);
+            assert_eq!(
+                second_body.task_id, first_body.task_id,
+                "the retry returns the original task id"
+            );
+            assert_eq!(second_body.status, TaskStatus::Queued);
+            assert!(
+                rx.try_recv().is_err(),
+                "a deduplicated retry must not enqueue a second task"
+            );
+        }
+
+        #[tokio::test]
+        async fn resubmission_after_failure_creates_new_task() {
+            let (app, store, mut rx) = make_app_with_store(None).await;
+            let key = store.create_api_key(None, None).await.unwrap();
+
+            let first = app
+                .clone()
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::ACCEPTED);
+            let first_body = accepted_body(first).await;
+            assert!(rx.try_recv().is_ok());
+
+            // Once the task fails, its work is no longer covered by an in-flight submission.
+            store
+                .mark_task_failed(&first_body.task_id, "aggregation timed out")
+                .await
+                .unwrap();
+
+            let second = app
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(
+                second.status(),
+                StatusCode::ACCEPTED,
+                "resubmission after a failure creates a fresh task"
+            );
+            let second_body = accepted_body(second).await;
+            assert!(!second_body.deduplicated);
+            assert_ne!(second_body.task_id, first_body.task_id);
+            assert!(
+                rx.try_recv().is_ok(),
+                "the fresh task is enqueued for aggregation"
+            );
+        }
+
+        #[tokio::test]
+        async fn deduplicated_submission_increments_metric() {
+            let (sender, mut rx) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
+            let metrics = Arc::new(MetricsCollector::new());
+            let store = SqliteStore::connect_in_memory()
+                .await
+                .expect("in-memory store should open");
+            let key = store.create_api_key(None, None).await.unwrap();
+            let mut state = IngressState::without_metrics(sender, queue_depth).with_store(store);
+            state.metrics = Some(Arc::clone(&metrics));
+            let app = build_app().with_state(state);
+
+            app.clone()
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            let _ = rx.try_recv();
+            let second = app
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(second.status(), StatusCode::OK);
+
+            assert_eq!(metrics.ingress_deduplicated.get(), 1);
+            assert_eq!(
+                metrics.ingress_accepted.get(),
+                1,
+                "only the fresh submission counts as accepted"
+            );
+        }
+
+        #[tokio::test]
         async fn tasks_endpoint_rejects_missing_token_when_store_present() {
             let (app, _store, _rx) = make_app_with_store(None).await;
             let req = Request::builder()
@@ -2627,10 +2779,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            for _ in 0..5 {
+            for i in 0..5 {
                 let resp = app
                     .clone()
-                    .oneshot(bearer_request(&valid_body(), &key.key))
+                    .oneshot(bearer_request(&valid_body_with_index(i), &key.key))
                     .await
                     .unwrap();
                 assert_eq!(
