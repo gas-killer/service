@@ -232,6 +232,24 @@ impl SqliteStore {
         key_id: &str,
         request: &GasKillerTaskRequestBody,
     ) -> anyhow::Result<SubmittedTask> {
+        self.create_task_deduplicated_hooked(key_id, request, || async {})
+            .await
+    }
+
+    /// Core of [`SqliteStore::create_task_deduplicated`], with a test seam. `on_blocked_insert`
+    /// runs after an insert is turned away by the guard and before the duplicate is read back —
+    /// the window in which the blocking task can go terminal — letting tests force that transition
+    /// and assert the retry yields a fresh task rather than an error.
+    async fn create_task_deduplicated_hooked<F, Fut>(
+        &self,
+        key_id: &str,
+        request: &GasKillerTaskRequestBody,
+        mut on_blocked_insert: F,
+    ) -> anyhow::Result<SubmittedTask>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         // Auto submissions carry no idempotency key, so they always create a fresh task.
         let Some(transition_index) = request.transition_index else {
             let task = self.create_task(key_id, request).await?;
@@ -291,6 +309,7 @@ impl SqliteStore {
                 }
                 // The guard's `NOT EXISTS` was false: an active task already covers this work.
                 None => {
+                    on_blocked_insert().await;
                     if let Some(task) = self
                         .active_duplicate_task(key_id, request.target_address, transition_index)
                         .await?
@@ -1071,5 +1090,51 @@ mod tests {
 
         let listed = store.list_tasks_for_key(&key, None, 100, 0).await.unwrap();
         assert_eq!(listed.len(), 1, "only one row exists after the race");
+    }
+
+    #[tokio::test]
+    async fn dedup_retries_to_fresh_task_when_blocker_goes_terminal_mid_check() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        // An active task occupies the slot, so the next submission's insert is turned away.
+        let blocker = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+
+        // Drive the blocker terminal exactly once, in the window between the blocked insert and the
+        // read-back, reproducing the race: the read-back then finds no active duplicate, so the
+        // loop must re-insert rather than error.
+        let fired = std::cell::Cell::new(false);
+        let submission = store
+            .create_task_deduplicated_hooked(&key, &request(), || {
+                let store = store.clone();
+                let blocker_id = blocker.task.id.clone();
+                let first = !fired.replace(true);
+                async move {
+                    if first {
+                        store
+                            .mark_task_failed(&blocker_id, "aggregation timed out")
+                            .await
+                            .unwrap();
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            !submission.deduplicated,
+            "the blocker went terminal, so the retry creates a fresh task rather than a 500"
+        );
+        assert_ne!(submission.task.id, blocker.task.id);
+        assert_eq!(submission.task.status, TaskStatus::Queued);
+
+        let active = store
+            .list_tasks_for_key(&key, Some(TaskStatus::Queued), 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1, "only the fresh task remains active");
     }
 }
