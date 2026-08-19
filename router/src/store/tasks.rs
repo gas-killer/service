@@ -26,6 +26,12 @@ use crate::ingress::GasKillerTaskRequestBody;
 const TASK_COLUMNS: &str = "id, key_id, status, target_address, call_data, transition_index, \
      from_address, value, block_height, payload, bundle, error, created_at, updated_at";
 
+/// Columns written by every task insert. Shared by [`SqliteStore::create_task`] and
+/// [`SqliteStore::create_task_deduplicated`] so a new column is added to both inserts at once
+/// rather than diverging silently.
+const TASK_INSERT_COLUMNS: &str = "id, key_id, status, target_address, call_data, \
+     transition_index, from_address, value, block_height";
+
 /// Lifecycle state of a task as it moves through aggregation.
 ///
 /// The string forms are the on-the-wire values (via serde) and the values persisted in the
@@ -159,6 +165,11 @@ impl SqliteStore {
     /// Returns the created [`Task`], including the store-assigned timestamps.
     ///
     /// Fails if `key_id` does not reference an existing key (enforced by the foreign key).
+    ///
+    /// Inserts unconditionally. Route explicit-`transition_index` submissions through
+    /// [`SqliteStore::create_task_deduplicated`] instead, so the one-active-task-per
+    /// `(key_id, target_address, transition_index)` invariant that ingress deduplication relies on
+    /// keeps holding.
     pub async fn create_task(
         &self,
         key_id: &str,
@@ -166,13 +177,11 @@ impl SqliteStore {
     ) -> anyhow::Result<Task> {
         let id = Uuid::new_v4().to_string();
 
-        let (created_at, updated_at): (i64, i64) = sqlx::query_as(
-            "INSERT INTO tasks \
-             (id, key_id, status, target_address, call_data, transition_index, from_address, \
-              value, block_height) \
+        let (created_at, updated_at): (i64, i64) = sqlx::query_as(&format!(
+            "INSERT INTO tasks ({TASK_INSERT_COLUMNS}) \
              VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8) \
              RETURNING created_at, updated_at",
-        )
+        ))
         .bind(&id)
         .bind(key_id)
         .bind(request.target_address.to_string())
@@ -232,61 +241,75 @@ impl SqliteStore {
             });
         };
 
-        let id = Uuid::new_v4().to_string();
-        let inserted: Option<(i64, i64)> = sqlx::query_as(
-            "INSERT INTO tasks \
-             (id, key_id, status, target_address, call_data, transition_index, from_address, \
-              value, block_height) \
-             SELECT ?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8 \
-             WHERE NOT EXISTS ( \
-                 SELECT 1 FROM tasks \
-                 WHERE key_id = ?2 AND target_address = ?3 AND transition_index = ?5 \
-                   AND status IN ('queued', 'processing', 'ready') \
-             ) \
-             RETURNING created_at, updated_at",
-        )
-        .bind(&id)
-        .bind(key_id)
-        .bind(request.target_address.to_string())
-        .bind(request.call_data.as_slice())
-        .bind(transition_index as i64)
-        .bind(request.from_address.to_string())
-        .bind(request.value.to_string())
-        .bind(request.block_height as i64)
-        .fetch_optional(self.pool())
-        .await
-        .context("inserting task with deduplication")?;
+        // The guard can block the insert (an active duplicate exists) yet the read-back find
+        // nothing, when that duplicate transitions to a terminal status in the window between the
+        // two statements. That window is correlated with the slow round the client is retrying, so
+        // rather than surface a transient error we re-attempt: the blocker is now terminal, so the
+        // next insert's `NOT EXISTS` passes and creates the fresh task the state machine implies.
+        // Bounded so a pathologically churning slot cannot loop forever.
+        const MAX_INSERT_ATTEMPTS: usize = 3;
+        for _ in 0..MAX_INSERT_ATTEMPTS {
+            let id = Uuid::new_v4().to_string();
+            let inserted: Option<(i64, i64)> = sqlx::query_as(&format!(
+                "INSERT INTO tasks ({TASK_INSERT_COLUMNS}) \
+                 SELECT ?1, ?2, 'queued', ?3, ?4, ?5, ?6, ?7, ?8 \
+                 WHERE NOT EXISTS ( \
+                     SELECT 1 FROM tasks \
+                     WHERE key_id = ?2 AND target_address = ?3 AND transition_index = ?5 \
+                       AND status IN ('queued', 'processing', 'ready') \
+                 ) \
+                 RETURNING created_at, updated_at",
+            ))
+            .bind(&id)
+            .bind(key_id)
+            .bind(request.target_address.to_string())
+            .bind(request.call_data.as_slice())
+            .bind(transition_index as i64)
+            .bind(request.from_address.to_string())
+            .bind(request.value.to_string())
+            .bind(request.block_height as i64)
+            .fetch_optional(self.pool())
+            .await
+            .context("inserting task with deduplication")?;
 
-        match inserted {
-            Some((created_at, updated_at)) => Ok(SubmittedTask {
-                task: Task {
-                    id,
-                    key_id: key_id.to_string(),
-                    status: TaskStatus::Queued,
-                    request: request.clone(),
-                    payload: None,
-                    bundle: None,
-                    error: None,
-                    created_at,
-                    updated_at,
-                },
-                deduplicated: false,
-            }),
-            // The guard's `NOT EXISTS` was false: an active task already covers this work, so read
-            // it back and return it as the deduplicated result.
-            None => {
-                let task = self
-                    .active_duplicate_task(key_id, request.target_address, transition_index)
-                    .await?
-                    .context(
-                        "deduplication guard blocked the insert but no active duplicate was found",
-                    )?;
-                Ok(SubmittedTask {
-                    task,
-                    deduplicated: true,
-                })
+            match inserted {
+                Some((created_at, updated_at)) => {
+                    return Ok(SubmittedTask {
+                        task: Task {
+                            id,
+                            key_id: key_id.to_string(),
+                            status: TaskStatus::Queued,
+                            request: request.clone(),
+                            payload: None,
+                            bundle: None,
+                            error: None,
+                            created_at,
+                            updated_at,
+                        },
+                        deduplicated: false,
+                    });
+                }
+                // The guard's `NOT EXISTS` was false: an active task already covers this work.
+                None => {
+                    if let Some(task) = self
+                        .active_duplicate_task(key_id, request.target_address, transition_index)
+                        .await?
+                    {
+                        return Ok(SubmittedTask {
+                            task,
+                            deduplicated: true,
+                        });
+                    }
+                    // The blocker went terminal between the insert and the read-back; loop to
+                    // re-attempt the insert, which now sees no active duplicate.
+                }
             }
         }
+
+        anyhow::bail!(
+            "deduplication insert blocked without an active duplicate across \
+             {MAX_INSERT_ATTEMPTS} attempts"
+        )
     }
 
     /// Finds the active task a duplicate submission collapses onto: the newest `queued`,
