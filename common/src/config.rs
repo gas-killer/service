@@ -397,15 +397,27 @@ fn parse_signature_scheme(value: Option<&str>) -> SignatureScheme {
 }
 
 /// Reads the storage-update encoding from `STATE_ENCODING` (case-insensitive
-/// `legacy` | `canonical`), defaulting to [`StateEncoding::Legacy`].
+/// `legacy` | `canonical` | `prestate-net`), defaulting to [`StateEncoding::Legacy`].
 ///
 /// `canonical` emits canonical state slices before every external call and a
 /// final re-assertion slice, so a re-entrant call into a Gas Killer target
 /// observes the storage native execution would have had (see
-/// `gas_analyzer::compute_state_updates_canonical`). **Node and router must run
-/// the same value** — the encoding changes `storage_updates`, hence the task
-/// digest — so this is read from one env var threaded to both binaries.
-/// Panics on an unrecognized value rather than silently diverging digests.
+/// `gas_analyzer::compute_state_updates_canonical`).
+///
+/// `prestate-net` signs the target's *net* storage diff — one slot-sorted store per
+/// changed slot plus its logs — read from the `prestateTracer`/`callTracer` pair
+/// instead of a struct-log trace. It costs `O(changed slots)` rather than
+/// `O(execution steps)`, which is what makes heavy-compute tracked functions
+/// extractable at all: their struct-log trace is large enough to time out or exhaust
+/// the node. Calls the net form cannot represent (an external `CALL`, `CREATE`, or
+/// `SELFDESTRUCT` at target depth) fall back to the *canonical* encoder, and a node
+/// whose RPC lacks either tracer fails the task rather than quietly downgrading —
+/// see [`gas_analyzer::StateEncoding::PrestateNet`].
+///
+/// **Node and router must run the same value** — the encoding changes
+/// `storage_updates`, hence the task digest — so this is read from one env var
+/// threaded to both binaries. Panics on an unrecognized value rather than silently
+/// diverging digests.
 pub fn state_encoding() -> gas_analyzer::StateEncoding {
     parse_state_encoding(env::var("STATE_ENCODING").ok().as_deref())
 }
@@ -413,11 +425,59 @@ pub fn state_encoding() -> gas_analyzer::StateEncoding {
 /// Parses the `STATE_ENCODING` value (case-insensitive, trimmed). `None` / empty →
 /// `Legacy`. Panics on an unrecognized value rather than silently diverging the
 /// node's and router's digests.
+///
+/// Each encoding has exactly one accepted spelling. Alternates would let two
+/// operators believe they are configured identically while signing different bytes,
+/// which is the failure this panic exists to prevent.
 fn parse_state_encoding(raw: Option<&str>) -> gas_analyzer::StateEncoding {
     match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         None | Some("") | Some("legacy") => gas_analyzer::StateEncoding::Legacy,
         Some("canonical") => gas_analyzer::StateEncoding::Canonical,
-        Some(other) => panic!("STATE_ENCODING must be 'legacy' or 'canonical', got '{other}'"),
+        Some("prestate-net") => gas_analyzer::StateEncoding::PrestateNet,
+        Some(other) => {
+            panic!("STATE_ENCODING must be 'legacy', 'canonical', or 'prestate-net', got '{other}'")
+        }
+    }
+}
+
+/// Reads the tracked-function simulation profile from `GK_SIM_PROFILE` (case-insensitive
+/// `chain` | `unbounded`), defaulting to [`SimProfile::Chain`].
+///
+/// Where [`state_encoding`] selects how a task's storage mutations are *represented*, this
+/// selects the gas limits they are *derived under* — independent axes, both consensus
+/// parameters.
+///
+/// `unbounded` simulates with the pinned unbounded block/tx gas limits, so a tracked
+/// function whose direct execution costs more than a real block can still be analyzed. What it
+/// produces stays bounded: applying the payload on-chain must fit the profile's gas budget and
+/// contain no `CREATE`, or the analysis hard-errors rather than signing a task nobody can
+/// settle. The gas *estimate* for applying it is still priced under the real chain's limits,
+/// because `verifyAndUpdate` lands in a real block. It additionally requires the RPC serving
+/// `debug_traceCall` to have its own execution cap lifted (`anvil --disable-block-gas-limit`,
+/// `geth --rpc.gascap=0`); without that the heavy call runs out of gas inside the tracer.
+///
+/// **Node and router must run the same value** — the profile changes the derived
+/// `storage_updates`, hence the task digest — so this is read from one env var threaded to
+/// both binaries. Panics on an unrecognized value rather than silently diverging digests.
+pub fn sim_profile() -> gas_analyzer::SimProfile {
+    parse_sim_profile(env::var("GK_SIM_PROFILE").ok().as_deref())
+}
+
+/// Parses the `GK_SIM_PROFILE` value (case-insensitive, trimmed). `None` / empty → `Chain`.
+/// Panics on an unrecognized value rather than silently diverging the node's and router's
+/// digests.
+///
+/// The accepted spellings match [`gas_analyzer::SimProfile`]'s variants, so the config value and
+/// the enum it selects are named the same thing. Each profile has exactly one accepted spelling:
+/// an alternate would let two operators believe they are configured identically while deriving
+/// different bytes, which is the failure this panic exists to prevent.
+fn parse_sim_profile(raw: Option<&str>) -> gas_analyzer::SimProfile {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("chain") => gas_analyzer::SimProfile::Chain,
+        Some("unbounded") => gas_analyzer::SimProfile::Unbounded,
+        Some(other) => {
+            panic!("GK_SIM_PROFILE must be 'chain' or 'unbounded', got '{other}'")
+        }
     }
 }
 
@@ -453,6 +513,33 @@ fn parse_quorum_threshold_fraction(num: Option<&str>, den: Option<&str>) -> (u64
             DEFAULT_QUORUM_THRESHOLD_DENOMINATOR,
         ),
     }
+}
+
+/// Default notice window, in blocks, for `SchnorrStakeRegistry` operator-set changes.
+///
+/// Zero means changes apply as soon as they are committed, which is what the e2e stack wants:
+/// its whole operator set is registered before the target contract is deployed, so there is no
+/// in-flight round for a mutation to invalidate and no reason to wait out a window.
+pub const DEFAULT_SCHNORR_NOTICE_WINDOW: u64 = 0;
+
+/// Reads the `SchnorrStakeRegistry` notice window from `SCHNORR_NOTICE_WINDOW`, defaulting to
+/// [`DEFAULT_SCHNORR_NOTICE_WINDOW`].
+///
+/// The registry takes this at construction and it is immutable thereafter. A deployment that
+/// mutates its operator set while rounds are in flight must set it above the longest window a
+/// settlement can span — the signing round's duration plus the consumer contract's
+/// `blockStaleMeasure` — or an announced change can still land between a round assembling its
+/// signature and that signature settling. The registry cannot check this itself: the bound lives
+/// on each consumer and is adjustable there, while one registry may back several consumers.
+pub fn schnorr_notice_window() -> u64 {
+    parse_schnorr_notice_window(env::var("SCHNORR_NOTICE_WINDOW").ok().as_deref())
+}
+
+/// Parses `SCHNORR_NOTICE_WINDOW`, falling back to the default when missing, empty or
+/// unparseable.
+fn parse_schnorr_notice_window(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SCHNORR_NOTICE_WINDOW)
 }
 
 /// Default per-stage timeout cap for the Schnorr coordinator's protocol rounds
@@ -738,12 +825,71 @@ mod tests {
             parse_state_encoding(Some("Canonical")),
             StateEncoding::Canonical
         );
+        assert_eq!(
+            parse_state_encoding(Some("prestate-net")),
+            StateEncoding::PrestateNet
+        );
+        assert_eq!(
+            parse_state_encoding(Some(" Prestate-Net ")),
+            StateEncoding::PrestateNet
+        );
     }
 
     #[test]
     #[should_panic(expected = "STATE_ENCODING must be")]
     fn state_encoding_rejects_unknown() {
         let _ = parse_state_encoding(Some("bogus"));
+    }
+
+    /// Each encoding has one spelling. A near-miss must panic rather than resolve, so an
+    /// operator who mistypes the value cannot end up signing a different representation
+    /// from the rest of the fleet.
+    #[test]
+    #[should_panic(expected = "STATE_ENCODING must be")]
+    fn state_encoding_rejects_a_near_miss_spelling() {
+        let _ = parse_state_encoding(Some("prestate_net"));
+    }
+
+    #[test]
+    fn sim_profile_parsing() {
+        use gas_analyzer::SimProfile;
+        assert_eq!(parse_sim_profile(None), SimProfile::Chain);
+        assert_eq!(parse_sim_profile(Some("")), SimProfile::Chain);
+        assert_eq!(parse_sim_profile(Some("chain")), SimProfile::Chain);
+        assert_eq!(parse_sim_profile(Some(" CHAIN ")), SimProfile::Chain);
+        assert_eq!(parse_sim_profile(Some("unbounded")), SimProfile::Unbounded);
+        assert_eq!(
+            parse_sim_profile(Some(" Unbounded ")),
+            SimProfile::Unbounded
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "GK_SIM_PROFILE must be")]
+    fn sim_profile_rejects_unknown() {
+        let _ = parse_sim_profile(Some("bogus"));
+    }
+
+    /// `unbounded-v1` was the spelling while the profile was in development. It must fail loudly
+    /// rather than resolve or fall back to `chain`, so a config carried over from that period
+    /// stops the binary instead of silently deriving digests the rest of the fleet will not match.
+    #[test]
+    #[should_panic(expected = "GK_SIM_PROFILE must be")]
+    fn sim_profile_rejects_the_development_era_spelling() {
+        let _ = parse_sim_profile(Some("unbounded-v1"));
+    }
+
+    #[test]
+    fn schnorr_notice_window_defaults_to_zero() {
+        assert_eq!(parse_schnorr_notice_window(None), 0);
+        assert_eq!(parse_schnorr_notice_window(Some("")), 0);
+        assert_eq!(parse_schnorr_notice_window(Some("abc")), 0);
+    }
+
+    #[test]
+    fn schnorr_notice_window_reads_override() {
+        assert_eq!(parse_schnorr_notice_window(Some("150")), 150);
+        assert_eq!(parse_schnorr_notice_window(Some("  300  ")), 300);
     }
 
     #[test]

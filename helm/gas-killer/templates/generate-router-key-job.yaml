@@ -19,6 +19,10 @@ spec:
     spec:
       restartPolicy: OnFailure
       serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" .) .Values.secretManager.serviceAccountName }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if not .Values.rerun.generateRouterKey }}
       # On a fresh PVC (e.g. after cluster recreation), check if a keypair already exists in
       # GCP Secret Manager. If so, restore it so generate_key skips generation and the

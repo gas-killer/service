@@ -45,6 +45,13 @@ eigenlayer:
 ingress:
   enabled: true
   host: testnet.gaskiller.xyz
+  annotations:
+    # testnet.gaskiller.xyz is proxied through Cloudflare, which terminates TLS and
+    # forwards to the origin over HTTP. nginx would answer that with a 308 to HTTPS,
+    # which Cloudflare serves back to the client as a redirect to the same URL — an
+    # infinite loop. grafana-testnet.gaskiller.xyz is DNS-only and reaches the origin
+    # over HTTPS, so it is unaffected.
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
 
 monitoring:
   enabled: true
@@ -56,6 +63,16 @@ monitoring:
 router:
   ingress:
     timeoutMs: "0"
+
+# The bridge mirrors EigenLayer operator state from L1 to L2, so it has nothing to do
+# on an L1-only testnet: bridge-to-l2.sh exits non-zero without an L2 RPC. Both keys
+# must move together — waitForBridge is read independently of enabled, so disabling
+# only the job leaves every node and the router waiting 300s for a .bridge_complete
+# marker that nothing writes, then failing their init container. Set both back to true
+# alongside l2.enabled=true and secrets.l2HttpRpc.
+bridge:
+  enabled: false
+  waitForBridge: false
 
 # Deploy the smoke-test target (ArraySummation) wired to a real BLSSignatureChecker after
 # AVS setup, then publish its address to a ConfigMap. Read it for the local smoke test:
