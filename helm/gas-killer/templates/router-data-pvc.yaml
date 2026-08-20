@@ -3,6 +3,20 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ include "gas-killer.routerdata.fullname" . }}
+  {{- if .Values.router.persistence.retainOnUninstall }}
+  annotations:
+    # Outlives `helm uninstall`, so the SQLite store is not collateral damage when some
+    # other volume in the release has to be recreated. A PVC whose size or storageClass
+    # changes cannot be patched, so the only way to apply it is deleting the claim — and
+    # uninstall drops every PVC in the release, this one included, even though nothing
+    # about it changed. Keeping the claim also makes the PV's reclaim policy moot: it is
+    # never released, so `Delete` never fires.
+    #
+    # A reinstall under the same release name and namespace adopts the surviving claim,
+    # since uninstall leaves the meta.helm.sh/release-* annotations in place. The cost is
+    # that the volume now only goes away on an explicit `kubectl delete pvc`.
+    "helm.sh/resource-policy": keep
+  {{- end }}
   labels:
     {{- include "gas-killer.labels" . | nindent 4 }}
     app.kubernetes.io/component: router

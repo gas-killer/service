@@ -435,6 +435,24 @@ router:
     # Applied as the pod's securityContext.fsGroup so the non-root container user can write
     # to the mounted volume. The router image runs as 'appuser' (uid/gid 1000).
     fsGroup: 1000
+    # Annotate the PVC with helm.sh/resource-policy: keep, so the store survives
+    # `helm uninstall` and is adopted again on the next install.
+    #
+    # On by default because the API keys here are stored hashed and cannot be re-read: losing
+    # the volume silently invalidates every key ever issued, with no way to recover one. That
+    # is a worse outcome than the cost of keeping it, and it is not hypothetical — the store
+    # was lost exactly once, as collateral damage of an uninstall performed to resize a
+    # different PVC in the release.
+    #
+    # Keeping the claim also makes the PV's reclaim policy moot, since the volume is never
+    # released and `Delete` never fires.
+    #
+    # The costs: the claim outlives the release, so removing it takes an explicit
+    # `kubectl delete pvc`, and any future resize of this volume becomes a manual delete for
+    # the same reason. Repeated install/uninstall cycles against one long-lived cluster will
+    # accumulate a claim; set this to false there, or delete it by label as
+    # scripts/run_helm_test.sh does.
+    retainOnUninstall: true
   resources:
     requests:
       memory: "512Mi"
