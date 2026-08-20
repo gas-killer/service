@@ -89,9 +89,13 @@ pub enum ExpiryStage {
     /// Accepted but never dequeued: the queue drained too slowly for the task's pinned block.
     Queued,
     /// Aggregated into a payload the client never collected. Sweeping it stops the router serving
-    /// that payload again and frees the deduplication slot for its transition index. It does not
-    /// invalidate a payload a client already holds: the payload's own `valid_until_block` is the
-    /// on-chain authority, and it can outlive the TTL on a chain whose blocks are slow enough.
+    /// that payload again and frees the deduplication slot for its transition index.
+    ///
+    /// The default TTL is sized to the payload's own on-chain life, so the sweep normally arrives
+    /// after `valid_until_block` has already passed and only clears server state. Under a TTL set
+    /// shorter than that window it arrives first, withdrawing a payload the chain would still
+    /// accept — which does not invalidate a payload a client already holds, since
+    /// `valid_until_block` remains the on-chain authority.
     Ready,
 }
 

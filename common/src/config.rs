@@ -208,6 +208,14 @@ pub fn max_queue_depth() -> usize {
         .unwrap_or(DEFAULT_MAX_QUEUE_DEPTH)
 }
 
+/// Nominal L1 slot time in seconds, used to convert the contract's block-denominated windows
+/// into the wall-clock ones the router schedules against.
+///
+/// L1 is the reference chain because payload validity is measured there (operator state lives on
+/// L1), and a shorter real slot time only shrinks the on-chain window, which leaves any default
+/// sized from this constant conservative rather than short.
+pub const NOMINAL_L1_BLOCK_TIME_SECS: u64 = 12;
+
 /// Default lifetime, in seconds, of a task that has not reached a terminal state.
 ///
 /// Every task pins a `block_height` that goes stale as the chain advances, so a task that waits
@@ -216,11 +224,29 @@ pub fn max_queue_depth() -> usize {
 /// payload that would revert, and a `ready` payload nobody collected is swept so it stops
 /// occupying the deduplication slot for its transition index. Configurable via
 /// `TASK_TTL_SECONDS`.
-pub const DEFAULT_TASK_TTL_SECS: u64 = 300;
+///
+/// Sized to the wall-clock life of a rendered payload on L1 ([`DEFAULT_PAYLOAD_BLOCK_BUFFER`]
+/// blocks at [`NOMINAL_L1_BLOCK_TIME_SECS`]), because the two directions of error are not
+/// symmetric: a TTL longer than it needs to be only delays shedding work that was already
+/// doomed, while a TTL shorter than the payload window withdraws a payload the chain would still
+/// have accepted and charges the client a fresh round for work the operators already did. Erring
+/// long is therefore the cheap direction.
+pub const DEFAULT_TASK_TTL_SECS: u64 = 600;
+
+// A `ready` payload stays submittable for `PAYLOAD_BLOCK_BUFFER` blocks past its reference block,
+// so a default TTL below that window would sweep payloads the chain still accepts. Enforced at
+// compile time to keep the two defaults in lockstep.
+const _: () =
+    assert!(DEFAULT_TASK_TTL_SECS >= DEFAULT_PAYLOAD_BLOCK_BUFFER * NOMINAL_L1_BLOCK_TIME_SECS);
 
 /// Reads the task TTL from `TASK_TTL_SECONDS`, defaulting to [`DEFAULT_TASK_TTL_SECS`]. Zero or
 /// unparseable values fall back to the default, since a TTL of zero would expire every task
 /// before the sequencer could dequeue it.
+///
+/// An explicit value is honoured as given, including one below the payload validity window: a
+/// deployment whose target chain has faster blocks than L1 has a proportionally shorter payload
+/// window, and only the operator knows which chain that is. Raising `PAYLOAD_BLOCK_BUFFER`
+/// without raising this leaves the same gap the default is sized to close.
 pub fn task_ttl() -> std::time::Duration {
     let secs = env::var("TASK_TTL_SECONDS")
         .ok()

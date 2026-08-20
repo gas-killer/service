@@ -406,7 +406,11 @@ router:
     # that can still land. A processing task is never cancelled mid-round. Watch
     # gas_killer_tasks_expired_total — sustained expiries mean the queue is not draining ahead of
     # the staleness window (TASK_TTL_SECONDS).
-    taskTtlSeconds: "300"
+    # Leave empty to use the router's own default, which is sized to the wall-clock life of a
+    # rendered payload on L1 (payloadBlockBuffer blocks x 12s = 600s at the stock buffer) so the
+    # sweep never withdraws a payload the chain would still accept. Set a shorter value only for a
+    # target chain with faster blocks, where the payload window is proportionally shorter.
+    taskTtlSeconds: ""
   # AVS identity metadata served at GET /avs-metadata.
   # Set metadata.uri in config.json to the public URL of this endpoint
   # (e.g. https://api.gaskiller.xyz/avs-metadata) before calling updateAVSMetadataURI.
