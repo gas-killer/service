@@ -2,6 +2,7 @@
 // on-chain submitter around the commonware aggregation engine.
 pub mod error;
 pub mod executor;
+pub mod expiry;
 pub mod factories;
 pub mod ingress;
 pub mod metrics;

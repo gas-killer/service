@@ -8,7 +8,7 @@
 
 use crate::ingress::GasKillerTaskRequest;
 use crate::metrics::MetricsCollector;
-use crate::store::{SqliteStore, TaskStatus};
+use crate::store::SqliteStore;
 use commonware_avs_router::sequencer::{SequencedTask, TaskSource};
 use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
@@ -67,17 +67,24 @@ pub fn in_flight_task() -> InFlightTask {
     Arc::new(Mutex::new(None))
 }
 
-/// Best-effort task status bookkeeping shared by the task source and the executor. A
-/// store error is logged rather than propagated: failing to record a status
-/// transition must never derail aggregation, which is the real work — a missed
-/// transition is recoverable (the startup re-queue picks up anything left `queued`
-/// or `processing`), whereas aborting the pipeline is not.
-async fn set_task_processing(store: &SqliteStore, task_id: &str) {
-    if let Err(e) = store
-        .update_task_status(task_id, TaskStatus::Processing)
-        .await
-    {
-        error!(task_id, error = %e, "failed to mark task processing");
+/// Claims a dequeued task for this round, moving it to `processing`, and reports whether the
+/// claim succeeded. `false` means the task has already settled — the TTL sweep expires tasks
+/// while they sit in this channel — so the caller must drop it rather than spend a round
+/// producing a payload too stale to land.
+///
+/// Best-effort task status bookkeeping shared by the task source and the executor: a store error
+/// is logged rather than propagated, because failing to record a status transition must never
+/// derail aggregation, which is the real work — a missed transition is recoverable (the startup
+/// re-queue picks up anything left `queued` or `processing`), whereas aborting the pipeline is
+/// not. An unreachable store therefore claims the task: the guard sheds doomed work, it is not
+/// the correctness gate — the round's own on-chain validation still rejects a stale payload.
+async fn claim_task_for_processing(store: &SqliteStore, task_id: &str) -> bool {
+    match store.claim_task_for_processing(task_id).await {
+        Ok(claimed) => claimed,
+        Err(e) => {
+            error!(task_id, error = %e, "failed to mark task processing");
+            true
+        }
     }
 }
 
@@ -352,8 +359,14 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
 
             let QueuedTask { task_id, request } = self.wait_for_task().await?;
 
-            if let Some(store) = &self.store {
-                set_task_processing(store, &task_id).await;
+            // A task the expiry sweep settled while it waited here is dropped rather than
+            // aggregated: its pinned block is stale enough that the round could not produce a
+            // submittable payload, so the height goes to the next task instead.
+            if let Some(store) = &self.store
+                && !claim_task_for_processing(store, &task_id).await
+            {
+                info!(task_id, "task settled while queued, skipping dispatch");
+                continue;
             }
 
             let enriched = match self.enrich(request).await {
@@ -424,6 +437,7 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::TaskStatus;
     use alloy::primitives::{Address, B256, FixedBytes, U256};
     use gas_killer_common::BundleProof;
 
@@ -551,7 +565,7 @@ mod tests {
         let done = store.create_task(&key, &request_body()).await.unwrap();
         let doomed = store.create_task(&key, &request_body()).await.unwrap();
 
-        set_task_processing(&store, &done.id).await;
+        assert!(claim_task_for_processing(&store, &done.id).await);
         assert_eq!(
             store.get_task(&done.id).await.unwrap().unwrap().status,
             TaskStatus::Processing
@@ -657,6 +671,74 @@ mod tests {
                 .error
                 .as_deref()
                 .is_some_and(|e| e.contains("task enrichment failed"))
+        );
+    }
+
+    /// The claim is the handshake between the expiry sweep and dispatch: once a task has settled,
+    /// the round it was queued for must go to other work.
+    #[tokio::test]
+    async fn claim_refuses_a_task_that_already_settled() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let expired = store.create_task(&key, &request_body()).await.unwrap();
+        store
+            .mark_task_expired(&expired.id, "QUEUE_TTL_EXCEEDED")
+            .await
+            .unwrap();
+
+        assert!(!claim_task_for_processing(&store, &expired.id).await);
+        assert_eq!(
+            store.get_task(&expired.id).await.unwrap().unwrap().status,
+            TaskStatus::Expired,
+            "a refused claim must not resurrect the task"
+        );
+        assert!(
+            !claim_task_for_processing(&store, "no-such-task").await,
+            "an unknown id is not claimable"
+        );
+    }
+
+    #[tokio::test]
+    async fn next_task_skips_a_task_expired_while_queued() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request_body()).await.unwrap();
+        store
+            .mark_task_expired(&task.id, "QUEUE_TTL_EXCEEDED: expired by the sweep")
+            .await
+            .unwrap();
+
+        let (sender, receiver) = task_channel();
+        let mut source = GasKillerTaskSource::new(
+            receiver,
+            task_queue_depth(),
+            unreachable_validator(),
+            None,
+            Some(store.clone()),
+            in_flight_task(),
+        );
+
+        sender
+            .send(QueuedTask {
+                task_id: task.id.clone(),
+                request: GasKillerTaskRequest {
+                    body: request_body(),
+                },
+            })
+            .unwrap();
+        // As above: closing the sender lets `next_task` return once it has skipped the task
+        // rather than blocking for another.
+        drop(sender);
+
+        assert!(source.next_task().await.is_none());
+
+        // Untouched: not re-dispatched (which enrichment would have settled as `failed` against
+        // the unreachable validator) and still carrying the sweep's reason.
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Expired);
+        assert_eq!(
+            settled.error.as_deref(),
+            Some("QUEUE_TTL_EXCEEDED: expired by the sweep")
         );
     }
 }

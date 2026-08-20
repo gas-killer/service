@@ -77,6 +77,70 @@ impl TaskStatus {
     }
 }
 
+/// A non-terminal lifecycle stage the TTL expiry sweep can settle, together with the clock it
+/// ages against.
+///
+/// `processing` is deliberately absent: its aggregation height is already assigned and the round
+/// must resolve either way, so cancelling the row mid-round would only lose the attribution of
+/// the result that is still coming. A task that outlives the TTL while processing is expired once
+/// its round settles, not during it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpiryStage {
+    /// Accepted but never dequeued: the queue drained too slowly for the task's pinned block.
+    Queued,
+    /// Aggregated into a payload the client never collected. Sweeping it stops the router serving
+    /// that payload again and frees the deduplication slot for its transition index.
+    ///
+    /// The default TTL is sized to the payload's own on-chain life, so the sweep normally arrives
+    /// after `valid_until_block` has already passed and only clears server state. Under a TTL set
+    /// shorter than that window it arrives first, withdrawing a payload the chain would still
+    /// accept — which does not invalidate a payload a client already holds, since
+    /// `valid_until_block` remains the on-chain authority.
+    Ready,
+}
+
+impl ExpiryStage {
+    /// Every stage the sweep visits, in the order it visits them.
+    pub const ALL: [Self; 2] = [Self::Queued, Self::Ready];
+
+    /// The `status` value this stage matches, as a SQL literal. Named literally rather than bound
+    /// as a parameter so SQLite can match the partial index covering the stage (see
+    /// `0006_task_expiry_index.sql`).
+    fn status_literal(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Ready => "ready",
+        }
+    }
+
+    /// The column the stage's age is measured from: when the request was accepted for `queued`,
+    /// and when aggregation recorded the payload for `ready`.
+    fn age_column(self) -> &'static str {
+        match self {
+            Self::Queued => "created_at",
+            Self::Ready => "updated_at",
+        }
+    }
+
+    /// Machine-readable code recorded at the front of the expired row's `error`, so a client
+    /// polling the task can tell a TTL sweep from the read path's staleness checks.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Queued => "QUEUE_TTL_EXCEEDED",
+            Self::Ready => "READY_TTL_EXCEEDED",
+        }
+    }
+
+    /// The full `error` recorded on rows this stage expires, for a TTL of `ttl_secs`.
+    fn reason(self, ttl_secs: i64) -> String {
+        let detail = match self {
+            Self::Queued => "not dequeued within the",
+            Self::Ready => "payload not collected within the",
+        };
+        format!("{}: {detail} {ttl_secs}s task TTL; re-request", self.code())
+    }
+}
+
 /// A persisted task: the request that created it, its current lifecycle state, and the outputs
 /// produced as it settles.
 #[derive(Debug, Clone)]
@@ -396,18 +460,24 @@ impl SqliteStore {
         rows.into_iter().map(Task::try_from).collect()
     }
 
-    /// Transitions a task to `status` and stamps `updated_at`. Sets only the status column, so
-    /// it suits state-only moves such as `queued → processing`; use [`Self::mark_task_ready`] or
-    /// [`Self::mark_task_failed`] when a payload or error must be recorded too. Returns `true`
-    /// if a task with that id existed.
-    pub async fn update_task_status(&self, id: &str, status: TaskStatus) -> anyhow::Result<bool> {
-        let result =
-            sqlx::query("UPDATE tasks SET status = ?2, updated_at = unixepoch() WHERE id = ?1")
-                .bind(id)
-                .bind(status.as_str())
-                .execute(self.pool())
-                .await
-                .context("updating task status")?;
+    /// Claims a task for aggregation, moving it to [`TaskStatus::Processing`] only while it is
+    /// still `queued` or already `processing`. Returns `false` when the id is unknown or the task
+    /// has already settled.
+    ///
+    /// The guard is what keeps the TTL sweep and the sequencer from fighting: a queued task the
+    /// sweep expires is still sitting in the sequencer's channel, and an unguarded status write
+    /// would resurrect it into a round whose payload is already too stale to land. A caller that
+    /// sees `false` must drop the task instead of aggregating it. `processing` is accepted so the
+    /// startup re-queue can re-claim a task whose round a restart interrupted.
+    pub async fn claim_task_for_processing(&self, id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE tasks SET status = 'processing', updated_at = unixepoch() \
+             WHERE id = ?1 AND status IN ('queued', 'processing')",
+        )
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .context("claiming task for processing")?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -469,6 +539,40 @@ impl SqliteStore {
         .context("marking task expired")?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Settles every task in `stage` that has aged past `ttl` as [`TaskStatus::Expired`],
+    /// recording the stage's reason, and returns the ids it expired (empty when none had).
+    ///
+    /// This is the store half of the periodic expiry sweep. It bounds how long a task can hold
+    /// state that is no longer useful: a `queued` task whose pinned block has gone stale would
+    /// spend a full aggregation round producing a payload the chain rejects, and a `ready` payload
+    /// nobody collected keeps blocking resubmission for its transition index. Expiring both frees
+    /// that capacity for work that can still land.
+    ///
+    /// Age is measured in the store's own clock (`unixepoch()`), so the sweep is unaffected by
+    /// skew between the router process and the database, and it survives a restart: the row's
+    /// timestamps, not any in-memory timer, decide what has lapsed.
+    pub async fn expire_stale_tasks(
+        &self,
+        stage: ExpiryStage,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<Vec<String>> {
+        let ttl_secs = ttl.as_secs().min(i64::MAX as u64) as i64;
+        let ids: Vec<(String,)> = sqlx::query_as(&format!(
+            "UPDATE tasks SET status = 'expired', error = ?1, updated_at = unixepoch() \
+             WHERE status = '{status}' AND {age} <= unixepoch() - ?2 \
+             RETURNING id",
+            status = stage.status_literal(),
+            age = stage.age_column(),
+        ))
+        .bind(stage.reason(ttl_secs))
+        .bind(ttl_secs)
+        .fetch_all(self.pool())
+        .await
+        .with_context(|| format!("expiring {} tasks past their TTL", stage.status_literal()))?;
+
+        Ok(ids.into_iter().map(|(id,)| id).collect())
     }
 
     /// Settles a task as [`TaskStatus::Failed`], recording the failure reason and stamping
@@ -669,31 +773,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_status_transitions_and_reports_existence() {
-        let store = store().await;
-        let key = key_id(&store).await;
-        let task = store.create_task(&key, &request()).await.unwrap();
-
-        assert!(
-            store
-                .update_task_status(&task.id, TaskStatus::Processing)
-                .await
-                .unwrap()
-        );
-        let fetched = store.get_task(&task.id).await.unwrap().unwrap();
-        assert_eq!(fetched.status, TaskStatus::Processing);
-        assert!(fetched.updated_at >= task.updated_at);
-
-        assert!(
-            !store
-                .update_task_status("does-not-exist", TaskStatus::Processing)
-                .await
-                .unwrap(),
-            "updating an unknown task should report no change"
-        );
-    }
-
-    #[tokio::test]
     async fn mark_ready_records_payload() {
         let store = store().await;
         let key = key_id(&store).await;
@@ -786,7 +865,7 @@ mod tests {
         let failed = store.create_task(&key, &request()).await.unwrap();
 
         store
-            .update_task_status(&processing.id, TaskStatus::Processing)
+            .claim_task_for_processing(&processing.id)
             .await
             .unwrap();
         store.mark_task_ready(&ready.id, "0x00").await.unwrap();
@@ -801,6 +880,143 @@ mod tests {
         );
         assert!(ids.contains(&queued.id.as_str()));
         assert!(ids.contains(&processing.id.as_str()));
+    }
+
+    // -- TTL expiry sweep --
+
+    /// Backdates a task's timestamps, standing in for the wall-clock wait the sweep measures.
+    async fn age_task(store: &SqliteStore, id: &str, secs: i64) {
+        sqlx::query(
+            "UPDATE tasks SET created_at = created_at - ?2, updated_at = updated_at - ?2 \
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(secs)
+        .execute(store.pool())
+        .await
+        .expect("backdating a task should succeed");
+    }
+
+    #[tokio::test]
+    async fn expire_stale_tasks_settles_only_rows_past_the_ttl() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let stale = store.create_task(&key, &request()).await.unwrap();
+        let fresh = store.create_task(&key, &request()).await.unwrap();
+        age_task(&store, &stale.id, 400).await;
+
+        let expired = store
+            .expire_stale_tasks(ExpiryStage::Queued, std::time::Duration::from_secs(300))
+            .await
+            .unwrap();
+
+        assert_eq!(expired, vec![stale.id.clone()]);
+        let settled = store.get_task(&stale.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Expired);
+        assert!(
+            settled
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("QUEUE_TTL_EXCEEDED") && e.contains("300s")),
+            "the reason names the breached TTL: {:?}",
+            settled.error
+        );
+        assert_eq!(
+            store.get_task(&fresh.id).await.unwrap().unwrap().status,
+            TaskStatus::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn expire_stale_tasks_is_empty_when_nothing_has_lapsed() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        store.create_task(&key, &request()).await.unwrap();
+
+        for stage in ExpiryStage::ALL {
+            assert!(
+                store
+                    .expire_stale_tasks(stage, std::time::Duration::from_secs(300))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    /// An expired task is not an active duplicate, so sweeping one frees its transition index for
+    /// a resubmission — the client's re-request after a `QUEUE_TTL_EXCEEDED` must be accepted.
+    #[tokio::test]
+    async fn sweeping_a_queued_task_frees_its_deduplication_slot() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        let first = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        age_task(&store, &first.task.id, 400).await;
+        store
+            .expire_stale_tasks(ExpiryStage::Queued, std::time::Duration::from_secs(300))
+            .await
+            .unwrap();
+
+        let retry = store
+            .create_task_deduplicated(&key, &request())
+            .await
+            .unwrap();
+        assert!(
+            !retry.deduplicated,
+            "a resubmission after the sweep is fresh work, not a duplicate"
+        );
+        assert_ne!(retry.task.id, first.task.id);
+    }
+
+    #[tokio::test]
+    async fn claim_moves_queued_to_processing_and_is_idempotent() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request()).await.unwrap();
+
+        assert!(store.claim_task_for_processing(&task.id).await.unwrap());
+        let claimed = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(claimed.status, TaskStatus::Processing);
+        assert!(claimed.updated_at >= task.updated_at);
+        assert!(
+            store.claim_task_for_processing(&task.id).await.unwrap(),
+            "re-claiming a processing task succeeds, so the startup re-queue can resume it"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_refuses_terminal_and_unknown_tasks() {
+        let store = store().await;
+        let key = key_id(&store).await;
+
+        let expired = store.create_task(&key, &request()).await.unwrap();
+        store.mark_task_expired(&expired.id, "swept").await.unwrap();
+        let failed = store.create_task(&key, &request()).await.unwrap();
+        store.mark_task_failed(&failed.id, "boom").await.unwrap();
+        let ready = store.create_task(&key, &request()).await.unwrap();
+        store.mark_task_ready(&ready.id, "0x00").await.unwrap();
+
+        for id in [&expired.id, &failed.id, &ready.id] {
+            assert!(
+                !store.claim_task_for_processing(id).await.unwrap(),
+                "a settled task must not be claimable"
+            );
+        }
+        assert!(
+            !store
+                .claim_task_for_processing("does-not-exist")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.get_task(&expired.id).await.unwrap().unwrap().error,
+            Some("swept".to_string()),
+            "a refused claim leaves the settled reason intact"
+        );
     }
 
     #[test]
@@ -860,7 +1076,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .update_task_status(&first.task.id, TaskStatus::Processing)
+            .claim_task_for_processing(&first.task.id)
             .await
             .unwrap();
 

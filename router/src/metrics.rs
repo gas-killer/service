@@ -17,6 +17,8 @@ pub struct MetricsCollector {
     pub ingress_rate_limited: Counter<u64, AtomicU64>,
     /// Tasks dequeued and handed to the creator for aggregation.
     pub tasks_created: Counter<u64, AtomicU64>,
+    /// Tasks settled `expired` by the periodic TTL sweep, across every stage it visits.
+    pub tasks_expired: Counter<u64, AtomicU64>,
     /// EVM storage-update computation duration (seconds).
     pub storage_computation_seconds: Histogram,
     /// Aggregation rounds that ended in a successful verifyAndUpdate transaction.
@@ -97,6 +99,13 @@ impl MetricsCollector {
             "gas_killer_tasks_created",
             "Total tasks dequeued and processed by the creator",
             tasks_created.clone(),
+        );
+
+        let tasks_expired = Counter::default();
+        registry.register(
+            "gas_killer_tasks_expired",
+            "Total tasks settled expired by the periodic task-TTL sweep",
+            tasks_expired.clone(),
         );
 
         let storage_computation_seconds =
@@ -214,6 +223,7 @@ impl MetricsCollector {
             ingress_at_capacity,
             ingress_rate_limited,
             tasks_created,
+            tasks_expired,
             storage_computation_seconds,
             aggregation_rounds_completed,
             aggregation_rounds_failed,
