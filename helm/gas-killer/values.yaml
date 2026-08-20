@@ -411,6 +411,16 @@ router:
     # sweep never withdraws a payload the chain would still accept. Set a shorter value only for a
     # target chain with faster blocks, where the payload window is proportionally shorter.
     taskTtlSeconds: ""
+    # How far behind the target chain's head a submitted block_height may be and still be admitted;
+    # past it POST /tasks returns 400 STALE_BLOCK. The analysis is anchored at that block, and both
+    # the aggregation round and the rendered payload's validity window have to fit in what is left
+    # of the contract's staleness window (eigenlayer.sdk.blockStaleMeasure), so admission holds the
+    # payload buffer back rather than accepting work that can only just finish simulating.
+    # Leave empty to use the router's derived default, BLOCK_STALE_MEASURE - PAYLOAD_BLOCK_BUFFER
+    # (250 at the stock 300/50). A value above the staleness window is clamped to it; "0" disables
+    # the check entirely, accepting arbitrarily old anchors (INGRESS_STALENESS_WINDOW_BLOCKS). The
+    # effective window is logged at router startup.
+    stalenessWindowBlocks: ""
   # AVS identity metadata served at GET /avs-metadata.
   # Set metadata.uri in config.json to the public URL of this endpoint
   # (e.g. https://api.gaskiller.xyz/avs-metadata) before calling updateAVSMetadataURI.

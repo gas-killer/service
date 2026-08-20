@@ -209,6 +209,35 @@ fn main() {
         );
     }
 
+    // The ingress admission window is derived rather than a fixed constant (it holds the payload
+    // buffer back from the staleness window), so report the effective value: it decides which
+    // submissions are accepted, and an operator cannot read it off a single env var.
+    match gas_killer_common::ingress_staleness_window() {
+        Some(window) => {
+            if let Some(requested) = std::env::var("INGRESS_STALENESS_WINDOW_BLOCKS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                && requested > window
+            {
+                tracing::warn!(
+                    requested,
+                    block_stale_measure,
+                    effective = window,
+                    "INGRESS_STALENESS_WINDOW_BLOCKS exceeds BLOCK_STALE_MEASURE; clamped to the staleness window, past which an admitted analysis cannot yield a submittable payload"
+                );
+            }
+            tracing::info!(
+                window_blocks = window,
+                block_stale_measure,
+                payload_block_buffer,
+                "ingress block-height admission window"
+            );
+        }
+        None => tracing::warn!(
+            "ingress block-height admission disabled (INGRESS_STALENESS_WINDOW_BLOCKS=0); submissions anchored arbitrarily far behind head will be accepted and may never produce a submittable payload"
+        ),
+    }
+
     // Log the router's public key G2 coordinates for config generation
     let my_pub_key = signer.public_key();
     let g2_point = G2Affine::deserialize_compressed(my_pub_key.as_ref()).unwrap();
