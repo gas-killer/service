@@ -278,19 +278,44 @@ fn reports_execution_revert(response: &ErrorPayload) -> bool {
         .any(|phrase| message.contains(phrase))
 }
 
-/// Pulls the revert payload out of a node's error `data`, which clients variously send as a hex
-/// string or nested inside an object, so any string in the structure that parses as bytes is taken
-/// as the payload.
+/// Pulls the revert payload out of a node's error `data`, which clients send either as a hex
+/// string or wrapped in an object nesting the real payload under a further `data`.
+///
+/// Keyed on the field name rather than taking the first string in the structure that parses as
+/// hex, because sibling fields are not reliably unparseable: an empty string decodes to empty
+/// bytes and a stringified number is valid hex, so a first-match scan can report a neighbouring
+/// field as the payload, or stop on one and drop the payload entirely. Only a non-empty decode
+/// counts for the same reason — an empty one carries no more information than finding nothing, and
+/// the caller already renders a missing payload as a revert without a reason.
 fn revert_data(response: &ErrorPayload) -> Option<Bytes> {
-    fn search(value: &serde_json::Value) -> Option<Bytes> {
+    fn decoded(encoded: &str) -> Option<Bytes> {
+        encoded
+            .parse::<Bytes>()
+            .ok()
+            .filter(|data| !data.is_empty())
+    }
+
+    /// Follows `data` down through however many objects a client wraps the payload in.
+    fn keyed(value: &serde_json::Value) -> Option<Bytes> {
         match value {
-            serde_json::Value::String(encoded) => encoded.parse().ok(),
-            serde_json::Value::Object(fields) => fields.values().find_map(search),
+            serde_json::Value::String(encoded) => decoded(encoded),
+            serde_json::Value::Object(fields) => keyed(fields.get("data")?),
             _ => None,
         }
     }
 
-    search(&response.try_data_as::<serde_json::Value>()?.ok()?)
+    /// Last resort for a client that names the field something else: any hex string anywhere in
+    /// the structure. Only reached once the keyed lookup has found nothing.
+    fn scan(value: &serde_json::Value) -> Option<Bytes> {
+        match value {
+            serde_json::Value::String(encoded) => decoded(encoded),
+            serde_json::Value::Object(fields) => fields.values().find_map(scan),
+            _ => None,
+        }
+    }
+
+    let data = response.try_data_as::<serde_json::Value>()?.ok()?;
+    keyed(&data).or_else(|| scan(&data))
 }
 
 /// Builds the contract error a node returns for a call that executed and reverted, with `data` as
@@ -546,6 +571,49 @@ mod tests {
             Some(r#"{"message":"execution reverted","data":"0xe1310aed"}"#.to_string()),
         ))
         .expect("a nested revert payload should still classify as a revert");
+        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+    }
+
+    // Sibling fields are not reliably unparseable: a stringified number is valid hex, so a scan
+    // that takes the first match can report a neighbour as the revert payload.
+    #[test]
+    fn revert_data_comes_from_the_data_field_not_a_sibling() {
+        let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
+            EXECUTION_REVERTED_CODE,
+            "Reverted",
+            Some(r#"{"gasUsed":"1234","data":"0xe1310aed"}"#.to_string()),
+        ))
+        .expect("a keyed revert payload should classify as a revert");
+        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+    }
+
+    // An empty string decodes to empty bytes, so a scan would stop on one and report a revert with
+    // no reason while the selector sat unread in the next field.
+    #[test]
+    fn an_empty_sibling_field_does_not_mask_the_revert_data() {
+        let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
+            EXECUTION_REVERTED_CODE,
+            "Reverted",
+            Some(r#"{"cause":"","data":"0xe1310aed"}"#.to_string()),
+        ))
+        .expect("an empty sibling should not stop the lookup");
+        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+        assert!(
+            revert.to_string().contains("InvalidQuorumApkHash()"),
+            "{revert}"
+        );
+    }
+
+    // Clients that wrap the payload under some other field name still get read, once the keyed
+    // lookup has come up empty.
+    #[test]
+    fn revert_data_is_found_under_an_unconventional_field_name() {
+        let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
+            EXECUTION_REVERTED_CODE,
+            "Reverted",
+            Some(r#"{"originalError":{"revertData":"0xe1310aed"}}"#.to_string()),
+        ))
+        .expect("an unconventionally named payload should still be found");
         assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
     }
 
