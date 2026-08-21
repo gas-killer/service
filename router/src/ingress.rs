@@ -423,13 +423,17 @@ async fn validate_onchain<P: Provider + Clone>(
         });
     }
 
-    // Reject analyses anchored too far behind head. This is an off-chain policy bound (the
-    // contract bounds the operator-set reference block, not this gas-analysis block_height):
-    // it keeps requests within the speculative executor cache's window and rejects analyses
-    // old enough to likely hit a transition_index mismatch. age == max_age stays valid, matching
-    // the contract's `referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number` convention.
-    let max_age = gas_killer_common::block_stale_measure();
-    if current_block.saturating_sub(body.block_height) > max_age {
+    // Reject analyses anchored too far behind head. This is an off-chain admission bound (the
+    // contract bounds the operator-set reference block, not this gas-analysis block_height): it
+    // keeps requests within the speculative executor cache's window, rejects analyses old enough
+    // to likely hit a transition_index mismatch, and leaves room inside the contract's staleness
+    // window for the aggregation round and the rendered payload's own validity. The window is
+    // configurable and can be turned off entirely; see
+    // [`gas_killer_common::ingress_staleness_window`]. age == max_age stays valid, matching the
+    // contract's `referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number` convention.
+    if let Some(max_age) = gas_killer_common::ingress_staleness_window()
+        && current_block.saturating_sub(body.block_height) > max_age
+    {
         return Err(OnchainValidationError::BlockHeightTooStale {
             provided: body.block_height,
             current: current_block,
@@ -3434,12 +3438,20 @@ mod tests {
             );
         }
 
+        /// The configured admission window, which every staleness assertion is measured against.
+        /// The check is skipped entirely when it is disabled, so a test asserting a rejection has
+        /// nothing to assert in that configuration.
+        fn admission_window() -> u64 {
+            gas_killer_common::ingress_staleness_window()
+                .expect("admission window must be enabled for the staleness tests")
+        }
+
         #[tokio::test]
         async fn test_block_height_too_stale() {
             let body = valid_body(); // block_height = 50
-            let measure = gas_killer_common::block_stale_measure();
-            // head one block past the staleness window → age = measure + 1, rejected
-            let head = body.block_height + measure + 1;
+            let window = admission_window();
+            // head one block past the admission window → age = window + 1, rejected
+            let head = body.block_height + window + 1;
 
             let (provider, asserter) = mock_provider();
             push_code_exists(&asserter);
@@ -3452,18 +3464,28 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    OnchainValidationError::BlockHeightTooStale { provided: 50, .. }
+                    OnchainValidationError::BlockHeightTooStale { provided: 50, max_age, .. }
+                        if max_age == window
                 ),
-                "expected BlockHeightTooStale, got {err}"
+                "expected BlockHeightTooStale reporting the admission window, got {err}"
+            );
+            // The rejection is what a client sees: a 400 naming the window it breached.
+            let api_err = ApiError::from(err);
+            assert_eq!(api_err.status, StatusCode::BAD_REQUEST);
+            assert_eq!(api_err.code, ErrorCode::StaleBlock);
+            assert!(
+                api_err.message.contains(&window.to_string()),
+                "the message should name the window: {}",
+                api_err.message
             );
         }
 
         #[tokio::test]
         async fn test_block_height_at_staleness_boundary_passes() {
             let body = valid_body(); // block_height = 50, transition_index = Some(5)
-            let measure = gas_killer_common::block_stale_measure();
-            // head exactly at the window edge → age == measure, still valid
-            let head = body.block_height + measure;
+            let window = admission_window();
+            // head exactly at the window edge → age == window, still valid
+            let head = body.block_height + window;
 
             let (provider, asserter) = mock_provider();
             push_code_exists(&asserter);
@@ -3475,7 +3497,38 @@ mod tests {
 
             assert!(
                 validate_onchain(&providers, &body).await.is_ok(),
-                "age == staleness window should be accepted"
+                "age == admission window should be accepted"
+            );
+        }
+
+        /// Admission is deliberately tighter than the contract's own staleness window: it holds
+        /// back the payload buffer so a task it accepts still has room to aggregate and render a
+        /// submittable payload. An analysis at the contract's edge is therefore rejected.
+        #[tokio::test]
+        async fn test_admission_window_is_tighter_than_the_contract_window() {
+            let window = admission_window();
+            let measure = gas_killer_common::block_stale_measure();
+            assert!(
+                window < measure,
+                "this test describes the derived default, which holds the payload buffer back \
+                 from the contract's window; INGRESS_STALENESS_WINDOW_BLOCKS resolves to {window} \
+                 against a staleness measure of {measure} in this environment"
+            );
+
+            let body = valid_body(); // block_height = 50
+            let head = body.block_height + measure;
+
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, head);
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+
+            let err = validate_onchain(&providers, &body).await.unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::BlockHeightTooStale { .. }),
+                "an analysis at the contract's staleness edge leaves no room to finish, got {err}"
             );
         }
 
