@@ -8177,6 +8177,8 @@ dependencies = [
  "ark-bn254",
  "ark-ec",
  "ark-ff 0.5.0",
+ "ark-serialize 0.5.0",
+ "commonware-avs-eigenlayer",
  "dotenv",
  "gas-analyzer-evmsketch",
  "gas-killer-common",

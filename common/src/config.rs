@@ -158,13 +158,50 @@ pub fn load_orchestrator_config(path: &str) -> OrchestratorConfig {
 pub async fn get_operator_states() -> Result<Vec<QuorumInfo>, Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
 
-    let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
-    let ws_rpc = env::var("WS_RPC").expect("WS_RPC must be set");
-    let avs_deployment_path =
-        env::var("AVS_DEPLOYMENT_PATH").expect("AVS_DEPLOYMENT_PATH must be set");
+    match stake_source() {
+        StakeSource::Eigenlayer => {
+            let http_rpc = env::var("HTTP_RPC").expect("HTTP_RPC must be set");
+            let ws_rpc = env::var("WS_RPC").expect("WS_RPC must be set");
+            let avs_deployment_path =
+                env::var("AVS_DEPLOYMENT_PATH").expect("AVS_DEPLOYMENT_PATH must be set");
 
-    let client = EigenStakingClient::new(http_rpc, ws_rpc, avs_deployment_path).await?;
-    client.get_operator_states().await
+            let client = EigenStakingClient::new(http_rpc, ws_rpc, avs_deployment_path).await?;
+            client.get_operator_states().await
+        }
+        StakeSource::Commitments => crate::commitments::get_operator_states_commitments().await,
+    }
+}
+
+/// Where the operator set (identities, weights, p2p keys, sockets) is read from.
+///
+/// `Eigenlayer` scans EigenLayer registration events via `EigenStakingClient`;
+/// `Commitments` reads the `SchnorrCommitmentsAdapter` published set in one call
+/// (see [`crate::commitments`]). The signature scheme is orthogonal — this only
+/// selects the stake/registration root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StakeSource {
+    Eigenlayer,
+    Commitments,
+}
+
+/// Reads the operator-set source from `STAKE_SOURCE` (`eigenlayer` | `commitments`),
+/// defaulting to [`StakeSource::Eigenlayer`] until the migration flips the default.
+/// Panics on an unrecognized value rather than silently bootstrapping from the wrong
+/// registry.
+pub fn stake_source() -> StakeSource {
+    parse_stake_source(env::var("STAKE_SOURCE").ok().as_deref())
+}
+
+/// Parses the `STAKE_SOURCE` value (case-insensitive, trimmed). `None` / empty →
+/// `Eigenlayer`.
+fn parse_stake_source(raw: Option<&str>) -> StakeSource {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("eigenlayer") => StakeSource::Eigenlayer,
+        Some("commitments") => StakeSource::Commitments,
+        Some(other) => {
+            panic!("STAKE_SOURCE must be 'eigenlayer' or 'commitments', got '{other}'")
+        }
+    }
 }
 
 /// Default P2P channel message backlog depth.
@@ -802,6 +839,26 @@ mod tests {
             parse_quorum_threshold_fraction(Some("3"), Some("5")),
             (3, 5)
         );
+    }
+
+    #[test]
+    fn stake_source_defaults_to_eigenlayer() {
+        assert_eq!(parse_stake_source(None), StakeSource::Eigenlayer);
+        assert_eq!(parse_stake_source(Some("")), StakeSource::Eigenlayer);
+        assert_eq!(parse_stake_source(Some("eigenlayer")), StakeSource::Eigenlayer);
+        assert_eq!(parse_stake_source(Some("  EigenLayer ")), StakeSource::Eigenlayer);
+    }
+
+    #[test]
+    fn stake_source_reads_commitments() {
+        assert_eq!(parse_stake_source(Some("commitments")), StakeSource::Commitments);
+        assert_eq!(parse_stake_source(Some(" Commitments ")), StakeSource::Commitments);
+    }
+
+    #[test]
+    #[should_panic(expected = "STAKE_SOURCE must be")]
+    fn stake_source_rejects_unknown_values() {
+        parse_stake_source(Some("lido"));
     }
 
     #[test]

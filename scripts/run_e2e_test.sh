@@ -36,6 +36,24 @@ E2E_EXAMPLE_CHOICE="${E2E_EXAMPLE:-array-summation}"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
 echo "State encoding: $STATE_ENCODING_CHOICE | e2e example: $E2E_EXAMPLE_CHOICE"
 
+# STAKE_SOURCE (eigenlayer|commitments) selects the operator-set root. `commitments`
+# skips the EigenLayer setup container entirely (a no-op override satisfies the compose
+# dependency) and deploys the Commitments stack from the host via forge instead —
+# requires foundry plus local checkouts of the two contract repos:
+#   COMMITMENTS_DIR   — AInima-Collective/commitments
+#   SOLIDITY_SDK_DIR  — gas-killer/solidity-sdk (branch with src/commitments/)
+STAKE_SOURCE_CHOICE="${STAKE_SOURCE:-eigenlayer}"
+export STAKE_SOURCE="$STAKE_SOURCE_CHOICE"
+COMPOSE="docker compose"
+if [ "$STAKE_SOURCE_CHOICE" = "commitments" ]; then
+    if [ "$SIGNATURE_SCHEME_CHOICE" != "schnorr" ]; then
+        echo -e "${RED}STAKE_SOURCE=commitments requires SIGNATURE_SCHEME=schnorr (the BLS path is EigenLayer-only)${NC}"
+        exit 1
+    fi
+    COMPOSE="docker compose -f docker-compose.yml -f docker-compose.commitments.yml"
+fi
+echo "Stake source: $STAKE_SOURCE_CHOICE"
+
 # Track if test passed
 TEST_PASSED=false
 
@@ -116,41 +134,146 @@ echo "Environment configuration complete"
 
 # Step 3: Pull Docker images
 echo -e "${YELLOW}Step 3: Pulling Docker images...${NC}"
-docker compose pull
+$COMPOSE pull
 
 # Step 4: Build service images
 echo -e "${YELLOW}Step 4: Building service Docker images...${NC}"
-docker compose build
+$COMPOSE build
+
+# Step 4b (commitments): the node containers bind-mount per-operator key files, so the
+# files must exist before compose up. In eigenlayer mode the setup container writes
+# them; here the generator binary does (idempotent — existing keys are kept).
+if [ "$STAKE_SOURCE_CHOICE" = "commitments" ]; then
+    echo -e "${YELLOW}Step 4b: Generating operator key files...${NC}"
+    mkdir -p config/.nodes/operator_keys
+    (cd "$PROJECT_ROOT/scripts" && \
+        OPERATOR_KEYS_DIR="$PROJECT_ROOT/config/.nodes/operator_keys" \
+        cargo run --release -p scripts --bin generate_operator_keys)
+fi
 
 # Step 5: Start Docker Compose services
 echo -e "${YELLOW}Step 5: Starting Docker Compose services...${NC}"
-docker compose up -d
+$COMPOSE up -d
 
 # Show running containers
-docker compose ps
+$COMPOSE ps
 
-# Step 6: Wait for EigenLayer setup to complete
-echo -e "${YELLOW}Step 6: Waiting for EigenLayer setup to complete...${NC}"
-timeout=500
-elapsed=0
+# Step 6: Provision the stake root. EigenLayer mode waits for the setup container;
+# commitments mode deploys the Commitments stack from the host, interleaving the two
+# contract repos (upstream deploy scripts for the Commitments legs, solidity-sdk's
+# CommitmentsGasKiller.s.sol for the Gas Killer legs — the arbiter must exist before
+# the OperatorRegistry bakes it in as its immutable requiredArbiter, and the
+# SchnorrCommitmentsAdapter before the SchnorrStakeRegistry takes it as its immutable
+# owner).
+if [ "$STAKE_SOURCE_CHOICE" = "commitments" ]; then
+    echo -e "${YELLOW}Step 6: Deploying the Commitments stack (host forge)...${NC}"
+    COMMITMENTS_DIR="${COMMITMENTS_DIR:?COMMITMENTS_DIR must point at a checkout of AInima-Collective/commitments}"
+    SOLIDITY_SDK_DIR="${SOLIDITY_SDK_DIR:?SOLIDITY_SDK_DIR must point at a checkout of gas-killer/solidity-sdk}"
 
-while [ $elapsed -lt $timeout ]; do
-    # Check if eigenlayer container has completed setup
-    if docker compose logs eigenlayer 2>/dev/null | grep -q "Operator 3 weight in quorum" && [ -f config/.nodes/avs_deploy.json ]; then
-        echo -e "${GREEN}EigenLayer setup completed successfully${NC}"
-        break
+    # The forge legs need the deployer key and quorum settings from .env, but the
+    # caller's stack choices must survive the source (same discipline as Step 7).
+    set -a; source .env; set +a
+    export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
+    export STATE_ENCODING="$STATE_ENCODING_CHOICE"
+    export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
+    export STAKE_SOURCE="$STAKE_SOURCE_CHOICE"
+
+    E2E_RPC="http://localhost:8545"
+    DEPLOYER_ADDR=$(cast wallet address "$PRIVATE_KEY")
+    OPERATOR_STAKE="${OPERATOR_STAKE_AMOUNT:-100}"
+
+    echo "Waiting for anvil at $E2E_RPC..."
+    for _ in $(seq 1 60); do
+        if cast block-number --rpc-url "$E2E_RPC" >/dev/null 2>&1; then break; fi
+        sleep 2
+    done
+    cast block-number --rpc-url "$E2E_RPC" >/dev/null
+
+    forge_leg() { # forge_leg <dir> <script target> [env pairs...]
+        local dir="$1"; local target="$2"; shift 2
+        (cd "$dir" && env "$@" forge script "$target" \
+            --rpc-url "$E2E_RPC" --broadcast --private-key "$PRIVATE_KEY" 2>&1)
+    }
+    grab() { # grab <output> <label>  — parses "label: 0x..." or "label=0x..."
+        echo "$1" | grep -E "$2[:=]" | tail -1 | sed -E 's/.*[:=][[:space:]]*//' | tr -d '[:space:]'
+    }
+
+    echo "Leg 1/5: CommitmentManager..."
+    OUT=$(forge_leg "$COMMITMENTS_DIR" script/DeployCommitmentManager.s.sol \
+        ADMIN_ADDRESS="$DEPLOYER_ADDR" UNBONDING_PERIOD=86400) || { echo "$OUT"; exit 1; }
+    MANAGER=$(grab "$OUT" "CommitmentManager proxy")
+    [ -n "$MANAGER" ] || { echo -e "${RED}Leg 1 failed:${NC}"; echo "$OUT" | tail -30; exit 1; }
+
+    echo "Leg 2/5: backing adapters..."
+    OUT=$(forge_leg "$COMMITMENTS_DIR" script/DeployAdaptersAndStrategies.s.sol \
+        COMMITMENT_MANAGER_ADDRESS="$MANAGER") || { echo "$OUT"; exit 1; }
+    BACKING_ADAPTER=$(grab "$OUT" "ERC20StaticAdapter")
+    [ -n "$BACKING_ADAPTER" ] || { echo -e "${RED}Leg 2 failed:${NC}"; echo "$OUT" | tail -30; exit 1; }
+
+    echo "Leg 3/5: stake token + SP1 arbiter (solidity-sdk)..."
+    OUT=$(forge_leg "$SOLIDITY_SDK_DIR" script/CommitmentsGasKiller.s.sol:GasKillerCommitmentsPhase1 \
+        COMMITMENT_MANAGER_ADDRESS="$MANAGER" ADMIN_ADDRESS="$DEPLOYER_ADDR") || { echo "$OUT"; exit 1; }
+    STAKE_TOKEN=$(grab "$OUT" "GK_STAKE_TOKEN")
+    ARBITER=$(grab "$OUT" "GK_ARBITER")
+    SP1_VERIFIER=$(grab "$OUT" "GK_SP1_VERIFIER")
+    [ -n "$ARBITER" ] || { echo -e "${RED}Leg 3 failed:${NC}"; echo "$OUT" | tail -30; exit 1; }
+
+    echo "Leg 4/5: OperatorRegistry..."
+    OUT=$(forge_leg "$COMMITMENTS_DIR" script/DeployOperatorRegistry.s.sol \
+        COMMITMENT_MANAGER_ADDRESS="$MANAGER" MIN_OPERATOR_STAKE="$OPERATOR_STAKE" \
+        ADMIN_ADDRESS="$DEPLOYER_ADDR" REQUIRED_ARBITER_ADDRESS="$ARBITER" \
+        REQUIRED_TOKEN_ADDRESS="$STAKE_TOKEN") || { echo "$OUT"; exit 1; }
+    OPERATOR_REGISTRY=$(grab "$OUT" "OperatorRegistry proxy")
+    [ -n "$OPERATOR_REGISTRY" ] || { echo -e "${RED}Leg 4 failed:${NC}"; echo "$OUT" | tail -30; exit 1; }
+    cast send --rpc-url "$E2E_RPC" --private-key "$PRIVATE_KEY" \
+        "$MANAGER" "setOperatorRegistry(address)" "$OPERATOR_REGISTRY" >/dev/null
+
+    echo "Leg 5/5: Schnorr adapter + registry + wiring (solidity-sdk)..."
+    OUT=$(forge_leg "$SOLIDITY_SDK_DIR" script/CommitmentsGasKiller.s.sol:GasKillerCommitmentsPhase2 \
+        OPERATOR_REGISTRY_ADDRESS="$OPERATOR_REGISTRY" ARBITER_ADDRESS="$ARBITER" \
+        ADMIN_ADDRESS="$DEPLOYER_ADDR" WEIGHT_SCALE="$OPERATOR_STAKE" \
+        QUORUM_THRESHOLD="${QUORUM_THRESHOLD:-2}" THRESHOLD_DENOMINATOR="${THRESHOLD_DENOMINATOR:-3}" \
+        SCHNORR_NOTICE_WINDOW="${SCHNORR_NOTICE_WINDOW:-0}") || { echo "$OUT"; exit 1; }
+    SCHNORR_ADAPTER=$(grab "$OUT" "GK_SCHNORR_ADAPTER")
+    SCHNORR_REGISTRY=$(grab "$OUT" "GK_SCHNORR_STAKE_REGISTRY")
+    [ -n "$SCHNORR_REGISTRY" ] || { echo -e "${RED}Leg 5 failed:${NC}"; echo "$OUT" | tail -30; exit 1; }
+
+    mkdir -p config/.nodes
+    jq -n \
+        --arg manager "$MANAGER" --arg opreg "$OPERATOR_REGISTRY" \
+        --arg backing "$BACKING_ADAPTER" --arg token "$STAKE_TOKEN" \
+        --arg arbiter "$ARBITER" --arg sp1 "$SP1_VERIFIER" \
+        --arg adapter "$SCHNORR_ADAPTER" --arg registry "$SCHNORR_REGISTRY" \
+        '{addresses: {commitmentManager: $manager, operatorRegistry: $opreg,
+          backingAdapter: $backing, stakeToken: $token, gasKillerArbiter: $arbiter,
+          sp1Verifier: $sp1, schnorrCommitmentsAdapter: $adapter,
+          schnorrStakeRegistry: $registry}, lastUpdate: {block_number: 0}}' \
+        > config/.nodes/avs_deploy.json
+    echo -e "${GREEN}Commitments stack deployed; avs_deploy.json written${NC}"
+    cat config/.nodes/avs_deploy.json
+else
+    echo -e "${YELLOW}Step 6: Waiting for EigenLayer setup to complete...${NC}"
+    timeout=500
+    elapsed=0
+
+    while [ $elapsed -lt $timeout ]; do
+        # Check if eigenlayer container has completed setup
+        if docker compose logs eigenlayer 2>/dev/null | grep -q "Operator 3 weight in quorum" && [ -f config/.nodes/avs_deploy.json ]; then
+            echo -e "${GREEN}EigenLayer setup completed successfully${NC}"
+            break
+        fi
+
+        echo "Waiting for EigenLayer setup... ($elapsed/$timeout seconds)"
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+
+    if [ $elapsed -ge $timeout ]; then
+        echo -e "${RED}Timeout waiting for EigenLayer setup${NC}"
+        echo "Eigenlayer logs:"
+        docker compose logs eigenlayer
+        exit 1
     fi
-    
-    echo "Waiting for EigenLayer setup... ($elapsed/$timeout seconds)"
-    sleep 10
-    elapsed=$((elapsed + 10))
-done
-
-if [ $elapsed -ge $timeout ]; then
-    echo -e "${RED}Timeout waiting for EigenLayer setup${NC}"
-    echo "Eigenlayer logs:"
-    docker compose logs eigenlayer
-    exit 1
 fi
 
 # Fix permissions on config/.nodes directory so deploy script can write
@@ -173,6 +296,7 @@ source ../.env
 export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
+export STAKE_SOURCE="$STAKE_SOURCE_CHOICE"
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then

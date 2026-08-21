@@ -8,7 +8,8 @@ use bindings::schnorrarraysummationfactory::SchnorrArraySummationFactory;
 use bindings::schnorrstakeregistry::SchnorrStakeRegistry;
 use gas_killer_common::schnorr::{PrivateKey, private_key_from_hex};
 use gas_killer_common::{
-    SignatureScheme, quorum_threshold_fraction, schnorr_notice_window, signature_scheme,
+    SignatureScheme, StakeSource, quorum_threshold_fraction, schnorr_notice_window,
+    signature_scheme, stake_source,
 };
 use rand::RngCore;
 use serde::Deserialize;
@@ -25,10 +26,38 @@ struct AvsDeploymentJson {
 
 #[derive(Debug, Deserialize)]
 struct AvsAddresses {
+    // EigenLayer-mode stack (written by the eigenlayer setup container).
     #[serde(rename = "avsServiceManagerWrapper")]
-    avs_service_manager_wrapper: String,
+    avs_service_manager_wrapper: Option<String>,
     #[serde(rename = "IncredibleSquaringTaskManager")]
-    bls_sig_check: String,
+    bls_sig_check: Option<String>,
+    // Commitments-mode stack (written by the e2e orchestration from the forge deploy
+    // legs: the commitments repo's own deploy scripts + solidity-sdk's
+    // `CommitmentsGasKiller.s.sol`).
+    #[serde(rename = "commitmentManager")]
+    commitment_manager: Option<String>,
+    #[serde(rename = "operatorRegistry")]
+    operator_registry: Option<String>,
+    #[serde(rename = "backingAdapter")]
+    backing_adapter: Option<String>,
+    #[serde(rename = "stakeToken")]
+    stake_token: Option<String>,
+    #[serde(rename = "gasKillerArbiter")]
+    gas_killer_arbiter: Option<String>,
+    #[serde(rename = "schnorrCommitmentsAdapter")]
+    schnorr_commitments_adapter: Option<String>,
+    #[serde(rename = "schnorrStakeRegistry")]
+    schnorr_stake_registry: Option<String>,
+}
+
+impl AvsAddresses {
+    /// Parses a required address field, with a mode-appropriate error when absent.
+    fn require(field: Option<&String>, name: &str) -> Result<Address, DynError> {
+        field
+            .ok_or_else(|| format!("{name} missing from deployment JSON"))?
+            .parse()
+            .map_err(|_| format!("Invalid {name} address format in deployment JSON").into())
+    }
 }
 
 /// Operator key files the eigenlayer setup container writes next to the deployment
@@ -109,18 +138,16 @@ async fn deploy_bls() -> Result<(), DynError> {
 
     let avs_deployment = read_avs_deployment(&avs_deployment_path)?;
 
-    let avs_address: Address = avs_deployment
-        .addresses
-        .avs_service_manager_wrapper
-        .parse()
-        .map_err(|_| "Invalid avsServiceManagerWrapper address format in deployment JSON")?;
+    let avs_address = AvsAddresses::require(
+        avs_deployment.addresses.avs_service_manager_wrapper.as_ref(),
+        "avsServiceManagerWrapper",
+    )?;
 
     // Get BLS signature checker address from deployment JSON
-    let bls_address: Address = avs_deployment
-        .addresses
-        .bls_sig_check
-        .parse()
-        .map_err(|_| "Invalid IncredibleSquaringTaskManager address format")?;
+    let bls_address = AvsAddresses::require(
+        avs_deployment.addresses.bls_sig_check.as_ref(),
+        "IncredibleSquaringTaskManager",
+    )?;
     println!("🔐 Using BLS Signature Checker: {}", bls_address);
 
     // Setup provider and signer
@@ -274,11 +301,19 @@ async fn deploy_bls() -> Result<(), DynError> {
     Ok(())
 }
 
+/// An operator's secp256k1 key: the parsed Schnorr signing key plus the raw hex it
+/// came from (Commitments-mode onboarding builds an Ethereum wallet from it — the
+/// Schnorr key IS the operator's on-chain identity and transaction signer).
+struct OperatorKey {
+    schnorr: PrivateKey,
+    raw_hex: String,
+}
+
 /// Loads every operator's secp256k1 key from the `*.private.ecdsa.key.json` files
 /// the eigenlayer setup container writes next to the deployment JSON (override the
 /// directory with `OPERATOR_KEYS_DIR`). Sorted by filename for a deterministic
 /// registration order.
-fn load_operator_keys(avs_deployment_path: &str) -> Result<Vec<PrivateKey>, DynError> {
+fn load_operator_keys(avs_deployment_path: &str) -> Result<Vec<OperatorKey>, DynError> {
     let keys_dir: PathBuf = match env::var("OPERATOR_KEYS_DIR")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -331,9 +366,343 @@ fn load_operator_keys(avs_deployment_path: &str) -> Result<Vec<PrivateKey>, DynE
         })?;
         let key = private_key_from_hex(&parsed.private_key)
             .ok_or_else(|| format!("Invalid privateKey in operator key file {}", file.display()))?;
-        keys.push(key);
+        keys.push(OperatorKey {
+            schnorr: key,
+            raw_hex: parsed.private_key,
+        });
     }
     Ok(keys)
+}
+
+/// Suffix of the BN254 key files the setup tooling writes next to the ECDSA keys.
+/// The BN254 key is the node's p2p/engine identity; Commitments-mode onboarding
+/// publishes its public coordinates through the adapter sidecar.
+const OPERATOR_BLS_KEY_FILE_SUFFIX: &str = ".private.bls.key.json";
+
+/// Loads every operator's BN254 private scalar (decimal string) from the
+/// `*.private.bls.key.json` files, sorted by filename — the same order
+/// `load_operator_keys` uses, so index i of both lists is the same operator.
+fn load_operator_bls_scalars(avs_deployment_path: &str) -> Result<Vec<ark_bn254::Fr>, DynError> {
+    use std::str::FromStr;
+
+    let keys_dir: PathBuf = match env::var("OPERATOR_KEYS_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        Some(dir) => PathBuf::from(dir),
+        None => Path::new(avs_deployment_path)
+            .parent()
+            .map(|p| p.join("operator_keys"))
+            .unwrap_or_else(|| PathBuf::from("operator_keys")),
+    };
+
+    let mut key_files: Vec<PathBuf> = fs::read_dir(&keys_dir)
+        .map_err(|e| format!("Failed to read operator keys directory {}: {}", keys_dir.display(), e))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(OPERATOR_BLS_KEY_FILE_SUFFIX))
+        })
+        .collect();
+    key_files.sort();
+
+    let mut scalars = Vec::with_capacity(key_files.len());
+    for file in &key_files {
+        let content = fs::read_to_string(file)
+            .map_err(|e| format!("Failed to read BLS key file {}: {}", file.display(), e))?;
+        let parsed: OperatorKeyFile = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse BLS key file {}: {}", file.display(), e))?;
+        let scalar = ark_bn254::Fr::from_str(parsed.private_key.trim())
+            .map_err(|_| format!("Invalid decimal BN254 privateKey in {}", file.display()))?;
+        scalars.push(scalar);
+    }
+    Ok(scalars)
+}
+
+/// Converts a BN254 base-field element into a U256 (big-endian).
+fn fq_to_u256(fq: &ark_bn254::Fq) -> U256 {
+    use ark_ff::{BigInteger, PrimeField};
+    U256::from_be_slice(&fq.into_bigint().to_bytes_be())
+}
+
+/// Derives the affine BN254 G1/G2 public coordinates for a private scalar, in the
+/// adapter's publishing convention: G1 = [x, y], G2 = [x_c0, x_c1, y_c0, y_c1] —
+/// the (c0, c1) order `CommonwarePublicKeys::from_string_coordinates` consumes.
+fn bls_public_coordinates(scalar: &ark_bn254::Fr) -> ([U256; 2], [U256; 4]) {
+    use ark_ec::{CurveGroup, PrimeGroup};
+
+    let g1 = (ark_bn254::G1Projective::generator() * scalar).into_affine();
+    let g2 = (ark_bn254::G2Projective::generator() * scalar).into_affine();
+    (
+        [fq_to_u256(&g1.x), fq_to_u256(&g1.y)],
+        [
+            fq_to_u256(&g2.x.c0),
+            fq_to_u256(&g2.x.c1),
+            fq_to_u256(&g2.y.c0),
+            fq_to_u256(&g2.y.c1),
+        ],
+    )
+}
+
+#[cfg(test)]
+mod bls_coordinate_tests {
+    use super::*;
+    use ark_serialize::CanonicalSerialize;
+    use std::str::FromStr;
+
+    // The published-coordinate convention must round-trip into exactly the BN254 G2
+    // public key the node derives from its own private scalar at startup
+    // (`Bn254Scheme::signer` compares compressed bytes against the participant set).
+    // A swapped Fq2 (c0, c1) order on either side would make every node fail its
+    // own-membership assert against a Commitments-sourced operator set.
+    #[test]
+    fn published_coordinates_reconstruct_the_node_side_key() {
+        use ark_ec::{CurveGroup, PrimeGroup};
+
+        let sk = ark_bn254::Fr::from_str("123456789123456789123456789").unwrap();
+        let (g1, g2) = bls_public_coordinates(&sk);
+
+        let keys = commonware_avs_eigenlayer::CommonwarePublicKeys::from_string_coordinates(
+            &g2[0].to_string(),
+            &g2[1].to_string(),
+            &g2[2].to_string(),
+            &g2[3].to_string(),
+            &g1[0].to_string(),
+            &g1[1].to_string(),
+        )
+        .expect("coordinates decode");
+
+        let expected = (ark_bn254::G2Projective::generator() * sk).into_affine();
+        let mut expected_bytes = Vec::new();
+        expected.serialize_compressed(&mut expected_bytes).unwrap();
+        assert_eq!(
+            keys.g2_pub_key.as_ref(),
+            expected_bytes.as_slice(),
+            "adapter-published G2 coordinates must reconstruct generator*sk"
+        );
+    }
+}
+
+/// Onboards every operator through the Commitments stack, mirroring each into the
+/// Schnorr registry via the adapter:
+///
+/// 1. fund the operator address with gas ETH and mint it stake tokens (dev token),
+/// 2. as the operator: approve + `manager.deposit`,
+/// 3. `manager.createCommitment` naming the arbiter/registry per the acceptance
+///    policy (amount `OPERATOR_STAKE_AMOUNT`, full `maxPenaltyBps`),
+/// 4. `operatorRegistry.register(commitmentId)`,
+/// 5. `adapter.join(schnorrKey, PoP, blsG1, blsG2, socket)` — the adapter registers
+///    the key in the SchnorrStakeRegistry with weight = stake / weightScale.
+///
+/// Sockets come from `OPERATOR_SOCKETS` (comma-separated, index-aligned with the
+/// sorted key files).
+async fn onboard_operators_commitments<P>(
+    deployer_provider: &P,
+    avs_deployment: &AvsDeploymentJson,
+    operator_keys: &[OperatorKey],
+    avs_deployment_path: &str,
+) -> Result<(), DynError>
+where
+    P: Provider + Clone,
+{
+    use alloy::network::TransactionBuilder;
+    use alloy::rpc::types::TransactionRequest;
+    use bindings::commitmentmanager::CommitmentManager;
+    use bindings::mintableerc20::MintableERC20;
+    use bindings::operatorregistry::OperatorRegistry;
+    use bindings::schnorrcommitmentsadapter::SchnorrCommitmentsAdapter;
+
+    let http_rpc = env::var("HTTP_RPC").map_err(|_| "HTTP_RPC environment variable is required")?;
+    let addresses = &avs_deployment.addresses;
+    let manager_address = AvsAddresses::require(addresses.commitment_manager.as_ref(), "commitmentManager")?;
+    let registry_address = AvsAddresses::require(addresses.operator_registry.as_ref(), "operatorRegistry")?;
+    let backing_adapter = AvsAddresses::require(addresses.backing_adapter.as_ref(), "backingAdapter")?;
+    let stake_token = AvsAddresses::require(addresses.stake_token.as_ref(), "stakeToken")?;
+    let arbiter = AvsAddresses::require(addresses.gas_killer_arbiter.as_ref(), "gasKillerArbiter")?;
+    let schnorr_adapter =
+        AvsAddresses::require(addresses.schnorr_commitments_adapter.as_ref(), "schnorrCommitmentsAdapter")?;
+
+    let stake_amount: U256 = env::var("OPERATOR_STAKE_AMOUNT")
+        .unwrap_or_else(|_| "100".to_string())
+        .trim()
+        .parse()
+        .map_err(|_| "OPERATOR_STAKE_AMOUNT must be a decimal integer")?;
+
+    let sockets_raw = env::var("OPERATOR_SOCKETS")
+        .unwrap_or_else(|_| "node-1:3001,node-2:3002,node-3:3003".to_string());
+    let sockets: Vec<&str> = sockets_raw.split(',').map(str::trim).collect();
+    if sockets.len() < operator_keys.len() {
+        return Err(format!(
+            "OPERATOR_SOCKETS has {} entries but {} operators were loaded",
+            sockets.len(),
+            operator_keys.len()
+        )
+        .into());
+    }
+
+    let bls_scalars = load_operator_bls_scalars(avs_deployment_path)?;
+    if bls_scalars.len() != operator_keys.len() {
+        return Err(format!(
+            "found {} *{} files but {} *{} files — every operator needs both keys",
+            bls_scalars.len(),
+            OPERATOR_BLS_KEY_FILE_SUFFIX,
+            operator_keys.len(),
+            OPERATOR_KEY_FILE_SUFFIX
+        )
+        .into());
+    }
+
+    // Gas budget per operator for its onboarding transactions (dev chains).
+    let gas_ether = U256::from(10u128.pow(18));
+
+    let token = MintableERC20::new(stake_token, deployer_provider.clone());
+    let mut rng = rand::rng();
+    let mut fill = |b: &mut [u8]| rng.fill_bytes(b);
+
+    for (i, entry) in operator_keys.iter().enumerate() {
+        let key = &entry.schnorr;
+        let pubkey = key.public_key();
+        let operator = pubkey.eth_address();
+        println!("👷 Onboarding operator {} ({})", i + 1, operator);
+
+        // 1. Gas + stake-token funding from the deployer.
+        let fund_tx = TransactionRequest::default()
+            .with_to(operator)
+            .with_value(gas_ether);
+        deployer_provider
+            .send_transaction(fund_tx)
+            .await
+            .map_err(|e| format!("Failed to fund operator {}: {}", operator, e))?
+            .get_receipt()
+            .await
+            .map_err(|e| format!("Funding transaction for {} not mined: {}", operator, e))?;
+        token
+            .mint(operator, stake_amount)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to mint stake for {}: {}", operator, e))?
+            .get_receipt()
+            .await
+            .map_err(|e| format!("Mint transaction for {} not mined: {}", operator, e))?;
+
+        // Operator wallet: the Schnorr key doubles as the transaction signer.
+        let signer: PrivateKeySigner = entry
+            .raw_hex
+            .trim()
+            .trim_start_matches("0x")
+            .parse()
+            .map_err(|_| format!("Operator key {} is not a valid Ethereum key", operator))?;
+        let op_provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(signer))
+            .connect_http(http_rpc.parse().map_err(|_| "Invalid RPC URL")?);
+
+        let op_token = MintableERC20::new(stake_token, op_provider.clone());
+        let manager = CommitmentManager::new(manager_address, op_provider.clone());
+        let registry = OperatorRegistry::new(registry_address, op_provider.clone());
+        let adapter = SchnorrCommitmentsAdapter::new(schnorr_adapter, op_provider.clone());
+
+        // 2. Approve + deposit into the manager's free balance.
+        op_token
+            .approve(manager_address, stake_amount)
+            .send()
+            .await
+            .map_err(|e| format!("approve failed for {}: {}", operator, e))?
+            .get_receipt()
+            .await
+            .map_err(|e| format!("approve for {} not mined: {}", operator, e))?;
+        manager
+            .deposit(stake_token, stake_amount)
+            .send()
+            .await
+            .map_err(|e| format!("deposit failed for {}: {}", operator, e))?
+            .get_receipt()
+            .await
+            .map_err(|e| format!("deposit for {} not mined: {}", operator, e))?;
+
+        // 3. Create the self-stake commitment per the registry's acceptance policy.
+        let params = CommitmentManager::CommitmentParams {
+            arbiter,
+            counterparty: registry_address,
+            token: stake_token,
+            adapter: backing_adapter,
+            amount: stake_amount,
+            maxPenaltyBps: 10_000,
+            challengeWindow: 86_400,
+            expiresAt: 0,
+            strategies: vec![],
+            metadataURI: String::new(),
+            metadataHash: [0u8; 32].into(),
+        };
+        let receipt = manager
+            .createCommitment(params)
+            .send()
+            .await
+            .map_err(|e| format!("createCommitment failed for {}: {}", operator, e))?
+            .get_receipt()
+            .await
+            .map_err(|e| format!("createCommitment for {} not mined: {}", operator, e))?;
+        if !receipt.status() {
+            return Err(format!("createCommitment reverted for {}", operator).into());
+        }
+        let commitment_id = receipt
+            .logs()
+            .iter()
+            .find_map(|log| {
+                log.log_decode::<CommitmentManager::CommitmentCreated>()
+                    .ok()
+                    .map(|ev| ev.inner.commitmentId)
+            })
+            .ok_or_else(|| format!("no CommitmentCreated event for {}", operator))?;
+
+        // 4. Register as a Commitments operator over that commitment.
+        let receipt = registry
+            .register(commitment_id)
+            .send()
+            .await
+            .map_err(|e| format!("register failed for {}: {}", operator, e))?
+            .get_receipt()
+            .await
+            .map_err(|e| format!("register for {} not mined: {}", operator, e))?;
+        if !receipt.status() {
+            return Err(format!("OperatorRegistry.register reverted for {}", operator).into());
+        }
+
+        // 5. Join the Schnorr signer set through the adapter (PoP checked locally
+        //    first, exactly as the direct-registration path does).
+        let pop = key.prove_possession(&mut fill);
+        if !pubkey.verify_possession(&pop) {
+            return Err(format!(
+                "locally generated proof of possession failed to verify for operator {}",
+                operator
+            )
+            .into());
+        }
+        let pop_bytes = pop.0.to_bytes();
+        let (bls_g1, bls_g2) = bls_public_coordinates(&bls_scalars[i]);
+        let receipt = adapter
+            .join(
+                U256::from_be_bytes(pubkey.x_bytes()),
+                U256::from_be_bytes(pubkey.y_bytes()),
+                U256::from_be_slice(&pop_bytes[..32]),
+                Address::from_slice(&pop_bytes[32..]),
+                bls_g1,
+                bls_g2,
+                sockets[i].to_string(),
+            )
+            .send()
+            .await
+            .map_err(|e| format!("adapter.join failed for {}: {}", operator, e))?
+            .get_receipt()
+            .await
+            .map_err(|e| format!("adapter.join for {} not mined: {}", operator, e))?;
+        if !receipt.status() {
+            return Err(format!("adapter.join reverted for {}", operator).into());
+        }
+        println!("✅ Operator {} staked, registered, and joined the signer set", operator);
+    }
+
+    Ok(())
 }
 
 /// Deploys the Schnorr `ArraySummation` target: deploys (or reuses) the
@@ -359,19 +728,27 @@ async fn deploy_schnorr() -> Result<(), DynError> {
     // deploys, so no round is ever in flight for a mutation to invalidate.
     let notice_window = schnorr_notice_window();
 
-    // The AVS reference comes from the eigenlayer deployment JSON — operators
-    // register with EigenLayer through the same service manager regardless of the
-    // quorum-signature scheme the target contract verifies.
+    // The AVS reference comes from the deployment JSON. Its source depends on the
+    // stake root: the EigenLayer service manager wrapper, or — in Commitments mode,
+    // which has no EigenLayer contracts at all — the Commitments OperatorRegistry
+    // proxy. Either way it only feeds the target's cosmetic `avsAddress`/`namespace`,
+    // never the task digest.
     let avs_deployment_path = env::var("AVS_DEPLOYMENT_PATH")
         .map_err(|_| "AVS_DEPLOYMENT_PATH environment variable is required")?;
 
     let avs_deployment = read_avs_deployment(&avs_deployment_path)?;
 
-    let avs_address: Address = avs_deployment
-        .addresses
-        .avs_service_manager_wrapper
-        .parse()
-        .map_err(|_| "Invalid avsServiceManagerWrapper address format in deployment JSON")?;
+    let source = stake_source();
+    let avs_address: Address = match source {
+        StakeSource::Eigenlayer => AvsAddresses::require(
+            avs_deployment.addresses.avs_service_manager_wrapper.as_ref(),
+            "avsServiceManagerWrapper",
+        )?,
+        StakeSource::Commitments => AvsAddresses::require(
+            avs_deployment.addresses.operator_registry.as_ref(),
+            "operatorRegistry",
+        )?,
+    };
 
     // The operators' Schnorr keys are their existing secp256k1 keys, read from the
     // key files the eigenlayer setup container produced.
@@ -400,6 +777,66 @@ async fn deploy_schnorr() -> Result<(), DynError> {
             avs_address
         )
         .into());
+    }
+
+    // Commitments mode: the registry was deployed by the forge legs with the
+    // SchnorrCommitmentsAdapter as its immutable owner, so this binary never deploys
+    // it and never calls `registerOperator` directly. Operators are onboarded through
+    // the Commitments stack instead (stake commitment -> register -> adapter.join),
+    // which mirrors them into the Schnorr registry. The ordering invariant is the
+    // same as the direct path: every join must land before the target deploys, because
+    // each one advances the registry's fail-closed `effectiveBlock` watermark.
+    if source == StakeSource::Commitments {
+        let registry_address = AvsAddresses::require(
+            avs_deployment.addresses.schnorr_stake_registry.as_ref(),
+            "schnorrStakeRegistry",
+        )?;
+        let code = provider.get_code_at(registry_address).await.map_err(|e| {
+            format!(
+                "Failed to get code for SchnorrStakeRegistry {}: {}",
+                registry_address, e
+            )
+        })?;
+        if code.as_ref().is_empty() {
+            return Err(format!(
+                "schnorrStakeRegistry {} from the deployment JSON has no code deployed — run the \
+                 Commitments forge deploy legs first",
+                registry_address
+            )
+            .into());
+        }
+        println!(
+            "🏦 Using Commitments-owned SchnorrStakeRegistry at: {}",
+            registry_address
+        );
+
+        onboard_operators_commitments(
+            &provider,
+            &avs_deployment,
+            &operator_keys,
+            &avs_deployment_path,
+        )
+        .await?;
+
+        if e2e_example_is_reentrant() {
+            return deploy_reentrant_checkpoint(
+                provider.clone(),
+                avs_address,
+                registry_address,
+                &avs_deployment_path,
+            )
+            .await;
+        }
+        return deploy_schnorr_target(
+            provider,
+            avs_address,
+            registry_address,
+            array_size,
+            max_value,
+            seed,
+            &avs_deployment_path,
+        )
+        .await;
     }
 
     // Resolve the Schnorr stake registry: reuse SCHNORR_STAKE_REGISTRY_ADDRESS when
@@ -457,7 +894,8 @@ async fn deploy_schnorr() -> Result<(), DynError> {
         let registry = SchnorrStakeRegistry::new(registry_address, provider.clone());
         let mut rng = rand::rng();
         let mut fill = |b: &mut [u8]| rng.fill_bytes(b);
-        for key in &operator_keys {
+        for entry in &operator_keys {
+            let key = &entry.schnorr;
             let pubkey = key.public_key();
             let operator = pubkey.eth_address();
             let pop = key.prove_possession(&mut fill);
@@ -508,8 +946,36 @@ async fn deploy_schnorr() -> Result<(), DynError> {
         .await;
     }
 
-    // Deploy the factory and the target, strictly after the registrations above so
-    // the first verification's `refBlock = head - 1` is at/after `effectiveBlock`.
+    deploy_schnorr_target(
+        provider,
+        avs_address,
+        registry_address,
+        array_size,
+        max_value,
+        seed,
+        &avs_deployment_path,
+    )
+    .await
+}
+
+/// Deploys the Schnorr factory + `SchnorrArraySummation` target wired to
+/// `registry_address`, and records the addresses in the deployment JSON. Shared by
+/// both stake roots; must run strictly after every operator registration/join so the
+/// first verification's `refBlock = head - 1` is at/after the registry's
+/// `effectiveBlock`.
+#[allow(clippy::too_many_arguments)]
+async fn deploy_schnorr_target<P>(
+    provider: P,
+    avs_address: Address,
+    registry_address: Address,
+    array_size: u64,
+    max_value: u64,
+    seed: u64,
+    avs_deployment_path: &str,
+) -> Result<(), DynError>
+where
+    P: Provider + Clone,
+{
     println!("🏭 Deploying a fresh SchnorrArraySummationFactory...");
     let factory = SchnorrArraySummationFactory::deploy(provider.clone())
         .await
@@ -581,7 +1047,7 @@ async fn deploy_schnorr() -> Result<(), DynError> {
 
     // Update deployment JSON if it exists
     update_schnorr_deployment_json(
-        &avs_deployment_path,
+        avs_deployment_path,
         &format!("{:?}", registry_address),
         &format!("{:?}", factory_address),
         &format!("{:?}", deployed_address),

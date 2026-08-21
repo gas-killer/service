@@ -1,0 +1,13 @@
+# Override for STAKE_SOURCE=commitments: the EigenLayer setup container is replaced
+# by a no-op so `depends_on: eigenlayer (service_completed_successfully)` unblocks
+# immediately. The Commitments stack deploys from the host instead (forge legs driven
+# by scripts/run_e2e_test.sh), and operator key files come from the
+# `generate_operator_keys` binary before compose up.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.commitments.yml up -d
+services:
+  eigenlayer:
+    image: alpine:3.20
+    entrypoint: ["/bin/true"]
+    command: []
+    environment: {}

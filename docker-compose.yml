@@ -78,6 +78,9 @@ services:
       - STORAGE_DIR=/app/data
       - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
+      # Operator-set root: eigenlayer (EigenStakingClient event scan) or commitments
+      # (SchnorrCommitmentsAdapter.getOperatorSet).
+      - STAKE_SOURCE=${STAKE_SOURCE:-eigenlayer}
     volumes:
       - ./config/.nodes/operator_keys/testacc1.private.bls.key.json:/app/key.json:ro
       # secp256k1 Schnorr signing key (used only in SIGNATURE_SCHEME=schnorr; the
@@ -123,6 +126,9 @@ services:
       - STORAGE_DIR=/app/data
       - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
+      # Operator-set root: eigenlayer (EigenStakingClient event scan) or commitments
+      # (SchnorrCommitmentsAdapter.getOperatorSet).
+      - STAKE_SOURCE=${STAKE_SOURCE:-eigenlayer}
     volumes:
       - ./config/.nodes/operator_keys/testacc2.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes/operator_keys/testacc2.private.ecdsa.key.json:/app/schnorr_key.json:ro
@@ -158,6 +164,9 @@ services:
       - STORAGE_DIR=/app/data
       - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
+      # Operator-set root: eigenlayer (EigenStakingClient event scan) or commitments
+      # (SchnorrCommitmentsAdapter.getOperatorSet).
+      - STAKE_SOURCE=${STAKE_SOURCE:-eigenlayer}
     volumes:
       - ./config/.nodes/operator_keys/testacc3.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes/operator_keys/testacc3.private.ecdsa.key.json:/app/schnorr_key.json:ro
@@ -207,6 +216,9 @@ services:
       # Blocks past the reference block for which a rendered task payload stays valid.
       - PAYLOAD_BLOCK_BUFFER=${PAYLOAD_BLOCK_BUFFER:-50}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
+      # Operator-set root: eigenlayer (EigenStakingClient event scan) or commitments
+      # (SchnorrCommitmentsAdapter.getOperatorSet).
+      - STAKE_SOURCE=${STAKE_SOURCE:-eigenlayer}
     volumes:
       - ./config/.nodes:/app/.nodes:ro
       - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro
