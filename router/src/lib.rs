@@ -6,6 +6,7 @@ pub mod expiry;
 pub mod factories;
 pub mod ingress;
 pub mod metrics;
+pub mod payload_revert;
 pub mod rate_limit;
 pub mod schnorr_coordinator;
 pub mod schnorr_submitter;
