@@ -16,6 +16,12 @@
 global:
   environment: TESTNET
 
+  # Heavy-compute tracked functions are only extractable from the net diff; a struct-log
+  # trace of a call that expensive does not complete. The fleet shares one RPC serving
+  # prestateTracer (diffMode) and callTracer (withLog), meeting the single-client
+  # condition on the stateEncoding block in values.yaml.
+  stateEncoding: "prestate-net"
+
 imagePullSecrets:
   - name: ghcr-pull-secret
 
