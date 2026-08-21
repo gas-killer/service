@@ -12,6 +12,7 @@
 //! target's ABI — the target only calls the checker, so solc does not surface them — which is why
 //! they are declared here rather than read from the generated bindings.
 
+use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::sol_types::{GenericContractError, SolError, SolInterface};
 use alloy_primitives::{Bytes, FixedBytes, hex};
 use std::fmt;
@@ -52,8 +53,20 @@ mod sol_errors {
     }
 }
 
-/// JSON-RPC error code a node returns for a call that executed and reverted.
+/// JSON-RPC error code a node returns for a call that executed and reverted. Every standard
+/// client uses it, so it is the primary signal.
 const EXECUTION_REVERTED_CODE: i64 = 3;
+
+/// Message fragments that mean the node executed the call and the call reverted, matched
+/// case-insensitively and consulted only when the response code is not
+/// [`EXECUTION_REVERTED_CODE`].
+///
+/// Whole phrases rather than the bare word "revert": a rejection raised *before* execution must
+/// keep the advisory fallback estimate, and these phrases carry only the one meaning in every
+/// client that emits them. A client whose wording matches neither the code nor a phrase falls
+/// through to the fallback, which is the safe direction — the payload ships as it did before this
+/// check existed, rather than a completed round being failed on a guess.
+const EXECUTION_REVERT_MESSAGES: &[&str] = &["execution reverted", "reverted with", "vm exception"];
 
 /// Longest raw revert payload rendered in full. Beyond this the hex is truncated so an error
 /// carrying large `bytes` arguments cannot flood a log line or a client-visible task error.
@@ -197,9 +210,9 @@ impl PayloadRevert {
     ///
     /// The distinction is what makes the estimate usable as a landability check: a transport
     /// failure, timeout, or rate-limit rejection says nothing about whether the call would have
-    /// succeeded, so only an error the node produced by executing the call qualifies. Reverts
-    /// that carry no return data are still reverts, and are recognised from the node's error
-    /// response rather than from data it did not send.
+    /// succeeded, so only an error the node produced by executing the call qualifies. Reverts that
+    /// carry no return data are still reverts, and are recognised from the node's error response
+    /// rather than from data it did not send.
     pub fn from_call_error(err: &alloy::contract::Error) -> Option<Self> {
         if let Some(data) = err.as_revert_data() {
             return Some(Self(data));
@@ -209,9 +222,15 @@ impl PayloadRevert {
             return None;
         };
         let response = transport.as_error_resp()?;
-        let reverted = response.code == EXECUTION_REVERTED_CODE
-            || response.message.to_lowercase().contains("revert");
-        reverted.then(|| Self(Bytes::new()))
+        if !reports_execution_revert(response) {
+            return None;
+        }
+        // `as_revert_data` reads the payload only when the node's message contains a lowercase
+        // "revert", so a client that capitalises its wording arrives here with revert data still
+        // attached. Reading it again is what keeps the selector — the entire diagnostic value of
+        // this path — from being dropped on precisely the non-standard clients the message check
+        // exists to serve.
+        Some(Self(revert_data(response).unwrap_or_default()))
     }
 
     /// Raw revert data as the node returned it. Empty when the call reverted without a reason.
@@ -263,6 +282,33 @@ impl fmt::Display for PayloadRevert {
     }
 }
 
+/// Whether a JSON-RPC error response describes a call that executed and reverted, as opposed to
+/// one the node refused before executing.
+fn reports_execution_revert(response: &ErrorPayload) -> bool {
+    if response.code == EXECUTION_REVERTED_CODE {
+        return true;
+    }
+    let message = response.message.to_lowercase();
+    EXECUTION_REVERT_MESSAGES
+        .iter()
+        .any(|phrase| message.contains(phrase))
+}
+
+/// Pulls the revert payload out of a node's error `data`, which clients variously send as a hex
+/// string or nested inside an object, so any string in the structure that parses as bytes is taken
+/// as the payload.
+fn revert_data(response: &ErrorPayload) -> Option<Bytes> {
+    fn search(value: &serde_json::Value) -> Option<Bytes> {
+        match value {
+            serde_json::Value::String(encoded) => encoded.parse().ok(),
+            serde_json::Value::Object(fields) => fields.values().find_map(search),
+            _ => None,
+        }
+    }
+
+    search(&response.try_data_as::<serde_json::Value>()?.ok()?)
+}
+
 /// Builds the contract error a node returns for a call that executed and reverted, with `data` as
 /// the hex revert payload (`None` for a bare `revert()`).
 ///
@@ -270,7 +316,11 @@ impl fmt::Display for PayloadRevert {
 /// executor need to drive the estimation path without a chain.
 #[cfg(test)]
 pub(crate) fn execution_reverted(data: Option<&str>) -> alloy::contract::Error {
-    rpc_error_with_data(EXECUTION_REVERTED_CODE, "execution reverted", data)
+    rpc_error_with_data(
+        EXECUTION_REVERTED_CODE,
+        "execution reverted",
+        data.map(|d| format!("\"{d}\"")),
+    )
 }
 
 /// Builds a JSON-RPC error response with no revert payload, for the failures that never reach
@@ -280,20 +330,21 @@ pub(crate) fn rpc_error(code: i64, message: &'static str) -> alloy::contract::Er
     rpc_error_with_data(code, message, None)
 }
 
+/// `data` is raw JSON, so a test can queue the bare hex string most clients send or the object
+/// some of them nest it in. Test-only, as with [`execution_reverted`].
 #[cfg(test)]
 fn rpc_error_with_data(
     code: i64,
     message: &'static str,
-    data: Option<&str>,
+    data: Option<String>,
 ) -> alloy::contract::Error {
-    use alloy::rpc::json_rpc::ErrorPayload;
     use alloy::transports::RpcError;
     use serde_json::value::RawValue;
 
     alloy::contract::Error::TransportError(RpcError::ErrorResp(ErrorPayload {
         code,
         message: message.into(),
-        data: data.map(|d| RawValue::from_string(format!("\"{d}\"")).unwrap()),
+        data: data.map(|d| RawValue::from_string(d).unwrap()),
     }))
 }
 
@@ -423,10 +474,75 @@ mod tests {
         assert!(revert.data().is_empty());
     }
 
-    // Not every node uses code 3; the message is the fallback signal.
+    // Not every client uses code 3; a recognised phrase is the fallback signal.
     #[test]
-    fn a_revert_reported_under_a_provider_specific_code_is_recognised() {
+    fn a_revert_reported_under_a_client_specific_code_is_recognised() {
         assert!(PayloadRevert::from_call_error(&rpc_error(-32000, "execution reverted")).is_some());
+        assert!(
+            PayloadRevert::from_call_error(&rpc_error(
+                -32000,
+                "VM Exception while processing transaction: reverted with reason string 'paused'"
+            ))
+            .is_some()
+        );
+    }
+
+    // The phrase list exists so the bare word cannot carry a classification on its own: a
+    // rejection that never executed must keep the fallback estimate, however it is worded.
+    #[test]
+    fn the_bare_word_revert_does_not_make_an_error_a_revert() {
+        assert!(
+            PayloadRevert::from_call_error(&rpc_error(
+                -32000,
+                "cannot revert to an archived state"
+            ))
+            .is_none()
+        );
+    }
+
+    // `as_revert_data` only reads the payload when the message contains a lowercase "revert", so a
+    // client that capitalises its wording would otherwise be reported as a data-less revert with
+    // the selector sitting unread in the response.
+    #[test]
+    fn revert_data_survives_a_capitalised_message() {
+        let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
+            EXECUTION_REVERTED_CODE,
+            "Reverted",
+            Some("\"0xe1310aed\"".to_string()),
+        ))
+        .expect("a capitalised revert message should still classify as a revert");
+        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+        assert!(
+            revert.to_string().contains("InvalidQuorumApkHash()"),
+            "the recovered selector should still be named: {revert}"
+        );
+    }
+
+    // Some clients wrap the payload in an object alongside the message rather than sending the hex
+    // string directly.
+    #[test]
+    fn revert_data_is_recovered_from_a_nested_data_object() {
+        let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
+            EXECUTION_REVERTED_CODE,
+            "Reverted",
+            Some(r#"{"message":"execution reverted","data":"0xe1310aed"}"#.to_string()),
+        ))
+        .expect("a nested revert payload should still classify as a revert");
+        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+    }
+
+    // A client that reports a revert without data must still be classified as a revert; there is
+    // simply nothing to name.
+    #[test]
+    fn a_capitalised_message_without_data_stays_a_data_less_revert() {
+        let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
+            EXECUTION_REVERTED_CODE,
+            "Reverted",
+            None,
+        ))
+        .expect("a data-less revert should still classify as a revert");
+        assert!(revert.data().is_empty());
+        assert_eq!(revert.to_string(), "reverted without reason data");
     }
 
     // Estimation refusing before it executes says nothing about whether the call would land, so
