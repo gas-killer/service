@@ -4164,6 +4164,7 @@ name = "gas-killer-router"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-json-abi",
  "alloy-primitives",
  "alloy-provider",
  "alloy-signer",

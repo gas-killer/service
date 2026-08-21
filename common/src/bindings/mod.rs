@@ -12,6 +12,14 @@ pub const GAS_KILLER_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0x93, 0xde, 
 pub const SCHNORR_GAS_KILLER_INTERFACE_ID: FixedBytes<4> =
     FixedBytes::new([0x82, 0xb3, 0x5a, 0x01]);
 
+/// The compiled ABI the [`gaskillersdk`] bindings are generated from, exposed so callers can
+/// enumerate what the SDK declares rather than restating it. Consumers that map SDK errors to
+/// their own data check themselves against this, so an error added upstream cannot go unnoticed.
+pub const GAS_KILLER_SDK_ABI: &str = include_str!("abis/GasKillerSDK.json");
+
+/// Schnorr twin of [`GAS_KILLER_SDK_ABI`], for the [`schnorrgaskillersdk`] bindings.
+pub const SCHNORR_GAS_KILLER_SDK_ABI: &str = include_str!("abis/SchnorrGasKillerSDK.json");
+
 #[allow(
     non_camel_case_types,
     non_snake_case,

@@ -6,22 +6,26 @@
 //! the revert data into something the client can act on: the Solidity error name plus the
 //! condition it implies about the target's configuration or the round's inputs.
 //!
-//! A reverting `verifyAndUpdate` can originate in three places, so selectors are collected from
-//! all of them: the SDK's own preflight checks, the EigenLayer `BLSSignatureChecker` the target
-//! calls into, and the Schnorr SDK's equivalents. The middleware errors do not appear in the
-//! target's ABI — the target only calls the checker, so solc does not surface them — which is why
-//! they are declared here rather than read from the generated bindings.
+//! A reverting `verifyAndUpdate` can originate in two places. The SDK's own preflight checks and
+//! state-change handler are taken from the generated bindings, so their selectors and signatures
+//! track the committed ABIs and a rename or a changed argument list upstream is a compile error
+//! here rather than an entry that silently stops matching. The EigenLayer `BLSSignatureChecker`
+//! the target calls into is the exception: its errors do not appear in the target's ABI — the
+//! target only calls the checker, so solc does not surface them — so those are declared locally.
 
 use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::sol_types::{GenericContractError, SolError, SolInterface};
 use alloy_primitives::{Bytes, FixedBytes, hex};
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
+use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
 use std::fmt;
 
-// Declared only so the selector table can take each selector and signature from a compile-time
-// constant rather than a transcribed hex literal; no instance of these types is ever built.
-mod sol_errors {
+// EigenLayer's `IBLSSignatureCheckerErrors`, raised inside the `checkSignatures` call the target
+// makes. Declared here because no ABI committed to this repo carries them, and only so the
+// selector table can take each selector and signature from a compile-time constant rather than a
+// transcribed hex literal; no instance of these types is ever built.
+mod checker_errors {
     alloy::sol! {
-        // EigenLayer `IBLSSignatureCheckerErrors`, raised inside `checkSignatures`.
         error InputEmptyQuorumNumbers();
         error InputArrayLengthMismatch();
         error InputNonSignerLengthMismatch();
@@ -30,26 +34,6 @@ mod sol_errors {
         error InvalidQuorumApkHash();
         error InvalidBLSPairingKey();
         error InvalidBLSSignature();
-
-        // `GasKillerSDK` preflight checks and state-change handler. Shared with the Schnorr SDK
-        // where the signature is identical, so each is declared once.
-        error FutureBlockNumber();
-        error StaleBlockNumber();
-        error InvalidTransitionIndex();
-        error InvalidSignature();
-        error InsufficientQuorumThreshold();
-        error InvalidStorageUpdates();
-        error MalformedLogPayload();
-        error InvalidOperation();
-        error InvalidArguments();
-        error RevertingContext(uint256 index, address target, bytes callData, bytes returnData);
-        error DeploymentFailed();
-
-        // `SchnorrGasKillerSDK`-only errors.
-        error InvalidQuorumSignature();
-        error ReentrantTransition();
-        error EmptyBatch();
-        error BlockStaleMeasureOverflow();
     }
 }
 
@@ -97,104 +81,104 @@ macro_rules! known_revert {
 /// the failure path.
 const KNOWN_REVERTS: &[KnownRevert] = &[
     known_revert!(
-        sol_errors::InvalidQuorumApkHash,
+        checker_errors::InvalidQuorumApkHash,
         "the target's blsSignatureChecker resolves a different operator set than the one that \
          signed this task; check the target's avsAddress and blsSignatureChecker against the live \
          deployment"
     ),
     known_revert!(
-        sol_errors::InvalidBLSSignature,
+        checker_errors::InvalidBLSSignature,
         "the aggregate signature does not verify against the quorum aggregate public key at the \
          reference block"
     ),
     known_revert!(
-        sol_errors::InvalidBLSPairingKey,
+        checker_errors::InvalidBLSPairingKey,
         "the BN254 pairing precompile rejected the proof; a supplied public key is not a valid \
          curve point"
     ),
     known_revert!(
-        sol_errors::InvalidReferenceBlocknumber,
+        checker_errors::InvalidReferenceBlocknumber,
         "the reference block is outside the window the signature checker accepts"
     ),
     known_revert!(
-        sol_errors::InputEmptyQuorumNumbers,
+        checker_errors::InputEmptyQuorumNumbers,
         "the round carried no quorum numbers for the signature checker to verify against"
     ),
     known_revert!(
-        sol_errors::InputArrayLengthMismatch,
+        checker_errors::InputArrayLengthMismatch,
         "the non-signer proof assembled for this round has inconsistent array lengths"
     ),
     known_revert!(
-        sol_errors::InputNonSignerLengthMismatch,
+        checker_errors::InputNonSignerLengthMismatch,
         "the non-signer public keys and their quorum bitmap indices differ in length"
     ),
     known_revert!(
-        sol_errors::NonSignerPubkeysNotSorted,
+        checker_errors::NonSignerPubkeysNotSorted,
         "the non-signer public keys are not in the ascending order the signature checker requires"
     ),
     known_revert!(
-        sol_errors::FutureBlockNumber,
+        GasKillerSDK::FutureBlockNumber,
         "the reference block is not yet mined from the target's view; the target may be on a \
          different chain than the one this task was analysed against"
     ),
     known_revert!(
-        sol_errors::StaleBlockNumber,
+        GasKillerSDK::StaleBlockNumber,
         "the reference block is older than the target's blockStaleMeasure allows; request a fresh \
          payload"
     ),
     known_revert!(
-        sol_errors::InvalidTransitionIndex,
+        GasKillerSDK::InvalidTransitionIndex,
         "the target's stateTransitionCount has moved past this payload; request a fresh payload"
     ),
     known_revert!(
-        sol_errors::InvalidSignature,
+        GasKillerSDK::InvalidSignature,
         "the signed digest does not match the one the target recomputes from its own address, the \
          target function, and the storage updates"
     ),
     known_revert!(
-        sol_errors::InsufficientQuorumThreshold,
+        GasKillerSDK::InsufficientQuorumThreshold,
         "the operators that signed hold less than QUORUM_THRESHOLD of the quorum's stake"
     ),
     known_revert!(
-        sol_errors::InvalidStorageUpdates,
+        GasKillerSDK::InvalidStorageUpdates,
         "the target's state-change handler could not decode the encoded storage updates"
     ),
     known_revert!(
-        sol_errors::MalformedLogPayload,
+        GasKillerSDK::MalformedLogPayload,
         "an encoded LOG update is not shaped as the target's state-change handler expects"
     ),
     known_revert!(
-        sol_errors::InvalidOperation,
+        GasKillerSDK::InvalidOperation,
         "the storage updates contain an operation the target's state-change handler does not \
          implement"
     ),
     known_revert!(
-        sol_errors::InvalidArguments,
+        GasKillerSDK::InvalidArguments,
         "the target rejected the call arguments"
     ),
     known_revert!(
-        sol_errors::RevertingContext,
+        GasKillerSDK::RevertingContext,
         "a CALL replayed from the storage updates reverted inside the target"
     ),
     known_revert!(
-        sol_errors::DeploymentFailed,
+        GasKillerSDK::DeploymentFailed,
         "a CREATE or CREATE2 replayed from the storage updates failed"
     ),
     known_revert!(
-        sol_errors::InvalidQuorumSignature,
+        SchnorrGasKillerSDK::InvalidQuorumSignature,
         "the aggregate Schnorr signature does not verify against the registry's aggregate key at \
          the reference block"
     ),
     known_revert!(
-        sol_errors::ReentrantTransition,
+        SchnorrGasKillerSDK::ReentrantTransition,
         "the target is already inside a tracked transition, so verifyAndUpdate cannot be entered"
     ),
     known_revert!(
-        sol_errors::EmptyBatch,
+        SchnorrGasKillerSDK::EmptyBatch,
         "the round produced no state updates to apply"
     ),
     known_revert!(
-        sol_errors::BlockStaleMeasureOverflow,
+        SchnorrGasKillerSDK::BlockStaleMeasureOverflow,
         "the target's configured blockStaleMeasure overflows when added to the reference block"
     ),
 ];
@@ -358,6 +342,40 @@ mod tests {
         PayloadRevert(Bytes::from(
             hex::decode(data).expect("test revert data should be hex"),
         ))
+    }
+
+    // Every error the committed SDK ABIs declare must have a cause. The generated bindings make a
+    // renamed, removed, or retyped error a compile failure, but an error *added* upstream would
+    // otherwise pass unnoticed and reach clients as raw revert data — which is the outcome this
+    // module exists to avoid. Reading the ABIs directly is the only check that sees additions.
+    #[test]
+    fn every_error_the_sdks_declare_has_a_cause() {
+        for (contract, abi) in [
+            (
+                "GasKillerSDK",
+                gas_killer_common::bindings::GAS_KILLER_SDK_ABI,
+            ),
+            (
+                "SchnorrGasKillerSDK",
+                gas_killer_common::bindings::SCHNORR_GAS_KILLER_SDK_ABI,
+            ),
+        ] {
+            let declared = serde_json::from_str::<alloy_json_abi::ContractObject>(abi)
+                .expect("the committed ABI should parse")
+                .abi
+                .expect("the committed ABI should carry an abi section");
+
+            for error in declared.errors.values().flatten() {
+                let selector = FixedBytes::new(error.selector().0);
+                assert!(
+                    KNOWN_REVERTS.iter().any(|known| known.selector == selector),
+                    "{contract}.{} ({selector}) is declared in the committed ABI but has no cause \
+                     in KNOWN_REVERTS; add an entry so a client sees the reason instead of raw \
+                     revert data",
+                    error.signature(),
+                );
+            }
+        }
     }
 
     // A second table entry for an already-listed selector would be dead: the lookup takes the
