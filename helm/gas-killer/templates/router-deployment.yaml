@@ -301,6 +301,10 @@ spec:
             - name: TASK_TTL_SECONDS
               value: {{ .Values.router.ingress.taskTtlSeconds | quote }}
             {{- end }}
+            {{- if ne (toString .Values.router.ingress.stalenessWindowBlocks) "" }}
+            - name: INGRESS_STALENESS_WINDOW_BLOCKS
+              value: {{ .Values.router.ingress.stalenessWindowBlocks | quote }}
+            {{- end }}
             {{- if or (and (eq .Values.global.environment "TESTNET") .Values.router.ingress.enabled) .Values.secrets.adminKey .Values.secrets.existingSecret }}
             - name: ADMIN_KEY
               valueFrom:

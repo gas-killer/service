@@ -40,11 +40,11 @@ use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::get_operator_states;
 use gas_killer_common::{
-    GasKillerTaskData, GasKillerValidator, SignatureScheme, SpeculativePrebuildConfig,
-    ack_messages_per_second, agg_activity_timeout, agg_window, load_key_from_file,
-    p2p_message_backlog, p2p_quota_period, quorum_threshold_fraction, rebroadcast_interval,
-    round_timeout, schnorr_messages_per_second, schnorr_stage_timeout, signature_scheme,
-    storage_directory, task_ttl,
+    GasKillerTaskData, GasKillerValidator, IngressStalenessWindow, SignatureScheme,
+    SpeculativePrebuildConfig, ack_messages_per_second, agg_activity_timeout, agg_window,
+    load_key_from_file, p2p_message_backlog, p2p_quota_period, quorum_threshold_fraction,
+    rebroadcast_interval, round_timeout, schnorr_messages_per_second, schnorr_stage_timeout,
+    signature_scheme, storage_directory, task_ttl,
 };
 use gas_killer_router::expiry::run_expiry_sweeper;
 use gas_killer_router::factories::{
@@ -207,6 +207,30 @@ fn main() {
             effective = payload_block_buffer,
             "PAYLOAD_BLOCK_BUFFER exceeds BLOCK_STALE_MEASURE; clamped to the staleness window so rendered payloads stay submittable on-chain"
         );
+    }
+
+    // The ingress admission window is derived rather than a fixed constant (it holds the payload
+    // buffer back from the staleness window), so report the effective value: it decides which
+    // submissions are accepted, and an operator cannot read it off a single env var.
+    match gas_killer_common::ingress_staleness_window() {
+        IngressStalenessWindow::Enforced(window) => tracing::info!(
+            window_blocks = window,
+            block_stale_measure,
+            payload_block_buffer,
+            "ingress block-height admission window"
+        ),
+        IngressStalenessWindow::Clamped {
+            requested,
+            effective,
+        } => tracing::warn!(
+            requested,
+            block_stale_measure,
+            window_blocks = effective,
+            "INGRESS_STALENESS_WINDOW_BLOCKS exceeds BLOCK_STALE_MEASURE; clamped to the staleness window, past which an admitted analysis cannot yield a submittable payload"
+        ),
+        IngressStalenessWindow::Disabled => tracing::warn!(
+            "ingress block-height admission disabled (INGRESS_STALENESS_WINDOW_BLOCKS=0); submissions anchored arbitrarily far behind head will be accepted and may never produce a submittable payload"
+        ),
     }
 
     // Log the router's public key G2 coordinates for config generation

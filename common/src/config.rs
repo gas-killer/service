@@ -734,6 +734,86 @@ pub fn payload_block_buffer() -> u64 {
     clamp_payload_block_buffer(requested, block_stale_measure())
 }
 
+/// How ingress admission is configured: the window it enforces, or that it is switched off.
+///
+/// Carries whether an explicitly requested window had to be reduced to fit, so a caller reporting
+/// the configuration knows without re-reading the environment or re-deriving the clamp rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressStalenessWindow {
+    /// Admission enforced with this many blocks of slack behind head.
+    Enforced(u64),
+    /// An explicitly requested window past the contract's staleness window, reduced to fit it.
+    Clamped { requested: u64, effective: u64 },
+    /// Admission switched off by an explicit `INGRESS_STALENESS_WINDOW_BLOCKS=0`.
+    Disabled,
+}
+
+impl IngressStalenessWindow {
+    /// Blocks of slack behind head that admission allows, or `None` when it is switched off.
+    pub fn window(self) -> Option<u64> {
+        match self {
+            Self::Enforced(window) => Some(window),
+            Self::Clamped { effective, .. } => Some(effective),
+            Self::Disabled => None,
+        }
+    }
+}
+
+/// Resolves the ingress admission window, in blocks: how far behind the target chain's head a
+/// submitted `block_height` may be and still be accepted.
+///
+/// Reads `INGRESS_STALENESS_WINDOW_BLOCKS`, where an explicit `0` is the escape hatch that turns
+/// admission off entirely. Unset or unparseable falls back to the derived default; see
+/// [`default_ingress_staleness_window`].
+pub fn ingress_staleness_window() -> IngressStalenessWindow {
+    let requested = env::var("INGRESS_STALENESS_WINDOW_BLOCKS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    resolve_ingress_staleness_window(requested, block_stale_measure(), payload_block_buffer())
+}
+
+/// The window admission uses when `INGRESS_STALENESS_WINDOW_BLOCKS` is unset: the contract's
+/// staleness window less the payload's own validity buffer.
+///
+/// A task's analysis is anchored at the submitted `block_height`, and everything downstream — the
+/// aggregation round, then the rendered payload's `valid_until_block` window — has to fit in what
+/// remains of the contract's `BLOCK_STALE_MEASURE` window. Admitting right up to the full window
+/// would accept work that can only just finish simulating, with nothing left for the payload the
+/// client is supposed to be able to submit. Holding back `PAYLOAD_BLOCK_BUFFER` blocks leaves that
+/// room. Floored at one block so a deployment that sets the buffer equal to the staleness window
+/// still admits fresh requests rather than rejecting everything.
+fn default_ingress_staleness_window(stale_measure: u64, payload_buffer: u64) -> u64 {
+    stale_measure.saturating_sub(payload_buffer).max(1)
+}
+
+/// Applies the `INGRESS_STALENESS_WINDOW_BLOCKS` semantics to a parsed value: `Some(0)` disables
+/// admission, any other explicit value is clamped to `stale_measure`, and an absent value derives
+/// [`default_ingress_staleness_window`].
+///
+/// The clamp bounds an explicit window by the contract's own: an analysis anchored further back
+/// than the operator-set window cannot produce a payload `verifyAndUpdate` accepts, and every such
+/// request also misses the speculative executor cache, which is sized to that same window. Split
+/// from [`ingress_staleness_window`] so the semantics are testable without mutating process-wide
+/// environment state.
+fn resolve_ingress_staleness_window(
+    requested: Option<u64>,
+    stale_measure: u64,
+    payload_buffer: u64,
+) -> IngressStalenessWindow {
+    match requested {
+        Some(0) => IngressStalenessWindow::Disabled,
+        Some(window) if window > stale_measure => IngressStalenessWindow::Clamped {
+            requested: window,
+            effective: stale_measure,
+        },
+        Some(window) => IngressStalenessWindow::Enforced(window),
+        None => IngressStalenessWindow::Enforced(default_ingress_staleness_window(
+            stale_measure,
+            payload_buffer,
+        )),
+    }
+}
+
 /// Clamps a requested payload buffer to the on-chain staleness window. A buffer past
 /// `stale_measure` would set `valid_until_block` beyond the block at which `verifyAndUpdate`
 /// reverts `StaleBlockNumber`, so the freshness gate would serve a payload that cannot land.
@@ -1058,5 +1138,79 @@ mod tests {
         // which `verifyAndUpdate` would revert `StaleBlockNumber`.
         assert_eq!(clamp_payload_block_buffer(500, 300), 300);
         assert_eq!(clamp_payload_block_buffer(300, 300), 300);
+    }
+
+    #[test]
+    fn ingress_window_default_reserves_the_payload_buffer() {
+        // Stock configuration: 300 - 50 leaves the payload's validity window inside the
+        // contract's staleness window.
+        assert_eq!(
+            resolve_ingress_staleness_window(None, 300, 50),
+            IngressStalenessWindow::Enforced(250),
+            "the default holds back the payload buffer"
+        );
+        assert_eq!(
+            resolve_ingress_staleness_window(None, 100, 10).window(),
+            Some(90)
+        );
+    }
+
+    #[test]
+    fn ingress_window_default_never_collapses_to_zero() {
+        // A buffer equal to (or somehow past) the staleness window would leave no admission
+        // window at all; the floor keeps fresh requests acceptable instead of rejecting every
+        // submission, and keeps the derived default from colliding with the disable sentinel.
+        assert_eq!(
+            resolve_ingress_staleness_window(None, 300, 300).window(),
+            Some(1)
+        );
+        assert_eq!(
+            resolve_ingress_staleness_window(None, 50, 300).window(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn ingress_window_explicit_value_is_honored() {
+        assert_eq!(
+            resolve_ingress_staleness_window(Some(10), 300, 50),
+            IngressStalenessWindow::Enforced(10)
+        );
+        assert_eq!(
+            resolve_ingress_staleness_window(Some(300), 300, 50),
+            IngressStalenessWindow::Enforced(300),
+            "a window exactly at the contract's window is unchanged"
+        );
+    }
+
+    #[test]
+    fn ingress_window_past_the_contract_window_reports_its_clamp() {
+        // The resolution carries the reduction, so startup reporting does not have to re-read the
+        // environment or re-apply the clamp rule to notice it happened.
+        assert_eq!(
+            resolve_ingress_staleness_window(Some(400), 300, 50),
+            IngressStalenessWindow::Clamped {
+                requested: 400,
+                effective: 300,
+            }
+        );
+        assert_eq!(
+            resolve_ingress_staleness_window(Some(400), 300, 50).window(),
+            Some(300),
+            "the effective window is the one admission enforces"
+        );
+    }
+
+    #[test]
+    fn ingress_window_zero_disables_admission() {
+        assert_eq!(
+            resolve_ingress_staleness_window(Some(0), 300, 50),
+            IngressStalenessWindow::Disabled,
+            "an explicit zero is the escape hatch, not a zero-block window"
+        );
+        assert_eq!(
+            resolve_ingress_staleness_window(Some(0), 300, 50).window(),
+            None
+        );
     }
 }
