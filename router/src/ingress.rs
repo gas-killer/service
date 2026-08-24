@@ -431,7 +431,7 @@ async fn validate_onchain<P: Provider + Clone>(
     // configurable and can be turned off entirely; see
     // [`gas_killer_common::ingress_staleness_window`]. age == max_age stays valid, matching the
     // contract's `referenceBlockNumber + BLOCK_STALE_MEASURE >= block.number` convention.
-    if let Some(max_age) = gas_killer_common::ingress_staleness_window()
+    if let Some(max_age) = gas_killer_common::ingress_staleness_window().window()
         && current_block.saturating_sub(body.block_height) > max_age
     {
         return Err(OnchainValidationError::BlockHeightTooStale {
@@ -3443,6 +3443,7 @@ mod tests {
         /// nothing to assert in that configuration.
         fn admission_window() -> u64 {
             gas_killer_common::ingress_staleness_window()
+                .window()
                 .expect("admission window must be enabled for the staleness tests")
         }
 
