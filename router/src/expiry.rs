@@ -19,9 +19,9 @@ use tracing::{debug, error, info};
 use crate::metrics::MetricsCollector;
 use crate::store::{ExpiryStage, SqliteStore};
 
-/// How often the sweep runs. Coarse relative to the default TTL (300 s), since the TTL is a
-/// backstop rather than a deadline the client can observe to the second — a task lingers at most
-/// one interval past its TTL before being settled.
+/// How often the sweep runs. Deliberately coarse relative to the task TTL (`TASK_TTL_SECONDS`),
+/// since the TTL is a backstop rather than a deadline the client can observe to the second — a
+/// task lingers at most one interval past its TTL before being settled.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Runs the TTL sweep every [`SWEEP_INTERVAL`] for as long as the router lives.
