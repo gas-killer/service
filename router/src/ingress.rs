@@ -321,6 +321,10 @@ pub enum OnchainValidationError {
         current: u64,
         max_age: u64,
     },
+    TargetNotDeployedAtBlock {
+        provided: u64,
+        current: u64,
+    },
     RpcError(String),
 }
 
@@ -344,6 +348,10 @@ impl fmt::Display for OnchainValidationError {
                 f,
                 "block_height {provided} is older than the staleness window ({max_age} blocks) relative to current chain height {current}"
             ),
+            Self::TargetNotDeployedAtBlock { provided, current } => write!(
+                f,
+                "target_address has no code at block_height {provided} (it is deployed as of the current chain height {current}), so an analysis anchored there would trace a call into an empty account"
+            ),
             Self::RpcError(msg) => write!(f, "RPC error during onchain validation: {msg}"),
         }
     }
@@ -365,6 +373,9 @@ impl From<OnchainValidationError> for ApiError {
             }
             OnchainValidationError::BlockHeightTooStale { .. } => {
                 (StatusCode::BAD_REQUEST, ErrorCode::StaleBlock)
+            }
+            OnchainValidationError::TargetNotDeployedAtBlock { .. } => {
+                (StatusCode::BAD_REQUEST, ErrorCode::TargetNotDeployed)
             }
             OnchainValidationError::RpcError(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, ErrorCode::RpcUnavailable)
@@ -438,6 +449,28 @@ async fn validate_onchain<P: Provider + Clone>(
             provided: body.block_height,
             current: current_block,
             max_age,
+        });
+    }
+
+    // Chain detection probes `latest`, which answers "is this a contract at all" but not "was it
+    // a contract at the height this analysis is anchored to". A `block_height` that predates the
+    // target's deployment traces a call into an empty account: the trace succeeds trivially, and
+    // the round returns a signed payload carrying an empty diff, so the request is refused here
+    // instead. A client whose RPC serves a lagging head sees this rather than a no-op payload.
+    //
+    // A provider that cannot serve state at `block_height` surfaces as a transient RPC failure
+    // rather than a rejection. That imposes no archive requirement the service does not already
+    // have: the analysis replays the call at that height, so a provider that cannot answer this
+    // probe cannot serve the task either.
+    let code_at_block = provider
+        .get_code_at(body.target_address)
+        .number(body.block_height)
+        .await
+        .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
+    if code_at_block.is_empty() {
+        return Err(OnchainValidationError::TargetNotDeployedAtBlock {
+            provided: body.block_height,
+            current: current_block,
         });
     }
 
@@ -3350,9 +3383,10 @@ mod tests {
     // alloy's built-in mock transport (alloy_provider::mock::Asserter).  No live
     // chain or forked node is required; responses are queued FIFO and consumed by
     // each RPC call in order:
-    //   1. eth_getCode        (detect_contract_chain)
+    //   1. eth_getCode        (detect_contract_chain, at latest)
     //   2. eth_blockNumber    (block-height check)
-    //   3. eth_call           (stateTransitionCount view call)
+    //   3. eth_getCode        (target code at the requested block_height)
+    //   4. eth_call           (stateTransitionCount view call)
 
     mod onchain {
         use super::*;
@@ -3491,6 +3525,7 @@ mod tests {
             let (provider, asserter) = mock_provider();
             push_code_exists(&asserter);
             push_block_number(&asserter, head);
+            push_code_exists(&asserter); // deployed at the requested block_height
             push_state_transition_count(&asserter, 5); // matches transition_index → passes
 
             let mut providers = HashMap::new();
@@ -3533,11 +3568,72 @@ mod tests {
             );
         }
 
+        /// A `block_height` that predates the target's deployment is refused even though the
+        /// address holds code now: chain detection sees the deployed contract at `latest`, and
+        /// only the probe at the requested height sees the empty account the analysis would have
+        /// traced into.
+        #[tokio::test]
+        async fn test_target_not_deployed_at_requested_block() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter); // detection at latest finds the deployed target
+            push_block_number(&asserter, 100);
+            push_code_empty(&asserter); // nothing was deployed at the requested block 50
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+
+            let err = validate_onchain(&providers, &valid_body())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    OnchainValidationError::TargetNotDeployedAtBlock {
+                        provided: 50,
+                        current: 100
+                    }
+                ),
+                "expected TargetNotDeployedAtBlock, got {err}"
+            );
+            // The code is distinct from CONTRACT_NOT_FOUND so a client can tell a wrong address
+            // from a block_height behind the target's deployment.
+            let api_err = ApiError::from(err);
+            assert_eq!(api_err.status, StatusCode::BAD_REQUEST);
+            assert_eq!(api_err.code, ErrorCode::TargetNotDeployed);
+        }
+
+        /// A provider that cannot serve state at the requested height leaves the request neither
+        /// proven good nor proven bad, so it is a transient failure rather than a rejection.
+        #[tokio::test]
+        async fn test_rpc_error_on_historical_get_code() {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, 100);
+            asserter.push_failure_msg("missing trie node");
+
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+
+            let err = validate_onchain(&providers, &valid_body())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::RpcError(_)),
+                "expected RpcError, got {err}"
+            );
+            assert_eq!(
+                ApiError::from(err).status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "an unanswerable probe is a 503, not a client error"
+            );
+        }
+
         #[tokio::test]
         async fn test_transition_index_behind() {
             let (provider, asserter) = mock_provider();
             push_code_exists(&asserter);
             push_block_number(&asserter, 100); // chain at 100, request wants 50 ✓
+            push_code_exists(&asserter); // deployed at the requested block_height
             push_state_transition_count(&asserter, 10); // contract at 10, request provides 5 ✗
 
             let mut providers = HashMap::new();
@@ -3563,6 +3659,7 @@ mod tests {
             let (provider, asserter) = mock_provider();
             push_code_exists(&asserter);
             push_block_number(&asserter, 100); // chain at 100 >= request 50 ✓
+            push_code_exists(&asserter); // deployed at the requested block_height
             push_state_transition_count(&asserter, 5); // contract at 5, request at 5 ✓
 
             let mut providers = HashMap::new();
@@ -3578,6 +3675,7 @@ mod tests {
             let (provider, asserter) = mock_provider();
             push_code_exists(&asserter);
             push_block_number(&asserter, 100);
+            push_code_exists(&asserter); // deployed at the requested block_height
             push_state_transition_count(&asserter, 3); // contract at 3, request at 5 → ahead ✗
 
             let mut providers = HashMap::new();
@@ -3638,6 +3736,7 @@ mod tests {
             let (provider, asserter) = mock_provider();
             push_code_exists(&asserter);
             push_block_number(&asserter, 100);
+            push_code_exists(&asserter); // deployed at the requested block_height
             asserter.push_failure_msg("call reverted");
 
             let mut providers = HashMap::new();
@@ -3657,6 +3756,7 @@ mod tests {
             let (provider, asserter) = mock_provider();
             push_code_exists(&asserter);
             push_block_number(&asserter, 100);
+            push_code_exists(&asserter); // deployed at the requested block_height
             // No push_state_transition_count — the mock asserter would fail if it were called.
 
             let mut providers = HashMap::new();
@@ -3678,6 +3778,7 @@ mod tests {
             push_code_empty(&l1_asserter); // L1 has no code
             push_code_exists(&l2_asserter); // L2 does
             push_block_number(&l2_asserter, 100);
+            push_code_exists(&l2_asserter); // deployed at the requested block_height
             push_state_transition_count(&l2_asserter, 5);
 
             let mut providers = HashMap::new();
@@ -3779,6 +3880,14 @@ mod tests {
                     },
                     StatusCode::BAD_REQUEST,
                     ErrorCode::StaleBlock,
+                ),
+                (
+                    OnchainValidationError::TargetNotDeployedAtBlock {
+                        provided: 100,
+                        current: 500,
+                    },
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::TargetNotDeployed,
                 ),
             ];
             for (err, status, code) in cases {

@@ -52,6 +52,9 @@ pub enum ErrorCode {
     RpcUnavailable,
     /// No contract is deployed at the requested target address on any supported chain.
     ContractNotFound,
+    /// The target address holds code now but held none at the requested `block_height` — the
+    /// request is anchored before the target was deployed.
+    TargetNotDeployed,
     /// The request body is malformed or fails field-level validation.
     InvalidRequest,
     /// The requested path does not exist.
@@ -259,6 +262,7 @@ mod tests {
             (ErrorCode::Forbidden, "FORBIDDEN"),
             (ErrorCode::RpcUnavailable, "RPC_UNAVAILABLE"),
             (ErrorCode::ContractNotFound, "CONTRACT_NOT_FOUND"),
+            (ErrorCode::TargetNotDeployed, "TARGET_NOT_DEPLOYED"),
             (ErrorCode::InvalidRequest, "INVALID_REQUEST"),
             (ErrorCode::NotFound, "NOT_FOUND"),
             (ErrorCode::MethodNotAllowed, "METHOD_NOT_ALLOWED"),
