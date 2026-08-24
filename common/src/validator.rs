@@ -6,6 +6,7 @@ use commonware_runtime::telemetry::metrics::raw::Histogram;
 use commonware_runtime::telemetry::metrics::registry::Registry;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -77,10 +78,33 @@ impl Default for ValidatorMetrics {
     }
 }
 
+/// The ABI encoding of a state-update program that carries no operations.
+///
+/// Derived from the encoder rather than written out as a literal, so a change to the wire
+/// format cannot leave this stale: the same function produces both the value under test and
+/// every program the analysis emits.
+static EMPTY_STATE_UPDATE_PROGRAM: LazyLock<Vec<u8>> =
+    LazyLock::new(|| gas_analyzer_core::encode_state_updates_to_abi(&[]).to_vec());
+
+/// Whether an ABI-encoded state-update program applies nothing.
+///
+/// Applying such a program is a no-op on the target's storage, yet it still costs gas and —
+/// because `verifyAndUpdate` is itself tracked — still advances `stateTransitionCount`,
+/// invalidating every other payload outstanding for that target. There is no reason to ask the
+/// quorum to sign one, so [`GasKillerValidator::analyze_transaction`] refuses it.
+///
+/// Note that only a freshly analysed program can be judged this way. A task's announced
+/// `storage_updates` are deliberately stripped to nothing on the wire (nodes recompute them),
+/// so an empty field there means "not carried", not "applies nothing".
+pub fn is_empty_state_update_program(encoded: &[u8]) -> bool {
+    encoded == EMPTY_STATE_UPDATE_PROGRAM.as_slice()
+}
+
 /// Result of gas analysis containing storage updates and gas information
 #[derive(Debug, Clone)]
 pub struct AnalysisResult {
-    /// The storage updates extracted from the transaction
+    /// The storage updates extracted from the transaction. Never the empty program — see
+    /// [`is_empty_state_update_program`].
     pub storage_updates: Vec<u8>,
     /// The gas estimate from gas-analyzer
     #[allow(dead_code)]
@@ -388,6 +412,9 @@ impl GasKillerValidator {
     ///
     /// Takes an explicit RPC URL parameter for flexibility.
     /// Forks at the specified block for deterministic results.
+    ///
+    /// An analysis that extracts no state updates is an error rather than a result: see
+    /// [`is_empty_state_update_program`].
     pub async fn analyze_transaction(
         &self,
         rpc_url: &str,
@@ -428,6 +455,17 @@ impl GasKillerValidator {
             )
             .await
             .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+
+        // Every path that produces a signable diff — the router's task creation and each node's
+        // independent recomputation — comes through here, so refusing the empty program once keeps
+        // a no-op out of the round without the two sides being able to disagree about it.
+        if is_empty_state_update_program(&storage_updates) {
+            anyhow::bail!(
+                "analysis produced no state updates: the call to {contract_address} at block \
+                 {block_height} changes nothing, so its payload would spend gas to apply nothing \
+                 while still advancing the target's transition count"
+            );
+        }
 
         debug!(
             "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
@@ -729,6 +767,39 @@ mod tests {
         let hash = result.expect("Full validation should succeed with RPC access");
         let zero_hash = Digest::from([0u8; 32]);
         assert_ne!(hash, zero_hash, "Hash should not be all zeros");
+    }
+
+    /// The empty program's shape: a 128-byte blob of two offsets followed by two zero-length
+    /// arrays. Pinned here so an encoder change that moved it fails in this crate rather than
+    /// leaving the guard silently unenforced.
+    #[test]
+    fn empty_program_is_two_zero_length_arrays() {
+        let encoded = gas_analyzer_core::encode_state_updates_to_abi(&[]);
+        assert!(is_empty_state_update_program(&encoded));
+        assert_eq!(encoded.len(), 128);
+        assert_eq!(U256::from_be_slice(&encoded[0..32]), U256::from(0x40)); // offset: types
+        assert_eq!(U256::from_be_slice(&encoded[32..64]), U256::from(0x60)); // offset: datas
+        assert_eq!(U256::from_be_slice(&encoded[64..96]), U256::ZERO); // types.length
+        assert_eq!(U256::from_be_slice(&encoded[96..128]), U256::ZERO); // datas.length
+    }
+
+    #[test]
+    fn a_program_that_writes_one_slot_is_not_empty() {
+        use gas_analyzer_core::{IStateUpdateTypes, StateUpdate};
+
+        let store = StateUpdate::Store(IStateUpdateTypes::Store {
+            slot: alloy::primitives::B256::ZERO,
+            value: alloy::primitives::B256::from(U256::from(1)),
+        });
+        let encoded = gas_analyzer_core::encode_state_updates_to_abi(&[store]);
+        assert!(!is_empty_state_update_program(&encoded));
+    }
+
+    /// A stripped announcement carries no `storage_updates` at all, which is not the same as an
+    /// analysis that applies nothing — the predicate must not conflate the two.
+    #[test]
+    fn an_absent_program_is_not_the_empty_program() {
+        assert!(!is_empty_state_update_program(&[]));
     }
 
     #[test]
