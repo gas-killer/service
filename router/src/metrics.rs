@@ -25,6 +25,11 @@ pub struct MetricsCollector {
     pub aggregation_rounds_completed: Counter<u64, AtomicU64>,
     /// Aggregation rounds that failed (hash mismatch, tx error, etc.).
     pub aggregation_rounds_failed: Counter<u64, AtomicU64>,
+    /// Rounds abandoned because the rendered payload's `verifyAndUpdate` reverted when estimated,
+    /// which is almost always a misconfigured target (wrong AVS or signature checker) rather than
+    /// a router fault. Tracked apart from `aggregation_rounds_failed` so that cause is visible
+    /// without reading logs.
+    pub payloads_rejected_reverting: Counter<u64, AtomicU64>,
     /// Full handle_verification duration including contract calls and tx submission (seconds).
     pub execution_duration_seconds: Histogram,
     /// Time from creator dispatching a task to the executor receiving threshold signatures (seconds).
@@ -131,6 +136,13 @@ impl MetricsCollector {
         );
 
         // Fast reverts (~sub-second, fail at tx send) and confirmed runs (~block-time dominated); Buckets resolve both ends.
+        let payloads_rejected_reverting = Counter::default();
+        registry.register(
+            "gas_killer_payloads_rejected_reverting",
+            "Total rounds failed because the rendered verifyAndUpdate reverted when estimated",
+            payloads_rejected_reverting.clone(),
+        );
+
         let execution_duration_seconds = Histogram::new([
             0.5, 1.0, 2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0, 45.0, 60.0, 120.0, 300.0,
         ]);
@@ -227,6 +239,7 @@ impl MetricsCollector {
             storage_computation_seconds,
             aggregation_rounds_completed,
             aggregation_rounds_failed,
+            payloads_rejected_reverting,
             execution_duration_seconds,
             p2p_round_trip_seconds,
             round_latency_seconds,

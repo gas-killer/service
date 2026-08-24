@@ -1,4 +1,5 @@
 use crate::metrics::MetricsCollector;
+use crate::payload_revert::PayloadRevert;
 use crate::sequencer::{InFlightTask, in_flight_task, set_task_failed, set_task_ready};
 use crate::store::SqliteStore;
 use crate::task_data::GasKillerTaskData;
@@ -6,7 +7,7 @@ use alloy::network::Ethereum;
 use alloy::sol_types::SolValue;
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use commonware_avs_router::executor::{BlsSignatureVerificationHandler, ExecutionResult};
 use commonware_avs_router::sequencer::{DispatchTime, take_dispatch_time};
 use gas_killer_common::ChainRole;
@@ -30,13 +31,16 @@ const DEFAULT_RECEIPT_TIMEOUT_L1_SECS: u64 = 120;
 /// Default receipt-wait timeout on L2, where blocks land in seconds or less.
 const DEFAULT_RECEIPT_TIMEOUT_L2_SECS: u64 = 30;
 
-/// Gas estimate recorded in a rendered payload when `eth_estimateGas` fails. It is advisory —
-/// the user re-fills gas when submitting — so a transient RPC failure still yields a submittable
-/// payload rather than failing an already-completed round. Sized as a generous ceiling that clears
-/// a real `verifyAndUpdate` (signature verification plus a large batched state transition) so a
-/// caller that submits it verbatim as the gas limit does not run out of gas; it stays well under
-/// the block gas limit, and unused gas is refunded, so over-provisioning costs the submitter
-/// nothing.
+/// Gas estimate recorded in a rendered payload when `eth_estimateGas` could not be reached. It is
+/// advisory — the user re-fills gas when submitting — so a transport failure still yields a
+/// submittable payload rather than failing an already-completed round. Sized as a generous ceiling
+/// that clears a real `verifyAndUpdate` (signature verification plus a large batched state
+/// transition) so a caller that submits it verbatim as the gas limit does not run out of gas; it
+/// stays well under the block gas limit, and unused gas is refunded, so over-provisioning costs
+/// the submitter nothing.
+///
+/// It never stands in for a call that executed and reverted: those fail the round outright, so a
+/// payload carrying this estimate is one whose landability is unknown, not one known to fail.
 const PAYLOAD_GAS_ESTIMATE_FALLBACK: u64 = 10_000_000;
 
 /// Rebuilds the operator-state-retriever `NonSignerStakesAndSignature` into the distinct
@@ -539,15 +543,63 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         })
     }
 
+    /// Resolves the advisory `estimated_gas` for a rendered payload from the outcome of
+    /// `eth_estimateGas`, or fails the round when that call proved the payload cannot land.
+    ///
+    /// The estimate doubles as the router's only end-to-end submittability check: it executes the
+    /// exact calldata the client would send, as the client's account, against the target's current
+    /// state and through the same signature verification. A revert there is proof the transaction
+    /// would revert for the client too, so the round fails with the decoded cause rather than
+    /// returning calldata that is certain to burn the client's gas.
+    ///
+    /// Failures that never reached execution — transport errors, timeouts, rate limiting — carry
+    /// no information about landability, so they keep [`PAYLOAD_GAS_ESTIMATE_FALLBACK`] and the
+    /// payload is still returned.
+    fn resolve_payload_gas(
+        &self,
+        outcome: alloy::contract::Result<u64>,
+        target_addr: Address,
+    ) -> Result<u64> {
+        let error = match outcome {
+            Ok(gas) => return Ok(gas),
+            Err(error) => error,
+        };
+
+        match PayloadRevert::from_call_error(&error) {
+            Some(revert) => {
+                warn!(
+                    target = %target_addr,
+                    %error,
+                    revert = %revert,
+                    "verifyAndUpdate reverts at current state; failing the round instead of \
+                     returning an unsubmittable payload"
+                );
+                if let Some(m) = &self.metrics {
+                    m.payloads_rejected_reverting.inc();
+                }
+                bail!("rendered payload reverts and cannot be submitted: {revert}");
+            }
+            None => {
+                warn!(
+                    target = %target_addr,
+                    %error,
+                    fallback = PAYLOAD_GAS_ESTIMATE_FALLBACK,
+                    "verifyAndUpdate gas estimation unreachable; using fallback estimate"
+                );
+                Ok(PAYLOAD_GAS_ESTIMATE_FALLBACK)
+            }
+        }
+    }
+
     /// Renders a completed BLS round into a user-signable transaction request and the durable
     /// [`TaskBundle`] it derives from, without broadcasting.
     ///
     /// `data` is the full `verifyAndUpdate` calldata; `estimated_gas` comes from
-    /// `eth_estimateGas` simulated as the requesting account, falling back to
-    /// [`PAYLOAD_GAS_ESTIMATE_FALLBACK`] if the estimate fails so a transient RPC error still
-    /// yields a submittable payload. `value` is fixed at zero: `verifyAndUpdate` is not payable
-    /// in beta and the value is kept server-controlled so a future on-chain fee is a server
-    /// change, not an integrator client-code change.
+    /// `eth_estimateGas` simulated as the requesting account, via
+    /// [`Self::resolve_payload_gas`] — which also fails the round if that call reverts. `value` is
+    /// fixed at zero: `verifyAndUpdate` is not payable in beta and the value is kept
+    /// server-controlled so a future on-chain fee is a server change, not an integrator client-code
+    /// change.
     async fn render_bls_payload(
         &self,
         msg_hash: FixedBytes<32>,
@@ -598,18 +650,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             .value(value);
 
         let data = call.calldata().clone();
-        let estimated_gas = match call.estimate_gas().await {
-            Ok(gas) => gas,
-            Err(e) => {
-                warn!(
-                    target = %target_addr,
-                    error = %e,
-                    fallback = PAYLOAD_GAS_ESTIMATE_FALLBACK,
-                    "verifyAndUpdate gas estimation failed; using fallback estimate"
-                );
-                PAYLOAD_GAS_ESTIMATE_FALLBACK
-            }
-        };
+        let estimated_gas = self.resolve_payload_gas(call.estimate_gas().await, target_addr)?;
 
         let valid_until_block = reference_block_number as u64 + self.payload_block_buffer;
 
@@ -979,18 +1020,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             .value(value);
 
         let data = call.calldata().clone();
-        let estimated_gas = match call.estimate_gas().await {
-            Ok(gas) => gas,
-            Err(e) => {
-                warn!(
-                    target = %target_addr,
-                    error = %e,
-                    fallback = PAYLOAD_GAS_ESTIMATE_FALLBACK,
-                    "verifyAndUpdate gas estimation failed; using fallback estimate"
-                );
-                PAYLOAD_GAS_ESTIMATE_FALLBACK
-            }
-        };
+        let estimated_gas = self.resolve_payload_gas(call.estimate_gas().await, target_addr)?;
 
         let unclamped_valid_until = reference_block_number as u64 + self.payload_block_buffer;
         let horizon = self
@@ -1659,5 +1689,151 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    // -- payload gas estimation --
+
+    use crate::payload_revert::{execution_reverted, rpc_error};
+
+    fn handler_for_estimation() -> GasKillerHandler<impl Provider<Ethereum> + Clone> {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        GasKillerHandler::new(1, provider)
+    }
+
+    // Queues the JSON-RPC error response a node returns for a call that executed and reverted, so
+    // the provider fails the next RPC the way `eth_estimateGas` does against a target whose
+    // signature checker cannot verify the round.
+    fn push_execution_revert(asserter: &Asserter, data: &str) {
+        asserter.push(alloy::rpc::json_rpc::ResponsePayload::Failure(
+            alloy::rpc::json_rpc::ErrorPayload {
+                code: 3,
+                message: "execution reverted".into(),
+                data: Some(
+                    serde_json::value::RawValue::from_string(format!("\"{data}\"")).unwrap(),
+                ),
+            },
+        ));
+    }
+
+    #[test]
+    fn resolve_payload_gas_uses_the_node_estimate() {
+        let handler = handler_for_estimation();
+        assert_eq!(
+            handler
+                .resolve_payload_gas(Ok(257_468), Address::ZERO)
+                .unwrap(),
+            257_468
+        );
+    }
+
+    // Estimation that never executed says nothing about landability, so the round still completes
+    // and the payload carries the advisory fallback.
+    #[test]
+    fn resolve_payload_gas_falls_back_when_estimation_is_unreachable() {
+        let handler = handler_for_estimation();
+        assert_eq!(
+            handler
+                .resolve_payload_gas(Err(rpc_error(-32005, "rate limit exceeded")), Address::ZERO)
+                .unwrap(),
+            PAYLOAD_GAS_ESTIMATE_FALLBACK
+        );
+    }
+
+    // A revert is proof the client's submission would revert too, so the round fails and the
+    // cause travels in the error rather than being replaced by a fallback estimate.
+    #[test]
+    fn resolve_payload_gas_fails_the_round_when_the_call_reverts() {
+        let handler = handler_for_estimation();
+        let error = handler
+            .resolve_payload_gas(Err(execution_reverted(Some("0xe1310aed"))), Address::ZERO)
+            .expect_err("a reverting estimate must not yield a payload");
+        let message = error.to_string();
+        assert!(message.contains("InvalidQuorumApkHash()"), "{message}");
+        assert!(message.contains("blsSignatureChecker"), "{message}");
+    }
+
+    #[test]
+    fn resolve_payload_gas_counts_rejected_payloads() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let metrics = Arc::new(MetricsCollector::new());
+        let handler = GasKillerHandler::new(1, provider).with_metrics(metrics.clone());
+
+        assert!(
+            handler
+                .resolve_payload_gas(Err(execution_reverted(Some("0xe1310aed"))), Address::ZERO)
+                .is_err()
+        );
+        assert!(
+            metrics
+                .encode()
+                .contains("gas_killer_payloads_rejected_reverting_total 1"),
+            "the rejection should be counted:\n{}",
+            metrics.encode()
+        );
+    }
+
+    // The failure the mis-wired integrator target hit: the round certifies, the payload renders,
+    // and the estimate proves it cannot land. The task must settle failed with the cause instead
+    // of ready with calldata that burns the client's gas.
+    #[tokio::test]
+    async fn handle_verification_settles_failed_when_the_rendered_payload_reverts() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store
+            .create_task(&key, &request_body())
+            .await
+            .expect("task creation should succeed");
+
+        let storage_updates = Bytes::from(vec![0xaa, 0xbb, 0xcc, 0xdd]);
+        let task_data = GasKillerTaskData {
+            storage_updates: storage_updates.clone(),
+            transition_index: 0,
+            target_address: Address::from([0x11; 20]),
+            call_data: vec![0x12, 0x34, 0x56, 0x78],
+            from_address: Address::from([0x22; 20]),
+            value: U256::ZERO,
+            block_height: 1,
+            chain_id: 1,
+        };
+        let msg_hash =
+            FixedBytes::<32>::from(task_data.build_payload_hash(storage_updates.as_ref()).0);
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        // The ERC-165 probe passes, then eth_estimateGas reverts with the signature-checker
+        // mismatch selector.
+        push_supports_interface(&asserter, true);
+        push_execution_revert(&asserter, "0xe1310aed");
+
+        let in_flight = in_flight_task();
+        *in_flight.lock().unwrap() = Some(task.id.clone());
+        let mut handler = GasKillerHandler::new(1, provider)
+            .with_store(store.clone())
+            .with_in_flight_task(in_flight.clone())
+            .with_payload_block_buffer(50);
+
+        let result = handler
+            .handle_verification(
+                0,
+                msg_hash,
+                Bytes::from(vec![0x00]),
+                100,
+                empty_non_signer_data(),
+                Some(&task_data),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Failed);
+        assert!(
+            settled.payload.is_none(),
+            "a payload proven to revert must not be persisted"
+        );
+        let error = settled.error.expect("a failure reason should be recorded");
+        assert!(error.contains("InvalidQuorumApkHash()"), "{error}");
+        assert!(error.contains("blsSignatureChecker"), "{error}");
     }
 }
