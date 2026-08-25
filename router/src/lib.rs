@@ -5,6 +5,8 @@ pub mod executor;
 pub mod expiry;
 pub mod factories;
 pub mod ingress;
+#[cfg(test)]
+mod log_capture;
 pub mod metrics;
 pub mod payload_revert;
 pub mod rate_limit;

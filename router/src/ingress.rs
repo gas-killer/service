@@ -3,7 +3,8 @@ use crate::metrics::MetricsCollector;
 use crate::rate_limit::KeyRateLimiter;
 use crate::sequencer::{QueuedTask, TaskQueueDepth, TaskSender};
 use crate::store::{
-    ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, SqliteStore, SubmittedTask, Task, TaskStatus,
+    ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, KeyVerdict, SqliteStore, SubmittedTask, Task,
+    TaskStatus,
 };
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
@@ -223,6 +224,17 @@ fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
         .is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes()))
 }
 
+/// `key_id` recorded for a request that cannot be attributed to an issued key. Every audit log
+/// line carries the field, so a search by `key_id` never silently omits unattributable traffic.
+const UNATTRIBUTED_KEY_ID: &str = "unknown";
+
+/// Milliseconds a request has spent in its handler, for the `duration_ms` field on its audit log
+/// lines. Measured from handler entry, so it covers authentication, validation, and persistence
+/// but not the framework's body read.
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis() as u64
+}
+
 /// Authenticates the caller against the durable store, returning the authenticated key (its id
 /// and rate-limit ceiling). Used by every task endpoint (submission and status) to identify — and
 /// scope work to — the calling key: a valid, unrevoked API key is required, and anything else is
@@ -232,21 +244,39 @@ fn check_bearer_auth(headers: &HeaderMap, expected: &str) -> bool {
 /// [`require_store`]) before authenticating. Every task endpoint needs the store regardless — to
 /// persist or to read — so there is no configuration in which one could authenticate a caller and
 /// then find it has nowhere to work.
+///
+/// Every rejection is logged with a `key_id` so an operator can trace abusive traffic back to a
+/// client: a key that was issued but has since been revoked or expired is named by its id
+/// ([`KeyVerdict::Rejected`]), and anything else — no header, or a value matching no issued key —
+/// records [`UNATTRIBUTED_KEY_ID`]. The presented key value is never logged.
 async fn authenticate_caller(
     store: &SqliteStore,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedKey, ApiError> {
-    if let Some(token) = bearer_token(headers) {
-        match store.verify_api_key(token).await {
-            Ok(Some(authed)) => return Ok(authed),
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!(error = %e, "api key verification failed");
-                return Err(ApiError::internal("Internal error during authentication"));
-            }
-        }
-    }
+    let Some(token) = bearer_token(headers) else {
+        warn!(
+            key_id = UNATTRIBUTED_KEY_ID,
+            "Request rejected: missing or malformed Authorization header"
+        );
+        return Err(ApiError::unauthorized());
+    };
 
+    // Each verdict decides only what the rejection is attributed to; every one of them is the
+    // same opaque `401` to the caller, so a probe cannot tell a revoked key from an invented one.
+    let key_id = match store.verify_api_key(token).await {
+        Ok(KeyVerdict::Valid(authed)) => return Ok(authed),
+        Ok(KeyVerdict::Rejected { id }) => id,
+        Ok(KeyVerdict::Unknown) => UNATTRIBUTED_KEY_ID.to_string(),
+        Err(e) => {
+            tracing::error!(error = %e, "api key verification failed");
+            return Err(ApiError::internal("Internal error during authentication"));
+        }
+    };
+
+    warn!(
+        %key_id,
+        "Request rejected: API key is unknown, revoked, or expired"
+    );
     Err(ApiError::unauthorized())
 }
 
@@ -731,11 +761,16 @@ impl Drop for QueueSlot<'_> {
 /// round-trips are worth spending on a request that cannot be persisted or attributed. Beyond
 /// that, validation and load-shedding stay synchronous and run before any task row is written, so
 /// a malformed or at-capacity request never persists.
+///
+/// Every outcome — accepted, deduplicated, or rejected — logs the calling `key_id`, the request's
+/// `target_address` and `transition_index`, and how long it took (`duration_ms`), so an operator
+/// can audit a client's traffic without the key value ever appearing in a log.
 pub async fn submit_task_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
     ApiJson(request): ApiJson<GasKillerTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskAcceptedResponse>), ApiError> {
+    let started = Instant::now();
     let store = require_store(&state)?;
     let key = authenticate_caller(store, &headers).await?;
 
@@ -747,7 +782,10 @@ pub async fn submit_task_handler(
     {
         warn!(
             key_id = %key.id,
+            target_address = %request.body.target_address,
+            transition_index = ?request.body.transition_index,
             retry_after_secs,
+            duration_ms = elapsed_ms(started),
             "Task rejected: per-key rate limit exceeded"
         );
         if let Some(m) = &state.metrics {
@@ -766,8 +804,12 @@ pub async fn submit_task_handler(
         Ok((slot, _depth)) => slot,
         Err(current_depth) => {
             warn!(
+                key_id = %key.id,
+                target_address = %request.body.target_address,
+                transition_index = ?request.body.transition_index,
                 queue_depth = current_depth,
                 max_queue_depth = state.max_queue_depth,
+                duration_ms = elapsed_ms(started),
                 "Task rejected: queue at capacity"
             );
             if let Some(m) = &state.metrics {
@@ -782,10 +824,13 @@ pub async fn submit_task_handler(
 
     if let Err(e) = request.validate() {
         warn!(
+            key_id = %key.id,
             target_address = %request.body.target_address,
             from_address = %request.body.from_address,
+            transition_index = ?request.body.transition_index,
             block_height = request.body.block_height,
             error = %e,
+            duration_ms = elapsed_ms(started),
             "Task rejected"
         );
         if let Some(m) = &state.metrics {
@@ -798,11 +843,13 @@ pub async fn submit_task_handler(
         && let Err(e) = validate_onchain(&*state.providers, &request.body).await
     {
         warn!(
+            key_id = %key.id,
             target_address = %request.body.target_address,
             from_address = %request.body.from_address,
             block_height = request.body.block_height,
             transition_index = ?request.body.transition_index,
             error = %e,
+            duration_ms = elapsed_ms(started),
             "Task rejected (onchain)"
         );
         if let Some(m) = &state.metrics {
@@ -815,7 +862,14 @@ pub async fn submit_task_handler(
         .create_task_deduplicated(&key.id, &request.body)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "failed to persist task");
+            tracing::error!(
+                key_id = %key.id,
+                target_address = %request.body.target_address,
+                transition_index = ?request.body.transition_index,
+                error = %e,
+                duration_ms = elapsed_ms(started),
+                "failed to persist task"
+            );
             ApiError::internal("Internal error: failed to persist task")
         })?;
 
@@ -825,10 +879,12 @@ pub async fn submit_task_handler(
     // so the client polls the same id idempotently.
     if deduplicated {
         info!(
+            key_id = %key.id,
             task_id = %task.id,
             status = ?task.status,
             target_address = %request.body.target_address,
             transition_index = ?request.body.transition_index,
+            duration_ms = elapsed_ms(started),
             "Task deduplicated onto existing submission"
         );
         if let Some(m) = &state.metrics {
@@ -845,11 +901,14 @@ pub async fn submit_task_handler(
     }
 
     info!(
+        key_id = %key.id,
         task_id = %task.id,
         target_address = %request.body.target_address,
         from_address = %request.body.from_address,
+        transition_index = ?request.body.transition_index,
         block_height = request.body.block_height,
         call_data_len = request.body.call_data.len(),
+        duration_ms = elapsed_ms(started),
         "Task accepted"
     );
     let queued = QueuedTask {
@@ -857,7 +916,12 @@ pub async fn submit_task_handler(
         request,
     };
     if state.sender.send(queued).is_err() {
-        tracing::error!(task_id = %task.id, "task channel closed, dropping request");
+        tracing::error!(
+            key_id = %key.id,
+            task_id = %task.id,
+            duration_ms = elapsed_ms(started),
+            "task channel closed, dropping request"
+        );
         return Err(ApiError::internal("Internal error: task queue unavailable"));
     }
     // The enqueued task now owns the reserved slot; the sequencer decrements the depth counter
@@ -900,7 +964,12 @@ impl From<Task> for TaskView {
         let payload = task.payload.as_deref().and_then(|raw| {
             serde_json::from_str::<PayloadView>(raw)
                 .inspect_err(|e| {
-                    tracing::warn!(task_id = %task.id, error = %e, "stored payload failed to parse");
+                    tracing::warn!(
+                        key_id = %task.key_id,
+                        task_id = %task.id,
+                        error = %e,
+                        "stored payload failed to parse"
+                    );
                 })
                 .ok()
         });
@@ -965,7 +1034,12 @@ async fn render_or_reject_payload<P: Provider + Clone>(
 ) -> Result<Option<PayloadView>, ApiError> {
     let payload = match task.payload.as_deref() {
         Some(raw) => serde_json::from_str::<PayloadView>(raw).map_err(|e| {
-            tracing::error!(task_id = %task.id, error = %e, "stored payload failed to parse");
+            tracing::error!(
+                key_id = %task.key_id,
+                task_id = %task.id,
+                error = %e,
+                "stored payload failed to parse"
+            );
             ApiError::internal("Internal error: stored payload is malformed")
         })?,
         // No payload recorded yet (queued/processing/failed).
@@ -995,7 +1069,12 @@ async fn render_or_reject_payload<P: Provider + Clone>(
     // The bundle carries the chain / target / transition / validity data the check needs.
     let bundle: TaskBundle = match task.bundle.as_deref() {
         Some(raw) => serde_json::from_str(raw).map_err(|e| {
-            tracing::error!(task_id = %task.id, error = %e, "stored bundle failed to parse");
+            tracing::error!(
+                key_id = %task.key_id,
+                task_id = %task.id,
+                error = %e,
+                "stored bundle failed to parse"
+            );
             ApiError::internal("Internal error: stored bundle is malformed")
         })?,
         // Ready without a bundle: nothing to validate against, so serve as-is.
@@ -1085,6 +1164,7 @@ pub async fn get_task_handler(
     headers: HeaderMap,
     Path(task_id): Path<String>,
 ) -> Result<Json<TaskView>, ApiError> {
+    let started = Instant::now();
     let store = require_store(&state)?;
     let key_id = authenticate_caller(store, &headers).await?.id;
 
@@ -1092,12 +1172,20 @@ pub async fn get_task_handler(
         .get_task(&task_id)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "failed to fetch task");
+            tracing::error!(key_id = %key_id, task_id = %task_id, error = %e, "failed to fetch task");
             ApiError::internal("Internal error: failed to fetch task")
         })?
         .ok_or_else(|| ApiError::not_found("Task not found"))?;
 
+    // A key reaching for a task it does not own is worth recording: the only way to hit this is
+    // to present a task id belonging to another client.
     if task.key_id != key_id {
+        warn!(
+            key_id = %key_id,
+            task_id = %task_id,
+            duration_ms = elapsed_ms(started),
+            "Task request rejected: task belongs to a different API key"
+        );
         return Err(ApiError::forbidden("Task belongs to a different API key"));
     }
 
@@ -1128,7 +1216,7 @@ pub async fn list_tasks_handler(
         .list_tasks_for_key(&key_id, params.status, limit, offset)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "failed to list tasks");
+            tracing::error!(key_id = %key_id, error = %e, "failed to list tasks");
             ApiError::internal("Internal error: failed to list tasks")
         })?;
 
@@ -1205,7 +1293,7 @@ async fn create_api_key_handler(
             tracing::error!(error = %e, "failed to create api key");
             ApiError::internal("Failed to create API key")
         })?;
-    info!(id = %created.id, rpm_limit = ?created.rpm_limit, "api key created");
+    info!(key_id = %created.id, rpm_limit = ?created.rpm_limit, "api key created");
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -1240,7 +1328,7 @@ async fn revoke_api_key_handler(
     })?;
 
     if revoked {
-        info!(id = %id, "api key revoked");
+        info!(key_id = %id, "api key revoked");
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::new(
@@ -2586,6 +2674,145 @@ mod tests {
             let (app, _store, _rx) = make_app_with_store(None).await;
             let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // -- audit logging tests --
+        //
+        // The audit trail is a contract with the operator: every request outcome must name the
+        // key that sent it (never the key value) and how long it took, so abusive traffic can be
+        // traced back to a client. These assert on the fields the handlers actually emit.
+
+        #[tokio::test]
+        async fn accepted_submission_logs_the_calling_key_and_duration() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let created = store.create_api_key(None, None).await.unwrap();
+
+            let (logs, _guard) = crate::log_capture::capture_events();
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let accepted = accepted_body(resp).await;
+
+            let event = logs.find("Task accepted").unwrap_or_else(|| {
+                panic!(
+                    "expected a Task accepted line, logged: {:?}",
+                    logs.messages()
+                )
+            });
+            assert_eq!(event.field("key_id"), Some(created.id.as_str()));
+            assert_eq!(event.field("task_id"), Some(accepted.task_id.as_str()));
+            assert_eq!(
+                event.field("target_address"),
+                Some("0x0000000000000000000000000000000000000001")
+            );
+            assert_eq!(event.field("transition_index"), Some("Some(0)"));
+            assert!(
+                event
+                    .field("duration_ms")
+                    .and_then(|d| d.parse::<u64>().ok())
+                    .is_some(),
+                "duration_ms should be logged as a number, got {:?}",
+                event.field("duration_ms")
+            );
+            // The key value itself must never reach a log line, in the message or in any field.
+            logs.assert_never_logged(&created.key);
+        }
+
+        #[tokio::test]
+        async fn revoked_key_rejection_names_the_key() {
+            let (app, store, _rx) = make_app_with_store(None).await;
+            let created = store.create_api_key(None, None).await.unwrap();
+            store.revoke_api_key(&created.id).await.unwrap();
+
+            let (logs, _guard) = crate::log_capture::capture_events();
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            // A key that was issued and then revoked is still attributable, which is the whole
+            // point: an operator can see which client is retrying with a dead key.
+            let event = logs
+                .find("Request rejected: API key is unknown, revoked, or expired")
+                .unwrap_or_else(|| {
+                    panic!("expected a rejection line, logged: {:?}", logs.messages())
+                });
+            assert_eq!(event.field("key_id"), Some(created.id.as_str()));
+            // The rejection path holds the presented token to resolve its id; it must log the id
+            // and nothing else.
+            logs.assert_never_logged(&created.key);
+        }
+
+        #[tokio::test]
+        async fn unknown_key_rejection_is_unattributed() {
+            let (app, _store, _rx) = make_app_with_store(None).await;
+
+            let (logs, _guard) = crate::log_capture::capture_events();
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), "gk_never_issued"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            let event = logs
+                .find("Request rejected: API key is unknown, revoked, or expired")
+                .unwrap_or_else(|| {
+                    panic!("expected a rejection line, logged: {:?}", logs.messages())
+                });
+            assert_eq!(event.field("key_id"), Some(UNATTRIBUTED_KEY_ID));
+        }
+
+        #[tokio::test]
+        async fn missing_token_rejection_is_unattributed() {
+            let (app, _store, _rx) = make_app_with_store(None).await;
+
+            let (logs, _guard) = crate::log_capture::capture_events();
+            let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+            let event = logs
+                .find("Request rejected: missing or malformed Authorization header")
+                .unwrap_or_else(|| {
+                    panic!("expected a rejection line, logged: {:?}", logs.messages())
+                });
+            assert_eq!(event.field("key_id"), Some(UNATTRIBUTED_KEY_ID));
+        }
+
+        #[tokio::test]
+        async fn rate_limited_request_logs_the_calling_key_and_duration() {
+            let (app, store, _rx) = make_rate_limited_app(1, None).await;
+            let created = store.create_api_key(None, None).await.unwrap();
+
+            let (logs, _guard) = crate::log_capture::capture_events();
+            let first = app
+                .clone()
+                .oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::ACCEPTED);
+            let second = app
+                .oneshot(bearer_request(&valid_body(), &created.key))
+                .await
+                .unwrap();
+            assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+            let event = logs
+                .find("Task rejected: per-key rate limit exceeded")
+                .unwrap_or_else(|| {
+                    panic!("expected a rate-limit line, logged: {:?}", logs.messages())
+                });
+            assert_eq!(event.field("key_id"), Some(created.id.as_str()));
+            assert!(
+                event
+                    .field("duration_ms")
+                    .and_then(|d| d.parse::<u64>().ok())
+                    .is_some(),
+                "duration_ms should be logged as a number, got {:?}",
+                event.field("duration_ms")
+            );
         }
 
         // -- queue capacity tests --

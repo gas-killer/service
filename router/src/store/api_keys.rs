@@ -56,14 +56,32 @@ pub struct ApiKeyMetadata {
     pub rpm_limit: Option<u32>,
 }
 
-/// The outcome of authenticating a presented key: the key's public id and its rate-limit ceiling.
-/// Returned by [`SqliteStore::verify_api_key`] so the ingress can both attribute the request to a
-/// key and pick the right rate-limit quota in one lookup.
+/// A key that authenticates: its public id and its rate-limit ceiling. Carried by
+/// [`KeyVerdict::Valid`] so the ingress can both attribute the request to a key and pick the right
+/// rate-limit quota from one lookup.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedKey {
     pub id: String,
     /// Per-key requests-per-minute override, or `None` when the key uses the global default rate.
     pub rpm_limit: Option<u32>,
+}
+
+/// What [`SqliteStore::verify_api_key`] made of a presented key value.
+///
+/// The two rejection variants are distinct because a request is only auditable when it can be
+/// attributed: a key this router issued and has since revoked or expired is still nameable, which
+/// is exactly the traffic worth investigating, while a value that was never a key has no id to
+/// name. Both are the same `401` to the caller.
+#[derive(Debug, Clone)]
+pub enum KeyVerdict {
+    /// The key is valid; `last_used` has been stamped.
+    Valid(AuthenticatedKey),
+    /// A key this router issued that no longer authenticates — revoked or past its expiry — named
+    /// by its public id so the rejection can be attributed. `last_used` is left untouched, so a
+    /// rejected request never registers as a use of the key.
+    Rejected { id: String },
+    /// The presented value matches no key this router ever issued.
+    Unknown,
 }
 
 /// Generates a fresh opaque key: `gk_` followed by 32 hex-encoded random bytes.
@@ -188,27 +206,35 @@ impl SqliteStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Authenticates a presented key. Returns the key's id and rate-limit ceiling when it matches
-    /// a still-valid key (neither revoked nor past its expiry), stamping `last_used` in the same
-    /// statement; returns `None` when the key is unknown, revoked, or expired. Lookup is by hash,
-    /// so the raw secret is never compared byte-wise.
-    pub async fn verify_api_key(
-        &self,
-        presented: &str,
-    ) -> anyhow::Result<Option<AuthenticatedKey>> {
+    /// Authenticates a presented key, returning a [`KeyVerdict`]: valid (with the id and
+    /// rate-limit ceiling), rejected but nameable, or unknown. Lookup is by hash, so the raw
+    /// secret is never compared byte-wise.
+    ///
+    /// One statement decides all three outcomes. Matching on `key_hash` alone means a revoked or
+    /// expired key still yields its row — that is what makes a rejection attributable — so the
+    /// validity test moves into the `SET`, stamping `last_used` only for a key that actually
+    /// authenticates, and comes back alongside the id as a flag. `invalid_at` is not assigned, so
+    /// the flag reads the same before and after the update.
+    pub async fn verify_api_key(&self, presented: &str) -> anyhow::Result<KeyVerdict> {
         let key_hash = hash_key(presented);
 
-        let row: Option<(String, Option<u32>)> = sqlx::query_as(
-            "UPDATE api_keys SET last_used = unixepoch() \
-             WHERE key_hash = ?1 AND (invalid_at IS NULL OR invalid_at > unixepoch()) \
-             RETURNING id, rpm_limit",
+        let row: Option<(String, Option<u32>, bool)> = sqlx::query_as(
+            "UPDATE api_keys \
+                SET last_used = CASE WHEN invalid_at IS NULL OR invalid_at > unixepoch() \
+                                     THEN unixepoch() ELSE last_used END \
+              WHERE key_hash = ?1 \
+             RETURNING id, rpm_limit, (invalid_at IS NULL OR invalid_at > unixepoch())",
         )
         .bind(&key_hash)
         .fetch_optional(self.pool())
         .await
         .context("verifying api key")?;
 
-        Ok(row.map(|(id, rpm_limit)| AuthenticatedKey { id, rpm_limit }))
+        Ok(match row {
+            Some((id, rpm_limit, true)) => KeyVerdict::Valid(AuthenticatedKey { id, rpm_limit }),
+            Some((id, _, false)) => KeyVerdict::Rejected { id },
+            None => KeyVerdict::Unknown,
+        })
     }
 }
 
@@ -220,6 +246,14 @@ mod tests {
         SqliteStore::connect_in_memory()
             .await
             .expect("in-memory store should open and migrate")
+    }
+
+    /// The authenticated key behind a [`KeyVerdict::Valid`], or a panic naming what came back.
+    fn expect_valid(verdict: KeyVerdict) -> AuthenticatedKey {
+        match verdict {
+            KeyVerdict::Valid(authed) => authed,
+            other => panic!("expected a valid key, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -256,11 +290,12 @@ mod tests {
         let store = store().await;
         let created = store.create_api_key(None, None).await.unwrap();
 
-        let authed = store
-            .verify_api_key(&created.key)
-            .await
-            .expect("verify should not error")
-            .expect("valid key should authenticate");
+        let authed = expect_valid(
+            store
+                .verify_api_key(&created.key)
+                .await
+                .expect("verify should not error"),
+        );
         assert_eq!(authed.id, created.id);
 
         // last_used starts null and is set after a successful verification.
@@ -280,11 +315,15 @@ mod tests {
         let store = store().await;
         store.create_api_key(None, None).await.unwrap();
 
-        let result = store
+        let verdict = store
             .verify_api_key("gk_deadbeef")
             .await
             .expect("verify should not error");
-        assert!(result.is_none(), "an unknown key must not authenticate");
+        assert!(
+            matches!(verdict, KeyVerdict::Unknown),
+            "a value that was never a key must not authenticate and has no id to name, got \
+             {verdict:?}"
+        );
     }
 
     #[tokio::test]
@@ -297,7 +336,10 @@ mod tests {
             "revoking an active key should report success"
         );
         assert!(
-            store.verify_api_key(&created.key).await.unwrap().is_none(),
+            matches!(
+                store.verify_api_key(&created.key).await.unwrap(),
+                KeyVerdict::Rejected { .. }
+            ),
             "a revoked key must not authenticate"
         );
     }
@@ -349,7 +391,10 @@ mod tests {
         assert_eq!(created.invalid_at, Some(FUTURE));
 
         assert!(
-            store.verify_api_key(&created.key).await.unwrap().is_some(),
+            matches!(
+                store.verify_api_key(&created.key).await.unwrap(),
+                KeyVerdict::Valid(_)
+            ),
             "a key whose expiry is in the future should authenticate"
         );
 
@@ -372,7 +417,10 @@ mod tests {
         let created = store.create_api_key(None, Some(1)).await.unwrap();
 
         assert!(
-            store.verify_api_key(&created.key).await.unwrap().is_none(),
+            matches!(
+                store.verify_api_key(&created.key).await.unwrap(),
+                KeyVerdict::Rejected { .. }
+            ),
             "a key past its expiry must not authenticate"
         );
         assert!(
@@ -391,7 +439,10 @@ mod tests {
             "revoking a key with a pending expiry should report success"
         );
         assert!(
-            store.verify_api_key(&created.key).await.unwrap().is_none(),
+            matches!(
+                store.verify_api_key(&created.key).await.unwrap(),
+                KeyVerdict::Rejected { .. }
+            ),
             "revocation must invalidate the key ahead of its scheduled expiry"
         );
     }
@@ -405,11 +456,7 @@ mod tests {
             .unwrap();
         assert_eq!(created.rpm_limit, Some(600));
 
-        let authed = store
-            .verify_api_key(&created.key)
-            .await
-            .unwrap()
-            .expect("key should authenticate");
+        let authed = expect_valid(store.verify_api_key(&created.key).await.unwrap());
         assert_eq!(authed.id, created.id);
         assert_eq!(
             authed.rpm_limit,
@@ -428,10 +475,82 @@ mod tests {
         let created = store.create_api_key(None, None).await.unwrap();
         assert_eq!(created.rpm_limit, None);
 
-        let authed = store.verify_api_key(&created.key).await.unwrap().unwrap();
+        let authed = expect_valid(store.verify_api_key(&created.key).await.unwrap());
         assert_eq!(
             authed.rpm_limit, None,
             "a key with no override falls back to the global default rate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_key_that_no_longer_authenticates_is_still_named() {
+        let store = store().await;
+        let revoked = store.create_api_key(None, None).await.unwrap();
+        store.revoke_api_key(&revoked.id).await.unwrap();
+        // An expiry in the distant past (1970) is already lapsed at creation.
+        let expired = store.create_api_key(None, Some(1)).await.unwrap();
+
+        // Neither key authenticates any more, but both remain attributable, so a rejected request
+        // can still name the client that sent it.
+        for created in [&revoked, &expired] {
+            match store.verify_api_key(&created.key).await.unwrap() {
+                KeyVerdict::Rejected { id } => assert_eq!(id, created.id),
+                other => panic!("expected a named rejection, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_key_does_not_have_its_last_used_stamped() {
+        let store = store().await;
+        let created = store.create_api_key(None, None).await.unwrap();
+        store.revoke_api_key(&created.id).await.unwrap();
+
+        // Plant a sentinel `last_used` rather than authenticating once for a real stamp: a real
+        // stamp and an unwanted re-stamp fall in the same second, so they are indistinguishable.
+        // A value no clock would produce makes an overwrite unmistakable.
+        const SENTINEL: i64 = 12_345;
+        sqlx::query("UPDATE api_keys SET last_used = ?1 WHERE id = ?2")
+            .bind(SENTINEL)
+            .bind(&created.id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        // Naming the key for the audit log must not register as a use of it: the one statement
+        // stamps `last_used` only on the branch that actually authenticates.
+        for _ in 0..3 {
+            assert!(matches!(
+                store.verify_api_key(&created.key).await.unwrap(),
+                KeyVerdict::Rejected { .. }
+            ));
+        }
+
+        // A revoked key drops out of the active listing, so read the column directly.
+        let last_used: Option<i64> =
+            sqlx::query_scalar("SELECT last_used FROM api_keys WHERE id = ?1")
+                .bind(&created.id)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            last_used,
+            Some(SENTINEL),
+            "a rejected request must leave last_used where the last real use left it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_never_issued_has_no_id_to_name() {
+        let store = store().await;
+        store.create_api_key(None, None).await.unwrap();
+
+        assert!(
+            matches!(
+                store.verify_api_key("gk_deadbeef").await.unwrap(),
+                KeyVerdict::Unknown
+            ),
+            "a value that matches no issued key has no id to attribute a request to"
         );
     }
 
