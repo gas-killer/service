@@ -2727,11 +2727,8 @@ mod tests {
                 "duration_ms should be logged as a number, got {:?}",
                 event.field("duration_ms")
             );
-            // The key value itself must never reach a log line.
-            assert!(
-                !logs.messages().iter().any(|m| m.contains(&created.key)),
-                "the key value must not be logged"
-            );
+            // The key value itself must never reach a log line, in the message or in any field.
+            logs.assert_never_logged(&created.key);
         }
 
         #[tokio::test]
@@ -2755,6 +2752,9 @@ mod tests {
                     panic!("expected a rejection line, logged: {:?}", logs.messages())
                 });
             assert_eq!(event.field("key_id"), Some(created.id.as_str()));
+            // The rejection path holds the presented token to resolve its id; it must log the id
+            // and nothing else.
+            logs.assert_never_logged(&created.key);
         }
 
         #[tokio::test]

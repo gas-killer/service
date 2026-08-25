@@ -67,6 +67,31 @@ impl CapturedEvents {
             Err(_) => Vec::new(),
         }
     }
+
+    /// Asserts that `needle` appears nowhere in what was logged — neither in a message nor in any
+    /// field value. Guards the invariant that a secret never reaches a log line: written as an
+    /// assertion over every field rather than a check of the fixed message strings, so a log
+    /// statement that puts a secret in a new field fails wherever it lands.
+    pub fn assert_never_logged(&self, needle: &str) {
+        let events = self
+            .0
+            .lock()
+            .expect("capture buffer is only locked to record an event");
+        for event in events.iter() {
+            assert!(
+                !event.message.contains(needle),
+                "logged message must not contain the secret: {:?}",
+                event.message
+            );
+            for (name, value) in &event.fields {
+                assert!(
+                    !value.contains(needle),
+                    "field {name:?} on {:?} must not contain the secret",
+                    event.message
+                );
+            }
+        }
+    }
 }
 
 impl<S: Subscriber> Layer<S> for CapturedEvents {
