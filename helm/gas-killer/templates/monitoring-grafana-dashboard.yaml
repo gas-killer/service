@@ -174,7 +174,8 @@ data:
           "id": 21,
           "type": "timeseries",
           "title": "Aggregation Rounds / min",
-          "gridPos": { "x": 0, "y": 15, "w": 8, "h": 8 },
+          "description": "Payload reverts are counted apart from generic failures because they almost always mean a misconfigured target (wrong AVS or signature checker) rather than a router fault.",
+          "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "rate(gas_killer_aggregation_rounds_completed_total[2m]) * 60",
@@ -183,32 +184,20 @@ data:
             {
               "expr": "rate(gas_killer_aggregation_rounds_failed_total[2m]) * 60",
               "legendFormat": "failed"
+            },
+            {
+              "expr": "rate(gas_killer_payloads_rejected_reverting_total[2m]) * 60",
+              "legendFormat": "payload reverts (target misconfigured)"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "short" } }
         },
         {
-          "id": 22,
-          "type": "timeseries",
-          "title": "Execution Duration (p50/p95)",
-          "gridPos": { "x": 8, "y": 15, "w": 8, "h": 8 },
-          "targets": [
-            {
-              "expr": "histogram_quantile(0.50, rate(gas_killer_execution_duration_seconds_bucket[5m]))",
-              "legendFormat": "Typical (p50)"
-            },
-            {
-              "expr": "histogram_quantile(0.95, rate(gas_killer_execution_duration_seconds_bucket[5m]))",
-              "legendFormat": "Slow tail (p95)"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "s" } }
-        },
-        {
           "id": 23,
           "type": "timeseries",
           "title": "Storage Computation Duration (p50/p95)",
-          "gridPos": { "x": 16, "y": 15, "w": 8, "h": 8 },
+          "description": "Router-side EVM storage-update computation, before the task is dispatched to the quorum. Not part of round latency.",
+          "gridPos": { "x": 12, "y": 15, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_storage_computation_seconds_bucket[5m]))",
@@ -226,43 +215,74 @@ data:
           "type": "text",
           "title": "Latency Breakdown",
           "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Latency Breakdown\n\nRound latency = end-to-end time from creator dispatch to verifyAndUpdate receipt confirmation, successful rounds only. P2P round-trip = time from creator dispatching a task (after router-side storage computation) to the executor receiving threshold signatures. Includes P2P transit ×2, node EVMSketch, BLS signing, and aggregation.\n\nEstimated transport+signing overhead ≈ round-trip − node EVMSketch. Router-side storage computation and ingress-queue wait are **not** part of either measurement (they complete before the dispatch timestamp is stamped)." }
+          "options": { "mode": "markdown", "content": "## Latency Breakdown\n\nTwo different clocks, and the difference between them matters.\n\n**End-to-end** is what a client waits: ingress acceptance until the task settles `ready` or `failed`. It includes queue wait and router-side storage computation.\n\n**Round latency** starts later — at creator dispatch — and covers only the round itself: `p2p + node compute` (P2P transit ×2, node EVMSketch, BLS signing, aggregation) plus `router execution` (contract calls and tx submission, broken out per phase alongside). Round latency is observed for successful rounds only, so receipt timeouts cannot skew its percentiles.\n\nEnd-to-end minus round latency is therefore the queue wait plus storage computation." }
         },
         {
-          "id": 44,
+          "id": 45,
           "type": "timeseries",
-          "title": "Round Latency (p50 / p95 / p99)",
-          "description": "End-to-end: creator dispatch → verifyAndUpdate receipt confirmation. Successful rounds only.",
-          "gridPos": { "x": 0, "y": 24, "w": 6, "h": 8 },
+          "title": "End-to-End Latency (p50 / p95)",
+          "description": "What a client actually waits: ingress acceptance to a task settling ready or failed, queue wait included. Resolution is whole seconds — both ends come from the task row's second-granularity timestamps.",
+          "gridPos": { "x": 0, "y": 24, "w": 8, "h": 8 },
           "targets": [
             {
-              "expr": "histogram_quantile(0.50, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "expr": "histogram_quantile(0.50, rate(gas_killer_task_e2e_seconds_bucket[5m]))",
               "legendFormat": "p50"
             },
             {
-              "expr": "histogram_quantile(0.95, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "expr": "histogram_quantile(0.95, rate(gas_killer_task_e2e_seconds_bucket[5m]))",
               "legendFormat": "p95"
-            },
-            {
-              "expr": "histogram_quantile(0.99, rate(gas_killer_round_latency_seconds_bucket[5m]))",
-              "legendFormat": "p99"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "s" } }
         },
         {
-          "id": 41,
+          "id": 44,
           "type": "timeseries",
-          "title": "P2P Round-Trip (p50 / p99)",
-          "gridPos": { "x": 6, "y": 24, "w": 6, "h": 8 },
+          "title": "Round Latency Breakdown",
+          "description": "The round total against its two components, so a regression can be attributed without switching panels. Total is creator dispatch to verifyAndUpdate receipt, successful rounds only.",
+          "gridPos": { "x": 8, "y": 24, "w": 8, "h": 8 },
           "targets": [
             {
-              "expr": "histogram_quantile(0.50, rate(gas_killer_p2p_round_trip_seconds_bucket[5m]))",
-              "legendFormat": "p50"
+              "expr": "histogram_quantile(0.95, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "legendFormat": "round total p95"
             },
             {
-              "expr": "histogram_quantile(0.99, rate(gas_killer_p2p_round_trip_seconds_bucket[5m]))",
-              "legendFormat": "p99"
+              "expr": "histogram_quantile(0.95, rate(gas_killer_p2p_round_trip_seconds_bucket[5m]))",
+              "legendFormat": "p2p + node compute p95"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_execution_duration_seconds_bucket[5m]))",
+              "legendFormat": "router execution p95"
+            },
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_round_latency_seconds_bucket[5m]))",
+              "legendFormat": "round total p50"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
+          "id": 46,
+          "type": "timeseries",
+          "title": "Executor Phases (p95)",
+          "description": "Per-phase latency inside handle_verification, in execution order: getMessageHash preflight → supportsInterface check → tx send (includes gas estimation) → receipt confirmation (block inclusion wait). Overlaid so the dominant phase is visible at a glance; receipt confirmation is normally block-time bound and dwarfs the rest.",
+          "gridPos": { "x": 16, "y": 24, "w": 8, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_hash_preflight_seconds_bucket[5m]))",
+              "legendFormat": "hash preflight"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_supports_interface_seconds_bucket[5m]))",
+              "legendFormat": "supportsInterface"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_tx_send_seconds_bucket[5m]))",
+              "legendFormat": "tx send"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_receipt_confirmation_seconds_bucket[5m]))",
+              "legendFormat": "receipt confirmation"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "s" } }
@@ -272,7 +292,7 @@ data:
           "type": "timeseries",
           "title": "Node EVMSketch Duration (p50 / p99)",
           "description": "Time for call_to_encoded_state_updates_with_evmsketch on the node (cache-miss path). Scraped from the node's /metrics endpoint.",
-          "gridPos": { "x": 12, "y": 24, "w": 6, "h": 8 },
+          "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(gas_killer_node_evmsketch_duration_seconds_bucket[5m]))",
@@ -290,7 +310,7 @@ data:
           "type": "timeseries",
           "title": "Task Queue Depth",
           "description": "Number of tasks sitting in the ingress queue waiting to be processed. Sustained depth > 0 under burst load indicates the 1 msg/sec P2P rate limit is the bottleneck.",
-          "gridPos": { "x": 18, "y": 24, "w": 6, "h": 8 },
+          "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "gas_killer_queue_depth",
@@ -315,14 +335,14 @@ data:
           "id": 60,
           "type": "text",
           "title": "Orchestrator Internals",
-          "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 },
+          "gridPos": { "x": 0, "y": 40, "w": 24, "h": 1 },
           "options": { "mode": "markdown", "content": "## Orchestrator Internals\n\nRound-internal metrics from the commonware orchestrator and BLS executor registries, surfaced via the runtime context on the same `/metrics` endpoint.\n\nTime to quorum = round broadcast → signature threshold reached (isolates aggregation from EigenLayer reads). Round timeouts = aggregation windows that expired before the round completed — the primary signal for tuning `ROUND_TIMEOUT`. EigenLayer state retrieval = operator resolution + non-signer stakes/signature reads between quorum and `handle_verification`; subtract it and time-to-quorum from P2P round-trip to estimate pure transport+signing overhead." }
         },
         {
           "id": 61,
           "type": "timeseries",
           "title": "Time to Quorum (p50 / p95)",
-          "gridPos": { "x": 0, "y": 33, "w": 6, "h": 8 },
+          "gridPos": { "x": 0, "y": 41, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(orchestrator_time_to_quorum_seconds_bucket[5m]))",
@@ -340,7 +360,7 @@ data:
           "type": "timeseries",
           "title": "Signature Arrival Spread (p50 / p99)",
           "description": "Round broadcast → each accepted signature. A wide p50→p99 gap means straggler operators are holding rounds open.",
-          "gridPos": { "x": 6, "y": 33, "w": 6, "h": 8 },
+          "gridPos": { "x": 6, "y": 41, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(orchestrator_signature_arrival_seconds_bucket[5m]))",
@@ -358,7 +378,7 @@ data:
           "type": "timeseries",
           "title": "Round Outcomes / min",
           "description": "A timed-out round is abandoned and the orchestrator moves to the next queued task; sustained timeouts mean ROUND_TIMEOUT is shorter than time-to-quorum.",
-          "gridPos": { "x": 12, "y": 33, "w": 6, "h": 8 },
+          "gridPos": { "x": 12, "y": 41, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "rate(orchestrator_round_executions_total{status=\"Success\"}[2m]) * 60",
@@ -380,7 +400,7 @@ data:
           "type": "timeseries",
           "title": "Signatures / min by Outcome",
           "description": "Success = accepted and stored. Invalid = failed decode, validation, or BLS verification. Dropped = duplicates, unknown senders/rounds, already-executed rounds.",
-          "gridPos": { "x": 18, "y": 33, "w": 6, "h": 8 },
+          "gridPos": { "x": 18, "y": 41, "w": 6, "h": 8 },
           "targets": [
             {
               "expr": "rate(orchestrator_signatures_total{status=\"Success\"}[2m]) * 60",
@@ -402,7 +422,7 @@ data:
           "type": "timeseries",
           "title": "EigenLayer State Retrieval (p50 / p95)",
           "description": "Operator-address resolution + current-block query + getNonSignerStakesAndSignature, per execution. Runs between quorum and handle_verification, so it is included in the P2P Round-Trip measurement above.",
-          "gridPos": { "x": 0, "y": 41, "w": 12, "h": 8 },
+          "gridPos": { "x": 0, "y": 49, "w": 12, "h": 8 },
           "targets": [
             {
               "expr": "histogram_quantile(0.50, rate(executor_state_retrieval_seconds_bucket[5m]))",
@@ -416,45 +436,74 @@ data:
           "fieldConfig": { "defaults": { "unit": "s" } }
         },
         {
-          "id": 66,
-          "type": "stat",
-          "title": "Operator Cache Misses (total)",
-          "description": "pubkeyHashToOperator RPC lookups. Expected at startup and when new operators register; steady growth otherwise indicates the cache is not retaining entries.",
-          "gridPos": { "x": 12, "y": 41, "w": 12, "h": 8 },
-          "targets": [{
-            "expr": "executor_operator_cache_misses_total",
-            "legendFormat": "cache misses"
-          }],
-          "options": {
-            "reduceOptions": { "calcs": ["lastNotNull"] },
-            "colorMode": "background",
-            "graphMode": "area"
-          }
-        },
-        {
           "id": 30,
           "type": "text",
           "title": "Ingress",
-          "gridPos": { "x": 0, "y": 49, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Ingress" }
+          "gridPos": { "x": 0, "y": 57, "w": 24, "h": 1 },
+          "options": { "mode": "markdown", "content": "## Ingress\n\nIngress counters are labelled with the `key_id` of the calling API key — the key's public id, never its value, matching the `key_id` field on the audit log lines. The aggregate panel sums across keys; the per-key panels break the same counters down so load and abuse can be attributed to a client.\n\nA key keeps its series until the router restarts, so a revoked key's history stays visible for as long as the process lives." }
         },
         {
           "id": 31,
           "type": "timeseries",
           "title": "Ingress Request Rate / min",
-          "gridPos": { "x": 0, "y": 50, "w": 12, "h": 8 },
+          "description": "Summed across every API key. Rejections split by cause: validation, per-key rate limit, and load shedding when the queue is full.",
+          "gridPos": { "x": 0, "y": 58, "w": 12, "h": 8 },
           "targets": [
             {
-              "expr": "rate(gas_killer_ingress_requests_accepted_total[2m]) * 60",
+              "expr": "sum(rate(gas_killer_ingress_requests_accepted_total[2m])) * 60",
               "legendFormat": "accepted"
             },
             {
-              "expr": "rate(gas_killer_ingress_requests_rejected_total[2m]) * 60",
-              "legendFormat": "rejected"
+              "expr": "sum(rate(gas_killer_ingress_requests_deduplicated_total[2m])) * 60",
+              "legendFormat": "deduplicated (retry)"
             },
             {
-              "expr": "rate(gas_killer_ingress_requests_at_capacity_total[2m]) * 60",
+              "expr": "sum(rate(gas_killer_ingress_requests_rejected_total[2m])) * 60",
+              "legendFormat": "rejected (400)"
+            },
+            {
+              "expr": "sum(rate(gas_killer_ingress_requests_rate_limited_total[2m])) * 60",
+              "legendFormat": "rate limited (429)"
+            },
+            {
+              "expr": "sum(rate(gas_killer_ingress_requests_at_capacity_total[2m])) * 60",
               "legendFormat": "at capacity (503)"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 34,
+          "type": "timeseries",
+          "title": "Accepted / min by API key",
+          "description": "Which clients are driving load. One line per key that has submitted since the router started.",
+          "gridPos": { "x": 12, "y": 58, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "sum by (key_id) (rate(gas_killer_ingress_requests_accepted_total[2m])) * 60",
+              "legendFormat": "{{ "{{" }} key_id {{ "}}" }}"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 35,
+          "type": "timeseries",
+          "title": "Rejections / min by API key",
+          "description": "Which clients are being turned away, and why. Kept as three series rather than one sum so the cause stays visible: a key that is rate limited is behaving differently from one sending invalid requests.",
+          "gridPos": { "x": 0, "y": 66, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "sum by (key_id) (rate(gas_killer_ingress_requests_rejected_total[2m])) * 60",
+              "legendFormat": "{{ "{{" }} key_id {{ "}}" }} rejected"
+            },
+            {
+              "expr": "sum by (key_id) (rate(gas_killer_ingress_requests_rate_limited_total[2m])) * 60",
+              "legendFormat": "{{ "{{" }} key_id {{ "}}" }} rate limited"
+            },
+            {
+              "expr": "sum by (key_id) (rate(gas_killer_ingress_requests_at_capacity_total[2m])) * 60",
+              "legendFormat": "{{ "{{" }} key_id {{ "}}" }} at capacity"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "short" } }
@@ -462,10 +511,11 @@ data:
         {
           "id": 32,
           "type": "stat",
-          "title": "Tasks Created (total)",
-          "gridPos": { "x": 12, "y": 50, "w": 6, "h": 8 },
+          "title": "Tasks Created",
+          "description": "Tasks dequeued and dispatched to the quorum over the dashboard's selected time range.",
+          "gridPos": { "x": 12, "y": 66, "w": 6, "h": 8 },
           "targets": [{
-            "expr": "gas_killer_tasks_created_total",
+            "expr": "increase(gas_killer_tasks_created_total[$__range])",
             "legendFormat": "tasks"
           }],
           "options": {
@@ -477,11 +527,11 @@ data:
         {
           "id": 33,
           "type": "stat",
-          "title": "Tasks Expired (total)",
-          "description": "Tasks settled expired by the TTL sweep: queued tasks the queue never reached before their block reference went stale, plus ready payloads no client collected. Sustained growth means the queue is not draining ahead of the staleness window \u2014 raise capacity or lower submission rate rather than raising TASK_TTL_SECONDS.",
-          "gridPos": { "x": 18, "y": 50, "w": 6, "h": 8 },
+          "title": "Tasks Expired",
+          "description": "Tasks settled expired by the TTL sweep over the selected time range: queued tasks the queue never reached before their block reference went stale, plus ready payloads no client collected. Sustained growth means the queue is not draining ahead of the staleness window — raise capacity or lower submission rate rather than raising TASK_TTL_SECONDS.",
+          "gridPos": { "x": 18, "y": 66, "w": 6, "h": 8 },
           "targets": [{
-            "expr": "gas_killer_tasks_expired_total",
+            "expr": "increase(gas_killer_tasks_expired_total[$__range])",
             "legendFormat": "tasks"
           }],
           "options": {
@@ -489,83 +539,6 @@ data:
             "colorMode": "background",
             "graphMode": "area"
           }
-        },
-        {
-          "id": 50,
-          "type": "text",
-          "title": "Executor Phase Breakdown",
-          "gridPos": { "x": 0, "y": 58, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Executor Phase Breakdown\n\nPer-phase latency inside `handle_verification`. getMessageHash preflight → supportsInterface check → tx send (includes gas estimation) → receipt confirmation (block inclusion wait)." }
-        },
-        {
-          "id": 52,
-          "type": "timeseries",
-          "title": "Hash Preflight (p50 / p95)",
-          "gridPos": { "x": 0, "y": 59, "w": 12, "h": 8 },
-          "targets": [
-            {
-              "expr": "histogram_quantile(0.50, rate(gas_killer_executor_hash_preflight_seconds_bucket[5m]))",
-              "legendFormat": "p50"
-            },
-            {
-              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_hash_preflight_seconds_bucket[5m]))",
-              "legendFormat": "p95"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "s" } }
-        },
-        {
-          "id": 53,
-          "type": "timeseries",
-          "title": "supportsInterface Check (p50 / p95)",
-          "gridPos": { "x": 12, "y": 59, "w": 12, "h": 8 },
-          "targets": [
-            {
-              "expr": "histogram_quantile(0.50, rate(gas_killer_executor_supports_interface_seconds_bucket[5m]))",
-              "legendFormat": "p50"
-            },
-            {
-              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_supports_interface_seconds_bucket[5m]))",
-              "legendFormat": "p95"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "s" } }
-        },
-        {
-          "id": 54,
-          "type": "timeseries",
-          "title": "TX Send (p50 / p95)",
-          "description": "Time from calling verifyAndUpdate to receiving the pending tx handle. Includes eth_estimateGas simulation.",
-          "gridPos": { "x": 0, "y": 67, "w": 12, "h": 8 },
-          "targets": [
-            {
-              "expr": "histogram_quantile(0.50, rate(gas_killer_executor_tx_send_seconds_bucket[5m]))",
-              "legendFormat": "p50"
-            },
-            {
-              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_tx_send_seconds_bucket[5m]))",
-              "legendFormat": "p95"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "s" } }
-        },
-        {
-          "id": 55,
-          "type": "timeseries",
-          "title": "Receipt Confirmation (p50 / p95)",
-          "description": "Time waiting for the verifyAndUpdate transaction to be included in a block.",
-          "gridPos": { "x": 12, "y": 67, "w": 12, "h": 8 },
-          "targets": [
-            {
-              "expr": "histogram_quantile(0.50, rate(gas_killer_executor_receipt_confirmation_seconds_bucket[5m]))",
-              "legendFormat": "p50"
-            },
-            {
-              "expr": "histogram_quantile(0.95, rate(gas_killer_executor_receipt_confirmation_seconds_bucket[5m]))",
-              "legendFormat": "p95"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "s" } }
         }
       ]
     }

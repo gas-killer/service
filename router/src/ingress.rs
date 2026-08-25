@@ -1,5 +1,5 @@
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ApiQuery, ErrorCode};
-use crate::metrics::MetricsCollector;
+use crate::metrics::{MetricsCollector, key_labels};
 use crate::rate_limit::KeyRateLimiter;
 use crate::sequencer::{QueuedTask, TaskQueueDepth, TaskSender};
 use crate::store::{
@@ -789,7 +789,9 @@ pub async fn submit_task_handler(
             "Task rejected: per-key rate limit exceeded"
         );
         if let Some(m) = &state.metrics {
-            m.ingress_rate_limited.inc();
+            m.ingress_rate_limited
+                .get_or_create(&key_labels(&key.id))
+                .inc();
         }
         return Err(ApiError::rate_limited(retry_after_secs));
     }
@@ -813,7 +815,9 @@ pub async fn submit_task_handler(
                 "Task rejected: queue at capacity"
             );
             if let Some(m) = &state.metrics {
-                m.ingress_at_capacity.inc();
+                m.ingress_at_capacity
+                    .get_or_create(&key_labels(&key.id))
+                    .inc();
             }
             return Err(ApiError::queue_full(
                 "Service at capacity, please retry shortly",
@@ -834,7 +838,7 @@ pub async fn submit_task_handler(
             "Task rejected"
         );
         if let Some(m) = &state.metrics {
-            m.ingress_rejected.inc();
+            m.ingress_rejected.get_or_create(&key_labels(&key.id)).inc();
         }
         return Err(e.into());
     }
@@ -853,7 +857,7 @@ pub async fn submit_task_handler(
             "Task rejected (onchain)"
         );
         if let Some(m) = &state.metrics {
-            m.ingress_rejected.inc();
+            m.ingress_rejected.get_or_create(&key_labels(&key.id)).inc();
         }
         return Err(e.into());
     }
@@ -888,7 +892,9 @@ pub async fn submit_task_handler(
             "Task deduplicated onto existing submission"
         );
         if let Some(m) = &state.metrics {
-            m.ingress_deduplicated.inc();
+            m.ingress_deduplicated
+                .get_or_create(&key_labels(&key.id))
+                .inc();
         }
         return Ok((
             StatusCode::OK,
@@ -928,7 +934,7 @@ pub async fn submit_task_handler(
     // when it dequeues. Releasing here would double-count against a task that is genuinely queued.
     slot.commit();
     if let Some(m) = &state.metrics {
-        m.ingress_accepted.inc();
+        m.ingress_accepted.get_or_create(&key_labels(&key.id)).inc();
     }
     Ok((
         StatusCode::ACCEPTED,
@@ -1721,6 +1727,40 @@ mod tests {
             let state =
                 IngressState::without_metrics(sender, queue_depth.clone()).with_store(store);
             (state, key, queue_depth, receiver)
+        }
+
+        /// [`keyed_state`] with metrics attached, returning the created key rather than just its
+        /// value so a test can assert on that key's counter series.
+        async fn metered_state(
+            metrics: Arc<MetricsCollector>,
+        ) -> (
+            IngressState,
+            CreatedApiKey,
+            TaskQueueDepth,
+            crate::sequencer::TaskReceiver,
+        ) {
+            let (sender, receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
+            let store = SqliteStore::connect_in_memory()
+                .await
+                .expect("in-memory store should open");
+            let key = store
+                .create_api_key(None, None)
+                .await
+                .expect("minting a key should succeed");
+            let mut state =
+                IngressState::without_metrics(sender, queue_depth.clone()).with_store(store);
+            state.metrics = Some(metrics);
+            (state, key, queue_depth, receiver)
+        }
+
+        /// One key's count on a per-key counter, or 0 when that key has no series on it yet. A
+        /// dashboard reads the same numbers through `sum by (key_id) (...)`.
+        fn key_count(counter: &crate::metrics::PerKeyCounter, key_id: &str) -> u64 {
+            counter
+                .get(&crate::metrics::key_labels(key_id))
+                .map(|c| c.get())
+                .unwrap_or(0)
         }
 
         /// [`keyed_state`] built into a router, for tests that do not tune the state.
@@ -2603,15 +2643,8 @@ mod tests {
 
         #[tokio::test]
         async fn deduplicated_submission_increments_metric() {
-            let (sender, mut rx) = crate::sequencer::task_channel();
-            let queue_depth = crate::sequencer::task_queue_depth();
             let metrics = Arc::new(MetricsCollector::new());
-            let store = SqliteStore::connect_in_memory()
-                .await
-                .expect("in-memory store should open");
-            let key = store.create_api_key(None, None).await.unwrap();
-            let mut state = IngressState::without_metrics(sender, queue_depth).with_store(store);
-            state.metrics = Some(Arc::clone(&metrics));
+            let (state, key, _queue_depth, mut rx) = metered_state(Arc::clone(&metrics)).await;
             let app = build_app().with_state(state);
 
             app.clone()
@@ -2625,9 +2658,9 @@ mod tests {
                 .unwrap();
             assert_eq!(second.status(), StatusCode::OK);
 
-            assert_eq!(metrics.ingress_deduplicated.get(), 1);
+            assert_eq!(key_count(&metrics.ingress_deduplicated, &key.id), 1);
             assert_eq!(
-                metrics.ingress_accepted.get(),
+                key_count(&metrics.ingress_accepted, &key.id),
                 1,
                 "only the fresh submission counts as accepted"
             );
@@ -2863,19 +2896,22 @@ mod tests {
         #[tokio::test]
         async fn test_full_queue_increments_at_capacity_metric() {
             let metrics = Arc::new(MetricsCollector::new());
-            let (mut state, key, queue_depth, _rx) = keyed_state().await;
-            state.metrics = Some(Arc::clone(&metrics));
+            let (mut state, key, queue_depth, _rx) = metered_state(Arc::clone(&metrics)).await;
             state.max_queue_depth = 1;
             queue_depth.store(1, std::sync::atomic::Ordering::Relaxed);
             let app = build_app().with_state(state);
 
             let resp = app
-                .oneshot(bearer_request(&valid_body(), &key))
+                .oneshot(bearer_request(&valid_body(), &key.key))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(metrics.ingress_at_capacity.get(), 1);
-            assert_eq!(metrics.ingress_rejected.get(), 0);
+            assert_eq!(key_count(&metrics.ingress_at_capacity, &key.id), 1);
+            assert_eq!(
+                key_count(&metrics.ingress_rejected, &key.id),
+                0,
+                "load shedding runs before validation, so nothing counts as rejected"
+            );
         }
 
         #[tokio::test]
@@ -3017,7 +3053,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
-            assert_eq!(metrics.ingress_rate_limited.get(), 1);
+            assert_eq!(key_count(&metrics.ingress_rate_limited, &key.id), 1);
         }
 
         #[tokio::test]
