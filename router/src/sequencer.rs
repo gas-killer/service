@@ -93,6 +93,7 @@ async fn claim_task_for_processing(store: &SqliteStore, task_id: &str) -> bool {
 /// the transition skipped rather than propagated, following the best-effort convention above.
 pub(crate) async fn set_task_ready(
     store: &SqliteStore,
+    metrics: Option<&MetricsCollector>,
     task_id: &str,
     payload: &PayloadView,
     bundle: &TaskBundle,
@@ -111,17 +112,34 @@ pub(crate) async fn set_task_ready(
             return;
         }
     };
-    if let Err(e) = store
+    match store
         .mark_task_ready_with_bundle(task_id, &payload_json, &bundle_json)
         .await
     {
-        error!(task_id, error = %e, "failed to mark task ready");
+        Ok(elapsed) => observe_task_e2e(metrics, elapsed),
+        Err(e) => error!(task_id, error = %e, "failed to mark task ready"),
     }
 }
 
-pub(crate) async fn set_task_failed(store: &SqliteStore, task_id: &str, reason: &str) {
-    if let Err(e) = store.mark_task_failed(task_id, reason).await {
-        error!(task_id, error = %e, "failed to mark task failed");
+pub(crate) async fn set_task_failed(
+    store: &SqliteStore,
+    metrics: Option<&MetricsCollector>,
+    task_id: &str,
+    reason: &str,
+) {
+    match store.mark_task_failed(task_id, reason).await {
+        Ok(elapsed) => observe_task_e2e(metrics, elapsed),
+        Err(e) => error!(task_id, error = %e, "failed to mark task failed"),
+    }
+}
+
+/// Records a settled task's end-to-end latency — ingress acceptance to terminal status — from the
+/// elapsed seconds the settling statement reported. `None` means no task carried that id, so
+/// there is nothing to time. A clock that moved backwards between the two timestamps is clamped
+/// to zero rather than observed as a negative duration.
+fn observe_task_e2e(metrics: Option<&MetricsCollector>, elapsed_secs: Option<i64>) {
+    if let (Some(m), Some(secs)) = (metrics, elapsed_secs) {
+        m.task_e2e_seconds.observe(secs.max(0) as f64);
     }
 }
 
@@ -343,7 +361,13 @@ impl GasKillerTaskSource {
         if let Some(store) = &self.store
             && let Some(task_id) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
         {
-            set_task_failed(store, &task_id, "aggregation height skipped by quorum").await;
+            set_task_failed(
+                store,
+                self.metrics.as_deref(),
+                &task_id,
+                "aggregation height skipped by quorum",
+            )
+            .await;
         }
     }
 }
@@ -374,8 +398,13 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
                 Err(e) => {
                     error!(error = %e, task_id, "failed to enrich task, dropping request");
                     if let Some(store) = &self.store {
-                        set_task_failed(store, &task_id, &format!("task enrichment failed: {e}"))
-                            .await;
+                        set_task_failed(
+                            store,
+                            self.metrics.as_deref(),
+                            &task_id,
+                            &format!("task enrichment failed: {e}"),
+                        )
+                        .await;
                     }
                     continue;
                 }
@@ -393,8 +422,13 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
                     "enriched task exceeds wire limits, dropping request"
                 );
                 if let Some(store) = &self.store {
-                    set_task_failed(store, &task_id, &format!("task exceeds wire limits: {e}"))
-                        .await;
+                    set_task_failed(
+                        store,
+                        self.metrics.as_deref(),
+                        &task_id,
+                        &format!("task exceeds wire limits: {e}"),
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -571,7 +605,7 @@ mod tests {
             TaskStatus::Processing
         );
 
-        set_task_ready(&store, &done.id, &sample_payload(), &sample_bundle()).await;
+        set_task_ready(&store, None, &done.id, &sample_payload(), &sample_bundle()).await;
         let ready = store.get_task(&done.id).await.unwrap().unwrap();
         assert_eq!(ready.status, TaskStatus::Ready);
         // Both the rendered payload and the structured bundle are persisted as JSON.
@@ -580,10 +614,46 @@ mod tests {
         let bundle: TaskBundle = serde_json::from_str(ready.bundle.as_deref().unwrap()).unwrap();
         assert_eq!(bundle, sample_bundle());
 
-        set_task_failed(&store, &doomed.id, "boom").await;
+        set_task_failed(&store, None, &doomed.id, "boom").await;
         let failed = store.get_task(&doomed.id).await.unwrap().unwrap();
         assert_eq!(failed.status, TaskStatus::Failed);
         assert_eq!(failed.error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn settling_a_task_records_its_end_to_end_latency() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let metrics = MetricsCollector::new();
+        let ready = store.create_task(&key, &request_body()).await.unwrap();
+        let failed = store.create_task(&key, &request_body()).await.unwrap();
+
+        // Both terminal transitions feed the histogram: a client waits just as long for a failure
+        // as for a payload, so leaving failures out would flatter the observed latency.
+        set_task_ready(
+            &store,
+            Some(&metrics),
+            &ready.id,
+            &sample_payload(),
+            &sample_bundle(),
+        )
+        .await;
+        set_task_failed(&store, Some(&metrics), &failed.id, "boom").await;
+
+        let output = metrics.encode();
+        assert!(
+            output.contains("gas_killer_task_e2e_seconds_count 2"),
+            "both settled tasks should be observed, got:\n{output}"
+        );
+
+        // Settling a task that does not exist reports no latency, so nothing is observed for it.
+        set_task_failed(&store, Some(&metrics), "no-such-task", "boom").await;
+        assert!(
+            metrics
+                .encode()
+                .contains("gas_killer_task_e2e_seconds_count 2"),
+            "a settle that matched no task must not be observed"
+        );
     }
 
     #[tokio::test]

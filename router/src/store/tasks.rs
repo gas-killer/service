@@ -500,25 +500,28 @@ impl SqliteStore {
 
     /// Settles a task as [`TaskStatus::Ready`], recording both the rendered transaction-request
     /// `payload` and the structured round `bundle` it was rendered from, and stamping
-    /// `updated_at`. Both are stored as JSON. Returns `true` if a task with that id existed.
+    /// `updated_at`. Both are stored as JSON.
+    ///
+    /// Returns how many whole seconds the task spent between being accepted at the ingress and
+    /// settling here — its end-to-end latency, measured in the same statement that settles it —
+    /// or `None` when no task with that id existed.
     pub async fn mark_task_ready_with_bundle(
         &self,
         id: &str,
         payload: &str,
         bundle: &str,
-    ) -> anyhow::Result<bool> {
-        let result = sqlx::query(
+    ) -> anyhow::Result<Option<i64>> {
+        sqlx::query_scalar(
             "UPDATE tasks SET status = 'ready', payload = ?2, bundle = ?3, \
-             updated_at = unixepoch() WHERE id = ?1",
+             updated_at = unixepoch() WHERE id = ?1 \
+             RETURNING unixepoch() - created_at",
         )
         .bind(id)
         .bind(payload)
         .bind(bundle)
-        .execute(self.pool())
+        .fetch_optional(self.pool())
         .await
-        .context("marking task ready with bundle")?;
-
-        Ok(result.rows_affected() > 0)
+        .context("marking task ready with bundle")
     }
 
     /// Settles a task as [`TaskStatus::Expired`], recording why and stamping `updated_at`.
@@ -576,19 +579,21 @@ impl SqliteStore {
     }
 
     /// Settles a task as [`TaskStatus::Failed`], recording the failure reason and stamping
-    /// `updated_at`. Returns `true` if a task with that id existed.
-    pub async fn mark_task_failed(&self, id: &str, error: &str) -> anyhow::Result<bool> {
-        let result = sqlx::query(
+    /// `updated_at`.
+    ///
+    /// Returns the task's end-to-end latency in whole seconds, as
+    /// [`mark_task_ready_with_bundle`](Self::mark_task_ready_with_bundle) does, or `None` when no
+    /// task with that id existed.
+    pub async fn mark_task_failed(&self, id: &str, error: &str) -> anyhow::Result<Option<i64>> {
+        sqlx::query_scalar(
             "UPDATE tasks SET status = 'failed', error = ?2, updated_at = unixepoch() \
-             WHERE id = ?1",
+             WHERE id = ?1 RETURNING unixepoch() - created_at",
         )
         .bind(id)
         .bind(error)
-        .execute(self.pool())
+        .fetch_optional(self.pool())
         .await
-        .context("marking task failed")?;
-
-        Ok(result.rows_affected() > 0)
+        .context("marking task failed")
     }
 
     /// Returns every task still in flight — `queued` or `processing` — oldest first. The router
@@ -796,6 +801,8 @@ mod tests {
                 .mark_task_ready_with_bundle(&task.id, "{\"payload\":1}", "{\"bundle\":2}")
                 .await
                 .unwrap()
+                .is_some(),
+            "settling an existing task should report its latency"
         );
         let fetched = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(fetched.status, TaskStatus::Ready);
@@ -837,6 +844,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settling_a_task_reports_how_long_it_took() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request()).await.unwrap();
+
+        // Backdate the submission so the reported figure is unambiguous, rather than the 0 a test
+        // that runs in well under a second would otherwise produce.
+        sqlx::query("UPDATE tasks SET created_at = created_at - 90 WHERE id = ?1")
+            .bind(&task.id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let elapsed = store
+            .mark_task_ready_with_bundle(&task.id, "{}", "{}")
+            .await
+            .unwrap()
+            .expect("settling an existing task reports its latency");
+        // A one-second window: the statement can land in the second after the backdating.
+        assert!(
+            (90..=91).contains(&elapsed),
+            "expected roughly 90s since submission, got {elapsed}"
+        );
+
+        // A task that never existed has no latency to report, so nothing is observed for it.
+        assert!(
+            store
+                .mark_task_failed("no-such-task", "nope")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn mark_failed_records_error() {
         let store = store().await;
         let key = key_id(&store).await;
@@ -847,6 +889,8 @@ mod tests {
                 .mark_task_failed(&task.id, "aggregation timed out")
                 .await
                 .unwrap()
+                .is_some(),
+            "settling an existing task should report its latency"
         );
         let fetched = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(fetched.status, TaskStatus::Failed);

@@ -1,20 +1,38 @@
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
-use commonware_runtime::telemetry::metrics::raw::{Counter, Gauge, Histogram};
+use commonware_runtime::telemetry::metrics::raw::{Counter, Family, Gauge, Histogram};
 use commonware_runtime::telemetry::metrics::registry::Registry;
 use std::sync::atomic::{AtomicI64, AtomicU64};
 
+/// Label set scoping a counter to one API key: the key's public id, never the key value. Matches
+/// the `key_id` field in the audit log, so a spike on a series can be traced straight to the
+/// request lines that produced it.
+type KeyLabels = [(&'static str, String); 1];
+
+/// An ingress counter broken down by the API key that drove it.
+///
+/// Cardinality is one series per key that has made a request since the process started, which for
+/// a keyed beta is a handful. A key that is revoked keeps its series until the router restarts —
+/// the series is the record of what that key did, so retiring it early would erase the history an
+/// investigation needs.
+pub type PerKeyCounter = Family<KeyLabels, Counter<u64, AtomicU64>>;
+
+/// The label set naming `key_id`, for indexing a [`PerKeyCounter`].
+pub fn key_labels(key_id: &str) -> KeyLabels {
+    [("key_id", key_id.to_string())]
+}
+
 pub struct MetricsCollector {
     registry: Registry,
-    /// Ingress requests that passed validation and were queued.
-    pub ingress_accepted: Counter<u64, AtomicU64>,
-    /// Ingress requests that collapsed onto an existing task via deduplication.
-    pub ingress_deduplicated: Counter<u64, AtomicU64>,
-    /// Ingress requests rejected by validation.
-    pub ingress_rejected: Counter<u64, AtomicU64>,
-    /// Ingress requests dropped because the task queue is at capacity.
-    pub ingress_at_capacity: Counter<u64, AtomicU64>,
-    /// Ingress requests rejected by per-API-key rate limiting.
-    pub ingress_rate_limited: Counter<u64, AtomicU64>,
+    /// Ingress requests that passed validation and were queued, by calling key.
+    pub ingress_accepted: PerKeyCounter,
+    /// Ingress requests that collapsed onto an existing task via deduplication, by calling key.
+    pub ingress_deduplicated: PerKeyCounter,
+    /// Ingress requests rejected by validation, by calling key.
+    pub ingress_rejected: PerKeyCounter,
+    /// Ingress requests dropped because the task queue is at capacity, by calling key.
+    pub ingress_at_capacity: PerKeyCounter,
+    /// Ingress requests rejected by per-API-key rate limiting, by calling key.
+    pub ingress_rate_limited: PerKeyCounter,
     /// Tasks dequeued and handed to the creator for aggregation.
     pub tasks_created: Counter<u64, AtomicU64>,
     /// Tasks settled `expired` by the periodic TTL sweep, across every stage it visits.
@@ -41,6 +59,12 @@ pub struct MetricsCollector {
     /// Excludes ingress-queue wait and router-side storage computation, which finish before the
     /// dispatch timestamp is stamped.
     pub round_latency_seconds: Histogram,
+    /// Wall-clock time from a task being accepted at the ingress to it settling `ready` or
+    /// `failed` (seconds). Unlike [`Self::round_latency_seconds`] this includes the ingress queue
+    /// wait and the router-side storage computation, so it is the latency a client actually
+    /// experiences. Resolution is whole seconds — both ends are read from the task row's
+    /// second-granularity timestamps.
+    pub task_e2e_seconds: Histogram,
     /// Current ingress queue depth: enqueued tasks awaiting processing plus submissions
     /// holding a reserved slot while they validate. Reserved slots are released if the
     /// submission is rejected, so a brief bump under a flood of invalid requests is expected
@@ -48,8 +72,6 @@ pub struct MetricsCollector {
     pub task_queue_depth: Gauge<i64, AtomicI64>,
     /// Whether the SQLite store answered its most recent health check (1 = up, 0 = down).
     pub db_up: Gauge<i64, AtomicI64>,
-    /// Time to detect which chain a target contract is deployed on (seconds).
-    pub executor_chain_detection_seconds: Histogram,
     /// Time for the payload-hash preflight computation (seconds).
     pub executor_hash_preflight_seconds: Histogram,
     /// Time for supportsInterface ERC-165 check (seconds).
@@ -64,38 +86,38 @@ impl MetricsCollector {
     pub fn new() -> Self {
         let mut registry = Registry::default();
 
-        let ingress_accepted = Counter::default();
+        let ingress_accepted = Family::default();
         registry.register(
             "gas_killer_ingress_requests_accepted",
-            "Total ingress task requests accepted and queued",
+            "Total ingress task requests accepted and queued, by calling API key",
             ingress_accepted.clone(),
         );
 
-        let ingress_deduplicated = Counter::default();
+        let ingress_deduplicated = Family::default();
         registry.register(
             "gas_killer_ingress_requests_deduplicated",
-            "Total ingress task requests that collapsed onto an existing task via deduplication",
+            "Total ingress task requests that collapsed onto an existing task via deduplication, by calling API key",
             ingress_deduplicated.clone(),
         );
 
-        let ingress_rejected = Counter::default();
+        let ingress_rejected = Family::default();
         registry.register(
             "gas_killer_ingress_requests_rejected",
-            "Total ingress task requests rejected by validation",
+            "Total ingress task requests rejected by validation, by calling API key",
             ingress_rejected.clone(),
         );
 
-        let ingress_at_capacity = Counter::default();
+        let ingress_at_capacity = Family::default();
         registry.register(
             "gas_killer_ingress_requests_at_capacity",
-            "Total ingress task requests dropped because the queue was full",
+            "Total ingress task requests dropped because the queue was full, by calling API key",
             ingress_at_capacity.clone(),
         );
 
-        let ingress_rate_limited = Counter::default();
+        let ingress_rate_limited = Family::default();
         registry.register(
             "gas_killer_ingress_requests_rate_limited",
-            "Total ingress task requests rejected by per-API-key rate limiting",
+            "Total ingress task requests rejected by per-API-key rate limiting, by calling API key",
             ingress_rate_limited.clone(),
         );
 
@@ -171,6 +193,17 @@ impl MetricsCollector {
             round_latency_seconds.clone(),
         );
 
+        // Spans the ingress queue wait as well as the round itself, so it needs headroom well
+        // past the round-latency buckets: a task can sit queued behind others for minutes.
+        let task_e2e_seconds = Histogram::new([
+            1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 120.0, 300.0, 600.0,
+        ]);
+        registry.register(
+            "gas_killer_task_e2e_seconds",
+            "Wall-clock seconds from ingress acceptance to a task settling ready or failed",
+            task_e2e_seconds.clone(),
+        );
+
         let task_queue_depth = Gauge::default();
         registry.register(
             "gas_killer_queue_depth",
@@ -189,13 +222,6 @@ impl MetricsCollector {
         let rpc_buckets = [
             0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5,
         ];
-        let executor_chain_detection_seconds = Histogram::new(rpc_buckets);
-        registry.register(
-            "gas_killer_executor_chain_detection_seconds",
-            "Time to detect which chain a target contract is deployed on",
-            executor_chain_detection_seconds.clone(),
-        );
-
         let executor_hash_preflight_seconds = Histogram::new(rpc_buckets);
         registry.register(
             "gas_killer_executor_hash_preflight_seconds",
@@ -243,9 +269,9 @@ impl MetricsCollector {
             execution_duration_seconds,
             p2p_round_trip_seconds,
             round_latency_seconds,
+            task_e2e_seconds,
             task_queue_depth,
             db_up,
-            executor_chain_detection_seconds,
             executor_hash_preflight_seconds,
             executor_supports_interface_seconds,
             executor_tx_send_seconds,
@@ -281,6 +307,54 @@ mod tests {
         ));
         assert!(output.contains("gas_killer_round_latency_seconds_count 1"));
         assert!(output.contains("gas_killer_round_latency_seconds_sum 12.5"));
+    }
+
+    #[test]
+    fn per_key_counters_emit_one_series_per_key() {
+        let metrics = MetricsCollector::new();
+        metrics
+            .ingress_accepted
+            .get_or_create(&key_labels("aaaa1111"))
+            .inc();
+        metrics
+            .ingress_accepted
+            .get_or_create(&key_labels("bbbb2222"))
+            .inc_by(3);
+        metrics
+            .ingress_rate_limited
+            .get_or_create(&key_labels("bbbb2222"))
+            .inc();
+
+        let output = metrics.encode();
+        assert!(
+            output.contains("gas_killer_ingress_requests_accepted_total{key_id=\"aaaa1111\"} 1")
+        );
+        assert!(
+            output.contains("gas_killer_ingress_requests_accepted_total{key_id=\"bbbb2222\"} 3")
+        );
+        assert!(
+            output
+                .contains("gas_killer_ingress_requests_rate_limited_total{key_id=\"bbbb2222\"} 1")
+        );
+        // A key that has not driven this counter has no series on it, so a per-key panel shows
+        // only keys that actually did something.
+        assert!(
+            !output.contains("gas_killer_ingress_requests_rate_limited_total{key_id=\"aaaa1111\"}")
+        );
+    }
+
+    #[test]
+    fn task_e2e_histogram_registered_and_observable() {
+        let metrics = MetricsCollector::new();
+        metrics.task_e2e_seconds.observe(42.0);
+
+        let output = metrics.encode();
+        assert!(
+            output
+                .contains("gas_killer_task_e2e_seconds Wall-clock seconds from ingress acceptance")
+        );
+        assert!(output.contains("gas_killer_task_e2e_seconds_count 1"));
+        assert!(output.contains("gas_killer_task_e2e_seconds_sum 42.0"));
     }
 
     #[test]

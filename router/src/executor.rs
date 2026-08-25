@@ -1126,12 +1126,26 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         if let Some(store) = &self.store
             && let Some(task_id) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
         {
+            let metrics = self.metrics.as_deref();
             match &result {
                 Ok(rendered) => {
-                    set_task_ready(store, &task_id, &rendered.payload, &rendered.bundle).await
+                    set_task_ready(
+                        store,
+                        metrics,
+                        &task_id,
+                        &rendered.payload,
+                        &rendered.bundle,
+                    )
+                    .await
                 }
                 Err(e) => {
-                    set_task_failed(store, &task_id, &format!("verification failed: {e}")).await
+                    set_task_failed(
+                        store,
+                        metrics,
+                        &task_id,
+                        &format!("verification failed: {e}"),
+                    )
+                    .await
                 }
             }
         }
@@ -1210,12 +1224,26 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerifica
         if let Some(store) = &self.store
             && let Some(task_id) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
         {
+            let metrics = self.metrics.as_deref();
             match &result {
                 Ok(rendered) => {
-                    set_task_ready(store, &task_id, &rendered.payload, &rendered.bundle).await
+                    set_task_ready(
+                        store,
+                        metrics,
+                        &task_id,
+                        &rendered.payload,
+                        &rendered.bundle,
+                    )
+                    .await
                 }
                 Err(e) => {
-                    set_task_failed(store, &task_id, &format!("verification failed: {e}")).await
+                    set_task_failed(
+                        store,
+                        metrics,
+                        &task_id,
+                        &format!("verification failed: {e}"),
+                    )
+                    .await
                 }
             }
         }
