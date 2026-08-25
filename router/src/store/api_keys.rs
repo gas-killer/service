@@ -210,6 +210,23 @@ impl SqliteStore {
 
         Ok(row.map(|(id, rpm_limit)| AuthenticatedKey { id, rpm_limit }))
     }
+
+    /// Resolves the public id of the key matching `presented`, whether or not it still
+    /// authenticates. This lets a rejected request be attributed to a revoked or expired key in
+    /// the audit log without the key value ever being logged; `None` means the presented value
+    /// matches no key this router ever issued, so there is nothing to attribute it to.
+    ///
+    /// A read only: unlike [`verify_api_key`](Self::verify_api_key) it does not stamp `last_used`,
+    /// so a rejected request never registers as a use of the key.
+    pub async fn identify_api_key(&self, presented: &str) -> anyhow::Result<Option<String>> {
+        let key_hash = hash_key(presented);
+
+        sqlx::query_scalar("SELECT id FROM api_keys WHERE key_hash = ?1")
+            .bind(&key_hash)
+            .fetch_optional(self.pool())
+            .await
+            .context("identifying api key")
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +449,58 @@ mod tests {
         assert_eq!(
             authed.rpm_limit, None,
             "a key with no override falls back to the global default rate"
+        );
+    }
+
+    #[tokio::test]
+    async fn identify_names_a_key_that_no_longer_authenticates() {
+        let store = store().await;
+        let revoked = store.create_api_key(None, None).await.unwrap();
+        store.revoke_api_key(&revoked.id).await.unwrap();
+        // An expiry in the distant past (1970) is already lapsed at creation.
+        let expired = store.create_api_key(None, Some(1)).await.unwrap();
+
+        // Neither key authenticates any more, but both remain attributable, so a rejected request
+        // can still name the client that sent it.
+        for created in [&revoked, &expired] {
+            assert!(store.verify_api_key(&created.key).await.unwrap().is_none());
+            assert_eq!(
+                store.identify_api_key(&created.key).await.unwrap().as_ref(),
+                Some(&created.id)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn identify_names_a_valid_key_without_stamping_last_used() {
+        let store = store().await;
+        let created = store.create_api_key(None, None).await.unwrap();
+
+        assert_eq!(
+            store.identify_api_key(&created.key).await.unwrap(),
+            Some(created.id.clone())
+        );
+
+        let listed = store.list_api_keys().await.unwrap();
+        let entry = listed.iter().find(|k| k.id == created.id).unwrap();
+        assert!(
+            entry.last_used.is_none(),
+            "identifying a key is a read and must not count as a use"
+        );
+    }
+
+    #[tokio::test]
+    async fn identify_returns_none_for_a_value_never_issued() {
+        let store = store().await;
+        store.create_api_key(None, None).await.unwrap();
+
+        assert!(
+            store
+                .identify_api_key("gk_deadbeef")
+                .await
+                .unwrap()
+                .is_none(),
+            "a value that matches no issued key has no id to attribute a request to"
         );
     }
 
