@@ -1,6 +1,7 @@
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
 use commonware_runtime::telemetry::metrics::raw::{Counter, Family, Gauge, Histogram};
 use commonware_runtime::telemetry::metrics::registry::Registry;
+use gas_killer_common::ChainRole;
 use std::sync::atomic::{AtomicI64, AtomicU64};
 
 /// Label set scoping a counter to one API key: the key's public id, never the key value. Matches
@@ -21,6 +22,18 @@ pub fn key_labels(key_id: &str) -> KeyLabels {
     [("key_id", key_id.to_string())]
 }
 
+/// Label set scoping a metric to one chain role, rendered as `chain="l1"` / `chain="l2"`.
+type ChainLabels = [(&'static str, String); 1];
+
+/// A gauge broken down by chain role. Cardinality is bounded by the roles the deployment
+/// configures, so at most two series.
+pub type PerChainGauge = Family<ChainLabels, Gauge<i64, AtomicI64>>;
+
+/// The label set naming `chain`, for indexing a [`PerChainGauge`].
+pub fn chain_labels(chain: ChainRole) -> ChainLabels {
+    [("chain", chain.name().to_string())]
+}
+
 pub struct MetricsCollector {
     registry: Registry,
     /// Ingress requests that passed validation and were queued, by calling key.
@@ -33,6 +46,9 @@ pub struct MetricsCollector {
     pub ingress_at_capacity: PerKeyCounter,
     /// Ingress requests rejected by per-API-key rate limiting, by calling key.
     pub ingress_rate_limited: PerKeyCounter,
+    /// Ingress requests refused because the chain every round depends on is unavailable, by
+    /// calling key.
+    pub ingress_rpc_unavailable: PerKeyCounter,
     /// Tasks dequeued and handed to the creator for aggregation.
     pub tasks_created: Counter<u64, AtomicU64>,
     /// Tasks settled `expired` by the periodic TTL sweep, across every stage it visits.
@@ -72,6 +88,10 @@ pub struct MetricsCollector {
     pub task_queue_depth: Gauge<i64, AtomicI64>,
     /// Whether the SQLite store answered its most recent health check (1 = up, 0 = down).
     pub db_up: Gauge<i64, AtomicI64>,
+    /// Whether each chain's RPC is currently usable (1 = healthy, 0 = degraded), as judged by
+    /// [`crate::rpc_health::RpcHealth`]. Zero means consecutive failures reached the configured
+    /// threshold; it returns to one on the next success.
+    pub rpc_healthy: PerChainGauge,
     /// Time for the payload-hash preflight computation (seconds).
     pub executor_hash_preflight_seconds: Histogram,
     /// Time for supportsInterface ERC-165 check (seconds).
@@ -119,6 +139,13 @@ impl MetricsCollector {
             "gas_killer_ingress_requests_rate_limited",
             "Total ingress task requests rejected by per-API-key rate limiting, by calling API key",
             ingress_rate_limited.clone(),
+        );
+
+        let ingress_rpc_unavailable = Family::default();
+        registry.register(
+            "gas_killer_ingress_requests_rpc_unavailable",
+            "Total ingress task requests refused because a required chain's RPC is unavailable, by calling API key",
+            ingress_rpc_unavailable.clone(),
         );
 
         let tasks_created = Counter::default();
@@ -218,6 +245,13 @@ impl MetricsCollector {
             db_up.clone(),
         );
 
+        let rpc_healthy = Family::default();
+        registry.register(
+            "gas_killer_rpc_healthy",
+            "Whether each chain's RPC is usable (1 = healthy, 0 = degraded past the consecutive-failure threshold)",
+            rpc_healthy.clone(),
+        );
+
         // Single same-RPC round-trips (~5-150ms); fine low-end buckets so p50/p95 resolve.
         let rpc_buckets = [
             0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5,
@@ -260,6 +294,7 @@ impl MetricsCollector {
             ingress_rejected,
             ingress_at_capacity,
             ingress_rate_limited,
+            ingress_rpc_unavailable,
             tasks_created,
             tasks_expired,
             storage_computation_seconds,
@@ -272,6 +307,7 @@ impl MetricsCollector {
             task_e2e_seconds,
             task_queue_depth,
             db_up,
+            rpc_healthy,
             executor_hash_preflight_seconds,
             executor_supports_interface_seconds,
             executor_tx_send_seconds,

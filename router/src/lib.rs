@@ -10,6 +10,7 @@ mod log_capture;
 pub mod metrics;
 pub mod payload_revert;
 pub mod rate_limit;
+pub mod rpc_health;
 pub mod schnorr_coordinator;
 pub mod schnorr_submitter;
 pub mod sequencer;

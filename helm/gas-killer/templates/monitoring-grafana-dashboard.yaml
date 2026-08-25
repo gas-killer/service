@@ -125,6 +125,27 @@ data:
           }
         },
         {
+          "id": 6,
+          "type": "timeseries",
+          "title": "RPC Health",
+          "description": "gas_killer_rpc_healthy per chain: 0 once consecutive RPC failures reach RPC_FAILURE_THRESHOLD, back to 1 on the next success. A background probe checks each chain every 15s, so this reflects provider reality even on an idle router. While L1 reads 0, POST /tasks is refused with 503 RPC_UNAVAILABLE — every round anchors to an L1 reference block, so an L1 outage blocks work for L2 targets too.",
+          "gridPos": { "x": 16, "y": 1, "w": 8, "h": 4 },
+          "targets": [{
+            "expr": "gas_killer_rpc_healthy",
+            "legendFormat": "{{ "{{" }} chain {{ "}}" }}"
+          }],
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 1,
+              "custom": { "lineWidth": 2, "fillOpacity": 20 },
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "DEGRADED", "color": "red" }, "1": { "text": "OK", "color": "green" } } }
+              ]
+            }
+          }
+        },
+        {
           "id": 10,
           "type": "text",
           "title": "Resource Usage",
@@ -468,6 +489,10 @@ data:
             {
               "expr": "sum(rate(gas_killer_ingress_requests_at_capacity_total[2m])) * 60",
               "legendFormat": "at capacity (503)"
+            },
+            {
+              "expr": "sum(rate(gas_killer_ingress_requests_rpc_unavailable_total[2m])) * 60",
+              "legendFormat": "rpc unavailable (503)"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "short" } }
@@ -504,6 +529,10 @@ data:
             {
               "expr": "sum by (key_id) (rate(gas_killer_ingress_requests_at_capacity_total[2m])) * 60",
               "legendFormat": "{{ "{{" }} key_id {{ "}}" }} at capacity"
+            },
+            {
+              "expr": "sum by (key_id) (rate(gas_killer_ingress_requests_rpc_unavailable_total[2m])) * 60",
+              "legendFormat": "{{ "{{" }} key_id {{ "}}" }} rpc unavailable"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "short" } }
