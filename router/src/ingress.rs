@@ -3,7 +3,8 @@ use crate::metrics::MetricsCollector;
 use crate::rate_limit::KeyRateLimiter;
 use crate::sequencer::{QueuedTask, TaskQueueDepth, TaskSender};
 use crate::store::{
-    ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, SqliteStore, SubmittedTask, Task, TaskStatus,
+    ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, KeyVerdict, SqliteStore, SubmittedTask, Task,
+    TaskStatus,
 };
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
@@ -245,9 +246,9 @@ fn elapsed_ms(started: Instant) -> u64 {
 /// then find it has nowhere to work.
 ///
 /// Every rejection is logged with a `key_id` so an operator can trace abusive traffic back to a
-/// client: a key that was issued but has since been revoked or expired is named by its id, and
-/// anything else — no header, or a value matching no issued key — records
-/// [`UNATTRIBUTED_KEY_ID`]. The presented key value is never logged.
+/// client: a key that was issued but has since been revoked or expired is named by its id
+/// ([`KeyVerdict::Rejected`]), and anything else — no header, or a value matching no issued key —
+/// records [`UNATTRIBUTED_KEY_ID`]. The presented key value is never logged.
 async fn authenticate_caller(
     store: &SqliteStore,
     headers: &HeaderMap,
@@ -260,35 +261,23 @@ async fn authenticate_caller(
         return Err(ApiError::unauthorized());
     };
 
-    match store.verify_api_key(token).await {
-        Ok(Some(authed)) => Ok(authed),
-        Ok(None) => {
-            let key_id = presented_key_id(store, token).await;
-            warn!(
-                %key_id,
-                "Request rejected: API key is unknown, revoked, or expired"
-            );
-            Err(ApiError::unauthorized())
-        }
+    // Each verdict decides only what the rejection is attributed to; every one of them is the
+    // same opaque `401` to the caller, so a probe cannot tell a revoked key from an invented one.
+    let key_id = match store.verify_api_key(token).await {
+        Ok(KeyVerdict::Valid(authed)) => return Ok(authed),
+        Ok(KeyVerdict::Rejected { id }) => id,
+        Ok(KeyVerdict::Unknown) => UNATTRIBUTED_KEY_ID.to_string(),
         Err(e) => {
             tracing::error!(error = %e, "api key verification failed");
-            Err(ApiError::internal("Internal error during authentication"))
+            return Err(ApiError::internal("Internal error during authentication"));
         }
-    }
-}
+    };
 
-/// Resolves the presented key's public id for an audit log line, falling back to
-/// [`UNATTRIBUTED_KEY_ID`] when the value was never issued as a key or the lookup itself fails.
-/// Runs only on the rejection path, so authenticating a valid key stays a single statement.
-async fn presented_key_id(store: &SqliteStore, presented: &str) -> String {
-    match store.identify_api_key(presented).await {
-        Ok(Some(id)) => id,
-        Ok(None) => UNATTRIBUTED_KEY_ID.to_string(),
-        Err(e) => {
-            tracing::error!(error = %e, "failed to identify presented api key");
-            UNATTRIBUTED_KEY_ID.to_string()
-        }
-    }
+    warn!(
+        %key_id,
+        "Request rejected: API key is unknown, revoked, or expired"
+    );
+    Err(ApiError::unauthorized())
 }
 
 /// Guards the `/admin/keys` endpoints with the `ADMIN_KEY` shared secret. Returns a 503 when
