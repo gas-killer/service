@@ -6,7 +6,6 @@ use commonware_runtime::telemetry::metrics::raw::Histogram;
 use commonware_runtime::telemetry::metrics::registry::Registry;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -78,33 +77,36 @@ impl Default for ValidatorMetrics {
     }
 }
 
-/// The ABI encoding of a state-update program that carries no operations.
-///
-/// Derived from the encoder rather than written out as a literal, so a change to the wire
-/// format cannot leave this stale: the same function produces both the value under test and
-/// every program the analysis emits.
-static EMPTY_STATE_UPDATE_PROGRAM: LazyLock<Vec<u8>> =
-    LazyLock::new(|| gas_analyzer_core::encode_state_updates_to_abi(&[]).to_vec());
-
-/// Whether an ABI-encoded state-update program applies nothing.
+/// Refuses an analysis whose program applies nothing.
 ///
 /// Applying such a program is a no-op on the target's storage, yet it still costs gas and —
 /// because `verifyAndUpdate` is itself tracked — still advances `stateTransitionCount`,
 /// invalidating every other payload outstanding for that target. There is no reason to ask the
-/// quorum to sign one, so [`GasKillerValidator::analyze_transaction`] refuses it.
+/// quorum to sign one.
 ///
-/// Note that only a freshly analysed program can be judged this way. A task's announced
-/// `storage_updates` are deliberately stripped to nothing on the wire (nodes recompute them),
-/// so an empty field there means "not carried", not "applies nothing".
-pub fn is_empty_state_update_program(encoded: &[u8]) -> bool {
-    encoded == EMPTY_STATE_UPDATE_PROGRAM.as_slice()
+/// The count comes from the analyzer, which reports it alongside the encoded program: emptiness
+/// is not visible in the payload itself, since a program with no operations still encodes to a
+/// fixed non-empty blob.
+fn ensure_program_applies_something(
+    update_count: usize,
+    contract_address: Address,
+    block_height: u64,
+) -> Result<()> {
+    if update_count == 0 {
+        anyhow::bail!(
+            "analysis produced no state updates: the call to {contract_address} at block \
+             {block_height} changes nothing, so its payload would spend gas to apply nothing \
+             while still advancing the target's transition count"
+        );
+    }
+    Ok(())
 }
 
 /// Result of gas analysis containing storage updates and gas information
 #[derive(Debug, Clone)]
 pub struct AnalysisResult {
-    /// The storage updates extracted from the transaction. Never the empty program — see
-    /// [`is_empty_state_update_program`].
+    /// The storage updates extracted from the transaction. Never a program that applies
+    /// nothing: such an analysis is refused rather than returned.
     pub storage_updates: Vec<u8>,
     /// The gas estimate from gas-analyzer
     #[allow(dead_code)]
@@ -414,7 +416,7 @@ impl GasKillerValidator {
     /// Forks at the specified block for deterministic results.
     ///
     /// An analysis that extracts no state updates is an error rather than a result: see
-    /// [`is_empty_state_update_program`].
+    /// [`ensure_program_applies_something`].
     pub async fn analyze_transaction(
         &self,
         rpc_url: &str,
@@ -444,39 +446,33 @@ impl GasKillerValidator {
         // Call gas-analyzer to get storage updates and gas estimate using EvmSketch.
         // The executor cache eliminates the build cost on repeated requests at the
         // same block height.
-        let (storage_updates, gas_estimate, _is_heuristic, _skipped_opcodes) =
-            call_to_encoded_state_updates_with_evmsketch_profiled(
-                &self.executor_cache,
-                rpc_url,
-                tx_request,
-                block_height,
-                self.state_encoding,
-                self.sim_profile,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+        let analysis = call_to_encoded_state_updates_with_evmsketch_profiled(
+            &self.executor_cache,
+            rpc_url,
+            tx_request,
+            block_height,
+            self.state_encoding,
+            self.sim_profile,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
 
         // Every path that produces a signable diff — the router's task creation and each node's
-        // independent recomputation — comes through here, so refusing the empty program once keeps
+        // independent recomputation — comes through here, so refusing an empty program once keeps
         // a no-op out of the round without the two sides being able to disagree about it.
-        if is_empty_state_update_program(&storage_updates) {
-            anyhow::bail!(
-                "analysis produced no state updates: the call to {contract_address} at block \
-                 {block_height} changes nothing, so its payload would spend gas to apply nothing \
-                 while still advancing the target's transition count"
-            );
-        }
+        ensure_program_applies_something(analysis.update_count, contract_address, block_height)?;
 
         debug!(
-            "Analysis complete: storage_updates_len={}, gas_estimate={}, block_height={}",
-            storage_updates.len(),
-            gas_estimate,
+            "Analysis complete: storage_updates_len={}, update_count={}, gas_estimate={}, block_height={}",
+            analysis.storage_updates.len(),
+            analysis.update_count,
+            analysis.gas_estimate,
             block_height
         );
 
         Ok(AnalysisResult {
-            storage_updates: storage_updates.to_vec(),
-            gas_estimate,
+            storage_updates: analysis.storage_updates.to_vec(),
+            gas_estimate: analysis.gas_estimate,
             block_height,
         })
     }
@@ -769,37 +765,23 @@ mod tests {
         assert_ne!(hash, zero_hash, "Hash should not be all zeros");
     }
 
-    /// The empty program's shape: a 128-byte blob of two offsets followed by two zero-length
-    /// arrays. Pinned here so an encoder change that moved it fails in this crate rather than
-    /// leaving the guard silently unenforced.
     #[test]
-    fn empty_program_is_two_zero_length_arrays() {
-        let encoded = gas_analyzer_core::encode_state_updates_to_abi(&[]);
-        assert!(is_empty_state_update_program(&encoded));
-        assert_eq!(encoded.len(), 128);
-        assert_eq!(U256::from_be_slice(&encoded[0..32]), U256::from(0x40)); // offset: types
-        assert_eq!(U256::from_be_slice(&encoded[32..64]), U256::from(0x60)); // offset: datas
-        assert_eq!(U256::from_be_slice(&encoded[64..96]), U256::ZERO); // types.length
-        assert_eq!(U256::from_be_slice(&encoded[96..128]), U256::ZERO); // datas.length
+    fn an_analysis_that_applies_nothing_is_refused() {
+        let target = Address::from([7u8; 20]);
+        let err = ensure_program_applies_something(0, target, 4242)
+            .expect_err("a program with no operations must not reach the quorum");
+        let message = err.to_string();
+        // The task's stored error is what the client reads, so it has to name the call it refused.
+        assert!(
+            message.contains(&target.to_string()) && message.contains("4242"),
+            "the refusal should name the call it applies to: {message}"
+        );
     }
 
     #[test]
-    fn a_program_that_writes_one_slot_is_not_empty() {
-        use gas_analyzer_core::{IStateUpdateTypes, StateUpdate};
-
-        let store = StateUpdate::Store(IStateUpdateTypes::Store {
-            slot: alloy::primitives::B256::ZERO,
-            value: alloy::primitives::B256::from(U256::from(1)),
-        });
-        let encoded = gas_analyzer_core::encode_state_updates_to_abi(&[store]);
-        assert!(!is_empty_state_update_program(&encoded));
-    }
-
-    /// A stripped announcement carries no `storage_updates` at all, which is not the same as an
-    /// analysis that applies nothing — the predicate must not conflate the two.
-    #[test]
-    fn an_absent_program_is_not_the_empty_program() {
-        assert!(!is_empty_state_update_program(&[]));
+    fn an_analysis_that_applies_one_operation_is_accepted() {
+        ensure_program_applies_something(1, Address::from([7u8; 20]), 4242)
+            .expect("a single operation is work worth signing");
     }
 
     #[test]
