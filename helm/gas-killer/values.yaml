@@ -133,6 +133,11 @@ rerun:
   keyExport: false
   # Re-run the deploy-target job to deploy a fresh demo target + checker against the current AVS.
   deployTarget: false
+  # Re-run the playground job. Only set this deliberately: it deploys a fresh public target and
+  # factory, which strands the addresses /avs-metadata is currently serving and resets a counter a
+  # reader may be part-way through advancing. The job is otherwise install-only, and skips any
+  # contract it already recorded that still has code on chain.
+  playground: false
   # Re-run the generate-router-key job (TESTNET+secretManager only).
   # Only set this if you intentionally want to rotate the router BLS keypair —
   # doing so requires all nodes to restart and pick up the new public key from GCP.
@@ -423,6 +428,11 @@ router:
     # are omitted from the response when empty, and each is checked for code on the chain the block
     # publishes before it is served, so an address on another network — or one that is simply wrong —
     # is omitted rather than published (DEMO_TARGET_ADDRESS / DEMO_FACTORY_ADDRESS).
+    #
+    # Leave both empty where playground.enabled is true: that job records what it deployed on the
+    # shared-data volume and the router is pointed at those records (DEMO_TARGET_FILE /
+    # DEMO_FACTORY_FILE), so the served addresses follow a redeployment. Set these only to point
+    # readers at something other than what the job deployed.
     demoTarget: ""
     demoFactory: ""
     # Seconds a task may sit without reaching a terminal state before a background sweep (every
@@ -583,6 +593,32 @@ deployTarget:
   deployerSecretKey: PRIVATE_KEY
   # ArraySummation constructor params. Smoke test sums indexes [1,2,3], so arraySize must be >= 4.
   arraySize: 10
+  maxValue: 10000
+  arraySeed: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
+
+# Playground job: deploys the contracts the public documentation points readers at — a shared
+# ArraySummation target for a first settlement with no Solidity written, and an
+# ArraySummationFactory for a reader who wants an instance nobody else is advancing. Both addresses
+# are served in the `contracts` block of GET /avs-metadata, so no document has to name them.
+#
+# Deliberately separate from deployTarget: that target is the deployment's own smoke test, whose
+# transition counter public traffic would advance, and it is reminted on every reinstall. Opt-in
+# (off by default; enable on testnet). Reuses deployTarget.image, since both run forge scripts from
+# the solidity-sdk image.
+playground:
+  enabled: false
+  # Secret key (in the app secret) holding the funded deployer key: PRIVATE_KEY or FUNDED_KEY.
+  deployerSecretKey: PRIVATE_KEY
+  # ArraySummation constructor params for the shared target. Larger than the smoke target's so a
+  # reader has room to submit repeatedly before exhausting anything interesting.
+  arraySize: 16
   maxValue: 10000
   arraySeed: 1
   resources:

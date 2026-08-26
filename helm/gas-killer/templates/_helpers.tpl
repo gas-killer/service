@@ -167,6 +167,13 @@ Deploy-target job name
 {{- end }}
 
 {{/*
+Playground job name
+*/}}
+{{- define "gas-killer.playground.fullname" -}}
+{{- printf "%s-playground" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 L2 service name
 */}}
 {{- define "gas-killer.l2.fullname" -}}

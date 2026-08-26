@@ -1,0 +1,154 @@
+{{- /*
+Playground job: deploys the contracts the public documentation points readers at — an
+ArraySummation target anyone may submit against, and an ArraySummationFactory from which a
+reader deploys an instance only they are advancing.
+
+Deliberately separate from the deploy-target job. That job's target is the deployment's own
+smoke test: public traffic against it would advance the transition counter the test asserts
+on, and it is reminted on every reinstall. These are deployed once, and their addresses are
+served from GET /avs-metadata rather than written into any document.
+
+Runs after setup; opt-in via playground.enabled.
+*/ -}}
+{{- if and .Values.playground.enabled (or .Release.IsInstall .Values.rerun.playground) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gas-killer.playground.fullname" . }}
+  labels:
+    {{- include "gas-killer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: playground
+  annotations:
+    # Runs automatically on helm install. On helm upgrade, only fires when rerun.playground=true,
+    # because redeploying strands the address the docs are serving and resets the counter a reader
+    # may be part-way through advancing.
+    "helm.sh/resource-policy": keep
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "gas-killer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: playground
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: deploy
+          # The same solidity-sdk image the deploy-target job uses: both run forge scripts from it.
+          image: "{{ .Values.deployTarget.image.repository }}:{{ required "deployTarget.image.tag must be set" .Values.deployTarget.image.tag }}"
+          imagePullPolicy: {{ .Values.deployTarget.image.pullPolicy }}
+          workingDir: /sdk
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              AVS_JSON=/app/.nodes/avs_deploy.json
+              TARGET_FILE=/app/.nodes/playground_target.txt
+              FACTORY_FILE=/app/.nodes/playground_factory.txt
+
+              # Wait for setup: the AVS must exist before anything can be wired to it.
+              TIMEOUT={{ .Values.global.initTimeout }}
+              ELAPSED=0
+              until [ -f /app/.nodes/.setup_complete ] && [ -f "$AVS_JSON" ]; do
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                  echo "ERROR: timed out after ${TIMEOUT}s waiting for setup"; exit 1
+                fi
+                echo "[playground] waiting for .setup_complete + avs_deploy.json (${ELAPSED}s)"
+                sleep 10; ELAPSED=$((ELAPSED + 10))
+              done
+
+              # Prints the address from a line of the form KEY=0x… , or the prose form the factory
+              # script currently uses. Empty output means the deploy did not produce an address.
+              # The alternation is grouped so the address suffix applies to every branch: ungrouped,
+              # `|` would bind it to the last branch only, and a bare marker line elsewhere in the
+              # output could win `tail -1` and yield nothing.
+              parse_address() {
+                echo "$1" | grep -oE "($2)[: =]+0x[0-9a-fA-F]{40}" | tail -1 |
+                  grep -oE '0x[0-9a-fA-F]{40}' || true
+              }
+
+              # Already deployed and still on chain? Then leave it alone: this job is not meant to
+              # remint contracts the docs are already serving.
+              already_deployed() {
+                [ -f "$1" ] || return 1
+                local addr
+                addr=$(cat "$1")
+                case "$addr" in 0x????????????????????????????????????????) ;; *) return 1 ;; esac
+                [ "$(cast code "$addr" --rpc-url "$HTTP_RPC")" != "0x" ]
+              }
+
+              export REGISTRY_COORDINATOR_ADDRESS=$(jq -r '.addresses.registryCoordinator // .addresses.RegistryCoordinator' "$AVS_JSON")
+              export AVS_ADDRESS=$(jq -r '.addresses.IncredibleSquaringServiceManager // .addresses.avsServiceManagerWrapper' "$AVS_JSON")
+              if [ -z "$REGISTRY_COORDINATOR_ADDRESS" ] || [ "$REGISTRY_COORDINATOR_ADDRESS" = "null" ]; then
+                echo "ERROR: registryCoordinator not found in $AVS_JSON"; jq '.addresses' "$AVS_JSON"; exit 1
+              fi
+              echo "[playground] RC=$REGISTRY_COORDINATOR_ADDRESS AVS=$AVS_ADDRESS"
+
+              # 1. The factory. A reader calls deployArraySummation(avs, checker, …) on it to get an
+              #    instance nobody else advances; it takes both addresses as arguments rather than
+              #    wiring them itself, which is why /avs-metadata publishes them alongside it.
+              if already_deployed "$FACTORY_FILE"; then
+                echo "[playground] factory already deployed at $(cat "$FACTORY_FILE"), skipping"
+              else
+                OUT=$(forge script script/DeployArraySummationFactory.s.sol:DeployArraySummationFactory \
+                  --rpc-url "$HTTP_RPC" --private-key "$PRIVATE_KEY" --broadcast 2>&1) || {
+                    echo "$OUT"; echo "ERROR: factory deploy failed"; exit 1; }
+                echo "$OUT"
+                FACTORY=$(parse_address "$OUT" 'DEPLOYED_FACTORY|ArraySummationFactory deployed at')
+                if [ -z "$FACTORY" ]; then
+                  echo "ERROR: could not parse the factory address from forge output"; exit 1
+                fi
+                printf '%s' "$FACTORY" > "$FACTORY_FILE"
+                chmod 644 "$FACTORY_FILE"
+                echo "[playground] factory=$FACTORY"
+              fi
+
+              # 2. The shared target. SIG_CHECKER_ADDRESS is left unset so the script provisions a
+              #    checker from the registry coordinator; the router reads the pair back off this
+              #    contract, so whatever it provisions is what /avs-metadata publishes.
+              if already_deployed "$TARGET_FILE"; then
+                echo "[playground] target already deployed at $(cat "$TARGET_FILE"), skipping"
+              else
+                export ARRAY_SIZE={{ .Values.playground.arraySize | quote }}
+                export MAX_VALUE={{ .Values.playground.maxValue | quote }}
+                export ARRAY_SEED={{ .Values.playground.arraySeed | quote }}
+                OUT=$(forge script script/ArraySummation.s.sol:ArraySummationScript \
+                  --rpc-url "$HTTP_RPC" --private-key "$PRIVATE_KEY" --broadcast 2>&1) || {
+                    echo "$OUT"; echo "ERROR: target deploy failed"; exit 1; }
+                echo "$OUT"
+                TARGET=$(parse_address "$OUT" 'DEPLOYED_TARGET')
+                if [ -z "$TARGET" ]; then
+                  echo "ERROR: could not parse DEPLOYED_TARGET from forge output"; exit 1
+                fi
+                printf '%s' "$TARGET" > "$TARGET_FILE"
+                chmod 644 "$TARGET_FILE"
+                echo "[playground] target=$TARGET"
+              fi
+
+              echo "[playground] done. Served as demoFactory / demoTarget on GET /avs-metadata."
+          env:
+            - name: PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: {{ .Values.playground.deployerSecretKey | default "PRIVATE_KEY" }}
+            - name: HTTP_RPC
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gas-killer.secret.fullname" . }}
+                  key: HTTP_RPC
+          volumeMounts:
+            - name: shared-data
+              mountPath: /app/.nodes
+          resources:
+            {{- toYaml .Values.playground.resources | nindent 12 }}
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: {{ include "gas-killer.shareddata.fullname" . }}
+{{- end }}

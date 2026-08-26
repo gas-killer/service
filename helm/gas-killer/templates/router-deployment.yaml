@@ -290,6 +290,15 @@ spec:
             - name: AVS_REFERENCE_TARGET_FILE
               value: "/app/.nodes/demo_target.txt"
             {{- end }}
+            {{- if .Values.playground.enabled }}
+            # Same volume, same reason. These paths must match what playground-job.yaml writes.
+            # The playground target is also preferred as the reference target, so the published
+            # blsSignatureChecker is the one demoTarget itself verifies against.
+            - name: DEMO_TARGET_FILE
+              value: "/app/.nodes/playground_target.txt"
+            - name: DEMO_FACTORY_FILE
+              value: "/app/.nodes/playground_factory.txt"
+            {{- end }}
             - name: INGRESS
               value: {{ .Values.router.ingress.enabled | quote }}
             - name: INGRESS_ADDRESS

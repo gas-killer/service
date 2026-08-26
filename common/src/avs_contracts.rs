@@ -24,6 +24,9 @@
 //! - The two are then cross-checked: the checker's own `registryCoordinator()` must be the
 //!   coordinator the operators are registered in. A mismatch means the reference target belongs to
 //!   a superseded deployment, so nothing is published rather than publishing a pair that reverts.
+//! - `demoTarget` and `demoFactory` come from configuration or, failing that, from what the
+//!   playground job recorded. The playground target doubles as the preferred reference target, so
+//!   the checker published is the one `demoTarget.blsSignatureChecker()` itself returns.
 //!
 //! Resolution costs four RPC round-trips, so the answer is cached in a [`ResolvedContracts`] slot
 //! rather than recomputed per use: `/avs-metadata` is public and unauthenticated, and serving it
@@ -44,8 +47,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::{error, info, warn};
 
 /// Filename holding the address of the target the deploy job last provisioned. Used as the
-/// reference target when neither `AVS_REFERENCE_TARGET` nor [`REFERENCE_TARGET_FILE_ENV`] is set,
-/// looked for beside `avs_deploy.json`.
+/// reference target when no pin and no record path are configured, looked for beside
+/// `avs_deploy.json`.
 const DEMO_TARGET_FILENAME: &str = "demo_target.txt";
 
 /// Names the file recording the target the deploy job provisioned.
@@ -55,6 +58,16 @@ const DEMO_TARGET_FILENAME: &str = "demo_target.txt";
 /// while the deploy job writes its record to the shared-data volume. Where the chart sets this, the
 /// job is what produces the file, so its absence means "not written yet" and resolution is retried.
 const REFERENCE_TARGET_FILE_ENV: &str = "AVS_REFERENCE_TARGET_FILE";
+
+/// Names the file recording the playground target — the shared contract the documentation points
+/// readers at, deployed by its own job so public traffic cannot advance the transition counter the
+/// smoke-test target depends on. Set for the same reason as [`REFERENCE_TARGET_FILE_ENV`]: the job
+/// writes to the shared-data volume, which is not where `avs_deploy.json` is read from.
+const DEMO_TARGET_FILE_ENV: &str = "DEMO_TARGET_FILE";
+
+/// Names the file recording the playground `ArraySummationFactory`, from which a reader deploys a
+/// target only they are advancing.
+const DEMO_FACTORY_FILE_ENV: &str = "DEMO_FACTORY_FILE";
 
 /// How long one resolution attempt may run before it is abandoned and retried. Four sequential RPC
 /// round-trips sit behind it, and this runs during startup, so an unresponsive provider must not
@@ -193,8 +206,12 @@ pub struct ContractsConfig {
     pub reference_target_file: Option<PathBuf>,
     /// `DEMO_TARGET_ADDRESS`.
     pub demo_target: Option<Address>,
+    /// [`DEMO_TARGET_FILE_ENV`]: file the playground job records its target in.
+    pub demo_target_file: Option<PathBuf>,
     /// `DEMO_FACTORY_ADDRESS`.
     pub demo_factory: Option<Address>,
+    /// [`DEMO_FACTORY_FILE_ENV`]: file the playground job records its factory in.
+    pub demo_factory_file: Option<PathBuf>,
 }
 
 impl ContractsConfig {
@@ -210,7 +227,9 @@ impl ContractsConfig {
             reference_target: address_from_env("AVS_REFERENCE_TARGET")?,
             reference_target_file: non_empty_env(REFERENCE_TARGET_FILE_ENV).map(PathBuf::from),
             demo_target: demo_address_from_env("DEMO_TARGET_ADDRESS"),
+            demo_target_file: non_empty_env(DEMO_TARGET_FILE_ENV).map(PathBuf::from),
             demo_factory: demo_address_from_env("DEMO_FACTORY_ADDRESS"),
+            demo_factory_file: non_empty_env(DEMO_FACTORY_FILE_ENV).map(PathBuf::from),
         })
     }
 }
@@ -251,30 +270,52 @@ fn demo_address_from_env(key: &str) -> Option<Address> {
     }
 }
 
-/// Reads a recorded reference target out of the file the deploy job writes.
-fn read_target_file(path: &Path) -> anyhow::Result<Address> {
-    let raw = std::fs::read_to_string(path).with_context(|| {
-        format!(
-            "reading the recorded reference target at {}",
-            path.display()
-        )
-    })?;
+/// Reads an address a deploy job recorded in a file.
+///
+/// Trailing whitespace is tolerated: the jobs write with `printf`, but a shell redirect elsewhere
+/// may leave a newline. Content that is not an address is an error rather than an omission — a job
+/// that failed mid-write, or wrote a message where an address should be, must not resolve to
+/// "nothing configured".
+fn read_recorded_address(path: &Path) -> anyhow::Result<Address> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the address recorded at {}", path.display()))?;
     parse_address(
-        &format!("the reference target recorded at {}", path.display()),
+        &format!("the address recorded at {}", path.display()),
         raw.trim(),
     )
 }
 
+/// An address configured outright, or failing that the one a deploy job recorded.
+///
+/// The configured value wins so a deployment can point readers at something other than what its own
+/// job deployed. A named record that cannot be read is an error, not an omission: the job that
+/// writes it can finish after the router is already serving, so the attempt is retried.
+fn recorded_address(
+    configured: Option<Address>,
+    record: Option<&Path>,
+) -> anyhow::Result<Option<Address>> {
+    if let Some(address) = configured {
+        return Ok(Some(address));
+    }
+    record.map(read_recorded_address).transpose()
+}
+
 /// The target whose getters the AVS and checker addresses are read from.
 ///
-/// The `AVS_REFERENCE_TARGET` pin wins. Failing that the deploy job's own record is read, which
-/// tracks redeployments without anyone editing configuration: from the file the deployment names
-/// explicitly, or — for a layout that keeps everything on one volume — from beside
-/// `avs_deploy.json`.
+/// The `AVS_REFERENCE_TARGET` pin wins. Failing that a deploy job's own record is read, which tracks
+/// redeployments without anyone editing configuration: the playground record, then the smoke-test
+/// one, then — for a layout that keeps everything on one volume — a record beside `avs_deploy.json`.
+///
+/// The playground target comes first because it is the contract the documentation points readers at,
+/// and it is published as `demoTarget`. Each target deploy provisions its own signature checker, so
+/// reading the pair off anything else would publish a checker that verifies correctly yet is not the
+/// one `demoTarget.blsSignatureChecker()` returns — a discrepancy an integrator would reasonably
+/// read as a bug. Preferring it makes the published set describe the very contract a reader submits
+/// against.
 ///
 /// `Ok(None)` means nothing is configured to read the pair from, so the block is left off for good.
-/// An error means a source that should exist could not be read, and resolution is retried: an
-/// explicitly named record is written by a job that can finish after the router starts serving.
+/// An error means a source that should exist could not be read, and resolution is retried: a named
+/// record is written by a job that can finish after the router starts serving.
 fn reference_target(
     deployment_path: &Path,
     config: &ContractsConfig,
@@ -282,8 +323,12 @@ fn reference_target(
     if let Some(address) = config.reference_target {
         return Ok(Some(address));
     }
-    if let Some(path) = &config.reference_target_file {
-        return read_target_file(path).map(Some);
+    if let Some(path) = config
+        .demo_target_file
+        .as_deref()
+        .or(config.reference_target_file.as_deref())
+    {
+        return read_recorded_address(path).map(Some);
     }
     let Some(sibling) = deployment_path
         .parent()
@@ -294,7 +339,7 @@ fn reference_target(
     if !sibling.exists() {
         return Ok(None);
     }
-    read_target_file(&sibling).map(Some)
+    read_recorded_address(&sibling).map(Some)
 }
 
 /// Keeps a demo address only if it has code on the chain the block publishes.
@@ -380,8 +425,18 @@ pub async fn resolve<P: Provider>(
         avs_address,
         bls_signature_checker,
         registry_coordinator,
-        demo_target: deployed_on_chain(provider, "demoTarget", config.demo_target).await?,
-        demo_factory: deployed_on_chain(provider, "demoFactory", config.demo_factory).await?,
+        demo_target: deployed_on_chain(
+            provider,
+            "demoTarget",
+            recorded_address(config.demo_target, config.demo_target_file.as_deref())?,
+        )
+        .await?,
+        demo_factory: deployed_on_chain(
+            provider,
+            "demoFactory",
+            recorded_address(config.demo_factory, config.demo_factory_file.as_deref())?,
+        )
+        .await?,
     }))
 }
 
@@ -465,6 +520,8 @@ mod tests {
     const COORDINATOR: Address = address!("0a032D62dde46670Ae40Ce532C97f6CE9Af72Dc4");
     const SUPERSEDED_COORDINATOR: Address = address!("00000000000000000000000000000000000000bb");
     const DEMO: Address = address!("00000000000000000000000000000000000000aa");
+    const PLAYGROUND: Address = address!("00000000000000000000000000000000000000cc");
+    const FACTORY: Address = address!("00000000000000000000000000000000000000dd");
 
     fn write(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
@@ -528,6 +585,97 @@ mod tests {
             reference_target(&deployment, &ContractsConfig::default()).unwrap(),
             Some(TARGET),
             "a deployment keeping both files on one volume needs no extra configuration"
+        );
+    }
+
+    #[test]
+    fn the_playground_record_wins_over_the_smoke_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ContractsConfig {
+            demo_target_file: Some(write(
+                dir.path(),
+                "playground_target.txt",
+                &format!("{PLAYGROUND}\n"),
+            )),
+            reference_target_file: Some(write(
+                dir.path(),
+                DEMO_TARGET_FILENAME,
+                &TARGET.to_string(),
+            )),
+            ..Default::default()
+        };
+
+        // Reading the pair off the contract the docs point at is what keeps the published
+        // blsSignatureChecker equal to demoTarget.blsSignatureChecker().
+        assert_eq!(
+            reference_target(Path::new("/nonexistent/avs_deploy.json"), &config).unwrap(),
+            Some(PLAYGROUND)
+        );
+
+        let pinned = ContractsConfig {
+            reference_target: Some(TARGET),
+            ..config
+        };
+        assert_eq!(
+            reference_target(Path::new("/nonexistent/avs_deploy.json"), &pinned).unwrap(),
+            Some(TARGET),
+            "an operator's pin outranks both records"
+        );
+    }
+
+    #[test]
+    fn the_smoke_record_is_the_reference_when_no_playground_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ContractsConfig {
+            reference_target_file: Some(write(
+                dir.path(),
+                DEMO_TARGET_FILENAME,
+                &TARGET.to_string(),
+            )),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            reference_target(Path::new("/nonexistent/avs_deploy.json"), &config).unwrap(),
+            Some(TARGET)
+        );
+    }
+
+    #[test]
+    fn demo_contracts_fall_back_to_the_playground_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = write(dir.path(), "playground_target.txt", &PLAYGROUND.to_string());
+        let factory = write(dir.path(), "playground_factory.txt", &FACTORY.to_string());
+
+        assert_eq!(
+            recorded_address(None, Some(&target)).unwrap(),
+            Some(PLAYGROUND)
+        );
+        assert_eq!(
+            recorded_address(None, Some(&factory)).unwrap(),
+            Some(FACTORY)
+        );
+        assert_eq!(
+            recorded_address(Some(DEMO), Some(&target)).unwrap(),
+            Some(DEMO),
+            "a configured address points readers somewhere other than what the job deployed"
+        );
+        assert_eq!(
+            recorded_address(None, None).unwrap(),
+            None,
+            "with no playground deployed the demo fields are omitted, not defaulted"
+        );
+    }
+
+    #[test]
+    fn a_record_holding_something_other_than_an_address_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A job that failed mid-write, or wrote an error message where an address should be.
+        let record = write(dir.path(), "playground_target.txt", "ERROR: forge failed\n");
+
+        assert!(
+            recorded_address(None, Some(&record)).is_err(),
+            "a malformed record must be retried, not read as nothing configured"
         );
     }
 
