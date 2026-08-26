@@ -19,7 +19,7 @@
 set -euo pipefail
 
 EXAMPLES_REPO="${EXAMPLES_REPO:-https://github.com/gas-killer/example-contracts}"
-EXAMPLES_REF="${EXAMPLES_REF:-f9aa0a6020ec7b3e28db47999ece8ba54b3847f6}"
+EXAMPLES_REF="${EXAMPLES_REF:-5827d9a3df69255aa07000165a9a5628b8408523}"
 EXAMPLES_DIR="${EXAMPLES_DIR:-.examples/example-contracts}"
 
 # The Gas Killer SDK is a submodule of the examples repo, and it carries its own examples
@@ -32,6 +32,7 @@ SDK_SUBDIR="lib/solidity-sdk"
 EXPECTED_ARTIFACTS=(
   "OnchainLife.sol/OnchainLife.json"
   "GuardedVault.sol/GuardedVault.json"
+  "SortedOracle.sol/SortedOracle.json"
 )
 EXPECTED_SDK_ARTIFACTS=(
   "ArraySummation.sol/ArraySummation.json"
