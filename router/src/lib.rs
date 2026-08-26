@@ -1,5 +1,6 @@
 // Gas killer router: verifier-only certificate collector, task sequencer, and
 // on-chain submitter around the commonware aggregation engine.
+pub mod avs_contracts;
 pub mod error;
 pub mod executor;
 pub mod expiry;

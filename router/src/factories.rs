@@ -145,6 +145,46 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
             }])
         }
     };
+    // Resolve the published contract set from the running deployment. A failure here is loud but
+    // not fatal: the rest of the endpoint is identity information that is still worth serving, and
+    // the router's real job does not depend on it. The `contracts` block is simply absent, which
+    // an integrator reads as "no authoritative answer" rather than being handed a wrong one.
+    let contracts = match crate::avs_contracts::deployment_path() {
+        Some(path) => match providers.get(&ChainRole::L1) {
+            Some(provider) => match crate::avs_contracts::resolve(provider, &path).await {
+                Ok(contracts) => {
+                    info!(
+                        avs_address = %contracts.avs_address,
+                        bls_signature_checker = %contracts.bls_signature_checker,
+                        registry_coordinator = %contracts.registry_coordinator,
+                        chain_id = contracts.chain_id,
+                        "publishing settlement contract addresses on /avs-metadata"
+                    );
+                    Some(contracts)
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "could not resolve settlement contract addresses; /avs-metadata will omit them"
+                    );
+                    None
+                }
+            },
+            None => {
+                tracing::warn!(
+                    "no L1 provider configured; /avs-metadata will omit settlement contract addresses"
+                );
+                None
+            }
+        },
+        None => {
+            tracing::warn!(
+                "AVS_DEPLOYMENT_PATH is not set; /avs-metadata will omit settlement contract addresses"
+            );
+            None
+        }
+    };
+
     let avs_metadata = AvsMetadata {
         name: env::var("AVS_METADATA_NAME").unwrap_or_else(|_| "Gas Killer".to_string()),
         website: env::var("AVS_METADATA_WEBSITE")
@@ -158,6 +198,7 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
             .ok()
             .filter(|s| !s.is_empty()),
         operator_sets,
+        contracts,
     };
     // Open the durable store and apply migrations before serving traffic. A failure here
     // aborts router startup rather than running against an unmigrated or unwritable store.

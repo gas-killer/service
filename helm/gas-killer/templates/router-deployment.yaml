@@ -301,6 +301,18 @@ spec:
             - name: RPC_FAILURE_THRESHOLD
               value: {{ .Values.router.ingress.rpcFailureThreshold | quote }}
             {{- end }}
+            {{- if .Values.router.ingress.avsReferenceTarget }}
+            - name: AVS_REFERENCE_TARGET
+              value: {{ .Values.router.ingress.avsReferenceTarget | quote }}
+            {{- end }}
+            {{- if .Values.router.ingress.demoTarget }}
+            - name: DEMO_TARGET_ADDRESS
+              value: {{ .Values.router.ingress.demoTarget | quote }}
+            {{- end }}
+            {{- if .Values.router.ingress.demoFactory }}
+            - name: DEMO_FACTORY_ADDRESS
+              value: {{ .Values.router.ingress.demoFactory | quote }}
+            {{- end }}
             {{- if .Values.router.ingress.taskTtlSeconds }}
             - name: TASK_TTL_SECONDS
               value: {{ .Values.router.ingress.taskTtlSeconds | quote }}
