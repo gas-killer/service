@@ -297,6 +297,10 @@ spec:
               value: {{ .Values.router.ingress.maxQueueDepth | quote }}
             - name: RATE_LIMIT_RPM
               value: {{ .Values.router.ingress.rateLimitRpm | quote }}
+            {{- if .Values.router.ingress.rpcFailureThreshold }}
+            - name: RPC_FAILURE_THRESHOLD
+              value: {{ .Values.router.ingress.rpcFailureThreshold | quote }}
+            {{- end }}
             {{- if .Values.router.ingress.taskTtlSeconds }}
             - name: TASK_TTL_SECONDS
               value: {{ .Values.router.ingress.taskTtlSeconds | quote }}

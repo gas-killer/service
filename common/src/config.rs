@@ -208,6 +208,25 @@ pub fn max_queue_depth() -> usize {
         .unwrap_or(DEFAULT_MAX_QUEUE_DEPTH)
 }
 
+/// Default number of consecutive RPC failures against one chain before that chain is treated as
+/// unavailable.
+///
+/// A single failed call is noise — a dropped connection, a rate-limited provider, one bad
+/// response. Requiring a run of them means a transient blip does not shed load, while a provider
+/// that is genuinely down is caught quickly. Configurable via `RPC_FAILURE_THRESHOLD`.
+pub const DEFAULT_RPC_FAILURE_THRESHOLD: u32 = 5;
+
+/// Reads the consecutive-RPC-failure threshold from `RPC_FAILURE_THRESHOLD`, defaulting to
+/// [`DEFAULT_RPC_FAILURE_THRESHOLD`]. Zero or unparseable values fall back to the default, since a
+/// threshold of zero would mark every chain unavailable before a single call had been made.
+pub fn rpc_failure_threshold() -> u32 {
+    env::var("RPC_FAILURE_THRESHOLD")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_RPC_FAILURE_THRESHOLD)
+}
+
 /// Nominal L1 slot time in seconds, used to convert the contract's block-denominated windows
 /// into the wall-clock ones the router schedules against.
 ///

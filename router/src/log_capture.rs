@@ -3,11 +3,24 @@
 //!
 //! The router's audit trail is a contract with the operator running it: a request must be
 //! attributable to the API key that sent it (`key_id`, never the key value) and timed
-//! (`duration_ms`). Those properties are invisible to a response-body assertion, so tests install
-//! a [`CapturedEvents`] layer as the thread's default subscriber and read the fields back.
+//! (`duration_ms`). Those properties are invisible to a response-body assertion, so tests capture
+//! the events and read the fields back.
+//!
+//! # Why the subscriber is global
+//!
+//! `tracing` caches each callsite's `Interest` process-wide. A thread that reaches a log statement
+//! with no subscriber installed registers that callsite as `Interest::never()`, and the cached
+//! verdict then suppresses the event for *every* thread — including one that has since installed a
+//! capture subscriber. Under a parallel test run that makes a thread-local subscriber lose events
+//! at random, depending on which test happened to touch the callsite first.
+//!
+//! So the capture layer is installed once as the process-wide default, which keeps every callsite
+//! registered as interested, and events are routed to the calling thread's own bucket. A test only
+//! ever sees what its own thread logged, and a thread with no active capture stores nothing.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, OnceLock};
+use std::thread::ThreadId;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
@@ -28,6 +41,13 @@ impl CapturedEvent {
     }
 }
 
+/// Per-thread event buckets. A thread with no entry is not capturing, so its events are dropped
+/// rather than accumulated for the life of the test binary.
+fn buckets() -> &'static Mutex<HashMap<ThreadId, Vec<CapturedEvent>>> {
+    static BUCKETS: OnceLock<Mutex<HashMap<ThreadId, Vec<CapturedEvent>>>> = OnceLock::new();
+    BUCKETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Renders every field of an event into strings. `Visit`'s other `record_*` methods default to
 /// `record_debug`, so covering `record_debug` and `record_str` captures every value type: a
 /// `%value` (Display) field records through the former with a `Debug` shim that prints the
@@ -45,27 +65,52 @@ impl Visit for FieldVisitor<'_> {
     }
 }
 
-/// A `tracing` layer that accumulates every event it sees. Cheap to clone — clones share one
-/// buffer — so a test keeps a handle while the subscriber owns the layer.
-#[derive(Clone, Default)]
-pub struct CapturedEvents(Arc<Mutex<Vec<CapturedEvent>>>);
+/// The layer installed as the process-wide default; it files each event under the thread that
+/// emitted it.
+struct BucketLayer;
+
+impl<S: Subscriber> Layer<S> for BucketLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let thread = std::thread::current().id();
+        let Ok(mut buckets) = buckets().lock() else {
+            return;
+        };
+        let Some(bucket) = buckets.get_mut(&thread) else {
+            return;
+        };
+        let mut fields = HashMap::new();
+        event.record(&mut FieldVisitor(&mut fields));
+        // `tracing` records an event's message as a field named `message`; lifting it out leaves
+        // `fields` holding only the structured fields a test asserts on.
+        let message = fields.remove("message").unwrap_or_default();
+        bucket.push(CapturedEvent { message, fields });
+    }
+}
+
+/// A handle on one thread's captured events. Dropping it stops capture for that thread and
+/// discards what it collected.
+pub struct CapturedEvents(ThreadId);
 
 impl CapturedEvents {
+    fn events(&self) -> Vec<CapturedEvent> {
+        buckets()
+            .lock()
+            .ok()
+            .and_then(|b| b.get(&self.0).cloned())
+            .unwrap_or_default()
+    }
+
     /// The first event whose message is exactly `message`, or `None` if no such event was
     /// recorded. Messages are the fixed strings the log statements carry, so this is how a test
     /// picks the log line it means to assert on.
     pub fn find(&self, message: &str) -> Option<CapturedEvent> {
-        let events = self.0.lock().ok()?;
-        events.iter().find(|e| e.message == message).cloned()
+        self.events().into_iter().find(|e| e.message == message)
     }
 
     /// Every recorded message, in order — for a failure message that shows what was logged
     /// instead of the line a test expected.
     pub fn messages(&self) -> Vec<String> {
-        match self.0.lock() {
-            Ok(events) => events.iter().map(|e| e.message.clone()).collect(),
-            Err(_) => Vec::new(),
-        }
+        self.events().into_iter().map(|e| e.message).collect()
     }
 
     /// Asserts that `needle` appears nowhere in what was logged — neither in a message nor in any
@@ -73,11 +118,7 @@ impl CapturedEvents {
     /// assertion over every field rather than a check of the fixed message strings, so a log
     /// statement that puts a secret in a new field fails wherever it lands.
     pub fn assert_never_logged(&self, needle: &str) {
-        let events = self
-            .0
-            .lock()
-            .expect("capture buffer is only locked to record an event");
-        for event in events.iter() {
+        for event in self.events() {
             assert!(
                 !event.message.contains(needle),
                 "logged message must not contain the secret: {:?}",
@@ -94,26 +135,31 @@ impl CapturedEvents {
     }
 }
 
-impl<S: Subscriber> Layer<S> for CapturedEvents {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        let mut fields = HashMap::new();
-        event.record(&mut FieldVisitor(&mut fields));
-        // `tracing` records an event's message as a field named `message`; lifting it out leaves
-        // `fields` holding only the structured fields a test asserts on.
-        let message = fields.remove("message").unwrap_or_default();
-        if let Ok(mut events) = self.0.lock() {
-            events.push(CapturedEvent { message, fields });
+impl Drop for CapturedEvents {
+    fn drop(&mut self) {
+        if let Ok(mut buckets) = buckets().lock() {
+            buckets.remove(&self.0);
         }
     }
 }
 
-/// Captures events emitted on the current thread until the returned guard drops.
+/// Starts capturing events emitted on the current thread until the returned handle drops.
 ///
-/// The subscriber is thread-local, so a `#[tokio::test]` (a current-thread runtime) records
-/// everything its handler emits without disturbing other tests running in parallel.
-pub fn capture_events() -> (CapturedEvents, tracing::subscriber::DefaultGuard) {
-    let captured = CapturedEvents::default();
-    let subscriber = tracing_subscriber::registry().with(captured.clone());
-    let guard = tracing::subscriber::set_default(subscriber);
-    (captured, guard)
+/// The first call installs the capture layer as the process-wide default; later calls reuse it.
+/// A thread that opens a second capture while one is live starts from empty.
+pub fn capture_events() -> CapturedEvents {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let subscriber = tracing_subscriber::registry().with(BucketLayer);
+        // A default set elsewhere in the binary would mean events go there instead; nothing in the
+        // library sets one, and failing loudly here would be a worse signal than a test that then
+        // finds no events.
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+
+    let thread = std::thread::current().id();
+    if let Ok(mut buckets) = buckets().lock() {
+        buckets.insert(thread, Vec::new());
+    }
+    CapturedEvents(thread)
 }

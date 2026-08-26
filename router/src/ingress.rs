@@ -1,6 +1,7 @@
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ApiQuery, ErrorCode};
 use crate::metrics::{MetricsCollector, key_labels};
 use crate::rate_limit::KeyRateLimiter;
+use crate::rpc_health::RpcHealth;
 use crate::sequencer::{QueuedTask, TaskQueueDepth, TaskSender};
 use crate::store::{
     ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, KeyVerdict, SqliteStore, SubmittedTask, Task,
@@ -139,6 +140,10 @@ pub struct IngressState {
     /// Durable SQLite store shared with the orchestrator. `None` when persistence is not
     /// configured (e.g. in tests); every task endpoint and the admin API require it.
     pub store: Option<SqliteStore>,
+    /// Per-chain RPC circuit breaker. Every chain read on the submission and freshness paths
+    /// reports its outcome here, and a degraded chain sheds new submissions. `None` disables both,
+    /// for harnesses with no providers to watch.
+    pub rpc_health: Option<Arc<RpcHealth>>,
 }
 
 impl IngressState {
@@ -163,6 +168,7 @@ impl IngressState {
             admin_key: None,
             avs_metadata,
             store: None,
+            rpc_health: None,
         }
     }
 
@@ -181,6 +187,7 @@ impl IngressState {
             admin_key: None,
             avs_metadata: AvsMetadata::default(),
             store: None,
+            rpc_health: None,
         }
     }
 
@@ -194,6 +201,12 @@ impl IngressState {
     /// construction.
     pub fn with_admin_key(mut self, admin_key: Option<String>) -> Self {
         self.admin_key = admin_key;
+        self
+    }
+
+    /// Attaches the RPC circuit breaker, returning the updated state for chained construction.
+    pub fn with_rpc_health(mut self, rpc_health: Arc<RpcHealth>) -> Self {
+        self.rpc_health = Some(rpc_health);
         self
     }
 }
@@ -406,14 +419,36 @@ impl From<OnchainValidationError> for ApiError {
     }
 }
 
+/// Reports one RPC call's outcome to the circuit breaker, passing the result through unchanged.
+///
+/// Every chain read on the submission path goes through here, so the breaker sees each call
+/// individually rather than inferring a verdict from whichever error happened to surface. `None`
+/// disables recording, for the test and store-only harnesses that have no breaker.
+fn record_rpc<T, E>(
+    health: Option<&RpcHealth>,
+    chain: ChainRole,
+    result: Result<T, E>,
+) -> Result<T, E> {
+    if let Some(health) = health {
+        match &result {
+            Ok(_) => health.record_success(chain),
+            Err(_) => health.record_failure(chain),
+        }
+    }
+    result
+}
+
 async fn detect_contract_chain<P: Provider + Clone>(
     providers: &HashMap<ChainRole, P>,
+    health: Option<&RpcHealth>,
     address: Address,
 ) -> Result<ChainRole, OnchainValidationError> {
     let mut rpc_error: Option<String> = None;
     for &chain_id in &CHAIN_DETECTION_ORDER {
         if let Some(provider) = providers.get(&chain_id) {
-            match provider.get_code_at(address).await {
+            // A chain that answers "no code here" has answered: that is a healthy provider, not a
+            // failure, so detection probing past it still clears any failure run on it.
+            match record_rpc(health, chain_id, provider.get_code_at(address).await) {
                 Ok(code) if !code.is_empty() => return Ok(chain_id),
                 Ok(_) => {}
                 Err(e) => {
@@ -431,15 +466,17 @@ async fn detect_contract_chain<P: Provider + Clone>(
 
 async fn validate_onchain<P: Provider + Clone>(
     providers: &HashMap<ChainRole, P>,
+    health: Option<&RpcHealth>,
     body: &GasKillerTaskRequestBody,
 ) -> Result<(), OnchainValidationError> {
-    let chain_id = detect_contract_chain(providers, body.target_address).await?;
+    let chain_id = detect_contract_chain(providers, health, body.target_address).await?;
 
-    let provider = providers.get(&chain_id).unwrap();
+    // Detection only returns a chain it read from this map, so the provider is always present.
+    let provider = providers
+        .get(&chain_id)
+        .ok_or_else(|| OnchainValidationError::RpcError("no provider for detected chain".into()))?;
 
-    let current_block = provider
-        .get_block_number()
-        .await
+    let current_block = record_rpc(health, chain_id, provider.get_block_number().await)
         .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
 
     if body.block_height > current_block {
@@ -477,11 +514,15 @@ async fn validate_onchain<P: Provider + Clone>(
     // rather than a rejection. That imposes no archive requirement the service does not already
     // have: the analysis replays the call at that height, so a provider that cannot answer this
     // probe cannot serve the task either.
-    let code_at_block = provider
-        .get_code_at(body.target_address)
-        .number(body.block_height)
-        .await
-        .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
+    let code_at_block = record_rpc(
+        health,
+        chain_id,
+        provider
+            .get_code_at(body.target_address)
+            .number(body.block_height)
+            .await,
+    )
+    .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
     if code_at_block.is_empty() {
         return Err(OnchainValidationError::TargetNotDeployedAtBlock {
             provided: body.block_height,
@@ -493,11 +534,12 @@ async fn validate_onchain<P: Provider + Clone>(
     // None means "auto" — the server resolves the index at dequeue time.
     if let Some(provided) = body.transition_index {
         let contract = GasKillerSDK::new(body.target_address, provider.clone());
-        let count = contract
-            .stateTransitionCount()
-            .call()
-            .await
-            .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
+        let count = record_rpc(
+            health,
+            chain_id,
+            contract.stateTransitionCount().call().await,
+        )
+        .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
         let current_count: u64 = count.try_into().map_err(|_| {
             OnchainValidationError::RpcError("stateTransitionCount overflow".into())
         })?;
@@ -796,6 +838,30 @@ pub async fn submit_task_handler(
         return Err(ApiError::rate_limited(retry_after_secs));
     }
 
+    // Shed before spending anything on a request that cannot complete: with the chain every round
+    // depends on unreachable, the task would be accepted, queued, and then fail on its own. This
+    // sits after the rate limit so an abusive key still sees its own 429, and before the queue
+    // reservation so a refused request never occupies capacity.
+    if let Some(chain) = state.rpc_health.as_ref().and_then(|h| h.blocking_chain()) {
+        warn!(
+            key_id = %key.id,
+            chain = %chain.name(),
+            target_address = %request.body.target_address,
+            duration_ms = elapsed_ms(started),
+            "Task rejected: chain RPC unavailable"
+        );
+        if let Some(m) = &state.metrics {
+            m.ingress_rpc_unavailable
+                .get_or_create(&key_labels(&key.id))
+                .inc();
+        }
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::RpcUnavailable,
+            "Service temporarily unavailable: upstream RPC is not responding",
+        ));
+    }
+
     // Load-shed before any validation work by atomically reserving a queue slot. Onchain
     // validation costs multiple RPC round-trips, so rejecting at-capacity requests up front keeps
     // an overloaded service from amplifying its own load; a request that would have failed
@@ -844,7 +910,12 @@ pub async fn submit_task_handler(
     }
 
     if !state.providers.is_empty()
-        && let Err(e) = validate_onchain(&*state.providers, &request.body).await
+        && let Err(e) = validate_onchain(
+            &*state.providers,
+            state.rpc_health.as_deref(),
+            &request.body,
+        )
+        .await
     {
         warn!(
             key_id = %key.id,
@@ -1035,6 +1106,7 @@ pub struct ListTasksQuery {
 async fn render_or_reject_payload<P: Provider + Clone>(
     providers: &HashMap<ChainRole, P>,
     freshness: &FreshnessCache,
+    health: Option<&RpcHealth>,
     store: &SqliteStore,
     task: &Task,
 ) -> Result<Option<PayloadView>, ApiError> {
@@ -1096,9 +1168,7 @@ async fn render_or_reject_payload<P: Provider + Clone>(
         let current_block = match freshness.cached_block_number(ChainRole::L1) {
             Some(block) => block,
             None => {
-                let block = l1_provider
-                    .get_block_number()
-                    .await
+                let block = record_rpc(health, ChainRole::L1, l1_provider.get_block_number().await)
                     .map_err(|e| ApiError::from(OnchainValidationError::RpcError(e.to_string())))?;
                 freshness.store_block_number(ChainRole::L1, block);
                 block
@@ -1121,7 +1191,7 @@ async fn render_or_reject_payload<P: Provider + Clone>(
     let role = match freshness.cached_chain_role(bundle.target_address) {
         Some(role) => role,
         None => {
-            let role = detect_contract_chain(providers, bundle.target_address).await?;
+            let role = detect_contract_chain(providers, health, bundle.target_address).await?;
             freshness.store_chain_role(bundle.target_address, role);
             role
         }
@@ -1133,10 +1203,7 @@ async fn render_or_reject_payload<P: Provider + Clone>(
         Some(count) => count,
         None => {
             let contract = GasKillerSDK::new(bundle.target_address, provider.clone());
-            let count = contract
-                .stateTransitionCount()
-                .call()
-                .await
+            let count = record_rpc(health, role, contract.stateTransitionCount().call().await)
                 .map_err(|e| ApiError::from(OnchainValidationError::RpcError(e.to_string())))?;
             let count: u64 = count.try_into().map_err(|_| {
                 ApiError::from(OnchainValidationError::RpcError(
@@ -1195,8 +1262,14 @@ pub async fn get_task_handler(
         return Err(ApiError::forbidden("Task belongs to a different API key"));
     }
 
-    let payload =
-        render_or_reject_payload(&*state.providers, &state.freshness, store, &task).await?;
+    let payload = render_or_reject_payload(
+        &*state.providers,
+        &state.freshness,
+        state.rpc_health.as_deref(),
+        store,
+        &task,
+    )
+    .await?;
     let mut view = TaskView::from(task);
     view.payload = payload;
     Ok(Json(view))
@@ -2720,7 +2793,7 @@ mod tests {
             let (app, store, _rx) = make_app_with_store(None).await;
             let created = store.create_api_key(None, None).await.unwrap();
 
-            let (logs, _guard) = crate::log_capture::capture_events();
+            let logs = crate::log_capture::capture_events();
             let resp = app
                 .oneshot(bearer_request(&valid_body(), &created.key))
                 .await
@@ -2759,7 +2832,7 @@ mod tests {
             let created = store.create_api_key(None, None).await.unwrap();
             store.revoke_api_key(&created.id).await.unwrap();
 
-            let (logs, _guard) = crate::log_capture::capture_events();
+            let logs = crate::log_capture::capture_events();
             let resp = app
                 .oneshot(bearer_request(&valid_body(), &created.key))
                 .await
@@ -2783,7 +2856,7 @@ mod tests {
         async fn unknown_key_rejection_is_unattributed() {
             let (app, _store, _rx) = make_app_with_store(None).await;
 
-            let (logs, _guard) = crate::log_capture::capture_events();
+            let logs = crate::log_capture::capture_events();
             let resp = app
                 .oneshot(bearer_request(&valid_body(), "gk_never_issued"))
                 .await
@@ -2802,7 +2875,7 @@ mod tests {
         async fn missing_token_rejection_is_unattributed() {
             let (app, _store, _rx) = make_app_with_store(None).await;
 
-            let (logs, _guard) = crate::log_capture::capture_events();
+            let logs = crate::log_capture::capture_events();
             let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
@@ -2819,7 +2892,7 @@ mod tests {
             let (app, store, _rx) = make_rate_limited_app(1, None).await;
             let created = store.create_api_key(None, None).await.unwrap();
 
-            let (logs, _guard) = crate::log_capture::capture_events();
+            let logs = crate::log_capture::capture_events();
             let first = app
                 .clone()
                 .oneshot(bearer_request(&valid_body(), &created.key))
@@ -2845,6 +2918,106 @@ mod tests {
                     .is_some(),
                 "duration_ms should be logged as a number, got {:?}",
                 event.field("duration_ms")
+            );
+        }
+
+        // -- RPC circuit breaker tests --
+
+        #[tokio::test]
+        async fn submission_is_refused_while_the_required_chain_is_degraded() {
+            let metrics = Arc::new(MetricsCollector::new());
+            let (mut state, key, _queue_depth, _rx) = metered_state(Arc::clone(&metrics)).await;
+            let health = Arc::new(crate::rpc_health::RpcHealth::new(
+                1,
+                [ChainRole::L1],
+                Some(Arc::clone(&metrics)),
+            ));
+            health.record_failure(ChainRole::L1);
+            state.rpc_health = Some(Arc::clone(&health));
+            let app = build_app().with_state(state);
+
+            // An invalid body: the refusal has to come from the breaker, which sits ahead of
+            // validation, rather than from the field checks this body would also fail.
+            let payload = serde_json::json!({
+                "body": {
+                    "target_address": "0x0000000000000000000000000000000000000000",
+                    "from_address":   "0x0000000000000000000000000000000000000002",
+                    "call_data":      [0xAB, 0xCD, 0xEF, 0x01],
+                    "transition_index": 0,
+                    "value": "0x0",
+                    "block_height": 1
+                }
+            })
+            .to_string();
+
+            let resp = app
+                .oneshot(bearer_request(&payload, &key.key))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = error_envelope(resp).await;
+            assert_eq!(body.error.code, crate::error::ErrorCode::RpcUnavailable);
+            assert_eq!(key_count(&metrics.ingress_rpc_unavailable, &key.id), 1);
+            assert_eq!(
+                key_count(&metrics.ingress_rejected, &key.id),
+                0,
+                "the breaker sheds before validation, so nothing counts as rejected"
+            );
+        }
+
+        #[tokio::test]
+        async fn submission_is_accepted_once_the_chain_recovers() {
+            let metrics = Arc::new(MetricsCollector::new());
+            let (mut state, key, _queue_depth, _rx) = metered_state(Arc::clone(&metrics)).await;
+            let health = Arc::new(crate::rpc_health::RpcHealth::new(
+                1,
+                [ChainRole::L1],
+                Some(Arc::clone(&metrics)),
+            ));
+            health.record_failure(ChainRole::L1);
+            state.rpc_health = Some(Arc::clone(&health));
+            let app = build_app().with_state(state);
+
+            let refused = app
+                .clone()
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+            // The background probe's next success is what reopens the gate; nothing about the
+            // refusal itself latches it shut.
+            health.record_success(ChainRole::L1);
+            let accepted = app
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+            assert_eq!(key_count(&metrics.ingress_rpc_unavailable, &key.id), 1);
+            assert_eq!(key_count(&metrics.ingress_accepted, &key.id), 1);
+        }
+
+        #[tokio::test]
+        async fn a_degraded_secondary_chain_does_not_shed_submissions() {
+            let metrics = Arc::new(MetricsCollector::new());
+            let (mut state, key, _queue_depth, _rx) = metered_state(Arc::clone(&metrics)).await;
+            let health = Arc::new(crate::rpc_health::RpcHealth::new(
+                1,
+                [ChainRole::L1, ChainRole::L2],
+                Some(Arc::clone(&metrics)),
+            ));
+            health.record_failure(ChainRole::L2);
+            state.rpc_health = Some(health);
+            let app = build_app().with_state(state);
+
+            let resp = app
+                .oneshot(bearer_request(&valid_body(), &key.key))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::ACCEPTED,
+                "an L1 target is unaffected by an L2 outage"
             );
         }
 
@@ -3268,7 +3441,8 @@ mod tests {
             providers.insert(ChainRole::L1, provider);
             let freshness = FreshnessCache::default();
 
-            let result = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            let result =
+                render_or_reject_payload(&providers, &freshness, None, &store, &task).await;
             assert_eq!(result.unwrap(), Some(payload));
         }
 
@@ -3297,9 +3471,10 @@ mod tests {
             providers.insert(ChainRole::L1, provider);
             let freshness = FreshnessCache::default();
 
-            let first = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            let first = render_or_reject_payload(&providers, &freshness, None, &store, &task).await;
             assert_eq!(first.unwrap(), Some(payload.clone()));
-            let second = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            let second =
+                render_or_reject_payload(&providers, &freshness, None, &store, &task).await;
             assert_eq!(second.unwrap(), Some(payload));
         }
 
@@ -3324,7 +3499,7 @@ mod tests {
             providers.insert(ChainRole::L1, provider);
             let freshness = FreshnessCache::default();
 
-            let err = render_or_reject_payload(&providers, &freshness, &store, &task)
+            let err = render_or_reject_payload(&providers, &freshness, None, &store, &task)
                 .await
                 .unwrap_err();
             assert_eq!(err.code, ErrorCode::PayloadExpired);
@@ -3356,7 +3531,7 @@ mod tests {
             providers.insert(ChainRole::L1, provider);
             let freshness = FreshnessCache::default();
 
-            let err = render_or_reject_payload(&providers, &freshness, &store, &task)
+            let err = render_or_reject_payload(&providers, &freshness, None, &store, &task)
                 .await
                 .unwrap_err();
             assert_eq!(err.code, ErrorCode::PayloadExpired);
@@ -3381,7 +3556,7 @@ mod tests {
             providers.insert(ChainRole::L1, provider);
             let freshness = FreshnessCache::default();
 
-            let err = render_or_reject_payload(&providers, &freshness, &store, &task)
+            let err = render_or_reject_payload(&providers, &freshness, None, &store, &task)
                 .await
                 .unwrap_err();
             assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -3400,7 +3575,8 @@ mod tests {
 
             let providers: HashMap<ChainRole, ReadOnlyProvider> = HashMap::new();
             let freshness = FreshnessCache::default();
-            let result = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            let result =
+                render_or_reject_payload(&providers, &freshness, None, &store, &task).await;
             assert_eq!(result.unwrap(), Some(payload));
         }
 
@@ -3415,7 +3591,8 @@ mod tests {
 
             let providers: HashMap<ChainRole, ReadOnlyProvider> = HashMap::new();
             let freshness = FreshnessCache::default();
-            let result = render_or_reject_payload(&providers, &freshness, &store, &task).await;
+            let result =
+                render_or_reject_payload(&providers, &freshness, None, &store, &task).await;
             assert_eq!(result.unwrap(), None);
         }
 
@@ -3433,7 +3610,7 @@ mod tests {
             // Even with providers configured, an already-expired task never touches the chain.
             let providers: HashMap<ChainRole, ReadOnlyProvider> = HashMap::new();
             let freshness = FreshnessCache::default();
-            let err = render_or_reject_payload(&providers, &freshness, &store, &task)
+            let err = render_or_reject_payload(&providers, &freshness, None, &store, &task)
                 .await
                 .unwrap_err();
             assert_eq!(err.code, ErrorCode::PayloadExpired);
@@ -3715,7 +3892,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(
@@ -3733,7 +3910,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(
@@ -3771,7 +3948,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &body).await.unwrap_err();
+            let err = validate_onchain(&providers, None, &body).await.unwrap_err();
             assert!(
                 matches!(
                     err,
@@ -3808,7 +3985,7 @@ mod tests {
             providers.insert(ChainRole::L1, provider);
 
             assert!(
-                validate_onchain(&providers, &body).await.is_ok(),
+                validate_onchain(&providers, None, &body).await.is_ok(),
                 "age == admission window should be accepted"
             );
         }
@@ -3837,7 +4014,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &body).await.unwrap_err();
+            let err = validate_onchain(&providers, None, &body).await.unwrap_err();
             assert!(
                 matches!(err, OnchainValidationError::BlockHeightTooStale { .. }),
                 "an analysis at the contract's staleness edge leaves no room to finish, got {err}"
@@ -3858,7 +4035,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(
@@ -3890,7 +4067,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(
@@ -3915,7 +4092,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(
@@ -3941,7 +4118,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            validate_onchain(&providers, &valid_body())
+            validate_onchain(&providers, None, &valid_body())
                 .await
                 .expect("valid onchain state should pass");
         }
@@ -3957,7 +4134,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(
@@ -3980,7 +4157,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(
@@ -3998,7 +4175,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(
@@ -4018,7 +4195,7 @@ mod tests {
             let mut providers = HashMap::new();
             providers.insert(ChainRole::L1, provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(
@@ -4041,7 +4218,7 @@ mod tests {
             let mut body = valid_body();
             body.transition_index = None;
 
-            validate_onchain(&providers, &body)
+            validate_onchain(&providers, None, &body)
                 .await
                 .expect("auto transition_index should skip count check and pass");
         }
@@ -4061,7 +4238,7 @@ mod tests {
             providers.insert(ChainRole::L1, l1_provider);
             providers.insert(ChainRole::L2, l2_provider);
 
-            validate_onchain(&providers, &valid_body())
+            validate_onchain(&providers, None, &valid_body())
                 .await
                 .expect("should find contract on L2");
         }
@@ -4078,7 +4255,7 @@ mod tests {
             providers.insert(ChainRole::L1, l1_provider);
             providers.insert(ChainRole::L2, l2_provider);
 
-            let err = validate_onchain(&providers, &valid_body())
+            let err = validate_onchain(&providers, None, &valid_body())
                 .await
                 .unwrap_err();
             assert!(

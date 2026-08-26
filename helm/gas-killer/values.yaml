@@ -399,6 +399,14 @@ router:
     # get 429 with a Retry-After header. Counters are in-memory and reset on restart
     # (RATE_LIMIT_RPM).
     rateLimitRpm: "60"
+    # Consecutive RPC failures against one chain before that chain is marked unavailable: the
+    # gas_killer_rpc_healthy{chain=...} gauge drops to 0, the transition is logged at WARN, and new
+    # submissions are refused with 503 RPC_UNAVAILABLE instead of being queued as work that cannot
+    # complete. Only an L1 outage sheds traffic — every round anchors to an L1 reference block — so
+    # a degraded L2 is alerted without blocking L1 targets. The count is a run, not a total: one
+    # success clears it, and a background probe re-checks every chain every 15s so the state
+    # recovers on its own. Leave empty to use the router's default of 5 (RPC_FAILURE_THRESHOLD).
+    rpcFailureThreshold: ""
     # Seconds a task may sit without reaching a terminal state before a background sweep (every
     # 60s) settles it as expired. A queued task past its TTL has a block_height too stale to
     # aggregate into a payload the contract accepts, and a ready payload nobody collected keeps

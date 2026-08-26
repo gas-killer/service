@@ -8,6 +8,7 @@ use crate::ingress::{
 };
 use crate::metrics::MetricsCollector;
 use crate::rate_limit::KeyRateLimiter;
+use crate::rpc_health::RpcHealth;
 use crate::schnorr_coordinator::SchnorrCertifiedReceiver;
 use crate::schnorr_submitter::SchnorrSubmitter;
 use crate::sequencer::{
@@ -47,6 +48,15 @@ const QUORUM_NUMBERS: &[u8] = &[0x00];
 /// How often the background loop re-checks SQLite store liveness for the `gas_killer_db_up`
 /// metric. Aligned with a typical Prometheus scrape interval so the gauge stays fresh.
 const DB_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How often the background loop probes each chain's RPC for the circuit breaker.
+///
+/// The probe is what makes the breaker independent of traffic: it trips on an outage even while
+/// the router is idle, and — because a degraded chain refuses new submissions — it is the only
+/// thing guaranteed to still be calling that chain, so it is also what lets the breaker clear.
+/// Without it a chain that degraded under load would stay degraded, having rejected the very
+/// requests whose success would have cleared it.
+const RPC_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Wallet provider that uses SimpleNonceManager to always fetch the pending nonce from the
 /// chain rather than caching it locally. This prevents nonce corruption when a transaction
@@ -169,6 +179,39 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
         });
     }
 
+    // Watch every chain the ingress can read, so an outage on either surfaces on the
+    // `gas_killer_rpc_healthy` gauge whether or not traffic happens to touch that chain.
+    let rpc_health = Arc::new(RpcHealth::new(
+        gas_killer_common::rpc_failure_threshold(),
+        providers.keys().copied().collect::<Vec<_>>(),
+        Some(Arc::clone(&metrics)),
+    ));
+    {
+        let rpc_health = Arc::clone(&rpc_health);
+        let probe_providers: Vec<_> = providers
+            .iter()
+            .map(|(&chain, provider)| (chain, provider.clone()))
+            .collect();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(RPC_HEALTH_CHECK_INTERVAL);
+            loop {
+                ticker.tick().await;
+                for (chain, provider) in &probe_providers {
+                    // `eth_blockNumber` is the cheapest call that proves a provider is answering.
+                    // It does not prove the provider can serve historical state, which is why the
+                    // request path reports its own outcomes too.
+                    match provider.get_block_number().await {
+                        Ok(_) => rpc_health.record_success(*chain),
+                        Err(e) => {
+                            tracing::debug!(chain = %chain.name(), error = %e, "RPC health probe failed");
+                            rpc_health.record_failure(*chain);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     let store_for_return = store.clone();
     let rate_limiter = Arc::new(KeyRateLimiter::new(gas_killer_common::rate_limit_rpm()));
     let ingress_state = IngressState::new(
@@ -181,7 +224,8 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
         avs_metadata,
     )
     .with_store(store)
-    .with_admin_key(admin_key);
+    .with_admin_key(admin_key)
+    .with_rpc_health(rpc_health);
     // Plain tokio::spawn works: the commonware tokio runtime shares the ambient
     // reactor with axum.
     tokio::spawn(async move {
