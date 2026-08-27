@@ -55,6 +55,19 @@ async fn read_transition_count<P: Provider>(
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dotenv::dotenv().ok();
 
+    // Checked before any deployment or RPC work: a stale `GAS_KILLER_TRIGGER_URL` is otherwise
+    // ignored in favour of the localhost default, quietly submitting to a different router than
+    // the one the caller named.
+    if env::var_os("GAS_KILLER_TRIGGER_URL").is_some()
+        && env::var_os("GAS_KILLER_TASKS_URL").is_none()
+    {
+        return Err(
+            "GAS_KILLER_TRIGGER_URL is no longer read; set GAS_KILLER_TASKS_URL to the \
+                    router's POST /tasks URL"
+                .into(),
+        );
+    }
+
     // Default to mock if any required env vars are missing
     let missing_required_env = [
         "GAS_KILLER_TARGET_ADDRESS",
@@ -172,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Capture the counter before posting the task; a settled task advances it.
     let initial_count = read_transition_count(request.body.target_address, &provider).await?;
 
-    let url = env::var("GAS_KILLER_TRIGGER_URL")
+    let url = env::var("GAS_KILLER_TASKS_URL")
         .unwrap_or_else(|_| "http://localhost:8080/tasks".to_string());
     println!("Posting GasKiller task to {}", url);
 

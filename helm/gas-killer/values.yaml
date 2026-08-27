@@ -179,7 +179,7 @@ secrets:
   l2HttpRpc: ""
 
   # Shared secret guarding the /admin/keys endpoints, used to mint and revoke per-client API
-  # keys via Authorization: Bearer <adminKey>. Clients then authenticate /trigger with their
+  # keys via Authorization: Bearer <adminKey>. Clients then authenticate POST /tasks with their
   # minted key. Required for TESTNET deployments with ingress enabled.
   # Override with: --set secrets.adminKey=<your-admin-key>
   adminKey: ""
@@ -859,7 +859,5 @@ ingress:
   # genuinely needs to be internet-facing.
   publicPaths:
     - /tasks
-    # Deprecated alias of /tasks, kept until clients migrate.
-    - /trigger
     - /avs-metadata
     - /healthz

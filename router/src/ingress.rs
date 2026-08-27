@@ -720,8 +720,8 @@ impl GasKillerTaskRequest {
     }
 }
 
-/// Body returned by `POST /tasks` (and its deprecated alias `POST /trigger`) when a task is
-/// accepted: the id the client polls for status, and the task's current state.
+/// Body returned by `POST /tasks` when a task is accepted: the id the client polls for status,
+/// and the task's current state.
 ///
 /// `deduplicated` is `true` when the submission collapsed onto an existing in-flight or `ready`
 /// task rather than creating a new one — a retry keyed on `(key_id, target_address,
@@ -803,7 +803,7 @@ impl Drop for QueueSlot<'_> {
     }
 }
 
-/// Handler for `POST /tasks`, and its deprecated alias `POST /trigger`.
+/// Handler for `POST /tasks`.
 ///
 /// Validates the request, persists it as a `queued` task before responding — so a restart can
 /// recover work already acknowledged to the client — then enqueues it for aggregation and returns
@@ -1488,8 +1488,6 @@ pub fn build_app() -> Router<IngressState> {
         .route("/avs-metadata", get(avs_metadata_handler))
         .route("/tasks", post(submit_task_handler).get(list_tasks_handler))
         .route("/tasks/:task_id", get(get_task_handler))
-        // Deprecated alias for `POST /tasks`, kept to ease client migration; identical behavior.
-        .route("/trigger", post(submit_task_handler))
         .route(
             "/admin/keys",
             post(create_api_key_handler).get(list_api_keys_handler),
@@ -1770,7 +1768,7 @@ mod tests {
 
         /// Builds an app backed by an in-memory store, optionally with an admin key. Returns the
         /// store handle so tests can mint/revoke keys directly, and the receiver so accepted
-        /// tasks have somewhere to land (a dropped receiver would make `/trigger` fail on send).
+        /// tasks have somewhere to land (a dropped receiver would make `POST /tasks` fail on send).
         async fn make_app_with_store(
             admin_key: Option<&str>,
         ) -> (Router, SqliteStore, crate::sequencer::TaskReceiver) {
@@ -1868,16 +1866,11 @@ mod tests {
                 .unwrap()
         }
 
+        /// An authenticated submission: `POST /tasks` carrying a Bearer token.
         fn bearer_request(body: &str, token: &str) -> Request<Body> {
-            bearer_request_to("/trigger", body, token)
-        }
-
-        /// A POST to an arbitrary submission URI with a Bearer token, so tests can exercise both
-        /// `/tasks` and its `/trigger` alias through the same helper.
-        fn bearer_request_to(uri: &str, body: &str, token: &str) -> Request<Body> {
             Request::builder()
                 .method(Method::POST)
-                .uri(uri)
+                .uri("/tasks")
                 .header("content-type", "application/json")
                 .header("Authorization", format!("Bearer {token}"))
                 .body(Body::from(body.to_string()))
@@ -1887,7 +1880,7 @@ mod tests {
         fn json_request(body: &str) -> Request<Body> {
             Request::builder()
                 .method(Method::POST)
-                .uri("/trigger")
+                .uri("/tasks")
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap()
@@ -2109,7 +2102,7 @@ mod tests {
             let (app, _queue) = make_app();
             let req = Request::builder()
                 .method(Method::POST)
-                .uri("/trigger")
+                .uri("/tasks")
                 .header("content-type", "application/json")
                 .body(Body::from("not json at all {{{"))
                 .unwrap();
@@ -2150,7 +2143,7 @@ mod tests {
             let (app, _queue) = make_app();
             let req = Request::builder()
                 .method(Method::POST)
-                .uri("/trigger")
+                .uri("/tasks")
                 .header("content-type", "application/json")
                 .body(Body::empty())
                 .unwrap();
@@ -2169,8 +2162,8 @@ mod tests {
         async fn test_wrong_method_returns_405() {
             let (app, _queue) = make_app();
             let req = Request::builder()
-                .method(Method::GET)
-                .uri("/trigger")
+                .method(Method::DELETE)
+                .uri("/tasks")
                 .body(Body::empty())
                 .unwrap();
 
@@ -2295,7 +2288,7 @@ mod tests {
         #[tokio::test]
         async fn test_submission_without_store_returns_503() {
             // Submission persists before responding and attributes the task to a key, both of
-            // which need the store, so a store-less ingress cannot serve `/trigger` at all. It
+            // which need the store, so a store-less ingress cannot serve `POST /tasks` at all. It
             // says so before spending validation or RPC work on the request, and there is no
             // configuration in which it instead accepts the task and drops it.
             let (app, _queue) = make_app();
@@ -2678,27 +2671,12 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn trigger_accepts_valid_api_key() {
-            let (app, store, mut rx) = make_app_with_store(None).await;
-            let created = store.create_api_key(None, None).await.unwrap();
-
-            let resp = app
-                .oneshot(bearer_request(&valid_body(), &created.key))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::ACCEPTED);
-            let body = accepted_body(resp).await;
-            assert_eq!(body.status, TaskStatus::Queued);
-            assert!(rx.try_recv().is_ok(), "valid key should queue the task");
-        }
-
-        #[tokio::test]
         async fn tasks_endpoint_accepts_valid_api_key_and_persists() {
             let (app, store, mut rx) = make_app_with_store(None).await;
             let created = store.create_api_key(None, None).await.unwrap();
 
             let resp = app
-                .oneshot(bearer_request_to("/tasks", &valid_body(), &created.key))
+                .oneshot(bearer_request(&valid_body(), &created.key))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -2835,7 +2813,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn trigger_rejects_revoked_api_key() {
+        async fn tasks_endpoint_rejects_revoked_api_key() {
             let (app, store, _rx) = make_app_with_store(None).await;
             let created = store.create_api_key(None, None).await.unwrap();
             store.revoke_api_key(&created.id).await.unwrap();
@@ -2848,7 +2826,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn trigger_rejects_unknown_key_when_store_present() {
+        async fn tasks_endpoint_rejects_unknown_key_when_store_present() {
             let (app, _store, _rx) = make_app_with_store(None).await;
             let resp = app
                 .oneshot(bearer_request(&valid_body(), "gk_unknown"))
@@ -2858,7 +2836,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn trigger_without_token_rejected_when_store_present() {
+        async fn tasks_endpoint_without_token_rejected_when_store_present() {
             let (app, _store, _rx) = make_app_with_store(None).await;
             let resp = app.oneshot(json_request(&valid_body())).await.unwrap();
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

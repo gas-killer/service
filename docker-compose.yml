@@ -203,7 +203,7 @@ services:
       - STORAGE_DIR=/app/data
       # SQLite API-key store path (shares the router-data volume with the journal).
       - DATA_DIR=/app/data
-      # Guards the /admin/keys endpoints used to mint the API keys that authenticate /trigger.
+      # Guards the /admin/keys endpoints used to mint the API keys that authenticate POST /tasks.
       # Defaults to a fixed value for the local/e2e harness; override by exporting ADMIN_KEY.
       - ADMIN_KEY=${ADMIN_KEY:-ci-admin-key}
       - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
