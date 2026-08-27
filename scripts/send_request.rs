@@ -172,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Capture the counter before posting the task; a settled task advances it.
     let initial_count = read_transition_count(request.body.target_address, &provider).await?;
 
-    let url = env::var("GAS_KILLER_TRIGGER_URL")
+    let url = env::var("GAS_KILLER_TASKS_URL")
         .unwrap_or_else(|_| "http://localhost:8080/tasks".to_string());
     println!("Posting GasKiller task to {}", url);
 

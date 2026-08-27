@@ -31,7 +31,7 @@ spec:
             routed here and stays reachable only in-cluster. Falls back to the router's public
             routes if publicPaths is unset, never to a catch-all "/".
           */}}
-          {{- range .Values.ingress.publicPaths | default (list "/tasks" "/trigger" "/avs-metadata" "/healthz") }}
+          {{- range .Values.ingress.publicPaths | default (list "/tasks" "/avs-metadata" "/healthz") }}
           - path: {{ . | quote }}
             pathType: Prefix
             backend:

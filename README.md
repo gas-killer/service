@@ -92,7 +92,7 @@ still required (BN254 key/curve handling, the EigenLayer staking client, the
 verification path (`GasKillerSDK.verifyAndUpdate` + `BLSSignatureChecker`) is unchanged.
 
 ```
-                        POST /trigger
+                         POST /tasks
                              │
                      router: HTTP ingress
                              │
@@ -226,8 +226,8 @@ Optional environment variables:
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
 - `INGRESS_TIMEOUT_MS`: Timeout for waiting on ingress tasks in milliseconds (default: 0, no timeout)
-- `ADMIN_KEY`: Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke the per-client API keys that authenticate `/trigger`. Omit or leave empty to disable the admin API.
-- `RATE_LIMIT_RPM`: Default per-API-key request rate on `/trigger` (`POST /tasks`), in requests per minute (default: 60). Applies to every key without a per-key override (set at creation via the `rpm_limit` field of `POST /admin/keys`). Over-limit requests get `429 Too Many Requests` with a `Retry-After` header. Counters are in-memory per router process and reset on restart.
+- `ADMIN_KEY`: Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke the per-client API keys that authenticate `POST /tasks`. Omit or leave empty to disable the admin API.
+- `RATE_LIMIT_RPM`: Default per-API-key request rate on `POST /tasks`, in requests per minute (default: 60). Applies to every key without a per-key override (set at creation via the `rpm_limit` field of `POST /admin/keys`). Over-limit requests get `429 Too Many Requests` with a `Retry-After` header. Counters are in-memory per router process and reset on restart.
 - `AVS_REFERENCE_TARGET`, `AVS_REFERENCE_TARGET_FILE`, `DEMO_TARGET_ADDRESS`, `DEMO_TARGET_FILE`, `DEMO_FACTORY_ADDRESS`, `DEMO_FACTORY_FILE`: feed the `contracts` block on `GET /avs-metadata` — `chainId`, `avsAddress`, `blsSignatureChecker`, `registryCoordinator`, plus the demo contracts the docs point at. Publishing the live pair is what stops a target being wired to a superseded checker, which passes every router-side check and then reverts `InvalidQuorumApkHash` on chain.
 
   | Variable | Sets |
@@ -263,9 +263,9 @@ INGRESS=true
 docker compose restart router
 ```
 
-3. **Trigger tasks via HTTP:**
+3. **Submit tasks via HTTP:**
 ```bash
-curl -X POST http://localhost:8080/trigger \
+curl -X POST http://localhost:8080/tasks \
   -H "Content-Type: application/json" \
   -d '{
     "body": {
@@ -281,7 +281,7 @@ curl -X POST http://localhost:8080/trigger \
 
 Note: `call_data` is a JSON array of bytes (not a hex string), `value` is a U256 hex string, and `block_height` must be non-zero.
 
-When the router has a persistent store (the default), `/trigger` requires a valid API key, minted
+When the router has a persistent store (the default), `POST /tasks` requires a valid API key, minted
 through the admin API (`POST /admin/keys`) using `ADMIN_KEY`. The raw key is returned exactly
 once. Locally (docker-compose) the admin API is on `localhost:8080`:
 ```bash
@@ -293,14 +293,14 @@ curl -X POST http://localhost:8080/admin/keys \
 ```
 
 Add `rpm_limit` (requests per minute) to the create body to give a key a custom rate; omit it to
-use the global `RATE_LIMIT_RPM` default. Each key is rate-limited on `/trigger`: over-limit requests
+use the global `RATE_LIMIT_RPM` default. Each key is rate-limited on `POST /tasks`: over-limit requests
 return `429 Too Many Requests` with a `Retry-After` header (seconds until the next request is
 allowed). The limiter is a token bucket, not a strict rolling window — a key may burst up to its
 full per-minute allowance at once, after which requests refill at roughly `rpm / 60` per second.
 Counters are in-memory per router process and reset on restart.
 
 On a Kubernetes deployment the `/admin/*` endpoints are **not** exposed through the public Ingress
-(only `/trigger`, `/avs-metadata`, `/healthz` are — see `ingress.publicPaths` in the chart).
+(only `/tasks`, `/avs-metadata`, `/healthz` are — see `ingress.publicPaths` in the chart).
 Reach them in-cluster. The `create_api_key` tool ships in the router image, defaults to the
 in-cluster `http://localhost:8080`, and reads `ADMIN_KEY` from the pod env — so `kubectl exec`
 needs no target flag:
@@ -322,13 +322,13 @@ deliberately added `/admin` to `ingress.publicPaths` — otherwise they 404 at t
 Then include the minted key as the Bearer token on task requests (revoke via the same in-cluster
 admin path when no longer needed):
 ```bash
-curl -X POST https://<host>/trigger \
+curl -X POST https://<host>/tasks \
   -H "Authorization: Bearer gk_..." \
   -H "Content-Type: application/json" \
   -d '...'
 ```
 
-Use the `send_request` script for a complete end-to-end trigger against an ArraySummation contract.
+Use the `send_request` script for a complete end-to-end run against an ArraySummation contract.
 Set `GAS_KILLER_API_KEY` to a minted key when the router requires auth:
 ```bash
 GAS_KILLER_API_KEY=gk_... cargo run -p scripts --bin send_request

@@ -386,7 +386,7 @@ jobs:
           set -euo pipefail
           ROUTER_URL=http://localhost:8080
 
-          # A well-formed task body so /trigger reaches the handler's auth check rather than
+          # A well-formed task body so POST /tasks reaches the handler's auth check rather than
           # failing JSON extraction first; field values are irrelevant because auth is evaluated
           # before validation.
           TASK_BODY='{"body":{"target_address":"0x0000000000000000000000000000000000000001","call_data":[171,205,239,1],"transition_index":0,"from_address":"0x0000000000000000000000000000000000000002","value":"0","block_height":1}}'
@@ -412,24 +412,24 @@ jobs:
             echo "listing leaked the key value"; exit 1
           fi
 
-          echo "=== The minted key passes the /trigger auth gate ==="
+          echo "=== The minted key passes the POST /tasks auth gate ==="
           CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $KEY" \
-            -H "Content-Type: application/json" -d "$TASK_BODY" "$ROUTER_URL/trigger")
-          [ "$CODE" != "401" ] || { echo "a valid key was rejected on /trigger"; exit 1; }
+            -H "Content-Type: application/json" -d "$TASK_BODY" "$ROUTER_URL/tasks")
+          [ "$CODE" != "401" ] || { echo "a valid key was rejected on POST /tasks"; exit 1; }
 
           echo "=== Revoke the key ==="
           CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
             -H "Authorization: Bearer $CI_ADMIN_KEY" "$ROUTER_URL/admin/keys/$ID")
           [ "$CODE" = "204" ] || { echo "expected 204 on revoke, got $CODE"; exit 1; }
 
-          echo "=== The revoked key is rejected on /trigger ==="
+          echo "=== The revoked key is rejected on POST /tasks ==="
           CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: Bearer $KEY" \
-            -H "Content-Type: application/json" -d "$TASK_BODY" "$ROUTER_URL/trigger")
-          [ "$CODE" = "401" ] || { echo "revoked key still accepted on /trigger (got $CODE)"; exit 1; }
+            -H "Content-Type: application/json" -d "$TASK_BODY" "$ROUTER_URL/tasks")
+          [ "$CODE" = "401" ] || { echo "revoked key still accepted on POST /tasks (got $CODE)"; exit 1; }
 
           echo "API key admin flow verified"
 
-          # Mint a working key for the remaining e2e steps, which authenticate /trigger with it.
+          # Mint a working key for the remaining e2e steps, which authenticate POST /tasks with it.
           # The value is written to GITHUB_ENV (not echoed) so later steps pick it up.
           WORKING=$(curl -s -X POST -H "Authorization: Bearer $CI_ADMIN_KEY" \
             -H "Content-Type: application/json" -d '{"label":"ci-e2e-runner"}' "$ROUTER_URL/admin/keys")
@@ -515,9 +515,9 @@ jobs:
           export HTTP_RPC=http://localhost:8545
           export WS_RPC=ws://localhost:8545
           export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
-          export GAS_KILLER_TRIGGER_URL=http://localhost:8080/trigger
+          export GAS_KILLER_TASKS_URL=http://localhost:8080/tasks
           export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-          # send_request authenticates /trigger with GAS_KILLER_API_KEY, minted in the admin-flow
+          # send_request authenticates POST /tasks with GAS_KILLER_API_KEY, minted in the admin-flow
           # step and exported via GITHUB_ENV.
 
           # Get the deployed target's address. deploy_example records whichever example it
@@ -638,13 +638,13 @@ jobs:
           PAYLOAD="{\"body\":{\"target_address\":\"$YIELD_DISTRIBUTOR\",\"call_data\":$BYTES_ARRAY,\"transition_index\":$INITIAL_COUNT,\"from_address\":\"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\",\"value\":\"0\",\"block_height\":$BLOCK}}"
           echo "Payload: $PAYLOAD"
 
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $GAS_KILLER_API_KEY" -d "$PAYLOAD" "$ROUTER_URL/trigger")
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $GAS_KILLER_API_KEY" -d "$PAYLOAD" "$ROUTER_URL/tasks")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | head -1)
           echo "Router response ($HTTP_CODE): $BODY"
 
           if [ "$HTTP_CODE" != "202" ] && [ "$HTTP_CODE" != "200" ]; then
-            echo "Router rejected the trigger request"
+            echo "Router rejected the task submission"
             echo "=== Router logs ==="
             kubectl logs -l app.kubernetes.io/component=router --tail 50
             exit 1

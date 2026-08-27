@@ -93,9 +93,8 @@ pub struct IngressHandles {
 }
 
 /// Creates the ingress task channel and, when `INGRESS=true`, spawns the HTTP
-/// server (`/trigger`, `/healthz`, `/avs-metadata`) on `INGRESS_ADDRESS`
-/// (default `0.0.0.0:8080`). Behavior, env knobs, and endpoint shapes are
-/// unchanged from the pre-migration router.
+/// server (`/tasks`, `/healthz`, `/avs-metadata`) on `INGRESS_ADDRESS`
+/// (default `0.0.0.0:8080`).
 pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHandles> {
     let (sender, receiver) = task_channel();
     let queue_depth = task_queue_depth();
