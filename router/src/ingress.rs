@@ -104,10 +104,11 @@ pub struct AvsMetadata {
     #[serde(rename = "operatorSets", skip_serializing_if = "Option::is_none")]
     pub operator_sets: Option<Vec<AvsOperatorSetMetadata>>,
     /// Settlement-relevant contract addresses, resolved from the running deployment by a
-    /// background task. Absent until that succeeds — an integrator gets no answer rather than a
-    /// wrong one, since a wrong checker is what makes a target revert on every submission. Held as
-    /// a shared write-once slot, so cloning this metadata for a response shares the resolver's
-    /// answer instead of snapshotting whatever was known when the router started.
+    /// background task. Absent until it establishes something — an integrator gets no answer rather
+    /// than a wrong one, since a wrong checker is what makes a target revert on every submission.
+    /// Held as a shared slot, so cloning this metadata for a response reads whatever the resolver
+    /// has published rather than snapshotting what was known when the router started, and a record
+    /// a deploy job writes later shows up without a restart.
     #[serde(default, skip_serializing_if = "ResolvedContracts::is_unresolved")]
     pub contracts: ResolvedContracts,
 }

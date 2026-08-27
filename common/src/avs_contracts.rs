@@ -30,12 +30,18 @@
 //!
 //! Resolution costs four RPC round-trips, so the answer is cached in a [`ResolvedContracts`] slot
 //! rather than recomputed per use: `/avs-metadata` is public and unauthenticated, and serving it
-//! must not turn into an RPC amplifier. Because the addresses only change when the AVS is
-//! redeployed — which restarts the process — the slot is written at most once, and a failed attempt
-//! is retried in the background until it succeeds.
+//! must not turn into an RPC amplifier.
+//!
+//! The slot holds the most complete set established so far, and a background resolver keeps
+//! refining it. That matters because the records it reads are written by deploy jobs that can
+//! finish — or fail outright — after the router is already serving: waiting for all of them before
+//! publishing anything would let one broken job withhold addresses that have nothing to do with it,
+//! while publishing once and stopping would miss a record that lands a minute later. So an attempt
+//! publishes what it can establish, and repeats while any record a job is expected to write is
+//! still unread.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use crate::bindings::IBLSSignatureCheckerRegistry;
@@ -152,33 +158,48 @@ fn checksummed_opt<S: Serializer>(
 /// The slot the resolved contract set is published into, shared between the background resolver and
 /// every `/avs-metadata` response.
 ///
-/// Write-once: these addresses change only on a redeployment, which the router has to restart to
-/// pick up anyway, so the resolver fills the slot on its first success and stops. A `OnceLock`
-/// rather than a lock means the request path reads it without blocking or poisoning.
+/// Rewritable rather than write-once, so an incomplete set can be served now and replaced when a
+/// deploy job's record lands. Reads take the lock only long enough to clone; a poisoned lock is
+/// recovered from rather than propagated, since the only writer replaces the value outright and so
+/// cannot leave it half-updated.
 #[derive(Debug, Clone, Default)]
-pub struct ResolvedContracts(Arc<OnceLock<AvsContracts>>);
+pub struct ResolvedContracts(Arc<RwLock<Option<AvsContracts>>>);
 
 impl ResolvedContracts {
-    /// The resolved set, or `None` while resolution has not yet succeeded.
-    pub fn get(&self) -> Option<&AvsContracts> {
-        self.0.get()
+    /// A copy of the set published so far, or `None` while nothing has been established.
+    pub fn snapshot(&self) -> Option<AvsContracts> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Whether nothing has been resolved yet. Drives `skip_serializing_if` so an unresolved set is
     /// absent from the response rather than serialized as `null` — a client branches on presence.
     pub fn is_unresolved(&self) -> bool {
-        self.0.get().is_none()
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
     }
 
-    /// Publishes the resolved set. A second call is ignored: the slot is write-once.
-    pub fn publish(&self, contracts: AvsContracts) {
-        let _ = self.0.set(contracts);
+    /// Publishes `contracts`, returning whether it differs from what was already published.
+    ///
+    /// The caller uses that to log a change rather than every repeat, since the resolver may
+    /// re-establish the same set many times while waiting on a record.
+    pub fn publish(&self, contracts: AvsContracts) -> bool {
+        let mut slot = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        if slot.as_ref() == Some(&contracts) {
+            return false;
+        }
+        *slot = Some(contracts);
+        true
     }
 }
 
 impl Serialize for ResolvedContracts {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self.0.get() {
+        match &*self.0.read().unwrap_or_else(PoisonError::into_inner) {
             Some(contracts) => contracts.serialize(serializer),
             None => serializer.serialize_none(),
         }
@@ -188,11 +209,7 @@ impl Serialize for ResolvedContracts {
 impl<'de> Deserialize<'de> for ResolvedContracts {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let contracts = Option::<AvsContracts>::deserialize(deserializer)?;
-        let slot = Self::default();
-        if let Some(contracts) = contracts {
-            slot.publish(contracts);
-        }
-        Ok(slot)
+        Ok(Self(Arc::new(RwLock::new(contracts))))
     }
 }
 
@@ -285,19 +302,46 @@ fn read_recorded_address(path: &Path) -> anyhow::Result<Address> {
     )
 }
 
+/// Tracks whether any record a deploy job is expected to write is still unread.
+///
+/// An unreadable record does not fail an attempt — one job that has not finished, or has failed for
+/// good, must not withhold the addresses it has nothing to do with. It does mean the set is
+/// incomplete, so the resolver keeps going until nothing named is outstanding.
+#[derive(Debug, Default)]
+struct Records {
+    pending: bool,
+}
+
+impl Records {
+    /// The address recorded at `path`, or `None` while that record cannot be read.
+    fn read(&mut self, path: &Path) -> Option<Address> {
+        match read_recorded_address(path) {
+            Ok(address) => Some(address),
+            Err(e) => {
+                warn!(
+                    error = %format!("{e:#}"),
+                    "a deploy job's record is not readable; retrying while the set is incomplete"
+                );
+                self.pending = true;
+                None
+            }
+        }
+    }
+}
+
 /// An address configured outright, or failing that the one a deploy job recorded.
 ///
 /// The configured value wins so a deployment can point readers at something other than what its own
-/// job deployed. A named record that cannot be read is an error, not an omission: the job that
-/// writes it can finish after the router is already serving, so the attempt is retried.
-fn recorded_address(
+/// job deployed.
+fn configured_or_recorded(
     configured: Option<Address>,
     record: Option<&Path>,
-) -> anyhow::Result<Option<Address>> {
+    records: &mut Records,
+) -> Option<Address> {
     if let Some(address) = configured {
-        return Ok(Some(address));
+        return Some(address);
     }
-    record.map(read_recorded_address).transpose()
+    record.and_then(|path| records.read(path))
 }
 
 /// The target whose getters the AVS and checker addresses are read from.
@@ -313,33 +357,28 @@ fn recorded_address(
 /// read as a bug. Preferring it makes the published set describe the very contract a reader submits
 /// against.
 ///
-/// `Ok(None)` means nothing is configured to read the pair from, so the block is left off for good.
-/// An error means a source that should exist could not be read, and resolution is retried: a named
-/// record is written by a job that can finish after the router starts serving.
+/// Each source is tried in turn, so a record that is not readable yet falls through to the next
+/// rather than withholding everything. `None` means none of them answered; whether that is worth
+/// retrying is [`Records::pending`], since a record absent because no job writes it is final while
+/// one absent because a job has not finished is not.
 fn reference_target(
     deployment_path: &Path,
     config: &ContractsConfig,
-) -> anyhow::Result<Option<Address>> {
+    records: &mut Records,
+) -> Option<Address> {
     if let Some(address) = config.reference_target {
-        return Ok(Some(address));
+        return Some(address);
     }
-    if let Some(path) = config
-        .demo_target_file
-        .as_deref()
-        .or(config.reference_target_file.as_deref())
-    {
-        return read_recorded_address(path).map(Some);
+    for named in [&config.demo_target_file, &config.reference_target_file] {
+        if let Some(address) = named.as_deref().and_then(|path| records.read(path)) {
+            return Some(address);
+        }
     }
-    let Some(sibling) = deployment_path
-        .parent()
-        .map(|dir| dir.join(DEMO_TARGET_FILENAME))
-    else {
-        return Ok(None);
-    };
+    let sibling = deployment_path.parent()?.join(DEMO_TARGET_FILENAME);
     if !sibling.exists() {
-        return Ok(None);
+        return None;
     }
-    read_recorded_address(&sibling).map(Some)
+    records.read(&sibling)
 }
 
 /// Keeps a demo address only if it has code on the chain the block publishes.
@@ -371,19 +410,35 @@ async fn deployed_on_chain<P: Provider>(
     Ok(Some(address))
 }
 
-/// Resolves the published contract set.
+/// What one resolution attempt established.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    /// The set to publish, or `None` when no reference target answered and there is therefore no
+    /// pair to read.
+    pub contracts: Option<AvsContracts>,
+    /// Whether a record a deploy job is expected to write is still unread, so the set may yet grow.
+    /// The resolver keeps attempting while this holds; when it is false the answer is as complete as
+    /// this configuration allows and resolution is done.
+    pub incomplete: bool,
+}
+
+/// Resolves as much of the published contract set as the running deployment can answer for.
 ///
-/// `Ok(None)` means there is no reference target to read the pair from, so there is nothing to
-/// publish and nothing to retry. An error is a failed attempt: something that should have answered
-/// did not, or the pair that came back is not the operators' own.
+/// An error is a failed attempt — something that should have answered did not, or the pair that came
+/// back is not the operators' own. A record that is merely unread is not an error: it leaves
+/// [`Resolution::incomplete`] set so the caller tries again, having published whatever else stands.
 pub async fn resolve<P: Provider>(
     provider: &P,
     registry_coordinator: Address,
     deployment_path: &Path,
     config: &ContractsConfig,
-) -> anyhow::Result<Option<AvsContracts>> {
-    let Some(target) = reference_target(deployment_path, config)? else {
-        return Ok(None);
+) -> anyhow::Result<Resolution> {
+    let mut records = Records::default();
+    let Some(target) = reference_target(deployment_path, config, &mut records) else {
+        return Ok(Resolution {
+            contracts: None,
+            incomplete: records.pending,
+        });
     };
 
     let chain_id = provider
@@ -420,38 +475,43 @@ pub async fn resolve<P: Provider>(
         );
     }
 
-    Ok(Some(AvsContracts {
-        chain_id,
-        avs_address,
-        bls_signature_checker,
-        registry_coordinator,
-        demo_target: deployed_on_chain(
-            provider,
-            "demoTarget",
-            recorded_address(config.demo_target, config.demo_target_file.as_deref())?,
-        )
-        .await?,
-        demo_factory: deployed_on_chain(
-            provider,
-            "demoFactory",
-            recorded_address(config.demo_factory, config.demo_factory_file.as_deref())?,
-        )
-        .await?,
-    }))
+    let demo_target = configured_or_recorded(
+        config.demo_target,
+        config.demo_target_file.as_deref(),
+        &mut records,
+    );
+    let demo_factory = configured_or_recorded(
+        config.demo_factory,
+        config.demo_factory_file.as_deref(),
+        &mut records,
+    );
+
+    Ok(Resolution {
+        contracts: Some(AvsContracts {
+            chain_id,
+            avs_address,
+            bls_signature_checker,
+            registry_coordinator,
+            demo_target: deployed_on_chain(provider, "demoTarget", demo_target).await?,
+            demo_factory: deployed_on_chain(provider, "demoFactory", demo_factory).await?,
+        }),
+        incomplete: records.pending,
+    })
 }
 
-/// Fills `slot` in the background, retrying a failed resolution until it succeeds.
+/// Keeps `slot` as complete as the deployment allows, publishing each improvement as it lands.
 ///
 /// A failure is not fatal — the rest of `/avs-metadata` is identity information worth serving, and
 /// an absent block reads as "no authoritative answer" rather than handing out a wrong one — but it
 /// must not be permanent either. The providers this reads through are known to flap, which is why
-/// the router carries an RPC circuit breaker, and the deploy job that records the reference target
-/// can finish after the router is already serving. Without a retry either would leave the block
-/// absent for the process lifetime, self-healing only on another restart.
+/// the router carries an RPC circuit breaker, and the deploy jobs that record addresses can finish
+/// after the router is already serving. Without retrying, either would leave the block absent for
+/// the process lifetime, self-healing only on another restart.
 ///
-/// The loop ends on the first success, and on `Ok(None)`, which means nothing is configured to
-/// resolve from. Anything else keeps retrying with backoff, so a misconfiguration stays visible in
-/// the logs instead of scrolling past once at startup.
+/// The loop ends once an attempt reports a complete answer — including the complete answer "nothing
+/// is configured to resolve from". Until then it publishes what each attempt established and tries
+/// again with backoff, so a misconfiguration stays visible in the logs instead of scrolling past
+/// once at startup, and a job that lands late upgrades what is already being served.
 pub fn spawn_resolver<P: Provider + 'static>(
     provider: P,
     registry_coordinator: Address,
@@ -464,23 +524,39 @@ pub fn spawn_resolver<P: Provider + 'static>(
         loop {
             let attempt = resolve(&provider, registry_coordinator, &deployment_path, &config);
             match tokio::time::timeout(RESOLVE_TIMEOUT, attempt).await {
-                Ok(Ok(Some(contracts))) => {
-                    info!(
-                        avs_address = %contracts.avs_address,
-                        bls_signature_checker = %contracts.bls_signature_checker,
-                        registry_coordinator = %contracts.registry_coordinator,
-                        chain_id = contracts.chain_id,
-                        "publishing settlement contract addresses on /avs-metadata"
-                    );
-                    slot.publish(contracts);
-                    return;
-                }
-                Ok(Ok(None)) => {
-                    info!(
-                        "no reference target configured ({REFERENCE_TARGET_FILE_ENV} or \
-                         AVS_REFERENCE_TARGET); /avs-metadata will omit the contracts block"
-                    );
-                    return;
+                Ok(Ok(resolution)) => {
+                    match resolution.contracts {
+                        // Logged on a change only: while a record is outstanding the same set is
+                        // re-established every attempt, and repeating it would drown the change.
+                        Some(contracts) => {
+                            let demo_target = contracts.demo_target;
+                            let demo_factory = contracts.demo_factory;
+                            let published = slot.publish(contracts.clone());
+                            if published {
+                                info!(
+                                    avs_address = %contracts.avs_address,
+                                    bls_signature_checker = %contracts.bls_signature_checker,
+                                    registry_coordinator = %contracts.registry_coordinator,
+                                    chain_id = contracts.chain_id,
+                                    demo_target = ?demo_target,
+                                    demo_factory = ?demo_factory,
+                                    incomplete = resolution.incomplete,
+                                    "publishing settlement contract addresses on /avs-metadata"
+                                );
+                            }
+                        }
+                        None if !resolution.incomplete => {
+                            info!(
+                                "no reference target configured ({REFERENCE_TARGET_FILE_ENV}, \
+                                 {DEMO_TARGET_FILE_ENV} or AVS_REFERENCE_TARGET); /avs-metadata \
+                                 will omit the contracts block"
+                            );
+                        }
+                        None => {}
+                    }
+                    if !resolution.incomplete {
+                        return;
+                    }
                 }
                 Ok(Err(e)) => error!(
                     error = %e,
@@ -522,12 +598,20 @@ mod tests {
     const DEMO: Address = address!("00000000000000000000000000000000000000aa");
     const PLAYGROUND: Address = address!("00000000000000000000000000000000000000cc");
     const FACTORY: Address = address!("00000000000000000000000000000000000000dd");
-
     fn write(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, body).expect("writing fixture");
         path
     }
+
+    /// [`reference_target`] plus whether anything it tried is still outstanding.
+    fn reference(deployment_path: &str, config: &ContractsConfig) -> (Option<Address>, bool) {
+        let mut records = Records::default();
+        let target = reference_target(Path::new(deployment_path), config, &mut records);
+        (target, records.pending)
+    }
+
+    const NO_DEPLOYMENT: &str = "/nonexistent/avs_deploy.json";
 
     // -- reference target selection --
 
@@ -538,53 +622,42 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            reference_target(Path::new("/nonexistent/avs_deploy.json"), &config).unwrap(),
-            Some(TARGET)
-        );
+        assert_eq!(reference(NO_DEPLOYMENT, &config), (Some(TARGET), false));
     }
 
     #[test]
     fn reads_the_target_from_the_named_record() {
         let dir = tempfile::tempdir().unwrap();
         // Written with a trailing newline by a shell redirect in some revisions of the job.
-        let recorded = write(dir.path(), DEMO_TARGET_FILENAME, &format!("{TARGET}\n"));
         let config = ContractsConfig {
-            reference_target_file: Some(recorded),
+            reference_target_file: Some(write(
+                dir.path(),
+                DEMO_TARGET_FILENAME,
+                &format!("{TARGET}\n"),
+            )),
             ..Default::default()
         };
 
         assert_eq!(
-            reference_target(Path::new("/nonexistent/avs_deploy.json"), &config).unwrap(),
-            Some(TARGET),
+            reference(NO_DEPLOYMENT, &config),
+            (Some(TARGET), false),
             "the job's own record tracks redeployments without anyone editing configuration"
         );
     }
 
     #[test]
-    fn a_named_record_that_is_absent_is_retried_not_ignored() {
+    fn a_named_record_that_is_absent_leaves_the_answer_incomplete() {
         let dir = tempfile::tempdir().unwrap();
         let config = ContractsConfig {
             reference_target_file: Some(dir.path().join(DEMO_TARGET_FILENAME)),
             ..Default::default()
         };
 
-        assert!(
-            reference_target(Path::new("/nonexistent/avs_deploy.json"), &config).is_err(),
-            "the deploy job writes that file and can finish after the router is serving"
-        );
-    }
-
-    #[test]
-    fn falls_back_to_a_record_beside_the_deployment_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let deployment = write(dir.path(), "avs_deploy.json", "{}");
-        write(dir.path(), DEMO_TARGET_FILENAME, &TARGET.to_string());
-
         assert_eq!(
-            reference_target(&deployment, &ContractsConfig::default()).unwrap(),
-            Some(TARGET),
-            "a deployment keeping both files on one volume needs no extra configuration"
+            reference(NO_DEPLOYMENT, &config),
+            (None, true),
+            "the deploy job writes that file and can finish after the router is serving, so this \
+             is worth another attempt rather than a final answer"
         );
     }
 
@@ -607,19 +680,38 @@ mod tests {
 
         // Reading the pair off the contract the docs point at is what keeps the published
         // blsSignatureChecker equal to demoTarget.blsSignatureChecker().
-        assert_eq!(
-            reference_target(Path::new("/nonexistent/avs_deploy.json"), &config).unwrap(),
-            Some(PLAYGROUND)
-        );
+        assert_eq!(reference(NO_DEPLOYMENT, &config), (Some(PLAYGROUND), false));
 
         let pinned = ContractsConfig {
             reference_target: Some(TARGET),
             ..config
         };
         assert_eq!(
-            reference_target(Path::new("/nonexistent/avs_deploy.json"), &pinned).unwrap(),
-            Some(TARGET),
+            reference(NO_DEPLOYMENT, &pinned),
+            (Some(TARGET), false),
             "an operator's pin outranks both records"
+        );
+    }
+
+    #[test]
+    fn an_unwritten_playground_record_falls_through_to_the_smoke_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ContractsConfig {
+            demo_target_file: Some(dir.path().join("playground_target.txt")),
+            reference_target_file: Some(write(
+                dir.path(),
+                DEMO_TARGET_FILENAME,
+                &TARGET.to_string(),
+            )),
+            ..Default::default()
+        };
+
+        // The whole point of falling through: a playground job that has not finished — or has
+        // failed for good — must not withhold the settlement pair, which has nothing to do with it.
+        assert_eq!(
+            reference(NO_DEPLOYMENT, &config),
+            (Some(TARGET), true),
+            "serve what is available, and keep trying for the record that is not"
         );
     }
 
@@ -635,60 +727,31 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            reference_target(Path::new("/nonexistent/avs_deploy.json"), &config).unwrap(),
-            Some(TARGET)
-        );
+        assert_eq!(reference(NO_DEPLOYMENT, &config), (Some(TARGET), false));
     }
 
     #[test]
-    fn demo_contracts_fall_back_to_the_playground_records() {
+    fn falls_back_to_a_record_beside_the_deployment_file() {
         let dir = tempfile::tempdir().unwrap();
-        let target = write(dir.path(), "playground_target.txt", &PLAYGROUND.to_string());
-        let factory = write(dir.path(), "playground_factory.txt", &FACTORY.to_string());
+        let deployment = write(dir.path(), "avs_deploy.json", "{}");
+        write(dir.path(), DEMO_TARGET_FILENAME, &TARGET.to_string());
 
         assert_eq!(
-            recorded_address(None, Some(&target)).unwrap(),
-            Some(PLAYGROUND)
-        );
-        assert_eq!(
-            recorded_address(None, Some(&factory)).unwrap(),
-            Some(FACTORY)
-        );
-        assert_eq!(
-            recorded_address(Some(DEMO), Some(&target)).unwrap(),
-            Some(DEMO),
-            "a configured address points readers somewhere other than what the job deployed"
-        );
-        assert_eq!(
-            recorded_address(None, None).unwrap(),
-            None,
-            "with no playground deployed the demo fields are omitted, not defaulted"
+            reference(deployment.to_str().unwrap(), &ContractsConfig::default()),
+            (Some(TARGET), false),
+            "a deployment keeping both files on one volume needs no extra configuration"
         );
     }
 
     #[test]
-    fn a_record_holding_something_other_than_an_address_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        // A job that failed mid-write, or wrote an error message where an address should be.
-        let record = write(dir.path(), "playground_target.txt", "ERROR: forge failed\n");
-
-        assert!(
-            recorded_address(None, Some(&record)).is_err(),
-            "a malformed record must be retried, not read as nothing configured"
-        );
-    }
-
-    #[test]
-    fn nothing_configured_yields_none() {
+    fn nothing_configured_is_a_complete_answer() {
         let dir = tempfile::tempdir().unwrap();
         let deployment = write(dir.path(), "avs_deploy.json", "{}");
 
-        assert!(
-            reference_target(&deployment, &ContractsConfig::default())
-                .unwrap()
-                .is_none(),
-            "with nothing to read the addresses from, publish nothing rather than guess"
+        assert_eq!(
+            reference(deployment.to_str().unwrap(), &ContractsConfig::default()),
+            (None, false),
+            "with no record named and none beside the deployment file there is nothing to wait for"
         );
     }
 
@@ -704,6 +767,57 @@ mod tests {
         );
     }
 
+    // -- demo contract records --
+
+    #[test]
+    fn demo_contracts_fall_back_to_the_playground_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = write(dir.path(), "playground_target.txt", &PLAYGROUND.to_string());
+        let factory = write(dir.path(), "playground_factory.txt", &FACTORY.to_string());
+        let mut records = Records::default();
+
+        assert_eq!(
+            configured_or_recorded(None, Some(&target), &mut records),
+            Some(PLAYGROUND)
+        );
+        assert_eq!(
+            configured_or_recorded(None, Some(&factory), &mut records),
+            Some(FACTORY)
+        );
+        assert_eq!(
+            configured_or_recorded(Some(DEMO), Some(&target), &mut records),
+            Some(DEMO),
+            "a configured address points readers somewhere other than what the job deployed"
+        );
+        assert_eq!(
+            configured_or_recorded(None, None, &mut records),
+            None,
+            "with no playground deployed the demo fields are omitted, not defaulted"
+        );
+        assert!(
+            !records.pending,
+            "nothing above is outstanding, so the answer is final"
+        );
+    }
+
+    #[test]
+    fn a_record_holding_something_other_than_an_address_is_outstanding() {
+        let dir = tempfile::tempdir().unwrap();
+        // A job that failed mid-write, or wrote an error message where an address should be.
+        let record = write(dir.path(), "playground_target.txt", "ERROR: forge failed\n");
+        let mut records = Records::default();
+
+        assert_eq!(
+            configured_or_recorded(None, Some(&record), &mut records),
+            None,
+            "a malformed record must not become a published address"
+        );
+        assert!(
+            records.pending,
+            "and it must be retried rather than read as nothing configured"
+        );
+    }
+
     // -- resolution against a mocked provider --
     //
     // Responses are queued FIFO and consumed by each RPC call in the order `resolve` makes them:
@@ -711,7 +825,7 @@ mod tests {
     //   2. eth_call   avsAddress()
     //   3. eth_call   blsSignatureChecker()
     //   4. eth_call   registryCoordinator() on the checker
-    //   5. eth_getCode demoTarget, then demoFactory, each only when configured
+    //   5. eth_getCode demoTarget, then demoFactory, each only when one was established
 
     fn mock_provider() -> (impl Provider + Clone, Asserter) {
         let asserter = Asserter::new();
@@ -740,25 +854,30 @@ mod tests {
         }
     }
 
+    async fn resolve_pinned<P: Provider>(provider: &P, config: &ContractsConfig) -> Resolution {
+        resolve(provider, COORDINATOR, Path::new(NO_DEPLOYMENT), config)
+            .await
+            .expect("a pinned reference target resolves without error")
+    }
+
     #[tokio::test]
     async fn publishes_the_pair_a_live_target_verifies_against() {
         let (provider, asserter) = mock_provider();
         push_wiring(&asserter, COORDINATOR);
 
-        let contracts = resolve(
-            &provider,
-            COORDINATOR,
-            Path::new("/nonexistent/avs_deploy.json"),
-            &pinned(None),
-        )
-        .await
-        .unwrap()
-        .expect("a pinned reference target has a set to publish");
+        let resolution = resolve_pinned(&provider, &pinned(None)).await;
+        let contracts = resolution
+            .contracts
+            .expect("a pinned reference target has a set to publish");
 
         assert_eq!(contracts.chain_id, 11155111);
         assert_eq!(contracts.avs_address, AVS);
         assert_eq!(contracts.bls_signature_checker, CHECKER);
         assert_eq!(contracts.registry_coordinator, COORDINATOR);
+        assert!(
+            !resolution.incomplete,
+            "nothing was left outstanding, so the resolver is done"
+        );
     }
 
     #[tokio::test]
@@ -769,7 +888,7 @@ mod tests {
         let err = resolve(
             &provider,
             COORDINATOR,
-            Path::new("/nonexistent/avs_deploy.json"),
+            Path::new(NO_DEPLOYMENT),
             &pinned(None),
         )
         .await
@@ -791,16 +910,45 @@ mod tests {
         let (provider, _asserter) = mock_provider();
 
         // No responses are queued: nothing to read the pair from means no RPC is made at all.
+        let resolution = resolve(
+            &provider,
+            COORDINATOR,
+            &deployment,
+            &ContractsConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolution,
+            Resolution {
+                contracts: None,
+                incomplete: false
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outstanding_demo_record_publishes_the_pair_and_asks_to_be_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, asserter) = mock_provider();
+        push_wiring(&asserter, COORDINATOR);
+
+        let config = ContractsConfig {
+            reference_target: Some(TARGET),
+            demo_factory_file: Some(dir.path().join("playground_factory.txt")),
+            ..Default::default()
+        };
+        let resolution = resolve_pinned(&provider, &config).await;
+
+        let contracts = resolution
+            .contracts
+            .expect("the settlement pair does not depend on the playground job");
+        assert_eq!(contracts.avs_address, AVS);
+        assert!(contracts.demo_factory.is_none());
         assert!(
-            resolve(
-                &provider,
-                COORDINATOR,
-                &deployment,
-                &ContractsConfig::default()
-            )
-            .await
-            .unwrap()
-            .is_none()
+            resolution.incomplete,
+            "the factory record is still coming, so the set is worth re-establishing"
         );
     }
 
@@ -810,15 +958,10 @@ mod tests {
         push_wiring(&asserter, COORDINATOR);
         asserter.push_success(&Bytes::from(vec![0x60u8]));
 
-        let contracts = resolve(
-            &provider,
-            COORDINATOR,
-            Path::new("/nonexistent/avs_deploy.json"),
-            &pinned(Some(DEMO)),
-        )
-        .await
-        .unwrap()
-        .expect("a pinned reference target has a set to publish");
+        let contracts = resolve_pinned(&provider, &pinned(Some(DEMO)))
+            .await
+            .contracts
+            .expect("a pinned reference target has a set to publish");
 
         assert_eq!(contracts.demo_target, Some(DEMO));
     }
@@ -829,15 +972,10 @@ mod tests {
         push_wiring(&asserter, COORDINATOR);
         asserter.push_success(&Bytes::new());
 
-        let contracts = resolve(
-            &provider,
-            COORDINATOR,
-            Path::new("/nonexistent/avs_deploy.json"),
-            &pinned(Some(DEMO)),
-        )
-        .await
-        .unwrap()
-        .expect("a demo address on the wrong chain must not withhold the settlement pair");
+        let contracts = resolve_pinned(&provider, &pinned(Some(DEMO)))
+            .await
+            .contracts
+            .expect("a demo address on the wrong chain must not withhold the settlement pair");
 
         assert!(
             contracts.demo_target.is_none(),
@@ -846,18 +984,22 @@ mod tests {
         );
     }
 
-    // -- serialization --
+    // -- serialization and the published slot --
 
-    #[test]
-    fn addresses_publish_in_checksummed_form() {
-        let contracts = AvsContracts {
+    fn contracts_with(demo_target: Option<Address>) -> AvsContracts {
+        AvsContracts {
             chain_id: 11155111,
             avs_address: AVS,
             bls_signature_checker: CHECKER,
             registry_coordinator: COORDINATOR,
-            demo_target: None,
+            demo_target,
             demo_factory: None,
-        };
+        }
+    }
+
+    #[test]
+    fn addresses_publish_in_checksummed_form() {
+        let contracts = contracts_with(None);
 
         let json = serde_json::to_value(&contracts).unwrap();
         // Solidity rejects a lowercase address literal, so a mixed-case rendering is the contract
@@ -884,23 +1026,38 @@ mod tests {
     fn an_unresolved_slot_serializes_as_null_and_reports_itself_unresolved() {
         let slot = ResolvedContracts::default();
         assert!(slot.is_unresolved());
+        assert!(slot.snapshot().is_none());
         assert_eq!(
             serde_json::to_value(&slot).unwrap(),
             serde_json::Value::Null
         );
 
-        slot.publish(AvsContracts {
-            chain_id: 11155111,
-            avs_address: AVS,
-            bls_signature_checker: CHECKER,
-            registry_coordinator: COORDINATOR,
-            demo_target: None,
-            demo_factory: None,
-        });
+        assert!(slot.publish(contracts_with(None)));
         assert!(!slot.is_unresolved());
         assert_eq!(
             serde_json::to_value(&slot).unwrap()["avsAddress"],
             "0xdCec8ce0a03848B55989Bcc711e424Ca31d9eeD9"
+        );
+    }
+
+    #[test]
+    fn republishing_the_same_set_is_not_a_change_but_a_better_one_is() {
+        let slot = ResolvedContracts::default();
+        assert!(slot.publish(contracts_with(None)));
+
+        // The resolver re-establishes the same set on every attempt while a record is outstanding;
+        // reporting that as a change would log it once a minute forever.
+        assert!(
+            !slot.publish(contracts_with(None)),
+            "an identical set is not news"
+        );
+
+        // And when the record finally lands, the fuller set replaces what is being served.
+        assert!(slot.publish(contracts_with(Some(DEMO))));
+        assert_eq!(
+            slot.snapshot().and_then(|c| c.demo_target),
+            Some(DEMO),
+            "a late record upgrades the published set instead of being lost to a write-once slot"
         );
     }
 }
