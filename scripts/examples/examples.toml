@@ -133,6 +133,60 @@ ctor_args = ["$avs", "$sigChecker", "5000"]
   sig   = "settle(address[],int256[])"
   args  = [["$signer:1", "$signer:2"], ["100", "-100"]]
 
+# ── SortedOracle ─────────────────────────────────────────────────────────────────────────
+# An oracle that sorts its whole observation set on every commit and stores only a commitment
+# to the result: `sortedRoot` plus four order statistics. The sort is a `pure` library call, so
+# it contributes nothing to the diff — a Gas Killer payload carries only STORE/LOG/CALL/CREATE
+# ops — and the settlement is six words at any N.
+#
+# REQUIRES STATE_ENCODING=prestate-net, for the same reason as onchainLife above: a struct-log
+# `debug_traceCall` costs O(execution steps), and sorting 128 observations is far past what a
+# stock anvil survives producing. Measured — the trace OOM-kills the ethereum container outright
+# (exit 137, OOMKilled: true), so the task never renders a payload:
+#
+#   Gas analysis failed: debug_trace_call failed: error sending request for url
+#     (http://ethereum:8545/)
+#
+# Unlike onchainLife this needs only the encoding, NOT GK_SIM_PROFILE=unbounded: the commit is
+# well under a 30M block, so the default `chain` profile simulates it fine. That makes this the
+# case that isolates the encoder from the gas ceiling — heavy to trace, cheap to execute.
+[[examples]]
+name      = "sortedOracle"
+artifact  = "SortedOracle.sol:SortedOracle"
+ctor_args = ["$avs", "$sigChecker"]
+
+  # 128 unordered observations, seeded in a prior transaction so the commit reads them cold —
+  # which is how a real oracle pays for them. Past the ~30-observation crossover where the
+  # six-word settlement floor stops dominating the naive cost. Values are arbitrary but fixed,
+  # so the order statistics and sortedRoot are reproducible across runs.
+  [[examples.setup]]
+  sig  = "reportBatch(uint256[])"
+  args = [[
+    "497527", "557208", "633488", "48145", "869035", "77127", "655888", "324660",
+    "161500", "536347", "215311", "133050", "121650", "415141", "73986", "183932",
+    "113636", "628471", "916644", "47423", "223837", "124241", "97108", "149984",
+    "33474", "594029", "418168", "510530", "243772", "874112", "126000", "937872",
+    "912981", "684590", "562032", "807798", "480515", "523989", "720488", "128398",
+    "640791", "865076", "284640", "806218", "565635", "60819", "666337", "814058",
+    "253627", "762223", "743333", "608472", "554991", "268629", "680375", "107140",
+    "793631", "998532", "822575", "564728", "298846", "120615", "563724", "788069",
+    "999346", "152600", "304954", "365697", "965672", "549185", "518853", "486591",
+    "391052", "865055", "183761", "832377", "271638", "968802", "176929", "447215",
+    "174747", "800526", "734909", "255567", "473655", "878906", "431196", "371039",
+    "506628", "479950", "115236", "759430", "409863", "994735", "603931", "820214",
+    "664187", "83777", "675467", "131639", "379924", "724595", "941942", "443905",
+    "243711", "755713", "747840", "794185", "505316", "548355", "23754", "431483",
+    "882246", "530975", "493296", "312184", "639166", "814836", "856025", "852659",
+    "6115", "179622", "5345", "585589", "229647", "748533", "477373", "498037",
+  ]]
+
+  # `commit()` is the tracked function: it sorts the set and writes the commitment. It reverts
+  # EmptyObservationSet with no observations, so the setup call above is required.
+  [[examples.exercise]]
+  label = "oracle_commit"
+  sig   = "commit()"
+  args  = []
+
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 # Examples from the Gas Killer SDK itself (lib/solidity-sdk, a submodule of the examples repo).
 # These are the targets the e2e matrix settles against.

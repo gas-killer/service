@@ -1,0 +1,19 @@
+# Build context for node/Dockerfile and router/Dockerfile. Both COPY the whole `scripts`
+# directory because it is a workspace member and `cargo build` needs it to resolve the
+# workspace — but the images only ever run `gas-killer-node` and `gas-killer-router`, which
+# read none of its data files. Without these exclusions, editing an example manifest or a
+# generated scenario invalidates the COPY layer and forces a full recompile of every image.
+scripts/examples/
+scripts/scenarios/
+
+# Host-side checkout of gas-killer/example-contracts, fetched by scripts/examples/fetch_examples.sh
+# with its nested submodules. Hundreds of MB, and the images never read it.
+.examples/
+
+# Compiled artifacts. The builder stage compiles inside a BuildKit cache mount, so a host
+# target/ directory in the context is dead weight.
+target/
+
+# Never ship credentials into an image layer.
+.env
+.env.*
