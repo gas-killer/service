@@ -281,6 +281,9 @@ curl -X POST http://localhost:8080/tasks \
 
 Note: `call_data` is a JSON array of bytes (not a hex string), `value` is a U256 hex string, and `block_height` must be non-zero.
 
+`POST /tasks` is the only submission path. The retired `/trigger` path answers `410 Gone` with
+code `ENDPOINT_GONE` on every method, naming `POST /tasks` as its replacement.
+
 When the router has a persistent store (the default), `POST /tasks` requires a valid API key, minted
 through the admin API (`POST /admin/keys`) using `ADMIN_KEY`. The raw key is returned exactly
 once. Locally (docker-compose) the admin API is on `localhost:8080`:
@@ -329,9 +332,12 @@ curl -X POST https://<host>/tasks \
 ```
 
 Use the `send_request` script for a complete end-to-end run against an ArraySummation contract.
-Set `GAS_KILLER_API_KEY` to a minted key when the router requires auth:
+Set `GAS_KILLER_API_KEY` to a minted key when the router requires auth, and
+`GAS_KILLER_TASKS_URL` to submit somewhere other than the default
+`http://localhost:8080/tasks`:
 ```bash
 GAS_KILLER_API_KEY=gk_... cargo run -p scripts --bin send_request
+GAS_KILLER_TASKS_URL=https://<host>/tasks GAS_KILLER_API_KEY=gk_... cargo run -p scripts --bin send_request
 ```
 
 ## Development
