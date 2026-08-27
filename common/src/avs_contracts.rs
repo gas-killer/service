@@ -613,6 +613,14 @@ mod tests {
 
     const NO_DEPLOYMENT: &str = "/nonexistent/avs_deploy.json";
 
+    /// A path to a record nothing has written, for asserting how an unwritten one is treated.
+    ///
+    /// Deliberately not beside [`NO_DEPLOYMENT`]: a test naming one of these must not be satisfiable
+    /// by the sibling lookup instead of the named path it is about.
+    fn unwritten(name: &str) -> PathBuf {
+        Path::new("/nonexistent/records").join(name)
+    }
+
     // -- reference target selection --
 
     #[test]
@@ -647,9 +655,8 @@ mod tests {
 
     #[test]
     fn a_named_record_that_is_absent_leaves_the_answer_incomplete() {
-        let dir = tempfile::tempdir().unwrap();
         let config = ContractsConfig {
-            reference_target_file: Some(dir.path().join(DEMO_TARGET_FILENAME)),
+            reference_target_file: Some(unwritten(DEMO_TARGET_FILENAME)),
             ..Default::default()
         };
 
@@ -930,13 +937,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_outstanding_demo_record_publishes_the_pair_and_asks_to_be_retried() {
-        let dir = tempfile::tempdir().unwrap();
         let (provider, asserter) = mock_provider();
         push_wiring(&asserter, COORDINATOR);
 
         let config = ContractsConfig {
             reference_target: Some(TARGET),
-            demo_factory_file: Some(dir.path().join("playground_factory.txt")),
+            demo_factory_file: Some(unwritten("playground_factory.txt")),
             ..Default::default()
         };
         let resolution = resolve_pinned(&provider, &config).await;
