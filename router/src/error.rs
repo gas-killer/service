@@ -59,10 +59,6 @@ pub enum ErrorCode {
     InvalidRequest,
     /// The requested path does not exist.
     NotFound,
-    /// The requested path was served by an earlier version of the API and has been removed.
-    /// Unlike [`ErrorCode::NotFound`] the path is recognised, so the message names the endpoint
-    /// that replaces it and the caller should update rather than retry.
-    EndpointGone,
     /// The HTTP method is not supported for the requested path.
     MethodNotAllowed,
     /// A required server-side feature or credential is not configured, so the endpoint cannot
@@ -141,13 +137,6 @@ impl ApiError {
     /// is to submit a fresh request, not that the resource is permanently gone.
     pub fn payload_expired(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, ErrorCode::PayloadExpired, message)
-    }
-
-    /// 410 with [`ErrorCode::EndpointGone`], for a path this API used to serve. Permanent by
-    /// definition: the caller must move to the endpoint the message names, and retrying the old
-    /// path will never succeed.
-    pub fn gone(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::GONE, ErrorCode::EndpointGone, message)
     }
 
     /// 429 with [`ErrorCode::RateLimited`], carrying the `Retry-After` delay (seconds) until the
@@ -276,7 +265,6 @@ mod tests {
             (ErrorCode::TargetNotDeployed, "TARGET_NOT_DEPLOYED"),
             (ErrorCode::InvalidRequest, "INVALID_REQUEST"),
             (ErrorCode::NotFound, "NOT_FOUND"),
-            (ErrorCode::EndpointGone, "ENDPOINT_GONE"),
             (ErrorCode::MethodNotAllowed, "METHOD_NOT_ALLOWED"),
             (ErrorCode::NotConfigured, "NOT_CONFIGURED"),
             (ErrorCode::Internal, "INTERNAL"),

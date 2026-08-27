@@ -14,7 +14,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
-    routing::{any, delete, get, post},
+    routing::{delete, get, post},
 };
 use gas_killer_common::ChainRole;
 use gas_killer_common::ReadOnlyProvider;
@@ -1482,22 +1482,12 @@ async fn wrap_framework_error(mut resp: Response) -> Response {
     resp
 }
 
-/// Handler for request paths this API used to serve and no longer does.
-///
-/// Answers `410 Gone` naming the endpoint that replaces the retired one, on every method, so a
-/// client still calling an old path gets an unambiguous instruction instead of a `404` it cannot
-/// distinguish from a typo or a misconfigured proxy.
-async fn retired_endpoint_handler() -> ApiError {
-    ApiError::gone("This endpoint has been removed; submit tasks to POST /tasks")
-}
-
 pub fn build_app() -> Router<IngressState> {
     Router::new()
         .route("/healthz", get(healthz_handler))
         .route("/avs-metadata", get(avs_metadata_handler))
         .route("/tasks", post(submit_task_handler).get(list_tasks_handler))
         .route("/tasks/:task_id", get(get_task_handler))
-        .route("/trigger", any(retired_endpoint_handler))
         .route(
             "/admin/keys",
             post(create_api_key_handler).get(list_api_keys_handler),
@@ -2210,14 +2200,14 @@ mod tests {
             assert_eq!(body.error.code, crate::error::ErrorCode::NotFound);
         }
 
-        /// `POST /tasks` is the only submission path. `/trigger` answers `410` naming the
-        /// replacement, on every method, and enqueues nothing.
+        /// `POST /tasks` is the only submission path: no other path is routed to the submission
+        /// handler, so a well-formed body sent elsewhere is an unknown path and enqueues nothing.
         ///
         /// Backed by a store and a live key so both halves are load-bearing: were `/trigger`
         /// pointed at the submission handler again, this request would authenticate and enqueue
         /// rather than being turned away early by a missing store.
         #[tokio::test]
-        async fn the_retired_trigger_path_is_gone_and_enqueues_nothing() {
+        async fn only_tasks_accepts_submissions() {
             let (app, store, mut rx) = make_app_with_store(None).await;
             let created = store.create_api_key(None, None).await.unwrap();
 
@@ -2228,32 +2218,14 @@ mod tests {
                 .header("Authorization", format!("Bearer {}", created.key))
                 .body(Body::from(valid_body()))
                 .unwrap();
-            let resp = app.clone().oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::GONE);
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
             let body = error_envelope(resp).await;
-            assert_eq!(body.error.code, crate::error::ErrorCode::EndpointGone);
-            assert!(
-                body.error.message.contains("POST /tasks"),
-                "the 410 should name the replacement endpoint, got {:?}",
-                body.error.message
-            );
+            assert_eq!(body.error.code, crate::error::ErrorCode::NotFound);
             assert!(
                 rx.try_recv().is_err(),
-                "a submission to a retired path must not be enqueued"
+                "a submission to an unrouted path must not be enqueued"
             );
-
-            // Retirement is not method-scoped: a GET gets the same instruction, not a 405.
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .method(Method::GET)
-                        .uri("/trigger")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::GONE);
         }
 
         // Pins the documented contract of `wrap_framework_error`: a handler that emits a bare,
