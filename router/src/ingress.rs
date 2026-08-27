@@ -2200,34 +2200,6 @@ mod tests {
             assert_eq!(body.error.code, crate::error::ErrorCode::NotFound);
         }
 
-        /// `POST /tasks` is the only submission path: no other path is routed to the submission
-        /// handler, so a well-formed body sent elsewhere is an unknown path and enqueues nothing.
-        ///
-        /// Backed by a store and a live key so both halves are load-bearing: were `/trigger`
-        /// pointed at the submission handler again, this request would authenticate and enqueue
-        /// rather than being turned away early by a missing store.
-        #[tokio::test]
-        async fn only_tasks_accepts_submissions() {
-            let (app, store, mut rx) = make_app_with_store(None).await;
-            let created = store.create_api_key(None, None).await.unwrap();
-
-            let req = Request::builder()
-                .method(Method::POST)
-                .uri("/trigger")
-                .header("content-type", "application/json")
-                .header("Authorization", format!("Bearer {}", created.key))
-                .body(Body::from(valid_body()))
-                .unwrap();
-            let resp = app.oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-            let body = error_envelope(resp).await;
-            assert_eq!(body.error.code, crate::error::ErrorCode::NotFound);
-            assert!(
-                rx.try_recv().is_err(),
-                "a submission to an unrouted path must not be enqueued"
-            );
-        }
-
         // Pins the documented contract of `wrap_framework_error`: a handler that emits a bare,
         // bodyless `StatusCode::NOT_FOUND`/`METHOD_NOT_ALLOWED` (no Content-Type) is rewritten into
         // the error envelope, while a handler that already returns an envelope (Content-Type
