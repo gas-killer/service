@@ -48,3 +48,4 @@ k256 = { version = "0.13", features = ["arithmetic"] }
 
 [dev-dependencies]
 rand = { workspace = true }
+tempfile = { workspace = true }

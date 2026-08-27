@@ -283,6 +283,13 @@ spec:
               {{- else }}
               value: "/app/.nodes/avs_deploy.json"
               {{- end }}
+            {{- if .Values.deployTarget.enabled }}
+            # The target deploy job records what it provisioned on the shared-data volume, which
+            # under Secret Manager is not the volume AVS_DEPLOYMENT_PATH points into, so the router
+            # is told where the record is rather than looking beside the deployment file.
+            - name: AVS_REFERENCE_TARGET_FILE
+              value: "/app/.nodes/demo_target.txt"
+            {{- end }}
             - name: INGRESS
               value: {{ .Values.router.ingress.enabled | quote }}
             - name: INGRESS_ADDRESS
@@ -300,6 +307,18 @@ spec:
             {{- if .Values.router.ingress.rpcFailureThreshold }}
             - name: RPC_FAILURE_THRESHOLD
               value: {{ .Values.router.ingress.rpcFailureThreshold | quote }}
+            {{- end }}
+            {{- if .Values.router.ingress.avsReferenceTarget }}
+            - name: AVS_REFERENCE_TARGET
+              value: {{ .Values.router.ingress.avsReferenceTarget | quote }}
+            {{- end }}
+            {{- if .Values.router.ingress.demoTarget }}
+            - name: DEMO_TARGET_ADDRESS
+              value: {{ .Values.router.ingress.demoTarget | quote }}
+            {{- end }}
+            {{- if .Values.router.ingress.demoFactory }}
+            - name: DEMO_FACTORY_ADDRESS
+              value: {{ .Values.router.ingress.demoFactory | quote }}
             {{- end }}
             {{- if .Values.router.ingress.taskTtlSeconds }}
             - name: TASK_TTL_SECONDS

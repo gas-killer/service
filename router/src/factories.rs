@@ -33,6 +33,7 @@ use commonware_avs_router::reporter::CertifiedReceiver;
 use commonware_avs_router::sequencer::{DispatchTime, ResolutionSender, SharedAssignments};
 use commonware_avs_router::submitter::Submitter;
 use gas_killer_common::ChainRole;
+use gas_killer_common::avs_contracts::{self, ContractsConfig, ResolvedContracts};
 use gas_killer_common::bindings::bls_apk_registry::BLSApkRegistry;
 use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
 use gas_killer_common::task_data::GasKillerTaskData;
@@ -145,6 +146,9 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
             }])
         }
     };
+    let contracts = ResolvedContracts::default();
+    spawn_contracts_resolver(&providers, contracts.clone());
+
     let avs_metadata = AvsMetadata {
         name: env::var("AVS_METADATA_NAME").unwrap_or_else(|_| "Gas Killer".to_string()),
         website: env::var("AVS_METADATA_WEBSITE")
@@ -158,6 +162,7 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
             .ok()
             .filter(|s| !s.is_empty()),
         operator_sets,
+        contracts,
     };
     // Open the durable store and apply migrations before serving traffic. A failure here
     // aborts router startup rather than running against an unmigrated or unwritable store.
@@ -277,6 +282,63 @@ pub async fn requeue_incomplete_tasks(
         queue_depth.fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
+}
+
+/// Starts background resolution of the `contracts` block on `GET /avs-metadata`, filling `slot`
+/// once the addresses are established. See [`gas_killer_common::avs_contracts`].
+///
+/// Everything it needs comes from the running deployment: the operators' registry coordinator
+/// through the same `avs_deploy.json` loader the submitter reads, and the AVS/checker pair from a
+/// live target's own getters. Anything missing leaves the block off — the endpoint's other fields
+/// are identity information still worth serving, and an integrator reads an absent block as "no
+/// authoritative answer" rather than being handed a wrong one.
+fn spawn_contracts_resolver(
+    providers: &HashMap<ChainRole, gas_killer_common::ReadOnlyProvider>,
+    slot: ResolvedContracts,
+) {
+    let Some(deployment_path) = avs_contracts::deployment_path() else {
+        tracing::warn!(
+            "AVS_DEPLOYMENT_PATH is not set; /avs-metadata will omit settlement contract addresses"
+        );
+        return;
+    };
+    let Some(provider) = providers.get(&ChainRole::L1) else {
+        tracing::warn!(
+            "no L1 provider configured; /avs-metadata will omit settlement contract addresses"
+        );
+        return;
+    };
+    let registry_coordinator = match AvsDeployment::load()
+        .and_then(|deployment| deployment.registry_coordinator_address())
+    {
+        Ok(address) => address,
+        Err(e) => {
+            error!(
+                error = %e,
+                "could not read the registry coordinator from the AVS deployment; /avs-metadata \
+                 will omit settlement contract addresses"
+            );
+            return;
+        }
+    };
+    let config = match ContractsConfig::from_env() {
+        Ok(config) => config,
+        Err(e) => {
+            error!(
+                error = %e,
+                "malformed reference target configuration; /avs-metadata will omit settlement \
+                 contract addresses"
+            );
+            return;
+        }
+    };
+    avs_contracts::spawn_resolver(
+        provider.clone(),
+        registry_coordinator,
+        deployment_path,
+        config,
+        slot,
+    );
 }
 
 fn build_ingress_providers()

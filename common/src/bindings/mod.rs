@@ -3,6 +3,20 @@ use alloy_primitives::FixedBytes;
 pub use commonware_avs_bindings::{ReadOnlyProvider, WalletProvider};
 pub use commonware_avs_bindings::{bls_apk_registry, bls_sig_check_operator_state_retriever};
 
+alloy::sol! {
+    /// The one getter the router needs from an `IBLSSignatureChecker`: the registry coordinator it
+    /// verifies operator state against.
+    ///
+    /// A target's checker and the router's own operator set must be the same deployment, or the
+    /// quorum APK the router computes will not match the one the contract checks and every
+    /// submission reverts `InvalidQuorumApkHash`. Reading this back is how that pairing is
+    /// confirmed rather than assumed.
+    #[sol(rpc)]
+    interface IBLSSignatureCheckerRegistry {
+        function registryCoordinator() external view returns (address);
+    }
+}
+
 /// ERC-165 interface ID for the GasKiller interface. A target contract must
 /// report support for this ID before the router submits `verifyAndUpdate`.
 pub const GAS_KILLER_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0x93, 0xde, 0x45, 0x31]);

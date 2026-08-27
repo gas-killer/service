@@ -407,6 +407,24 @@ router:
     # success clears it, and a background probe re-checks every chain every 15s so the state
     # recovers on its own. Leave empty to use the router's default of 5 (RPC_FAILURE_THRESHOLD).
     rpcFailureThreshold: ""
+    # Deployed target whose avsAddress() and blsSignatureChecker() getters establish the pair
+    # published in the `contracts` block of GET /avs-metadata. Leave empty where deployTarget.enabled
+    # is true: that job records the target it provisioned at /app/.nodes/demo_target.txt on the
+    # shared-data volume and the router is pointed at it (AVS_REFERENCE_TARGET_FILE), so the pair
+    # follows every redeployment without anyone editing configuration. Set this only to pin a
+    # different target (AVS_REFERENCE_TARGET); resolution retries in the background, so a target
+    # recorded after the router starts serving is picked up without a restart.
+    avsReferenceTarget: ""
+    # Contracts the documentation points readers at, published in the same block. demoTarget is a
+    # shared target for a first settlement with no Solidity written; concurrent readers can
+    # invalidate each other's payloads on transitionIndex, which demoFactory avoids by giving each
+    # reader their own instance. Neither is the deployTarget smoke-test target: public traffic would
+    # advance the counter that test depends on, and that address is reminted on every reinstall. Both
+    # are omitted from the response when empty, and each is checked for code on the chain the block
+    # publishes before it is served, so an address on another network — or one that is simply wrong —
+    # is omitted rather than published (DEMO_TARGET_ADDRESS / DEMO_FACTORY_ADDRESS).
+    demoTarget: ""
+    demoFactory: ""
     # Seconds a task may sit without reaching a terminal state before a background sweep (every
     # 60s) settles it as expired. A queued task past its TTL has a block_height too stale to
     # aggregate into a payload the contract accepts, and a ready payload nobody collected keeps

@@ -18,6 +18,7 @@ use axum::{
 };
 use gas_killer_common::ChainRole;
 use gas_killer_common::ReadOnlyProvider;
+use gas_killer_common::avs_contracts::ResolvedContracts;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
@@ -102,6 +103,13 @@ pub struct AvsMetadata {
     pub twitter: Option<String>,
     #[serde(rename = "operatorSets", skip_serializing_if = "Option::is_none")]
     pub operator_sets: Option<Vec<AvsOperatorSetMetadata>>,
+    /// Settlement-relevant contract addresses, resolved from the running deployment by a
+    /// background task. Absent until that succeeds — an integrator gets no answer rather than a
+    /// wrong one, since a wrong checker is what makes a target revert on every submission. Held as
+    /// a shared write-once slot, so cloning this metadata for a response shares the resolver's
+    /// answer instead of snapshotting whatever was known when the router started.
+    #[serde(default, skip_serializing_if = "ResolvedContracts::is_unresolved")]
+    pub contracts: ResolvedContracts,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1746,6 +1754,7 @@ mod tests {
 
     mod http {
         use super::*;
+        use alloy_primitives::address;
         use axum::body::Body;
         use axum::http::{Method, Request, StatusCode};
         use tower::util::ServiceExt; // for `oneshot`
@@ -2342,6 +2351,7 @@ mod tests {
                 logo: Some("https://example.com/logo.png".to_string()),
                 twitter: Some("https://x.com/gaskiller".to_string()),
                 operator_sets: None,
+                contracts: ResolvedContracts::default(),
             };
             let app = build_app().with_state(state);
             let req = Request::builder()
@@ -2360,6 +2370,77 @@ mod tests {
                 serde_json::from_slice(&bytes).expect("response should be valid AvsMetadata JSON");
             assert_eq!(metadata.name, "Gas Killer");
             assert_eq!(metadata.website, "https://gaskiller.xyz");
+
+            // Absent rather than null when unresolved, so a client can branch on presence.
+            let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                raw.get("contracts").is_none(),
+                "an unresolved contract set must be omitted, got {raw}"
+            );
+        }
+
+        #[tokio::test]
+        async fn avs_metadata_publishes_the_contract_set_in_camel_case() {
+            let (sender, _receiver) = crate::sequencer::task_channel();
+            let queue_depth = crate::sequencer::task_queue_depth();
+            let mut state = IngressState::without_metrics(sender, queue_depth);
+            // Published the way the resolver publishes it: into the shared slot the response reads.
+            let contracts = ResolvedContracts::default();
+            contracts.publish(gas_killer_common::avs_contracts::AvsContracts {
+                chain_id: 11155111,
+                avs_address: address!("dCec8ce0a03848B55989Bcc711e424Ca31d9eeD9"),
+                bls_signature_checker: address!("6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9"),
+                registry_coordinator: address!("0a032D62dde46670Ae40Ce532C97f6CE9Af72Dc4"),
+                demo_target: Some(address!("00000000000000000000000000000000000000aa")),
+                demo_factory: None,
+            });
+            state.avs_metadata = AvsMetadata {
+                name: "Gas Killer".to_string(),
+                website: "https://gaskiller.xyz".to_string(),
+                description: "Test AVS".to_string(),
+                logo: None,
+                twitter: None,
+                operator_sets: None,
+                contracts,
+            };
+            let app = build_app().with_state(state);
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri("/avs-metadata")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let contracts = &raw["contracts"];
+
+            // Integrators read these keys off the wire, so the names are the contract, not an
+            // implementation detail of the Rust field names.
+            assert_eq!(contracts["chainId"], 11155111);
+            assert_eq!(
+                contracts["avsAddress"],
+                "0xdCec8ce0a03848B55989Bcc711e424Ca31d9eeD9"
+            );
+            assert_eq!(
+                contracts["blsSignatureChecker"],
+                "0x6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9"
+            );
+            assert_eq!(
+                contracts["registryCoordinator"],
+                "0x0a032D62dde46670Ae40Ce532C97f6CE9Af72Dc4"
+            );
+            assert_eq!(
+                contracts["demoTarget"],
+                "0x00000000000000000000000000000000000000AA"
+            );
+            assert!(
+                contracts.get("demoFactory").is_none(),
+                "an unconfigured demo contract must be omitted, not null"
+            );
         }
 
         #[tokio::test]

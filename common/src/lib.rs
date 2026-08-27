@@ -1,3 +1,4 @@
+pub mod avs_contracts;
 pub mod bindings;
 pub mod config;
 pub mod payload;
