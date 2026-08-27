@@ -1,4 +1,4 @@
-use crate::avs_contracts::AvsContracts;
+use crate::avs_contracts::ResolvedContracts;
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ApiQuery, ErrorCode};
 use crate::metrics::{MetricsCollector, key_labels};
 use crate::rate_limit::KeyRateLimiter;
@@ -103,11 +103,13 @@ pub struct AvsMetadata {
     pub twitter: Option<String>,
     #[serde(rename = "operatorSets", skip_serializing_if = "Option::is_none")]
     pub operator_sets: Option<Vec<AvsOperatorSetMetadata>>,
-    /// Settlement-relevant contract addresses, resolved from the running deployment at startup.
-    /// Absent when they could not be established — an integrator gets no answer rather than a
-    /// wrong one, since a wrong checker is what makes a target revert on every submission.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub contracts: Option<AvsContracts>,
+    /// Settlement-relevant contract addresses, resolved from the running deployment by a
+    /// background task. Absent until that succeeds — an integrator gets no answer rather than a
+    /// wrong one, since a wrong checker is what makes a target revert on every submission. Held as
+    /// a shared write-once slot, so cloning this metadata for a response shares the resolver's
+    /// answer instead of snapshotting whatever was known when the router started.
+    #[serde(default, skip_serializing_if = "ResolvedContracts::is_unresolved")]
+    pub contracts: ResolvedContracts,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2349,7 +2351,7 @@ mod tests {
                 logo: Some("https://example.com/logo.png".to_string()),
                 twitter: Some("https://x.com/gaskiller".to_string()),
                 operator_sets: None,
-                contracts: None,
+                contracts: ResolvedContracts::default(),
             };
             let app = build_app().with_state(state);
             let req = Request::builder()
@@ -2382,6 +2384,16 @@ mod tests {
             let (sender, _receiver) = crate::sequencer::task_channel();
             let queue_depth = crate::sequencer::task_queue_depth();
             let mut state = IngressState::without_metrics(sender, queue_depth);
+            // Published the way the resolver publishes it: into the shared slot the response reads.
+            let contracts = ResolvedContracts::default();
+            contracts.publish(crate::avs_contracts::AvsContracts {
+                chain_id: 11155111,
+                avs_address: address!("dCec8ce0a03848B55989Bcc711e424Ca31d9eeD9"),
+                bls_signature_checker: address!("6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9"),
+                registry_coordinator: address!("0a032D62dde46670Ae40Ce532C97f6CE9Af72Dc4"),
+                demo_target: Some(address!("00000000000000000000000000000000000000aa")),
+                demo_factory: None,
+            });
             state.avs_metadata = AvsMetadata {
                 name: "Gas Killer".to_string(),
                 website: "https://gaskiller.xyz".to_string(),
@@ -2389,14 +2401,7 @@ mod tests {
                 logo: None,
                 twitter: None,
                 operator_sets: None,
-                contracts: Some(AvsContracts {
-                    chain_id: 11155111,
-                    avs_address: address!("dCec8ce0a03848B55989Bcc711e424Ca31d9eeD9"),
-                    bls_signature_checker: address!("6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9"),
-                    registry_coordinator: address!("0a032D62dde46670Ae40Ce532C97f6CE9Af72Dc4"),
-                    demo_target: Some(address!("00000000000000000000000000000000000000aa")),
-                    demo_factory: None,
-                }),
+                contracts,
             };
             let app = build_app().with_state(state);
             let req = Request::builder()

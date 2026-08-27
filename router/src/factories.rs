@@ -2,6 +2,7 @@
 //! providers, the HTTP ingress, and the on-chain submitter.
 
 use crate::GasKillerHandler;
+use crate::avs_contracts::{self, ContractsConfig, ResolvedContracts};
 use crate::ingress::{
     AvsMetadata, AvsOperatorSetMetadata, AvsOperatorSetSoftware, GasKillerTaskRequest,
     IngressState, start_gas_killer_http_server,
@@ -145,45 +146,8 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
             }])
         }
     };
-    // Resolve the published contract set from the running deployment. A failure here is loud but
-    // not fatal: the rest of the endpoint is identity information that is still worth serving, and
-    // the router's real job does not depend on it. The `contracts` block is simply absent, which
-    // an integrator reads as "no authoritative answer" rather than being handed a wrong one.
-    let contracts = match crate::avs_contracts::deployment_path() {
-        Some(path) => match providers.get(&ChainRole::L1) {
-            Some(provider) => match crate::avs_contracts::resolve(provider, &path).await {
-                Ok(contracts) => {
-                    info!(
-                        avs_address = %contracts.avs_address,
-                        bls_signature_checker = %contracts.bls_signature_checker,
-                        registry_coordinator = %contracts.registry_coordinator,
-                        chain_id = contracts.chain_id,
-                        "publishing settlement contract addresses on /avs-metadata"
-                    );
-                    Some(contracts)
-                }
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        "could not resolve settlement contract addresses; /avs-metadata will omit them"
-                    );
-                    None
-                }
-            },
-            None => {
-                tracing::warn!(
-                    "no L1 provider configured; /avs-metadata will omit settlement contract addresses"
-                );
-                None
-            }
-        },
-        None => {
-            tracing::warn!(
-                "AVS_DEPLOYMENT_PATH is not set; /avs-metadata will omit settlement contract addresses"
-            );
-            None
-        }
-    };
+    let contracts = ResolvedContracts::default();
+    spawn_contracts_resolver(&providers, contracts.clone());
 
     let avs_metadata = AvsMetadata {
         name: env::var("AVS_METADATA_NAME").unwrap_or_else(|_| "Gas Killer".to_string()),
@@ -318,6 +282,63 @@ pub async fn requeue_incomplete_tasks(
         queue_depth.fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
+}
+
+/// Starts background resolution of the `contracts` block on `GET /avs-metadata`, filling `slot`
+/// once the addresses are established. See [`crate::avs_contracts`].
+///
+/// Everything it needs comes from the running deployment: the operators' registry coordinator
+/// through the same `avs_deploy.json` loader the submitter reads, and the AVS/checker pair from a
+/// live target's own getters. Anything missing leaves the block off — the endpoint's other fields
+/// are identity information still worth serving, and an integrator reads an absent block as "no
+/// authoritative answer" rather than being handed a wrong one.
+fn spawn_contracts_resolver(
+    providers: &HashMap<ChainRole, gas_killer_common::ReadOnlyProvider>,
+    slot: ResolvedContracts,
+) {
+    let Some(deployment_path) = avs_contracts::deployment_path() else {
+        tracing::warn!(
+            "AVS_DEPLOYMENT_PATH is not set; /avs-metadata will omit settlement contract addresses"
+        );
+        return;
+    };
+    let Some(provider) = providers.get(&ChainRole::L1) else {
+        tracing::warn!(
+            "no L1 provider configured; /avs-metadata will omit settlement contract addresses"
+        );
+        return;
+    };
+    let registry_coordinator = match AvsDeployment::load()
+        .and_then(|deployment| deployment.registry_coordinator_address())
+    {
+        Ok(address) => address,
+        Err(e) => {
+            error!(
+                error = %e,
+                "could not read the registry coordinator from the AVS deployment; /avs-metadata \
+                 will omit settlement contract addresses"
+            );
+            return;
+        }
+    };
+    let config = match ContractsConfig::from_env() {
+        Ok(config) => config,
+        Err(e) => {
+            error!(
+                error = %e,
+                "malformed reference target configuration; /avs-metadata will omit settlement \
+                 contract addresses"
+            );
+            return;
+        }
+    };
+    avs_contracts::spawn_resolver(
+        provider.clone(),
+        registry_coordinator,
+        deployment_path,
+        config,
+        slot,
+    );
 }
 
 fn build_ingress_providers()
