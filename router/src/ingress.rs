@@ -1,4 +1,3 @@
-use crate::avs_contracts::ResolvedContracts;
 use crate::error::{ApiError, ApiErrorBody, ApiErrorEnvelope, ApiJson, ApiQuery, ErrorCode};
 use crate::metrics::{MetricsCollector, key_labels};
 use crate::rate_limit::KeyRateLimiter;
@@ -19,6 +18,7 @@ use axum::{
 };
 use gas_killer_common::ChainRole;
 use gas_killer_common::ReadOnlyProvider;
+use gas_killer_common::avs_contracts::ResolvedContracts;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
@@ -2386,7 +2386,7 @@ mod tests {
             let mut state = IngressState::without_metrics(sender, queue_depth);
             // Published the way the resolver publishes it: into the shared slot the response reads.
             let contracts = ResolvedContracts::default();
-            contracts.publish(crate::avs_contracts::AvsContracts {
+            contracts.publish(gas_killer_common::avs_contracts::AvsContracts {
                 chain_id: 11155111,
                 avs_address: address!("dCec8ce0a03848B55989Bcc711e424Ca31d9eeD9"),
                 bls_signature_checker: address!("6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9"),

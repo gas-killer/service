@@ -1,5 +1,4 @@
-//! Resolves the contract addresses an integrator needs in order to settle, for
-//! `GET /avs-metadata`.
+//! Resolves the contract addresses that make up a deployment's settlement wiring.
 //!
 //! A target contract must be wired to two addresses: the AVS service manager and the
 //! `IBLSSignatureChecker`. Get the checker wrong and the target still passes every router-side
@@ -8,10 +7,14 @@
 //! checks them against a superseded one. Publishing the pair from the running deployment is what
 //! makes that unwireable by accident.
 //!
-//! Nothing here is hand-copied, which is the point: hand-copied addresses are exactly what goes
-//! stale when the operator set is redeployed.
+//! The set is shared because the wiring is: the router aggregates certificates against the
+//! operators' registry coordinator and submits to a target that verifies through the checker, and a
+//! node validates work for that same deployment. The router also publishes the resolved set as the
+//! `contracts` block on `GET /avs-metadata`, which is what saves an integrator from hand-copying
+//! any of it — hand-copied addresses are exactly what goes stale when the operator set is
+//! redeployed.
 //!
-//! - `registryCoordinator` comes from the same `avs_deploy.json` loader the rest of the router
+//! - `registryCoordinator` comes from the same `avs_deploy.json` loader the rest of the service
 //!   reads, so there is one parser for that file.
 //! - `avsAddress` and `blsSignatureChecker` are read from a live target's own getters, so they are
 //!   authoritative by construction: whatever a settling target verifies against *is* the answer.
@@ -22,21 +25,21 @@
 //!   coordinator the operators are registered in. A mismatch means the reference target belongs to
 //!   a superseded deployment, so nothing is published rather than publishing a pair that reverts.
 //!
-//! Resolution happens off the request path and the answer is cached in a [`ResolvedContracts`]
-//! slot: `/avs-metadata` is public and unauthenticated, so serving it must not turn into an RPC
-//! amplifier. Because the addresses only change when the AVS is redeployed — which restarts the
-//! router — the slot is written at most once, and a failed attempt is retried in the background
-//! until it succeeds.
+//! Resolution costs four RPC round-trips, so the answer is cached in a [`ResolvedContracts`] slot
+//! rather than recomputed per use: `/avs-metadata` is public and unauthenticated, and serving it
+//! must not turn into an RPC amplifier. Because the addresses only change when the AVS is
+//! redeployed — which restarts the process — the slot is written at most once, and a failed attempt
+//! is retried in the background until it succeeds.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use crate::bindings::IBLSSignatureCheckerRegistry;
+use crate::bindings::gaskillersdk::GasKillerSDK;
 use alloy_primitives::Address;
 use alloy_provider::Provider;
 use anyhow::Context;
-use gas_killer_common::bindings::IBLSSignatureCheckerRegistry;
-use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::{error, info, warn};
 

@@ -2,7 +2,6 @@
 //! providers, the HTTP ingress, and the on-chain submitter.
 
 use crate::GasKillerHandler;
-use crate::avs_contracts::{self, ContractsConfig, ResolvedContracts};
 use crate::ingress::{
     AvsMetadata, AvsOperatorSetMetadata, AvsOperatorSetSoftware, GasKillerTaskRequest,
     IngressState, start_gas_killer_http_server,
@@ -34,6 +33,7 @@ use commonware_avs_router::reporter::CertifiedReceiver;
 use commonware_avs_router::sequencer::{DispatchTime, ResolutionSender, SharedAssignments};
 use commonware_avs_router::submitter::Submitter;
 use gas_killer_common::ChainRole;
+use gas_killer_common::avs_contracts::{self, ContractsConfig, ResolvedContracts};
 use gas_killer_common::bindings::bls_apk_registry::BLSApkRegistry;
 use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
 use gas_killer_common::task_data::GasKillerTaskData;
@@ -285,7 +285,7 @@ pub async fn requeue_incomplete_tasks(
 }
 
 /// Starts background resolution of the `contracts` block on `GET /avs-metadata`, filling `slot`
-/// once the addresses are established. See [`crate::avs_contracts`].
+/// once the addresses are established. See [`gas_killer_common::avs_contracts`].
 ///
 /// Everything it needs comes from the running deployment: the operators' registry coordinator
 /// through the same `avs_deploy.json` loader the submitter reads, and the AVS/checker pair from a
