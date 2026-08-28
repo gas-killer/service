@@ -189,7 +189,15 @@ while this one has none) — never on a bare timer.
   a short settle delay, then resumes from the observed tip. A certificate whose digest
   matches neither the expected digest nor the skip digest (a node resolved the height
   from a directive issued by a previous router life) consumes the height and the
-  in-flight task is re-assigned to the next one.
+  in-flight task is re-assigned to the next one. Every task still `queued` or
+  `processing` is rebuilt from its stored request and pushed back through the channel
+  fresh submissions use — except one whose `transition_index` the contract has already
+  moved past, which is settled `expired` naming the index and the current count rather
+  than re-run. `verifyAndUpdate` orders on that index, so a re-run cannot double-apply;
+  it can only spend a round to reach a payload the contract rejects and then report a
+  task `failed` whose state change is in fact already on chain. The count is read once
+  per distinct target, and a chain that cannot be reached falls back to re-queueing
+  everything. Settled tasks are counted in `gas_killer_tasks_expired_at_requeue_total`.
 - **Router journal loss**: if the router's journal is wiped while the nodes keep
   theirs (e.g. only the router pod is rescheduled), the sequencer would restart at
   height 0 — below heights the nodes will ever propose again. Nodes detect directives
