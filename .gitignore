@@ -35,3 +35,7 @@ terraform.tfstate.*
 router.db
 router.db-*
 /data/
+
+# Python bytecode (bridge/)
+__pycache__/
+*.pyc
