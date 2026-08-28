@@ -441,9 +441,15 @@ fn main() {
         // finished: every task still `queued` or `processing` is rebuilt and
         // pushed back through the same channel fresh submissions use.
         if let Some(store) = &ingress.store {
-            requeue_incomplete_tasks(store, &ingress.sender, &ingress.queue_depth)
-                .await
-                .expect("Failed to re-enqueue incomplete tasks");
+            requeue_incomplete_tasks(
+                store,
+                &ingress.sender,
+                &ingress.queue_depth,
+                validator.as_ref(),
+                Some(&metrics),
+            )
+            .await
+            .expect("Failed to re-enqueue incomplete tasks");
 
             // Bound how long a task can hold state that can no longer produce a submittable
             // payload: queued tasks the queue never reached in time, and ready payloads nobody

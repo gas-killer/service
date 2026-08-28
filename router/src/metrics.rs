@@ -53,6 +53,9 @@ pub struct MetricsCollector {
     pub tasks_created: Counter<u64, AtomicU64>,
     /// Tasks settled `expired` by the periodic TTL sweep, across every stage it visits.
     pub tasks_expired: Counter<u64, AtomicU64>,
+    /// Tasks the startup re-queue settled `expired` because their transition index had already
+    /// been applied on chain, rather than re-running work the contract would reject.
+    pub tasks_expired_at_requeue: Counter<u64, AtomicU64>,
     /// EVM storage-update computation duration (seconds).
     pub storage_computation_seconds: Histogram,
     /// Aggregation rounds that ended in a successful verifyAndUpdate transaction.
@@ -160,6 +163,13 @@ impl MetricsCollector {
             "gas_killer_tasks_expired",
             "Total tasks settled expired by the periodic task-TTL sweep",
             tasks_expired.clone(),
+        );
+
+        let tasks_expired_at_requeue = Counter::default();
+        registry.register(
+            "gas_killer_tasks_expired_at_requeue",
+            "Total recovered tasks settled expired at startup because their transition index was already applied on chain",
+            tasks_expired_at_requeue.clone(),
         );
 
         let storage_computation_seconds =
@@ -297,6 +307,7 @@ impl MetricsCollector {
             ingress_rpc_unavailable,
             tasks_created,
             tasks_expired,
+            tasks_expired_at_requeue,
             storage_computation_seconds,
             aggregation_rounds_completed,
             aggregation_rounds_failed,

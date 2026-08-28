@@ -441,7 +441,8 @@ router:
     # blocking resubmission for its transition index; expiring both frees the capacity for work
     # that can still land. A processing task is never cancelled mid-round. Watch
     # gas_killer_tasks_expired_total — sustained expiries mean the queue is not draining ahead of
-    # the staleness window (TASK_TTL_SECONDS).
+    # the staleness window (TASK_TTL_SECONDS). Restart recovery settles separately, under
+    # gas_killer_tasks_expired_at_requeue_total.
     # Leave empty to use the router's own default, which is sized to the wall-clock life of a
     # rendered payload on L1 (payloadBlockBuffer blocks x 12s = 600s at the stock buffer) so the
     # sweep never withdraws a payload the chain would still accept. Set a shorter value only for a
