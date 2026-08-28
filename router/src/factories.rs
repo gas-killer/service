@@ -245,9 +245,6 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
 }
 
 /// Reads a target contract's current `stateTransitionCount()`.
-///
-/// The startup re-queue depends only on this one view call, so it takes the capability rather
-/// than the whole validator — which also lets the recovery logic be tested without a chain.
 #[async_trait::async_trait]
 pub trait TransitionCountReader: Send + Sync {
     async fn state_transition_count(&self, target: Address) -> Result<u64>;
@@ -268,14 +265,9 @@ impl TransitionCountReader for GasKillerValidator {
 /// channel a fresh `POST /tasks` submission uses, so it flows through the normal
 /// dequeue → processing → ready/failed pipeline indistinguishably from new work.
 ///
-/// A recovered task is only worth re-running while its transition index is still the one the
-/// contract will accept. A task can be left `processing` by a crash that happened after its
-/// transition already landed, and the chain may also have moved on under a task that never got
-/// that far. Either way the index is spent: `verifyAndUpdate` orders on it, so a re-run cannot
-/// double-apply, it can only spend a full aggregation round to arrive at a payload the contract
-/// rejects — which `handle_verification` then records as `failed`, telling a client its task
-/// failed when the state change it asked for is in fact already on chain. Settling those
-/// `expired` instead reports the outcome honestly and leaves the round for work that can land.
+/// A task whose `transition_index` the contract has already passed settles `expired`:
+/// `verifyAndUpdate` orders on that index, so aggregating it could only reach a payload the
+/// contract rejects.
 pub async fn requeue_incomplete_tasks(
     store: &SqliteStore,
     sender: &TaskSender,
@@ -293,21 +285,19 @@ pub async fn requeue_incomplete_tasks(
         "re-enqueuing incomplete tasks from a previous router life"
     );
 
-    // One read per distinct target rather than per task: a restart with a full window in flight
-    // recovers many tasks pointing at the same contract.
+    // One read per distinct target: a restart with a full window in flight recovers many tasks
+    // pointing at the same contract.
     let mut counts: HashMap<Address, u64> = HashMap::new();
-    // An unreachable chain answers for no target, so the first read failure abandons the check
-    // for the whole pass instead of retrying it once per remaining task. Recovery then falls
-    // back to re-enqueueing everything, which is what it did before the check existed.
+    // An unreachable chain answers for no target: the first read failure abandons the check for
+    // the whole pass and every remaining task takes the unchecked path.
     let mut chain_readable = true;
 
     for task in tasks {
         let task_id = task.id;
         let target = task.request.target_address;
 
-        // A task that left `transition_index` to the server has no index to compare: the
-        // sequencer resolves it against the chain when it dequeues, which is already the
-        // current value.
+        // A server-resolved (`None`) index has nothing to compare against: the sequencer reads
+        // the current value when it dequeues.
         if let Some(index) = task.request.transition_index
             && chain_readable
         {
@@ -358,9 +348,8 @@ pub async fn requeue_incomplete_tasks(
                         );
                         continue;
                     }
-                    // Re-enqueue rather than drop: leaving the row `processing` with nothing in
-                    // the channel would strand it until the TTL sweep, and the contract's own
-                    // ordering still rules out a double-apply.
+                    // Fall through to re-enqueue: a row left `processing` with nothing in the
+                    // channel is stranded until the TTL sweep.
                     Err(e) => error!(
                         task_id,
                         error = %e,
@@ -694,11 +683,10 @@ mod tests {
     use alloy_primitives::U256;
     use std::sync::Mutex;
 
-    /// Scripted `stateTransitionCount()` source: answers from `counts` and records every target
-    /// it was asked about, so a test can assert both the answer used and how many reads it cost.
+    /// Scripted `stateTransitionCount()` source, recording every target it is asked about.
     struct FakeCounts {
         counts: HashMap<Address, u64>,
-        /// When true every read fails, standing in for an unreachable chain.
+        /// Every read fails, standing in for an unreachable chain.
         fails: bool,
         reads: Mutex<Vec<Address>>,
     }
@@ -766,7 +754,7 @@ mod tests {
         (store, key_id)
     }
 
-    /// Persists a task and leaves it `processing`, the state a crash mid-aggregation leaves behind.
+    /// Persists a task and leaves it `processing`.
     async fn processing_task(
         store: &SqliteStore,
         key_id: &str,
@@ -795,9 +783,8 @@ mod tests {
         ids
     }
 
-    /// The case #325 reports: a task left `processing` by a crash whose transition already landed
-    /// must not be re-run, and must not end up `failed` — the state change it asked for is on
-    /// chain, so the honest outcome is `expired` with a reason the client can act on.
+    /// A `processing` task whose transition already landed settles `expired`, naming the index
+    /// and the on-chain count.
     #[tokio::test]
     async fn already_applied_task_is_settled_expired_instead_of_requeued() {
         let (store, key_id) = store_with_key().await;
@@ -831,8 +818,7 @@ mod tests {
         );
     }
 
-    /// The complement: while the contract still sits at the task's index, the task is exactly the
-    /// work the re-queue exists to resume.
+    /// A contract still sitting at the task's index leaves the task re-queueable.
     #[tokio::test]
     async fn task_whose_index_is_still_current_is_requeued() {
         let (store, key_id) = store_with_key().await;
@@ -857,8 +843,7 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Processing);
     }
 
-    /// A task that left the index to the server has nothing to compare against — the sequencer
-    /// resolves it from the chain when it dequeues — so it is re-queued without a read.
+    /// A server-resolved index is re-queued without a read.
     #[tokio::test]
     async fn auto_index_task_is_requeued_without_reading_the_chain() {
         let (store, key_id) = store_with_key().await;
@@ -880,8 +865,7 @@ mod tests {
         );
     }
 
-    /// An unreachable chain must not strand recovered work: every task falls back to the
-    /// unchecked path, and the failure is not retried once per task.
+    /// An unreachable chain re-queues every task, reading once rather than once per task.
     #[tokio::test]
     async fn unreadable_chain_requeues_everything_and_reads_once() {
         let (store, key_id) = store_with_key().await;
@@ -913,8 +897,7 @@ mod tests {
         );
     }
 
-    /// A restart with a window in flight recovers many tasks against one contract; the count is
-    /// read once and reused, so recovery cost scales with distinct targets, not tasks.
+    /// Many tasks against one contract cost one read.
     #[tokio::test]
     async fn one_read_per_distinct_target() {
         let (store, key_id) = store_with_key().await;
@@ -941,8 +924,7 @@ mod tests {
         assert_eq!(reads, want, "each target should be read exactly once");
     }
 
-    /// A `queued` row is recovered on the same terms as a `processing` one: the crash window the
-    /// issue describes is about the index being spent, not about how far the task had got.
+    /// A `queued` row with a spent index settles `expired` on the same terms as a `processing` one.
     #[tokio::test]
     async fn queued_task_with_a_spent_index_is_also_settled_expired() {
         let (store, key_id) = store_with_key().await;
