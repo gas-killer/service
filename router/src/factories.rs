@@ -15,7 +15,7 @@ use crate::sequencer::{
     InFlightTask, QueuedTask, TaskQueueDepth, TaskReceiver, TaskSender, task_channel,
     task_queue_depth,
 };
-use crate::store::SqliteStore;
+use crate::store::{SqliteStore, TaskCursor};
 use alloy::network::{Ethereum, EthereumWallet};
 use alloy_primitives::{Address, Bytes};
 use alloy_provider::{
@@ -67,6 +67,10 @@ const TRANSITION_CHECK_BUDGET: Duration = Duration::from_secs(30);
 /// Consecutive unreadable targets taken as the chain being unavailable rather than those targets
 /// being individually unresolvable, after which the re-queue stops checking.
 const MAX_CONSECUTIVE_COUNT_FAILURES: u32 = 3;
+
+/// Rows the startup re-queue loads per page. Bounds how much of the backlog is held in memory at
+/// once; the walk repeats until the backlog is drained.
+const REQUEUE_PAGE_SIZE: u32 = 256;
 
 /// Wallet provider that uses SimpleNonceManager to always fetch the pending nonce from the
 /// chain rather than caching it locally. This prevents nonce corruption when a transaction
@@ -273,6 +277,8 @@ impl TransitionCountReader for GasKillerValidator {
 /// Each task is rebuilt from its persisted request and pushed through the same
 /// channel a fresh `POST /tasks` submission uses, so it flows through the normal
 /// dequeue → processing → ready/failed pipeline indistinguishably from new work.
+/// The backlog is walked in pages of [`REQUEUE_PAGE_SIZE`] so its size bounds how
+/// long startup takes, not how much memory it holds.
 ///
 /// A task whose `transition_index` the contract has already passed settles `expired`:
 /// `verifyAndUpdate` orders on that index, so aggregating it could only reach a payload the
@@ -284,15 +290,14 @@ pub async fn requeue_incomplete_tasks(
     transitions: &dyn TransitionCountReader,
     metrics: Option<&MetricsCollector>,
 ) -> Result<()> {
-    let tasks = store.incomplete_tasks().await?;
-    if tasks.is_empty() {
+    // The walk ends at the last row in flight when it starts. A task a client submits while it
+    // drains is already in the channel from the ingress that accepted it, so sweeping past this
+    // bound would enqueue that task a second time.
+    let Some(through) = store.last_incomplete_task().await? else {
         return Ok(());
-    }
+    };
 
-    info!(
-        count = tasks.len(),
-        "re-enqueuing incomplete tasks from a previous router life"
-    );
+    info!("re-enqueuing incomplete tasks from a previous router life");
 
     // One read per distinct target: a restart with a full window in flight recovers many tasks
     // pointing at the same contract.
@@ -306,103 +311,130 @@ pub async fn requeue_incomplete_tasks(
     let started = Instant::now();
     let mut checking = true;
 
-    for task in tasks {
-        let task_id = task.id;
-        let target = task.request.target_address;
+    let mut cursor: Option<TaskCursor> = None;
+    let mut requeued = 0usize;
+    let mut settled = 0usize;
 
-        // A server-resolved (`None`) index has nothing to compare against: the sequencer reads
-        // the current value when it dequeues.
-        if let Some(index) = task.request.transition_index
-            && checking
-        {
-            let count = match counts.get(&target) {
-                Some(count) => Some(*count),
-                None if started.elapsed() >= TRANSITION_CHECK_BUDGET => {
-                    warn!(
-                        budget_secs = TRANSITION_CHECK_BUDGET.as_secs(),
-                        "transition-index check budget spent; re-queueing the remaining recovered tasks unchecked"
-                    );
-                    checking = false;
-                    None
-                }
-                None => match transitions.state_transition_count(target).await {
-                    Ok(count) => {
-                        consecutive_failures = 0;
-                        counts.insert(target, count);
-                        Some(count)
-                    }
-                    Err(e) => {
-                        consecutive_failures += 1;
+    loop {
+        let page = store
+            .incomplete_tasks_page(cursor.as_ref(), &through, REQUEUE_PAGE_SIZE)
+            .await?;
+        let Some(last) = page.last() else { break };
+        cursor = Some(TaskCursor {
+            created_at: last.created_at,
+            id: last.id.clone(),
+        });
+
+        let page_len = page.len();
+        for task in page {
+            let task_id = task.id;
+            let target = task.request.target_address;
+
+            // A server-resolved (`None`) index has nothing to compare against: the sequencer reads
+            // the current value when it dequeues.
+            if let Some(index) = task.request.transition_index
+                && checking
+            {
+                let count = match counts.get(&target) {
+                    Some(count) => Some(*count),
+                    None if started.elapsed() >= TRANSITION_CHECK_BUDGET => {
                         warn!(
-                            %target,
-                            error = %e,
-                            consecutive_failures,
-                            "could not read stateTransitionCount; re-queueing this task unchecked"
+                            budget_secs = TRANSITION_CHECK_BUDGET.as_secs(),
+                            "transition-index check budget spent; re-queueing the remaining recovered tasks unchecked"
                         );
-                        if consecutive_failures >= MAX_CONSECUTIVE_COUNT_FAILURES {
-                            warn!(
-                                "stateTransitionCount unreadable for {consecutive_failures} targets in a row; re-queueing the remaining recovered tasks unchecked"
-                            );
-                            checking = false;
-                        }
+                        checking = false;
                         None
                     }
-                },
-            };
-
-            if let Some(count) = count
-                && count > index
-            {
-                let reason = format!(
-                    "transition index {index} is already applied on chain (the contract reports \
-                     {count}); this task's own effect may already have landed, so check the \
-                     target's state before re-requesting"
-                );
-                match store.mark_task_expired(&task_id, &reason).await {
-                    Ok(true) => {
-                        if let Some(m) = metrics {
-                            m.tasks_expired_at_requeue.inc();
+                    None => match transitions.state_transition_count(target).await {
+                        Ok(count) => {
+                            consecutive_failures = 0;
+                            counts.insert(target, count);
+                            Some(count)
                         }
-                        info!(
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            warn!(
+                                %target,
+                                error = %e,
+                                consecutive_failures,
+                                "could not read stateTransitionCount; re-queueing this task unchecked"
+                            );
+                            if consecutive_failures >= MAX_CONSECUTIVE_COUNT_FAILURES {
+                                warn!(
+                                    "stateTransitionCount unreadable for {consecutive_failures} targets in a row; re-queueing the remaining recovered tasks unchecked"
+                                );
+                                checking = false;
+                            }
+                            None
+                        }
+                    },
+                };
+
+                if let Some(count) = count
+                    && count > index
+                {
+                    let reason = format!(
+                        "transition index {index} is already applied on chain (the contract reports \
+                         {count}); this task's own effect may already have landed, so check the \
+                         target's state before re-requesting"
+                    );
+                    match store.mark_task_expired(&task_id, &reason).await {
+                        Ok(true) => {
+                            if let Some(m) = metrics {
+                                m.tasks_expired_at_requeue.inc();
+                            }
+                            info!(
+                                task_id,
+                                %target,
+                                transition_index = index,
+                                onchain_count = count,
+                                "recovered task's transition index is already consumed; settled expired"
+                            );
+                            settled += 1;
+                            continue;
+                        }
+                        Ok(false) => {
+                            warn!(
+                                task_id,
+                                "recovered task vanished before it could be settled expired"
+                            );
+                            continue;
+                        }
+                        // Fall through to re-enqueue: a row left `processing` with nothing in the
+                        // channel is stranded until the TTL sweep.
+                        Err(e) => error!(
                             task_id,
-                            %target,
-                            transition_index = index,
-                            onchain_count = count,
-                            "recovered task's transition index is already consumed; settled expired"
-                        );
-                        continue;
+                            error = %e,
+                            "failed to settle an already-applied recovered task; re-queueing it"
+                        ),
                     }
-                    Ok(false) => {
-                        warn!(
-                            task_id,
-                            "recovered task vanished before it could be settled expired"
-                        );
-                        continue;
-                    }
-                    // Fall through to re-enqueue: a row left `processing` with nothing in the
-                    // channel is stranded until the TTL sweep.
-                    Err(e) => error!(
-                        task_id,
-                        error = %e,
-                        "failed to settle an already-applied recovered task; re-queueing it"
-                    ),
                 }
             }
+
+            let queued = QueuedTask {
+                task_id: task_id.clone(),
+                request: GasKillerTaskRequest { body: task.request },
+            };
+            if sender.send(queued).is_err() {
+                error!(
+                    task_id,
+                    "failed to re-enqueue incomplete task: channel closed"
+                );
+                continue;
+            }
+            queue_depth.fetch_add(1, Ordering::Relaxed);
+            requeued += 1;
         }
 
-        let queued = QueuedTask {
-            task_id: task_id.clone(),
-            request: GasKillerTaskRequest { body: task.request },
-        };
-        if sender.send(queued).is_err() {
-            error!(
-                task_id,
-                "failed to re-enqueue incomplete task: channel closed"
-            );
-            continue;
+        if page_len < REQUEUE_PAGE_SIZE as usize {
+            break;
         }
-        queue_depth.fetch_add(1, Ordering::Relaxed);
     }
+
+    info!(
+        requeued,
+        settled, "finished re-enqueuing incomplete tasks from a previous router life"
+    );
     Ok(())
 }
 
@@ -1099,6 +1131,72 @@ mod tests {
         let mut want = vec![shared, other];
         want.sort();
         assert_eq!(reads, want, "each target should be read exactly once");
+    }
+
+    /// A backlog larger than one page drains completely.
+    #[tokio::test]
+    async fn a_backlog_larger_than_one_page_is_fully_requeued() {
+        let (store, key_id) = store_with_key().await;
+        let addr = target(0x11);
+        let total = REQUEUE_PAGE_SIZE as usize + 5;
+        for _ in 0..total {
+            processing_task(&store, &key_id, &request(addr, Some(7))).await;
+        }
+
+        let (sender, mut receiver) = task_channel();
+        let depth = task_queue_depth();
+        // The contract still sits at the tasks' index, so none of them settle.
+        let counts = FakeCounts::new([(addr, 7)]);
+
+        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+            .await
+            .expect("re-queue should succeed");
+
+        assert_eq!(drained(&mut receiver).len(), total);
+        assert_eq!(depth.load(Ordering::Relaxed), total);
+        assert_eq!(
+            counts.reads().len(),
+            1,
+            "the per-target cache should span pages"
+        );
+    }
+
+    /// Settling rows removes them from the set the walk is reading, which is what an offset-paged
+    /// walk cannot survive. Every row across every page must still be visited exactly once.
+    #[tokio::test]
+    async fn a_multi_page_backlog_settles_every_row_as_the_set_shrinks() {
+        let (store, key_id) = store_with_key().await;
+        let addr = target(0x11);
+        let total = REQUEUE_PAGE_SIZE as usize + 5;
+        let mut ids = Vec::new();
+        for _ in 0..total {
+            ids.push(processing_task(&store, &key_id, &request(addr, Some(7))).await);
+        }
+
+        let (sender, mut receiver) = task_channel();
+        let depth = task_queue_depth();
+        // Every task's index is spent, so every row leaves the set as the walk reaches it.
+        let counts = FakeCounts::new([(addr, 8)]);
+        let metrics = MetricsCollector::new();
+
+        requeue_incomplete_tasks(&store, &sender, &depth, &counts, Some(&metrics))
+            .await
+            .expect("re-queue should succeed");
+
+        assert!(drained(&mut receiver).is_empty());
+        for id in &ids {
+            assert_eq!(
+                status_of(&store, id).await,
+                TaskStatus::Expired,
+                "every row should be visited, including those past the first page"
+            );
+        }
+        assert!(
+            metrics.encode().contains(&format!(
+                "gas_killer_tasks_expired_at_requeue_total {total}"
+            )),
+            "the counter should span pages"
+        );
     }
 
     /// A `queued` row with a spent index settles `expired` on the same terms as a `processing` one.
