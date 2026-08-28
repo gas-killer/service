@@ -557,11 +557,14 @@ data:
           "id": 33,
           "type": "stat",
           "title": "Tasks Expired",
-          "description": "Tasks settled expired by the TTL sweep over the selected time range: queued tasks the queue never reached before their block reference went stale, plus ready payloads no client collected. Sustained growth means the queue is not draining ahead of the staleness window — raise capacity or lower submission rate rather than raising TASK_TTL_SECONDS.",
+          "description": "Tasks settled expired over the selected time range. The TTL sweep series covers queued tasks the queue never reached before their block reference went stale, plus ready payloads no client collected; sustained growth there means the queue is not draining ahead of the staleness window, so raise capacity or lower submission rate rather than raising TASK_TTL_SECONDS. The restart series counts recovered tasks whose transition index the chain had already consumed, and only moves on a router restart.",
           "gridPos": { "x": 18, "y": 66, "w": 6, "h": 8 },
           "targets": [{
             "expr": "increase(gas_killer_tasks_expired_total[$__range])",
-            "legendFormat": "tasks"
+            "legendFormat": "ttl sweep"
+          }, {
+            "expr": "increase(gas_killer_tasks_expired_at_requeue_total[$__range])",
+            "legendFormat": "spent index at restart"
           }],
           "options": {
             "reduceOptions": { "calcs": ["lastNotNull"] },

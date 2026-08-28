@@ -39,7 +39,7 @@ use gas_killer_common::task_data::GasKillerTaskData;
 use gas_killer_common::{ChainRole, GasKillerValidator};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, str::FromStr, sync::Arc};
 use tracing::{error, info, warn};
 
@@ -58,6 +58,15 @@ const DB_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 /// Without it a chain that degraded under load would stay degraded, having rejected the very
 /// requests whose success would have cleared it.
 const RPC_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long the startup re-queue may spend reading `stateTransitionCount()` before it stops
+/// checking and re-queues the rest unchecked. Bounds the delay a large recovered backlog spread
+/// across many distinct targets can add before the sequencer starts.
+const TRANSITION_CHECK_BUDGET: Duration = Duration::from_secs(30);
+
+/// Consecutive unreadable targets taken as the chain being unavailable rather than those targets
+/// being individually unresolvable, after which the re-queue stops checking.
+const MAX_CONSECUTIVE_COUNT_FAILURES: u32 = 3;
 
 /// Wallet provider that uses SimpleNonceManager to always fetch the pending nonce from the
 /// chain rather than caching it locally. This prevents nonce corruption when a transaction
@@ -288,9 +297,14 @@ pub async fn requeue_incomplete_tasks(
     // One read per distinct target: a restart with a full window in flight recovers many tasks
     // pointing at the same contract.
     let mut counts: HashMap<Address, u64> = HashMap::new();
-    // An unreachable chain answers for no target: the first read failure abandons the check for
-    // the whole pass and every remaining task takes the unchecked path.
-    let mut chain_readable = true;
+    // A read failure is not attributable to the chain: `get_state_transition_count` detects the
+    // target's chain first, and that step reports a target it cannot place the same way it
+    // reports an RPC that will not answer. So a single failure only skips its own target, and
+    // only a run of them is taken as the chain being down. The budget bounds the remaining case
+    // the run does not cover, reads that succeed but are slow across many distinct targets.
+    let mut consecutive_failures = 0u32;
+    let started = Instant::now();
+    let mut checking = true;
 
     for task in tasks {
         let task_id = task.id;
@@ -299,22 +313,38 @@ pub async fn requeue_incomplete_tasks(
         // A server-resolved (`None`) index has nothing to compare against: the sequencer reads
         // the current value when it dequeues.
         if let Some(index) = task.request.transition_index
-            && chain_readable
+            && checking
         {
             let count = match counts.get(&target) {
                 Some(count) => Some(*count),
+                None if started.elapsed() >= TRANSITION_CHECK_BUDGET => {
+                    warn!(
+                        budget_secs = TRANSITION_CHECK_BUDGET.as_secs(),
+                        "transition-index check budget spent; re-queueing the remaining recovered tasks unchecked"
+                    );
+                    checking = false;
+                    None
+                }
                 None => match transitions.state_transition_count(target).await {
                     Ok(count) => {
+                        consecutive_failures = 0;
                         counts.insert(target, count);
                         Some(count)
                     }
                     Err(e) => {
+                        consecutive_failures += 1;
                         warn!(
                             %target,
                             error = %e,
-                            "could not read stateTransitionCount; re-queueing recovered tasks without checking whether their transition already landed"
+                            consecutive_failures,
+                            "could not read stateTransitionCount; re-queueing this task unchecked"
                         );
-                        chain_readable = false;
+                        if consecutive_failures >= MAX_CONSECUTIVE_COUNT_FAILURES {
+                            warn!(
+                                "stateTransitionCount unreadable for {consecutive_failures} targets in a row; re-queueing the remaining recovered tasks unchecked"
+                            );
+                            checking = false;
+                        }
                         None
                     }
                 },
@@ -324,8 +354,9 @@ pub async fn requeue_incomplete_tasks(
                 && count > index
             {
                 let reason = format!(
-                    "transition index {index} was already applied on chain (the contract reports \
-                     {count}); re-request against the current index"
+                    "transition index {index} is already applied on chain (the contract reports \
+                     {count}); this task's own effect may already have landed, so check the \
+                     target's state before re-requesting"
                 );
                 match store.mark_task_expired(&task_id, &reason).await {
                     Ok(true) => {
@@ -337,7 +368,7 @@ pub async fn requeue_incomplete_tasks(
                             %target,
                             transition_index = index,
                             onchain_count = count,
-                            "recovered task's transition already landed; settled expired instead of re-queueing"
+                            "recovered task's transition index is already consumed; settled expired"
                         );
                         continue;
                     }
@@ -679,6 +710,7 @@ pub async fn create_schnorr_submitter(
 mod tests {
     use super::*;
     use crate::GasKillerTaskRequestBody;
+    use crate::metrics::MetricsCollector;
     use crate::store::TaskStatus;
     use alloy_primitives::U256;
     use std::sync::Mutex;
@@ -725,6 +757,56 @@ mod tests {
                 .copied()
                 .ok_or_else(|| anyhow::anyhow!("no count scripted for {target}"))
         }
+    }
+
+    /// Deletes a task row when asked for a count, so the settle that follows finds nothing.
+    struct DeletingReader {
+        store: SqliteStore,
+        task_id: String,
+        count: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl TransitionCountReader for DeletingReader {
+        async fn state_transition_count(&self, _target: Address) -> Result<u64> {
+            sqlx::query("DELETE FROM tasks WHERE id = ?1")
+                .bind(&self.task_id)
+                .execute(self.store.pool())
+                .await?;
+            Ok(self.count)
+        }
+    }
+
+    /// Closes the store's pool when asked for a count, so the settle that follows errors.
+    struct ClosingReader {
+        store: SqliteStore,
+        count: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl TransitionCountReader for ClosingReader {
+        async fn state_transition_count(&self, _target: Address) -> Result<u64> {
+            self.store.pool().close().await;
+            Ok(self.count)
+        }
+    }
+
+    /// Moves a task's `created_at` back a minute, fixing its position in `incomplete_tasks`.
+    async fn backdate(store: &SqliteStore, id: &str) {
+        sqlx::query("UPDATE tasks SET created_at = created_at - 60 WHERE id = ?1")
+            .bind(id)
+            .execute(store.pool())
+            .await
+            .expect("backdating should succeed");
+    }
+
+    async fn status_of(store: &SqliteStore, id: &str) -> TaskStatus {
+        store
+            .get_task(id)
+            .await
+            .expect("get_task should succeed")
+            .expect("task should exist")
+            .status
     }
 
     fn target(byte: u8) -> Address {
@@ -794,10 +876,18 @@ mod tests {
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         let counts = FakeCounts::new([(addr, 8)]);
+        let metrics = MetricsCollector::new();
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, &counts, Some(&metrics))
             .await
             .expect("re-queue should succeed");
+
+        assert!(
+            metrics
+                .encode()
+                .contains("gas_killer_tasks_expired_at_requeue_total 1"),
+            "the re-queue should count what it settled"
+        );
 
         assert!(
             drained(&mut receiver).is_empty(),
@@ -865,12 +955,13 @@ mod tests {
         );
     }
 
-    /// An unreachable chain re-queues every task, reading once rather than once per task.
+    /// An unreadable chain re-queues every task, and stops reading once a run of targets has
+    /// failed rather than retrying for each of them.
     #[tokio::test]
-    async fn unreadable_chain_requeues_everything_and_reads_once() {
+    async fn unreadable_chain_requeues_everything_and_latches_off() {
         let (store, key_id) = store_with_key().await;
         let mut expected = Vec::new();
-        for byte in [0x11u8, 0x22, 0x33] {
+        for byte in [0x11u8, 0x22, 0x33, 0x44, 0x55] {
             expected.push(processing_task(&store, &key_id, &request(target(byte), Some(7))).await);
         }
 
@@ -880,7 +971,7 @@ mod tests {
 
         requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
             .await
-            .expect("re-queue should succeed despite the read failing");
+            .expect("re-queue should succeed despite the reads failing");
 
         let mut drained_ids = drained(&mut receiver);
         drained_ids.sort();
@@ -889,12 +980,98 @@ mod tests {
             drained_ids, expected,
             "every task should still be re-queued"
         );
-        assert_eq!(depth.load(Ordering::Relaxed), 3);
+        assert_eq!(depth.load(Ordering::Relaxed), 5);
         assert_eq!(
             counts.reads().len(),
-            1,
-            "the first failure should abandon the check rather than retry per task"
+            MAX_CONSECUTIVE_COUNT_FAILURES as usize,
+            "a run of failures should stop the check rather than retry for every remaining task"
         );
+    }
+
+    /// One target the chain cannot place is not the chain being down, so the targets after it are
+    /// still checked.
+    #[tokio::test]
+    async fn one_unreadable_target_does_not_disable_the_check_for_the_rest() {
+        let (store, key_id) = store_with_key().await;
+        let unreadable = target(0x11);
+        let readable = target(0x22);
+        let first = processing_task(&store, &key_id, &request(unreadable, Some(7))).await;
+        let spent = processing_task(&store, &key_id, &request(readable, Some(7))).await;
+        // `incomplete_tasks` orders by `created_at, id`, and both rows land in the same second,
+        // so backdate the unreadable one to pin it ahead of the readable one.
+        backdate(&store, &first).await;
+
+        let (sender, mut receiver) = task_channel();
+        let depth = task_queue_depth();
+        // `readable` is scripted; `unreadable` is not, so its read errors.
+        let counts = FakeCounts::new([(readable, 9)]);
+
+        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+            .await
+            .expect("re-queue should succeed");
+
+        assert_eq!(
+            drained(&mut receiver).len(),
+            1,
+            "only the unreadable target's task should be re-queued"
+        );
+        assert_eq!(
+            status_of(&store, &spent).await,
+            TaskStatus::Expired,
+            "the readable target's spent index should still be caught"
+        );
+    }
+
+    /// A row removed between the load and the settle is left alone rather than re-queued.
+    #[tokio::test]
+    async fn a_row_that_disappears_before_the_settle_is_not_requeued() {
+        let (store, key_id) = store_with_key().await;
+        let addr = target(0x11);
+        let task_id = processing_task(&store, &key_id, &request(addr, Some(7))).await;
+
+        let (sender, mut receiver) = task_channel();
+        let depth = task_queue_depth();
+        let counts = DeletingReader {
+            store: store.clone(),
+            task_id: task_id.clone(),
+            count: 9,
+        };
+
+        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+            .await
+            .expect("re-queue should succeed");
+
+        assert!(drained(&mut receiver).is_empty());
+        assert!(
+            store
+                .get_task(&task_id)
+                .await
+                .expect("get_task should succeed")
+                .is_none()
+        );
+    }
+
+    /// A settle the store refuses falls through to re-queueing, so the row is not left
+    /// `processing` with nothing in the channel.
+    #[tokio::test]
+    async fn a_failed_settle_falls_through_to_requeueing() {
+        let (store, key_id) = store_with_key().await;
+        let addr = target(0x11);
+        let task_id = processing_task(&store, &key_id, &request(addr, Some(7))).await;
+
+        let (sender, mut receiver) = task_channel();
+        let depth = task_queue_depth();
+        let counts = ClosingReader {
+            store: store.clone(),
+            count: 9,
+        };
+
+        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+            .await
+            .expect("re-queue should succeed despite the settle failing");
+
+        assert_eq!(drained(&mut receiver), vec![task_id]);
+        assert_eq!(depth.load(Ordering::Relaxed), 1);
     }
 
     /// Many tasks against one contract cost one read.

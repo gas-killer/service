@@ -190,7 +190,7 @@ while this one has none) — never on a bare timer.
   matches neither the expected digest nor the skip digest (a node resolved the height
   from a directive issued by a previous router life) consumes the height and the
   in-flight task is re-assigned to the next one. Tasks still `queued` or `processing`
-  are re-queued, except one whose `transition_index` the contract has already passed.
+  are re-queued, except one whose `transition_index` the contract has already consumed.
   That settles `expired`, counted in `gas_killer_tasks_expired_at_requeue_total`.
 - **Router journal loss**: if the router's journal is wiped while the nodes keep
   theirs (e.g. only the router pod is rescheduled), the sequencer would restart at
