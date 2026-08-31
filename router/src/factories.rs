@@ -68,8 +68,15 @@ const TRANSITION_CHECK_BUDGET: Duration = Duration::from_secs(30);
 /// being individually unresolvable, after which the re-queue stops checking.
 const MAX_CONSECUTIVE_COUNT_FAILURES: u32 = 3;
 
-/// Rows the startup re-queue loads per page. Bounds how much of the backlog is held in memory at
-/// once; the walk repeats until the backlog is drained.
+/// Rows the startup re-queue loads per query, repeating until the backlog is drained.
+///
+/// Bounds the rows a single query materializes, not the re-queue's peak footprint: the task
+/// channel is unbounded and the sequencer dispatches one task at a time, so everything the walk
+/// sends stays resident until the sequencer reaches it.
+///
+/// Sized above [`gas_killer_common::max_queue_depth`]'s default, which the ingress caps
+/// admissions against, so an unraised deployment drains in one page. Raising that cap past this
+/// is what puts the walk on its second page.
 const REQUEUE_PAGE_SIZE: u32 = 256;
 
 /// Wallet provider that uses SimpleNonceManager to always fetch the pending nonce from the
@@ -103,6 +110,14 @@ pub struct IngressHandles {
     /// and executor so they can drive task status transitions. `None` when
     /// `INGRESS != true` (no store is opened without the HTTP server).
     pub store: Option<SqliteStore>,
+    /// Last task a previous router life left in flight, read before this process began
+    /// accepting submissions. `None` when there was no backlog, or when no store was opened.
+    ///
+    /// Taken here rather than by the re-queue itself because it is only an honest upper bound on
+    /// "what a previous life left" while no row the running ingress created can exist yet. Read
+    /// after the server starts, a submission accepted in between would sort at or below it, and
+    /// the walk would enqueue a task the ingress had already put in the channel.
+    pub requeue_bound: Option<TaskCursor>,
 }
 
 /// Creates the ingress task channel and, when `INGRESS=true`, spawns the HTTP
@@ -120,6 +135,7 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
             receiver,
             queue_depth,
             store: None,
+            requeue_bound: None,
         });
     }
 
@@ -179,6 +195,10 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
     // Open the durable store and apply migrations before serving traffic. A failure here
     // aborts router startup rather than running against an unmigrated or unwritable store.
     let store = SqliteStore::connect().await?;
+
+    // Fix the re-queue's upper bound while the backlog is still exactly what a previous router
+    // life left: nothing below is served yet, so no row here can be one this process accepted.
+    let requeue_bound = store.last_incomplete_task().await?;
 
     // Publish store liveness as `gas_killer_db_up`. connect() already proved the store
     // answers, so seed the gauge to 1; a background loop then re-checks so a later volume
@@ -254,6 +274,7 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
         receiver,
         queue_depth,
         store: Some(store_for_return),
+        requeue_bound,
     })
 }
 
@@ -277,8 +298,8 @@ impl TransitionCountReader for GasKillerValidator {
 /// Each task is rebuilt from its persisted request and pushed through the same
 /// channel a fresh `POST /tasks` submission uses, so it flows through the normal
 /// dequeue → processing → ready/failed pipeline indistinguishably from new work.
-/// The backlog is walked in pages of [`REQUEUE_PAGE_SIZE`] so its size bounds how
-/// long startup takes, not how much memory it holds.
+/// The backlog is walked in pages of [`REQUEUE_PAGE_SIZE`], bounded above by `through`,
+/// the last row in flight before this process began accepting submissions.
 ///
 /// A task whose `transition_index` the contract has already passed settles `expired`:
 /// `verifyAndUpdate` orders on that index, so aggregating it could only reach a payload the
@@ -287,13 +308,11 @@ pub async fn requeue_incomplete_tasks(
     store: &SqliteStore,
     sender: &TaskSender,
     queue_depth: &TaskQueueDepth,
+    through: Option<&TaskCursor>,
     transitions: &dyn TransitionCountReader,
     metrics: Option<&MetricsCollector>,
 ) -> Result<()> {
-    // The walk ends at the last row in flight when it starts. A task a client submits while it
-    // drains is already in the channel from the ingress that accepted it, so sweeping past this
-    // bound would enqueue that task a second time.
-    let Some(through) = store.last_incomplete_task().await? else {
+    let Some(through) = through else {
         return Ok(());
     };
 
@@ -317,7 +336,7 @@ pub async fn requeue_incomplete_tasks(
 
     loop {
         let page = store
-            .incomplete_tasks_page(cursor.as_ref(), &through, REQUEUE_PAGE_SIZE)
+            .incomplete_tasks_page(cursor.as_ref(), through, REQUEUE_PAGE_SIZE)
             .await?;
         let Some(last) = page.last() else { break };
         cursor = Some(TaskCursor {
@@ -823,7 +842,7 @@ mod tests {
         }
     }
 
-    /// Moves a task's `created_at` back a minute, fixing its position in `incomplete_tasks`.
+    /// Moves a task's `created_at` back a minute, fixing its position in the re-queue walk.
     async fn backdate(store: &SqliteStore, id: &str) {
         sqlx::query("UPDATE tasks SET created_at = created_at - 60 WHERE id = ?1")
             .bind(id)
@@ -905,14 +924,25 @@ mod tests {
         let addr = target(0x11);
         let task_id = processing_task(&store, &key_id, &request(addr, Some(7))).await;
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         let counts = FakeCounts::new([(addr, 8)]);
         let metrics = MetricsCollector::new();
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, Some(&metrics))
-            .await
-            .expect("re-queue should succeed");
+        requeue_incomplete_tasks(
+            &store,
+            &sender,
+            &depth,
+            bound.as_ref(),
+            &counts,
+            Some(&metrics),
+        )
+        .await
+        .expect("re-queue should succeed");
 
         assert!(
             metrics
@@ -947,11 +977,15 @@ mod tests {
         let addr = target(0x11);
         let task_id = processing_task(&store, &key_id, &request(addr, Some(7))).await;
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         let counts = FakeCounts::new([(addr, 7)]);
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
             .await
             .expect("re-queue should succeed");
 
@@ -972,11 +1006,15 @@ mod tests {
         let addr = target(0x11);
         let task_id = processing_task(&store, &key_id, &request(addr, None)).await;
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         let counts = FakeCounts::new([(addr, 99)]);
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
             .await
             .expect("re-queue should succeed");
 
@@ -997,11 +1035,15 @@ mod tests {
             expected.push(processing_task(&store, &key_id, &request(target(byte), Some(7))).await);
         }
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         let counts = FakeCounts::failing();
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
             .await
             .expect("re-queue should succeed despite the reads failing");
 
@@ -1029,16 +1071,20 @@ mod tests {
         let readable = target(0x22);
         let first = processing_task(&store, &key_id, &request(unreadable, Some(7))).await;
         let spent = processing_task(&store, &key_id, &request(readable, Some(7))).await;
-        // `incomplete_tasks` orders by `created_at, id`, and both rows land in the same second,
+        // The walk orders by `created_at, id`, and both rows land in the same second,
         // so backdate the unreadable one to pin it ahead of the readable one.
         backdate(&store, &first).await;
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         // `readable` is scripted; `unreadable` is not, so its read errors.
         let counts = FakeCounts::new([(readable, 9)]);
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
             .await
             .expect("re-queue should succeed");
 
@@ -1061,6 +1107,10 @@ mod tests {
         let addr = target(0x11);
         let task_id = processing_task(&store, &key_id, &request(addr, Some(7))).await;
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         let counts = DeletingReader {
@@ -1069,7 +1119,7 @@ mod tests {
             count: 9,
         };
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
             .await
             .expect("re-queue should succeed");
 
@@ -1091,6 +1141,10 @@ mod tests {
         let addr = target(0x11);
         let task_id = processing_task(&store, &key_id, &request(addr, Some(7))).await;
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         let counts = ClosingReader {
@@ -1098,7 +1152,7 @@ mod tests {
             count: 9,
         };
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
             .await
             .expect("re-queue should succeed despite the settle failing");
 
@@ -1117,11 +1171,15 @@ mod tests {
         }
         processing_task(&store, &key_id, &request(other, Some(7))).await;
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         let counts = FakeCounts::new([(shared, 7), (other, 7)]);
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
             .await
             .expect("re-queue should succeed");
 
@@ -1143,12 +1201,16 @@ mod tests {
             processing_task(&store, &key_id, &request(addr, Some(7))).await;
         }
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         // The contract still sits at the tasks' index, so none of them settle.
         let counts = FakeCounts::new([(addr, 7)]);
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
             .await
             .expect("re-queue should succeed");
 
@@ -1173,15 +1235,26 @@ mod tests {
             ids.push(processing_task(&store, &key_id, &request(addr, Some(7))).await);
         }
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         // Every task's index is spent, so every row leaves the set as the walk reaches it.
         let counts = FakeCounts::new([(addr, 8)]);
         let metrics = MetricsCollector::new();
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, Some(&metrics))
-            .await
-            .expect("re-queue should succeed");
+        requeue_incomplete_tasks(
+            &store,
+            &sender,
+            &depth,
+            bound.as_ref(),
+            &counts,
+            Some(&metrics),
+        )
+        .await
+        .expect("re-queue should succeed");
 
         assert!(drained(&mut receiver).is_empty());
         for id in &ids {
@@ -1209,11 +1282,15 @@ mod tests {
             .await
             .expect("task creation should succeed");
 
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
         let (sender, mut receiver) = task_channel();
         let depth = task_queue_depth();
         let counts = FakeCounts::new([(addr, 12)]);
 
-        requeue_incomplete_tasks(&store, &sender, &depth, &counts, None)
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
             .await
             .expect("re-queue should succeed");
 

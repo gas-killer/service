@@ -445,6 +445,7 @@ fn main() {
                 store,
                 &ingress.sender,
                 &ingress.queue_depth,
+                ingress.requeue_bound.as_ref(),
                 validator.as_ref(),
                 Some(&metrics),
             )
