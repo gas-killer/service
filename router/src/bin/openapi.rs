@@ -1,22 +1,35 @@
-//! Writes the ingress OpenAPI document to `router/openapi.json`.
+//! Writes the ingress OpenAPI documents to `router/openapi.json` and
+//! `router/openapi.internal.json`.
 //!
 //! Run it after changing a handler annotation or a DTO: `cargo run --bin openapi`. The committed
-//! document is what the docs site renders, and a test in [`gas_killer_router::openapi`] fails
-//! while it is stale, so this is the way to make that test pass.
+//! documents are what the docs site consumes, and a test in [`gas_killer_router::openapi`] fails
+//! while either is stale, so this is the way to make that test pass.
+//!
+//! The two differ by the operator surface: see [`gas_killer_router::openapi::PRIVATE_TAGS`].
 
 use anyhow::Context;
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
-    let document =
-        gas_killer_router::openapi::render().context("rendering the OpenAPI document")?;
-
     // Resolved against the crate rather than the working directory, so the binary writes the same
-    // file wherever it is invoked from.
-    let destination = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("openapi.json");
-    std::fs::write(&destination, &document)
-        .with_context(|| format!("writing {}", destination.display()))?;
+    // files wherever it is invoked from.
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
-    println!("wrote {} ({} bytes)", destination.display(), document.len());
+    for (name, rendered) in [
+        (
+            "openapi.json",
+            gas_killer_router::openapi::render().context("rendering the published document")?,
+        ),
+        (
+            "openapi.internal.json",
+            gas_killer_router::openapi::render_internal()
+                .context("rendering the internal document")?,
+        ),
+    ] {
+        let destination = crate_root.join(name);
+        std::fs::write(&destination, &rendered)
+            .with_context(|| format!("writing {}", destination.display()))?;
+        println!("wrote {} ({} bytes)", destination.display(), rendered.len());
+    }
     Ok(())
 }

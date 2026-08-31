@@ -395,6 +395,212 @@
           }
         }
       }
+    },
+    "/admin/keys": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List active API keys",
+        "description": "Lists metadata for every key that still authenticates. Key values and their hashes are never returned.",
+        "operationId": "listApiKeys",
+        "responses": {
+          "200": {
+            "description": "Metadata for the active keys.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiKeyMetadata"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid `ADMIN_KEY`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected server-side error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The admin API is not configured (`ADMIN_KEY` is unset), or task persistence is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Issue an API key",
+        "description": "Mints a new API key and returns its value. The value is returned exactly once and is not recoverable afterwards, since only its hash is stored. The whole body is optional: an empty body creates an unlabelled key that never expires and uses the global rate limit.",
+        "operationId": "createApiKey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The key was created. `key` is the value to send as a bearer token and is shown only here.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedApiKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_at` is not in the future, `rpm_limit` is zero, or the body is not valid JSON. Returned with code `INVALID_REQUEST`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid `ADMIN_KEY`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected server-side error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The admin API is not configured (`ADMIN_KEY` is unset), or task persistence is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ]
+      }
+    },
+    "/admin/keys/{id}": {
+      "delete": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Revoke an API key",
+        "description": "Revokes a key by its public id, taking effect on the next request that presents it. Tasks the key already created are unaffected but become unreachable, since a task is only visible to the key that created it.",
+        "operationId": "revokeApiKey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Public id of the key, from the create or list response.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The key was revoked."
+          },
+          "401": {
+            "description": "Missing or invalid `ADMIN_KEY`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active key with this id exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected server-side error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The admin API is not configured (`ADMIN_KEY` is unset), or task persistence is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -432,6 +638,53 @@
         "properties": {
           "error": {
             "$ref": "#/components/schemas/ApiErrorBody"
+          }
+        }
+      },
+      "ApiKeyMetadata": {
+        "type": "object",
+        "description": "Non-secret metadata about an active API key, safe to list. Deliberately omits the key value\nand its hash so neither is ever exposed through the admin API.",
+        "required": [
+          "id",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_used": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "invalid_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp at which the key expires, or `None` if it never expires. Listed keys are\nalways still valid, so this is only ever null or a future time."
+          },
+          "rpm_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-key requests-per-minute override, or `None` when the key uses the global default rate.",
+            "minimum": 0
           }
         }
       },
@@ -609,6 +862,80 @@
         ],
         "maxItems": 131072,
         "minItems": 4
+      },
+      "CreateApiKeyRequest": {
+        "type": "object",
+        "description": "Request body for `POST /admin/keys`. The whole body is optional; an empty body creates an\nunlabeled key. `invalid_at` is an optional unix timestamp at which the key expires; omit or\nsend `null` for a key that never expires. It must be in the future.",
+        "properties": {
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-text name for the key, shown in listings. Blank labels are normalized to absent."
+          },
+          "invalid_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp at which the key stops authenticating. Omit or send `null` for a key that\nnever expires. Must be in the future."
+          },
+          "rpm_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-key requests-per-minute override for `POST /tasks`. Omit or send `null` to limit the\nkey at the global default rate (`RATE_LIMIT_RPM`). Must be positive when present.",
+            "minimum": 0
+          }
+        }
+      },
+      "CreatedApiKey": {
+        "type": "object",
+        "description": "A newly created API key, including the raw secret. The `key` is returned to the caller\nexactly once — it is never persisted in the clear and cannot be recovered afterwards.",
+        "required": [
+          "id",
+          "key",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "invalid_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp at which the key stops authenticating, or `None` if it never expires."
+          },
+          "rpm_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-key requests-per-minute override for `POST /tasks`, or `None` to use the global\ndefault rate.",
+            "minimum": 0
+          }
+        }
       },
       "ErrorCode": {
         "type": "string",
@@ -849,6 +1176,11 @@
       }
     },
     "securitySchemes": {
+      "AdminAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The operator's `ADMIN_KEY` shared secret, sent as `Authorization: Bearer <ADMIN_KEY>`. Mints and revokes API keys, so it is not an integrator credential."
+      },
       "ApiKeyAuth": {
         "type": "http",
         "scheme": "bearer",
@@ -864,6 +1196,10 @@
     {
       "name": "Metadata",
       "description": "Public AVS identity and settlement addresses, consumed by the restaking indexer and by integrators wiring a target contract."
+    },
+    {
+      "name": "Admin",
+      "description": "API key lifecycle, guarded by the operator's `ADMIN_KEY`. Operator surface, not part of the integrator API."
     },
     {
       "name": "Health",

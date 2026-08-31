@@ -253,9 +253,10 @@ Operator (node) key files are generated automatically by the Docker setup and do
 
 ## Ingress Mode
 
-Enable HTTP endpoints for external task requests. The full contract for these endpoints is
+Enable HTTP endpoints for external task requests. The contract for these endpoints is
 `router/openapi.json`, generated from the handlers themselves; see [Regenerating the OpenAPI
-document](#regenerating-the-openapi-document).
+documents](#regenerating-the-openapi-documents). The admin API is in
+`router/openapi.internal.json` instead.
 
 1. **Enable ingress in .env:**
 ```bash
@@ -362,18 +363,27 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-### Regenerating the OpenAPI document
+### Regenerating the OpenAPI documents
 
-`router/openapi.json` describes the ingress HTTP API and is generated from the `#[utoipa::path]`
-annotations on the handlers, so it cannot drift from what the router actually serves. Rewrite it
-after changing a handler annotation or any type it exposes:
+Both documents are generated from the `#[utoipa::path]` annotations on the ingress handlers, so
+neither can drift from what the router actually serves. Rewrite them after changing a handler
+annotation or any type it exposes:
 
 ```bash
 cargo run --bin openapi
 ```
 
-A unit test compares the committed document against the one the code produces, so CI fails while
-the two disagree. The docs site renders this document as its API reference.
+- `router/openapi.json` is the integrator API. The docs site renders it as its public API
+  reference, including an interactive playground.
+- `router/openapi.internal.json` additionally describes the `/admin/keys` endpoints.
+
+The admin API is absent from the published document by construction, not by configuration on the
+site: the generator drops operations tagged `Admin` along with the credential and types only they
+use. `ADMIN_KEY` mints and revokes every API key the router honours, and a public playground is
+the wrong place to invite someone to paste one.
+
+Unit tests compare both committed documents against what the code produces and assert the
+operator surface stays out of the published one, so CI fails on either kind of drift.
 
 ### Testing
 
