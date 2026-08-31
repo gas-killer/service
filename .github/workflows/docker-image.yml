@@ -8,10 +8,10 @@ on:
       - staging
   pull_request:
   release:
-    # `created` does not fire when a release that was saved as a draft is later
-    # published, so a draft-first release never builds its images. `published`
-    # covers that path; both are kept so either route builds exactly once.
-    types: [created, published]
+    # `published` fires exactly once on every publish route, draft-first or direct.
+    # `created` is skipped for draft saves and otherwise only doubles a direct
+    # publish, so subscribing to it adds a redundant build and never a needed one.
+    types: [published]
   workflow_dispatch:
 
 env:
