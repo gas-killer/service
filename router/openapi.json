@@ -1,0 +1,1209 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Gas Killer Router API",
+    "description": "HTTP API for the Gas Killer router (the AVS aggregator).\n\nClients submit compute tasks to `POST /tasks`; the router validates them, fans them out to restaked operator nodes, and aggregates the BLS signatures into a completed round. Rather than broadcasting on-chain itself, the router returns a ready-to-sign transaction, the *payload*. The typical flow is:\n\n1. `POST /tasks` to submit a task and receive a `task_id`.\n2. `GET /tasks/{task_id}` to poll until `status` is `ready`, at which point the response carries a `payload` object.\n3. Sign and submit that `payload` from your own wallet before its `valid_until_block`.\n\nTask submission and polling are authenticated with an API key.",
+    "contact": {
+      "name": "Gas Killer",
+      "url": "https://gaskiller.xyz",
+      "email": "contact@gaskiller.xyz"
+    },
+    "license": {
+      "name": "PPL"
+    },
+    "version": "0.3.0"
+  },
+  "servers": [
+    {
+      "url": "{baseUrl}",
+      "description": "Gas Killer router ingress",
+      "variables": {
+        "baseUrl": {
+          "default": "https://testnet.gaskiller.xyz",
+          "description": "Base URL of the router ingress. Defaults to the public testnet; select localhost for local development, or replace with your own deployment.",
+          "enum": [
+            "https://testnet.gaskiller.xyz",
+            "http://localhost:8080"
+          ]
+        }
+      }
+    }
+  ],
+  "paths": {
+    "/tasks": {
+      "get": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "List your tasks",
+        "description": "Lists the tasks created by the calling API key, newest first. Supports an optional `status` filter and `limit`/`offset` pagination. Payloads are returned as last stored; unlike `GET /tasks/{task_id}`, this endpoint does not re-check payload freshness, so always fetch a single task before submitting its payload.",
+        "operationId": "listTasks",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Return only tasks in this lifecycle state.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TaskStatus"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of tasks to return. Defaults to 50 and is clamped to the range 1 to 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Number of tasks to skip, for pagination. Negative values are treated as 0.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The calling key's tasks, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A query parameter is invalid, for example an unknown `status` value or a non-integer `limit`. Returned with code `INVALID_REQUEST`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected server-side error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Task persistence is not configured, so the endpoint cannot serve the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Submit a compute task",
+        "description": "Queues a task for the operator network and returns a `task_id` to poll. The request is authenticated, load-shed against the queue capacity, then validated (field-level, then on-chain) before it is accepted. A `202` means the task was queued: poll `GET /tasks/{task_id}` until it is `ready`, then sign and submit the returned payload yourself.\n\nA repeat of a submission that is still in flight collapses onto the original rather than creating a second task, and answers `200` with `deduplicated: true`. Deduplication is keyed on the calling key, the target, and the transition index, so it only applies to a submission that named an explicit `transition_index`.\n\nSubmission is rate limited per API key (60 requests per minute by default). Over the limit returns `429` with a `Retry-After` header.",
+        "operationId": "submitTask",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GasKillerTaskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The submission matched a task already in flight for this key, target and transition index, so it returned the original task id rather than queueing a second one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAcceptedResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Task accepted and queued. Poll `GET /tasks/{task_id}` for status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskAcceptedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request failed validation. `code` is one of `INVALID_REQUEST`, `INVALID_ADDRESS`, `STALE_BLOCK`, `TRANSITION_MISMATCH`, `CALLDATA_TOO_LARGE`, `CONTRACT_NOT_FOUND`, or `TARGET_NOT_DEPLOYED`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is well-formed JSON but does not match the expected schema, for example a field of the wrong type. Returned with code `INVALID_REQUEST`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The API key exceeded its request rate limit. Wait for the number of seconds in the `Retry-After` header, then retry.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Seconds to wait before retrying."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected server-side error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The service is at capacity (`QUEUE_FULL`), an upstream RPC endpoint used for validation is unreachable (`RPC_UNAVAILABLE`), or task persistence is not configured (`NOT_CONFIGURED`). The first two are transient; a `QUEUE_FULL` response carries a `Retry-After` estimate.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Seconds to wait before retrying, on a `QUEUE_FULL` response."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/tasks/{task_id}": {
+      "get": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Get task status",
+        "description": "Returns the full state of a single task. Poll this endpoint until `status` is `ready`, at which point `payload` holds a ready-to-sign transaction request. This is the authoritative freshness check: for a `ready` task the router re-validates the payload against current chain state, so a stale payload returns `409 PAYLOAD_EXPIRED` (re-request the task) rather than calldata that would revert on submission. A task is visible only to the API key that created it.",
+        "operationId": "getTask",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "The task id returned by `POST /tasks`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current task state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials are valid but the task belongs to a different API key. Kept distinct from `404` so a caller can tell \"not yours\" from \"no such task\".",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No task with this id exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The task's `ready` payload is no longer submittable: its `valid_until_block` has passed, or the on-chain state-transition index has advanced and the round was already consumed. Submit a fresh task and poll again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected server-side error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "An upstream RPC endpoint used for the freshness check is unreachable (`RPC_UNAVAILABLE`), or task persistence is not configured (`NOT_CONFIGURED`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/avs-metadata": {
+      "get": {
+        "tags": [
+          "Metadata"
+        ],
+        "summary": "AVS identity and contract addresses",
+        "description": "Returns the AVS identity document in the exact shape the restaking indexer expects (the URL registered via `updateAVSMetadataURI`), plus a `contracts` block naming the addresses a target contract must be wired to in order to settle. Public; no authentication required.\n\nThe `contracts` block is the authoritative source for those addresses. They belong to whichever AVS deployment is currently signing, each redeployment provisions a new signature checker, and a target wired to a superseded one passes every validation here and then reverts `InvalidQuorumApkHash` on chain. Read them from this endpoint rather than copying them into your own configuration.\n\nThe block is omitted entirely when the router could not establish the addresses, so a client that finds it absent has no answer rather than a wrong one.",
+        "operationId": "getAvsMetadata",
+        "responses": {
+          "200": {
+            "description": "AVS metadata document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvsMetadata"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness probe",
+        "description": "Answers `200` whenever the ingress is listening. It reports nothing about readiness or the operator network; the router's readiness and Prometheus endpoints are served on a separate operator port and are not part of this API.",
+        "operationId": "getHealthz",
+        "responses": {
+          "200": {
+            "description": "The ingress is listening."
+          }
+        }
+      }
+    },
+    "/admin/keys": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List active API keys",
+        "description": "Lists metadata for every key that still authenticates. Key values and their hashes are never returned.",
+        "operationId": "listApiKeys",
+        "responses": {
+          "200": {
+            "description": "Metadata for the active keys.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiKeyMetadata"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid `ADMIN_KEY`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected server-side error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The admin API is not configured (`ADMIN_KEY` is unset), or task persistence is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Issue an API key",
+        "description": "Mints a new API key and returns its value. The value is returned exactly once and is not recoverable afterwards, since only its hash is stored. The whole body is optional: an empty body creates an unlabelled key that never expires and uses the global rate limit.",
+        "operationId": "createApiKey",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The key was created. `key` is the value to send as a bearer token and is shown only here.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedApiKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_at` is not in the future, `rpm_limit` is zero, or the body is not valid JSON. Returned with code `INVALID_REQUEST`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid `ADMIN_KEY`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected server-side error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The admin API is not configured (`ADMIN_KEY` is unset), or task persistence is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ]
+      }
+    },
+    "/admin/keys/{id}": {
+      "delete": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Revoke an API key",
+        "description": "Revokes a key by its public id, taking effect on the next request that presents it. Tasks the key already created are unaffected but become unreachable, since a task is only visible to the key that created it.",
+        "operationId": "revokeApiKey",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Public id of the key, from the create or list response.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The key was revoked."
+          },
+          "401": {
+            "description": "Missing or invalid `ADMIN_KEY`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active key with this id exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected server-side error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The admin API is not configured (`ADMIN_KEY` is unset), or task persistence is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "AdminAuth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Address": {
+        "type": "string",
+        "description": "A 20-byte Ethereum address, 0x-prefixed hex.",
+        "examples": [
+          "0x0000000000000000000000000000000000000001"
+        ],
+        "pattern": "^0x[0-9a-fA-F]{40}$"
+      },
+      "ApiErrorBody": {
+        "type": "object",
+        "description": "The `error` object nested inside [`ApiErrorEnvelope`].",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiErrorEnvelope": {
+        "type": "object",
+        "description": "The full wire shape of an error response: `{ \"error\": { \"code\", \"message\" } }`.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ApiErrorBody"
+          }
+        }
+      },
+      "ApiKeyMetadata": {
+        "type": "object",
+        "description": "Non-secret metadata about an active API key, safe to list. Deliberately omits the key value\nand its hash so neither is ever exposed through the admin API.",
+        "required": [
+          "id",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_used": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "invalid_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp at which the key expires, or `None` if it never expires. Listed keys are\nalways still valid, so this is only ever null or a future time."
+          },
+          "rpm_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-key requests-per-minute override, or `None` when the key uses the global default rate.",
+            "minimum": 0
+          }
+        }
+      },
+      "AvsContracts": {
+        "type": "object",
+        "description": "The addresses a target must be wired to in order to settle, plus the demo contracts the\ndocumentation points at.\n\nSerialized as the `contracts` object on `GET /avs-metadata`. Every field is a public on-chain\naddress, and the endpoint is already public and unauthenticated, so there is nothing here to\ngate.",
+        "required": [
+          "chainId",
+          "avsAddress",
+          "blsSignatureChecker",
+          "registryCoordinator"
+        ],
+        "properties": {
+          "chainId": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain ID every address below lives on, so an integrator can tell at a glance whether\nthey are pointed at the right network. True of the AVS trio by construction — they are read\nthrough a provider for this chain — and of the demo contracts because each is checked for\ncode here before being published.",
+            "example": 11155111,
+            "minimum": 0
+          },
+          "avsAddress": {
+            "$ref": "#/components/schemas/Address",
+            "description": "AVS service manager a target names as its `avsAddress`."
+          },
+          "blsSignatureChecker": {
+            "$ref": "#/components/schemas/Address",
+            "description": "Signature checker a target must verify against. The verification-blocking one of the pair."
+          },
+          "registryCoordinator": {
+            "$ref": "#/components/schemas/Address",
+            "description": "Registry coordinator the operators are registered in. Published so an integrator can\nconfirm their own wiring independently: `blsSignatureChecker().registryCoordinator()` must\nequal this."
+          },
+          "demoTarget": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Address",
+                "description": "A deployed target anyone may submit against, for a first settlement with no Solidity\nwritten. Shared, so concurrent readers can invalidate each other's payloads on\n`transitionIndex`; `demoFactory` is the way to avoid that. Absent when none is configured."
+              }
+            ]
+          },
+          "demoFactory": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Address",
+                "description": "Factory that deploys a caller-owned target, for a reader who wants an instance no one else\nis advancing. It takes the AVS and checker addresses as arguments rather than wiring them\nitself, so a caller should pass the two published above. Absent when none is configured."
+              }
+            ]
+          }
+        }
+      },
+      "AvsMetadata": {
+        "type": "object",
+        "description": "AVS identity metadata served at `GET /avs-metadata`.\n\nThe EigenLayer indexer fetches the URL passed to `updateAVSMetadataURI`\nand expects this exact JSON shape.",
+        "required": [
+          "name",
+          "website",
+          "description"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "website": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "logo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "twitter": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operatorSets": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AvsOperatorSetMetadata"
+            }
+          },
+          "contracts": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AvsContracts",
+                "description": "Settlement-relevant contract addresses, resolved from the running deployment by a\nbackground task. Absent until it establishes something — an integrator gets no answer rather\nthan a wrong one, since a wrong checker is what makes a target revert on every submission.\nHeld as a shared slot, so cloning this metadata for a response reads whatever the resolver\nhas published rather than snapshotting what was known when the router started, and a record\na deploy job writes later shows up without a restart."
+              }
+            ]
+          }
+        }
+      },
+      "AvsOperatorSetMetadata": {
+        "type": "object",
+        "required": [
+          "name",
+          "id",
+          "description",
+          "software"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "software": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AvsOperatorSetSoftware"
+            }
+          },
+          "slashingConditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AvsOperatorSetSoftware": {
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "CallData": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "description": "ABI-encoded calldata as an array of byte values (0 to 255). The first four bytes are the function selector, so at least 4 bytes are required; the maximum accepted size is 128 KiB.",
+        "examples": [
+          [
+            171,
+            205,
+            239,
+            1
+          ]
+        ],
+        "maxItems": 131072,
+        "minItems": 4
+      },
+      "CreateApiKeyRequest": {
+        "type": "object",
+        "description": "Request body for `POST /admin/keys`. The whole body is optional; an empty body creates an\nunlabeled key. `invalid_at` is an optional unix timestamp at which the key expires; omit or\nsend `null` for a key that never expires. It must be in the future.",
+        "properties": {
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-text name for the key, shown in listings. Blank labels are normalized to absent."
+          },
+          "invalid_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp at which the key stops authenticating. Omit or send `null` for a key that\nnever expires. Must be in the future."
+          },
+          "rpm_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-key requests-per-minute override for `POST /tasks`. Omit or send `null` to limit the\nkey at the global default rate (`RATE_LIMIT_RPM`). Must be positive when present.",
+            "minimum": 0
+          }
+        }
+      },
+      "CreatedApiKey": {
+        "type": "object",
+        "description": "A newly created API key, including the raw secret. The `key` is returned to the caller\nexactly once — it is never persisted in the clear and cannot be recovered afterwards.",
+        "required": [
+          "id",
+          "key",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "invalid_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp at which the key stops authenticating, or `None` if it never expires."
+          },
+          "rpm_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-key requests-per-minute override for `POST /tasks`, or `None` to use the global\ndefault rate.",
+            "minimum": 0
+          }
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "description": "Stable, machine-readable error code returned in every API error response.\n\nThese identifiers are a public API contract: integrators branch on them, so a variant\nmust never be renamed or repurposed once shipped. Add a new variant rather than changing\nthe meaning of an existing one. The wire form is uppercase snake-case (e.g.\n`TRANSITION_MISMATCH`).",
+        "enum": [
+          "INVALID_ADDRESS",
+          "STALE_BLOCK",
+          "TRANSITION_MISMATCH",
+          "PAYLOAD_EXPIRED",
+          "CALLDATA_TOO_LARGE",
+          "RATE_LIMITED",
+          "QUEUE_FULL",
+          "UNAUTHORIZED",
+          "FORBIDDEN",
+          "RPC_UNAVAILABLE",
+          "CONTRACT_NOT_FOUND",
+          "TARGET_NOT_DEPLOYED",
+          "INVALID_REQUEST",
+          "NOT_FOUND",
+          "METHOD_NOT_ALLOWED",
+          "NOT_CONFIGURED",
+          "INTERNAL"
+        ]
+      },
+      "GasKillerTaskRequest": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/GasKillerTaskRequestBody"
+          }
+        }
+      },
+      "GasKillerTaskRequestBody": {
+        "type": "object",
+        "required": [
+          "target_address",
+          "call_data",
+          "from_address",
+          "value",
+          "block_height"
+        ],
+        "properties": {
+          "target_address": {
+            "$ref": "#/components/schemas/Address",
+            "description": "The contract the computation is executed against."
+          },
+          "call_data": {
+            "$ref": "#/components/schemas/CallData"
+          },
+          "transition_index": {
+            "$ref": "#/components/schemas/TransitionIndex",
+            "description": "`None`, JSON `null`, `\"auto\"`, or a missing field all mean \"auto\":\nthe server resolves the next available slot at dequeue time,\nenabling safe parallel submissions."
+          },
+          "from_address": {
+            "$ref": "#/components/schemas/Address",
+            "description": "The address the simulated call is sent from."
+          },
+          "value": {
+            "$ref": "#/components/schemas/HexUint256",
+            "description": "Wei value to attach to the call."
+          },
+          "block_height": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The block height the computation is pinned to.",
+            "example": 1,
+            "minimum": 1
+          }
+        }
+      },
+      "HexBytes": {
+        "type": "string",
+        "description": "A 0x-prefixed hex byte string.",
+        "examples": [
+          "0x93de4531"
+        ],
+        "pattern": "^0x[0-9a-fA-F]*$"
+      },
+      "HexUint256": {
+        "type": "string",
+        "description": "A 256-bit unsigned integer, 0x-prefixed hex.",
+        "examples": [
+          "0x0"
+        ],
+        "pattern": "^0x[0-9a-fA-F]+$"
+      },
+      "PayloadView": {
+        "type": "object",
+        "description": "A ready-to-sign transaction request returned by `GET /tasks/{id}` once a task is ready.\n\nThe caller signs and submits it as-is. `to` and `value` are server-controlled rather than\nbare `verifyAndUpdate` calldata, so introducing an on-chain protocol fee (a payable target or\na routing entrypoint) changes the server output, never the integrator's client code.",
+        "required": [
+          "to",
+          "data",
+          "value",
+          "chain_id",
+          "estimated_gas",
+          "valid_until_block"
+        ],
+        "properties": {
+          "to": {
+            "$ref": "#/components/schemas/Address",
+            "description": "Contract the transaction is sent to (the gas-killer target in beta)."
+          },
+          "data": {
+            "$ref": "#/components/schemas/HexBytes",
+            "description": "Full ABI-encoded `verifyAndUpdate` calldata (selector + arguments)."
+          },
+          "value": {
+            "$ref": "#/components/schemas/HexUint256",
+            "description": "Wei sent with the transaction. Zero in beta; `verifyAndUpdate` is not payable."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Numeric EVM chain id the transaction must be submitted to.",
+            "example": 11155111,
+            "minimum": 0
+          },
+          "estimated_gas": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`eth_estimateGas` result for the rendered call, provided as a submission hint.",
+            "example": 234000,
+            "minimum": 0
+          },
+          "valid_until_block": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last block for which the payload is accepted on-chain; past it the caller re-requests.",
+            "example": 22345678,
+            "minimum": 0
+          }
+        }
+      },
+      "TaskAcceptedResponse": {
+        "type": "object",
+        "description": "Body returned by `POST /tasks` when a task is accepted: the id the client polls for status,\nand the task's current state.\n\n`deduplicated` is `true` when the submission collapsed onto an existing in-flight or `ready`\ntask rather than creating a new one — a retry keyed on `(key_id, target_address,\ntransition_index)` is idempotent, returning the original task id with a `200 OK`. A fresh\nsubmission carries `false` and a `202 Accepted`.",
+        "required": [
+          "task_id",
+          "status",
+          "deduplicated"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "The id to poll for status via `GET /tasks/{task_id}`.",
+            "example": "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus",
+            "description": "The task's state at the moment it was accepted."
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "description": "Whether the submission collapsed onto a task already in flight rather than creating a new\none. `true` accompanies a `200`, `false` a `202`."
+          }
+        }
+      },
+      "TaskStatus": {
+        "type": "string",
+        "description": "Lifecycle state of a task as it moves through aggregation. `ready` is the state in which a task carries a submittable payload; `failed` and `expired` both carry an `error`.",
+        "enum": [
+          "queued",
+          "processing",
+          "ready",
+          "failed",
+          "expired"
+        ]
+      },
+      "TaskView": {
+        "type": "object",
+        "description": "Full task state returned by the status endpoints (`GET /tasks/{id}` and `GET /tasks`).\n\n`created_at`/`updated_at` are unix timestamps in seconds, matching the timestamp convention\nused elsewhere in the API (e.g. the admin key listing). `payload` is populated once the task\nreaches `ready`; `error` once it is `failed` or `expired`.",
+        "required": [
+          "task_id",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "example": "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp (seconds) when the task was created."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp (seconds) of the last state change."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Failure reason; present once the task is `failed` or `expired`."
+          },
+          "payload": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PayloadView",
+                "description": "The ready-to-sign transaction; present once the task is `ready`."
+              }
+            ]
+          }
+        }
+      },
+      "TransitionIndex": {
+        "anyOf": [
+          {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          {
+            "type": "string",
+            "enum": [
+              "auto"
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The state-transition slot to occupy. Send an integer to target a specific slot, or \"auto\" (or null, or omit the field) to let the router resolve the next available slot at dequeue time, which is what makes safe parallel submissions possible.",
+        "default": "auto"
+      }
+    },
+    "securitySchemes": {
+      "AdminAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The operator's `ADMIN_KEY` shared secret, sent as `Authorization: Bearer <ADMIN_KEY>`. Mints and revokes API keys, so it is not an integrator credential."
+      },
+      "ApiKeyAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "An API key for task submission and polling, sent as `Authorization: Bearer gk_...`."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Tasks",
+      "description": "Submitting compute tasks, polling their status, and retrieving the ready-to-sign payload."
+    },
+    {
+      "name": "Metadata",
+      "description": "Public AVS identity and settlement addresses, consumed by the restaking indexer and by integrators wiring a target contract."
+    },
+    {
+      "name": "Admin",
+      "description": "API key lifecycle, guarded by the operator's `ADMIN_KEY`. Operator surface, not part of the integrator API."
+    },
+    {
+      "name": "Health",
+      "description": "Liveness probing."
+    }
+  ]
+}

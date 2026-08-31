@@ -92,7 +92,7 @@ impl FreshnessCache {
 ///
 /// The EigenLayer indexer fetches the URL passed to `updateAVSMetadataURI`
 /// and expects this exact JSON shape.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AvsMetadata {
     pub name: String,
     pub website: String,
@@ -110,10 +110,11 @@ pub struct AvsMetadata {
     /// has published rather than snapshotting what was known when the router started, and a record
     /// a deploy job writes later shows up without a restart.
     #[serde(default, skip_serializing_if = "ResolvedContracts::is_unresolved")]
+    #[schema(value_type = Option<gas_killer_common::avs_contracts::AvsContracts>)]
     pub contracts: ResolvedContracts,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AvsOperatorSetMetadata {
     pub name: String,
     pub id: String,
@@ -123,7 +124,7 @@ pub struct AvsOperatorSetMetadata {
     pub slashing_conditions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AvsOperatorSetSoftware {
     pub name: String,
     pub description: String,
@@ -666,21 +667,31 @@ where
     d.deserialize_option(TransitionIndexVisitor)
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, utoipa::ToSchema)]
 pub struct GasKillerTaskRequestBody {
+    /// The contract the computation is executed against.
+    #[schema(value_type = gas_killer_common::openapi::Address)]
     pub target_address: Address,
+    #[schema(value_type = crate::openapi::CallData)]
     pub call_data: Vec<u8>,
     /// `None`, JSON `null`, `"auto"`, or a missing field all mean "auto":
     /// the server resolves the next available slot at dequeue time,
     /// enabling safe parallel submissions.
     #[serde(default, deserialize_with = "deserialize_transition_index")]
+    #[schema(value_type = crate::openapi::TransitionIndex)]
     pub transition_index: Option<u64>,
+    /// The address the simulated call is sent from.
+    #[schema(value_type = gas_killer_common::openapi::Address)]
     pub from_address: Address,
+    /// Wei value to attach to the call.
+    #[schema(value_type = gas_killer_common::openapi::HexUint256)]
     pub value: U256,
+    /// The block height the computation is pinned to.
+    #[schema(minimum = 1, example = 1)]
     pub block_height: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, utoipa::ToSchema)]
 pub struct GasKillerTaskRequest {
     pub body: GasKillerTaskRequestBody,
 }
@@ -727,10 +738,15 @@ impl GasKillerTaskRequest {
 /// task rather than creating a new one — a retry keyed on `(key_id, target_address,
 /// transition_index)` is idempotent, returning the original task id with a `200 OK`. A fresh
 /// submission carries `false` and a `202 Accepted`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TaskAcceptedResponse {
+    /// The id to poll for status via `GET /tasks/{task_id}`.
+    #[schema(example = "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11")]
     pub task_id: String,
+    /// The task's state at the moment it was accepted.
     pub status: TaskStatus,
+    /// Whether the submission collapsed onto a task already in flight rather than creating a new
+    /// one. `true` accompanies a `200`, `false` a `202`.
     pub deduplicated: bool,
 }
 
@@ -816,6 +832,75 @@ impl Drop for QueueSlot<'_> {
 /// Every outcome — accepted, deduplicated, or rejected — logs the calling `key_id`, the request's
 /// `target_address` and `transition_index`, and how long it took (`duration_ms`), so an operator
 /// can audit a client's traffic without the key value ever appearing in a log.
+#[utoipa::path(
+    post,
+    path = "/tasks",
+    tag = "Tasks",
+    operation_id = "submitTask",
+    summary = "Submit a compute task",
+    description = "Queues a task for the operator network and returns a `task_id` to poll. The \
+                   request is authenticated, load-shed against the queue capacity, then validated \
+                   (field-level, then on-chain) before it is accepted. A `202` means the task was \
+                   queued: poll `GET /tasks/{task_id}` until it is `ready`, then sign and submit \
+                   the returned payload yourself.\n\nA repeat of a submission that is still \
+                   in flight collapses onto the original rather than creating a second task, and \
+                   answers `200` with `deduplicated: true`. Deduplication is keyed on the calling \
+                   key, the target, and the transition index, so it only applies to a submission \
+                   that named an explicit `transition_index`.\n\nSubmission is rate limited per \
+                   API key (60 requests per minute by default). Over the limit returns `429` with \
+                   a `Retry-After` header.",
+    security(("ApiKeyAuth" = [])),
+    request_body = GasKillerTaskRequest,
+    responses(
+        (
+            status = 202,
+            description = "Task accepted and queued. Poll `GET /tasks/{task_id}` for status.",
+            body = TaskAcceptedResponse
+        ),
+        (
+            status = 200,
+            description = "The submission matched a task already in flight for this key, target \
+                           and transition index, so it returned the original task id rather than \
+                           queueing a second one.",
+            body = TaskAcceptedResponse
+        ),
+        (
+            status = 400,
+            description = "The request failed validation. `code` is one of `INVALID_REQUEST`, \
+                           `INVALID_ADDRESS`, `STALE_BLOCK`, `TRANSITION_MISMATCH`, \
+                           `CALLDATA_TOO_LARGE`, `CONTRACT_NOT_FOUND`, or `TARGET_NOT_DEPLOYED`.",
+            body = ApiErrorEnvelope
+        ),
+        (status = 401, description = "Missing or invalid API key.", body = ApiErrorEnvelope),
+        (
+            status = 422,
+            description = "The body is well-formed JSON but does not match the expected schema, \
+                           for example a field of the wrong type. Returned with code \
+                           `INVALID_REQUEST`.",
+            body = ApiErrorEnvelope
+        ),
+        (
+            status = 429,
+            description = "The API key exceeded its request rate limit. Wait for the number of \
+                           seconds in the `Retry-After` header, then retry.",
+            body = ApiErrorEnvelope,
+            headers(("Retry-After" = u64, description = "Seconds to wait before retrying."))
+        ),
+        (
+            status = 503,
+            description = "The service is at capacity (`QUEUE_FULL`), an upstream RPC endpoint \
+                           used for validation is unreachable (`RPC_UNAVAILABLE`), or task \
+                           persistence is not configured (`NOT_CONFIGURED`). The first two are \
+                           transient; a `QUEUE_FULL` response carries a `Retry-After` estimate.",
+            body = ApiErrorEnvelope,
+            headers((
+                "Retry-After" = u64,
+                description = "Seconds to wait before retrying, on a `QUEUE_FULL` response."
+            ))
+        ),
+        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+    )
+)]
 pub async fn submit_task_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
@@ -1031,13 +1116,18 @@ pub async fn submit_task_handler(
 /// `created_at`/`updated_at` are unix timestamps in seconds, matching the timestamp convention
 /// used elsewhere in the API (e.g. the admin key listing). `payload` is populated once the task
 /// reaches `ready`; `error` once it is `failed` or `expired`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TaskView {
+    #[schema(example = "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11")]
     pub task_id: String,
     pub status: TaskStatus,
+    /// Unix timestamp (seconds) when the task was created.
     pub created_at: i64,
+    /// Unix timestamp (seconds) of the last state change.
     pub updated_at: i64,
+    /// Failure reason; present once the task is `failed` or `expired`.
     pub error: Option<String>,
+    /// The ready-to-sign transaction; present once the task is `ready`.
     pub payload: Option<PayloadView>,
 }
 
@@ -1092,13 +1182,19 @@ fn clamp_offset(offset: Option<i64>) -> i64 {
 }
 
 /// Query parameters for `GET /tasks`: an optional status filter and pagination bounds.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListTasksQuery {
+    /// Return only tasks in this lifecycle state.
     #[serde(default)]
     status: Option<TaskStatus>,
+    /// Maximum number of tasks to return. Defaults to 50 and is clamped to the range 1 to 200.
     #[serde(default)]
+    #[param(minimum = 1, maximum = 200, default = 50)]
     limit: Option<i64>,
+    /// Number of tasks to skip, for pagination. Negative values are treated as 0.
     #[serde(default)]
+    #[param(minimum = 0, default = 0)]
     offset: Option<i64>,
 }
 
@@ -1241,6 +1337,56 @@ async fn render_or_reject_payload<P: Provider + Clone>(
 /// owned by a different key yields `403` (kept distinct from `404` so a caller can tell "no such
 /// task" from "not yours"). For a `ready` task this is the authoritative freshness check: a stale
 /// payload yields a `409 PAYLOAD_EXPIRED` re-request error rather than calldata that would revert.
+#[utoipa::path(
+    get,
+    path = "/tasks/{task_id}",
+    tag = "Tasks",
+    operation_id = "getTask",
+    summary = "Get task status",
+    description = "Returns the full state of a single task. Poll this endpoint until `status` is \
+                   `ready`, at which point `payload` holds a ready-to-sign transaction request. \
+                   This is the authoritative freshness check: for a `ready` task the router \
+                   re-validates the payload against current chain state, so a stale payload \
+                   returns `409 PAYLOAD_EXPIRED` (re-request the task) rather than calldata that \
+                   would revert on submission. A task is visible only to the API key that created \
+                   it.",
+    security(("ApiKeyAuth" = [])),
+    params(
+        ("task_id" = String, Path, description = "The task id returned by `POST /tasks`.")
+    ),
+    responses(
+        (status = 200, description = "Current task state.", body = TaskView),
+        (status = 401, description = "Missing or invalid API key.", body = ApiErrorEnvelope),
+        (
+            status = 403,
+            description = "The credentials are valid but the task belongs to a different API key. \
+                           Kept distinct from `404` so a caller can tell \"not yours\" from \
+                           \"no such task\".",
+            body = ApiErrorEnvelope
+        ),
+        (
+            status = 404,
+            description = "No task with this id exists.",
+            body = ApiErrorEnvelope
+        ),
+        (
+            status = 409,
+            description = "The task's `ready` payload is no longer submittable: its \
+                           `valid_until_block` has passed, or the on-chain state-transition index \
+                           has advanced and the round was already consumed. Submit a fresh task \
+                           and poll again.",
+            body = ApiErrorEnvelope
+        ),
+        (
+            status = 503,
+            description = "An upstream RPC endpoint used for the freshness check is unreachable \
+                           (`RPC_UNAVAILABLE`), or task persistence is not configured \
+                           (`NOT_CONFIGURED`).",
+            body = ApiErrorEnvelope
+        ),
+        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+    )
+)]
 pub async fn get_task_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
@@ -1289,6 +1435,41 @@ pub async fn get_task_handler(
 /// Scoped to the caller's API key; supports an optional `?status=` filter and `?limit=`/`?offset=`
 /// pagination. `limit` defaults to [`DEFAULT_TASK_PAGE_SIZE`] and is clamped to
 /// `[1, MAX_TASK_PAGE_SIZE]`; a negative `offset` is treated as `0`.
+#[utoipa::path(
+    get,
+    path = "/tasks",
+    tag = "Tasks",
+    operation_id = "listTasks",
+    summary = "List your tasks",
+    description = "Lists the tasks created by the calling API key, newest first. Supports an \
+                   optional `status` filter and `limit`/`offset` pagination. Payloads are \
+                   returned as last stored; unlike `GET /tasks/{task_id}`, this endpoint does not \
+                   re-check payload freshness, so always fetch a single task before submitting \
+                   its payload.",
+    security(("ApiKeyAuth" = [])),
+    params(ListTasksQuery),
+    responses(
+        (
+            status = 200,
+            description = "The calling key's tasks, newest first.",
+            body = Vec<TaskView>
+        ),
+        (
+            status = 400,
+            description = "A query parameter is invalid, for example an unknown `status` value or \
+                           a non-integer `limit`. Returned with code `INVALID_REQUEST`.",
+            body = ApiErrorEnvelope
+        ),
+        (status = 401, description = "Missing or invalid API key.", body = ApiErrorEnvelope),
+        (
+            status = 503,
+            description = "Task persistence is not configured, so the endpoint cannot serve the \
+                           request.",
+            body = ApiErrorEnvelope
+        ),
+        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+    )
+)]
 pub async fn list_tasks_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
@@ -1314,10 +1495,13 @@ pub async fn list_tasks_handler(
 /// Request body for `POST /admin/keys`. The whole body is optional; an empty body creates an
 /// unlabeled key. `invalid_at` is an optional unix timestamp at which the key expires; omit or
 /// send `null` for a key that never expires. It must be in the future.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 pub struct CreateApiKeyRequest {
+    /// Free-text name for the key, shown in listings. Blank labels are normalized to absent.
     #[serde(default)]
     pub label: Option<String>,
+    /// Unix timestamp at which the key stops authenticating. Omit or send `null` for a key that
+    /// never expires. Must be in the future.
     #[serde(default)]
     pub invalid_at: Option<i64>,
     /// Per-key requests-per-minute override for `POST /tasks`. Omit or send `null` to limit the
@@ -1328,7 +1512,42 @@ pub struct CreateApiKeyRequest {
 
 /// `POST /admin/keys` — issues a new API key. Admin-only. The response carries the raw key
 /// value exactly once; it is not persisted in the clear and cannot be retrieved later.
-async fn create_api_key_handler(
+#[utoipa::path(
+    post,
+    path = "/admin/keys",
+    tag = "Admin",
+    operation_id = "createApiKey",
+    summary = "Issue an API key",
+    description = "Mints a new API key and returns its value. The value is returned exactly once \
+                   and is not recoverable afterwards, since only its hash is stored. The whole \
+                   body is optional: an empty body creates an unlabelled key that never expires \
+                   and uses the global rate limit.",
+    security(("AdminAuth" = [])),
+    request_body = CreateApiKeyRequest,
+    responses(
+        (
+            status = 201,
+            description = "The key was created. `key` is the value to send as a bearer token and \
+                           is shown only here.",
+            body = CreatedApiKey
+        ),
+        (
+            status = 400,
+            description = "`invalid_at` is not in the future, `rpm_limit` is zero, or the body is \
+                           not valid JSON. Returned with code `INVALID_REQUEST`.",
+            body = ApiErrorEnvelope
+        ),
+        (status = 401, description = "Missing or invalid `ADMIN_KEY`.", body = ApiErrorEnvelope),
+        (
+            status = 503,
+            description = "The admin API is not configured (`ADMIN_KEY` is unset), or task \
+                           persistence is not configured.",
+            body = ApiErrorEnvelope
+        ),
+        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+    )
+)]
+pub async fn create_api_key_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
     body: bytes::Bytes,
@@ -1386,7 +1605,28 @@ async fn create_api_key_handler(
 }
 
 /// `GET /admin/keys` — lists metadata for active keys. Admin-only. Never returns key values.
-async fn list_api_keys_handler(
+#[utoipa::path(
+    get,
+    path = "/admin/keys",
+    tag = "Admin",
+    operation_id = "listApiKeys",
+    summary = "List active API keys",
+    description = "Lists metadata for every key that still authenticates. Key values and their \
+                   hashes are never returned.",
+    security(("AdminAuth" = [])),
+    responses(
+        (status = 200, description = "Metadata for the active keys.", body = Vec<ApiKeyMetadata>),
+        (status = 401, description = "Missing or invalid `ADMIN_KEY`.", body = ApiErrorEnvelope),
+        (
+            status = 503,
+            description = "The admin API is not configured (`ADMIN_KEY` is unset), or task \
+                           persistence is not configured.",
+            body = ApiErrorEnvelope
+        ),
+        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+    )
+)]
+pub async fn list_api_keys_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ApiKeyMetadata>>, ApiError> {
@@ -1402,7 +1642,37 @@ async fn list_api_keys_handler(
 
 /// `DELETE /admin/keys/:id` — revokes a key, taking effect immediately. Admin-only. Returns
 /// 204 on success and 404 when no active key with that id exists.
-async fn revoke_api_key_handler(
+#[utoipa::path(
+    delete,
+    path = "/admin/keys/{id}",
+    tag = "Admin",
+    operation_id = "revokeApiKey",
+    summary = "Revoke an API key",
+    description = "Revokes a key by its public id, taking effect on the next request that \
+                   presents it. Tasks the key already created are unaffected but become \
+                   unreachable, since a task is only visible to the key that created it.",
+    security(("AdminAuth" = [])),
+    params(
+        ("id" = String, Path, description = "Public id of the key, from the create or list response.")
+    ),
+    responses(
+        (status = 204, description = "The key was revoked."),
+        (status = 401, description = "Missing or invalid `ADMIN_KEY`.", body = ApiErrorEnvelope),
+        (
+            status = 404,
+            description = "No active key with this id exists.",
+            body = ApiErrorEnvelope
+        ),
+        (
+            status = 503,
+            description = "The admin API is not configured (`ADMIN_KEY` is unset), or task \
+                           persistence is not configured.",
+            body = ApiErrorEnvelope
+        ),
+        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+    )
+)]
+pub async fn revoke_api_key_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -1427,11 +1697,45 @@ async fn revoke_api_key_handler(
     }
 }
 
-async fn healthz_handler() -> StatusCode {
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tag = "Health",
+    operation_id = "getHealthz",
+    summary = "Liveness probe",
+    description = "Answers `200` whenever the ingress is listening. It reports nothing about \
+                   readiness or the operator network; the router's readiness and Prometheus \
+                   endpoints are served on a separate operator port and are not part of this API.",
+    responses(
+        (status = 200, description = "The ingress is listening.")
+    )
+)]
+pub async fn healthz_handler() -> StatusCode {
     StatusCode::OK
 }
 
-async fn avs_metadata_handler(State(state): State<IngressState>) -> Json<AvsMetadata> {
+#[utoipa::path(
+    get,
+    path = "/avs-metadata",
+    tag = "Metadata",
+    operation_id = "getAvsMetadata",
+    summary = "AVS identity and contract addresses",
+    description = "Returns the AVS identity document in the exact shape the restaking indexer \
+                   expects (the URL registered via `updateAVSMetadataURI`), plus a `contracts` \
+                   block naming the addresses a target contract must be wired to in order to \
+                   settle. Public; no authentication required.\n\nThe `contracts` block is the \
+                   authoritative source for those addresses. They belong to whichever AVS \
+                   deployment is currently signing, each redeployment provisions a new signature \
+                   checker, and a target wired to a superseded one passes every validation here \
+                   and then reverts `InvalidQuorumApkHash` on chain. Read them from this endpoint \
+                   rather than copying them into your own configuration.\n\nThe block is \
+                   omitted entirely when the router could not establish the addresses, so a \
+                   client that finds it absent has no answer rather than a wrong one.",
+    responses(
+        (status = 200, description = "AVS metadata document.", body = AvsMetadata)
+    )
+)]
+pub async fn avs_metadata_handler(State(state): State<IngressState>) -> Json<AvsMetadata> {
     Json(state.avs_metadata.clone())
 }
 

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// must never be renamed or repurposed once shipped. Add a new variant rather than changing
 /// the meaning of an existing one. The wire form is uppercase snake-case (e.g.
 /// `TRANSITION_MISMATCH`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     /// A required address field is zero or otherwise not a usable address.
@@ -69,14 +69,14 @@ pub enum ErrorCode {
 }
 
 /// The `error` object nested inside [`ApiErrorEnvelope`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ApiErrorBody {
     pub code: ErrorCode,
     pub message: String,
 }
 
 /// The full wire shape of an error response: `{ "error": { "code", "message" } }`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ApiErrorEnvelope {
     pub error: ApiErrorBody,
 }

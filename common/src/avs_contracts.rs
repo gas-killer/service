@@ -94,24 +94,28 @@ const RETRY_MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Serialized as the `contracts` object on `GET /avs-metadata`. Every field is a public on-chain
 /// address, and the endpoint is already public and unauthenticated, so there is nothing here to
 /// gate.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct AvsContracts {
     /// EVM chain ID every address below lives on, so an integrator can tell at a glance whether
     /// they are pointed at the right network. True of the AVS trio by construction — they are read
     /// through a provider for this chain — and of the demo contracts because each is checked for
     /// code here before being published.
     #[serde(rename = "chainId")]
+    #[schema(example = 11155111)]
     pub chain_id: u64,
     /// AVS service manager a target names as its `avsAddress`.
     #[serde(rename = "avsAddress", serialize_with = "checksummed")]
+    #[schema(value_type = crate::openapi::Address)]
     pub avs_address: Address,
     /// Signature checker a target must verify against. The verification-blocking one of the pair.
     #[serde(rename = "blsSignatureChecker", serialize_with = "checksummed")]
+    #[schema(value_type = crate::openapi::Address)]
     pub bls_signature_checker: Address,
     /// Registry coordinator the operators are registered in. Published so an integrator can
     /// confirm their own wiring independently: `blsSignatureChecker().registryCoordinator()` must
     /// equal this.
     #[serde(rename = "registryCoordinator", serialize_with = "checksummed")]
+    #[schema(value_type = crate::openapi::Address)]
     pub registry_coordinator: Address,
     /// A deployed target anyone may submit against, for a first settlement with no Solidity
     /// written. Shared, so concurrent readers can invalidate each other's payloads on
@@ -121,6 +125,7 @@ pub struct AvsContracts {
         skip_serializing_if = "Option::is_none",
         serialize_with = "checksummed_opt"
     )]
+    #[schema(value_type = Option<crate::openapi::Address>)]
     pub demo_target: Option<Address>,
     /// Factory that deploys a caller-owned target, for a reader who wants an instance no one else
     /// is advancing. It takes the AVS and checker addresses as arguments rather than wiring them
@@ -130,6 +135,7 @@ pub struct AvsContracts {
         skip_serializing_if = "Option::is_none",
         serialize_with = "checksummed_opt"
     )]
+    #[schema(value_type = Option<crate::openapi::Address>)]
     pub demo_factory: Option<Address>,
 }
 

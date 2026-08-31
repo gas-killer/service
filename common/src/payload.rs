@@ -14,19 +14,25 @@ use serde::{Deserialize, Serialize};
 /// The caller signs and submits it as-is. `to` and `value` are server-controlled rather than
 /// bare `verifyAndUpdate` calldata, so introducing an on-chain protocol fee (a payable target or
 /// a routing entrypoint) changes the server output, never the integrator's client code.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PayloadView {
     /// Contract the transaction is sent to (the gas-killer target in beta).
+    #[schema(value_type = crate::openapi::Address)]
     pub to: Address,
     /// Full ABI-encoded `verifyAndUpdate` calldata (selector + arguments).
+    #[schema(value_type = crate::openapi::HexBytes)]
     pub data: Bytes,
     /// Wei sent with the transaction. Zero in beta; `verifyAndUpdate` is not payable.
+    #[schema(value_type = crate::openapi::HexUint256)]
     pub value: U256,
     /// Numeric EVM chain id the transaction must be submitted to.
+    #[schema(example = 11155111)]
     pub chain_id: u64,
     /// `eth_estimateGas` result for the rendered call, provided as a submission hint.
+    #[schema(example = 234000)]
     pub estimated_gas: u64,
     /// Last block for which the payload is accepted on-chain; past it the caller re-requests.
+    #[schema(example = 22345678)]
     pub valid_until_block: u64,
 }
 

@@ -253,7 +253,9 @@ Operator (node) key files are generated automatically by the Docker setup and do
 
 ## Ingress Mode
 
-Enable HTTP endpoints for external task requests:
+Enable HTTP endpoints for external task requests. The full contract for these endpoints is
+`router/openapi.json`, generated from the handlers themselves; see [Regenerating the OpenAPI
+document](#regenerating-the-openapi-document).
 
 1. **Enable ingress in .env:**
 ```bash
@@ -359,6 +361,19 @@ the aggregation migration; the parts still needed are vendored under `common/src
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+### Regenerating the OpenAPI document
+
+`router/openapi.json` describes the ingress HTTP API and is generated from the `#[utoipa::path]`
+annotations on the handlers, so it cannot drift from what the router actually serves. Rewrite it
+after changing a handler annotation or any type it exposes:
+
+```bash
+cargo run --bin openapi
+```
+
+A unit test compares the committed document against the one the code produces, so CI fails while
+the two disagree. The docs site renders this document as its API reference.
 
 ### Testing
 

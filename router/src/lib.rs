@@ -8,6 +8,7 @@ pub mod ingress;
 #[cfg(test)]
 mod log_capture;
 pub mod metrics;
+pub mod openapi;
 pub mod payload_revert;
 pub mod rate_limit;
 pub mod rpc_health;

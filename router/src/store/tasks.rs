@@ -36,8 +36,15 @@ const TASK_INSERT_COLUMNS: &str = "id, key_id, status, target_address, call_data
 ///
 /// The string forms are the on-the-wire values (via serde) and the values persisted in the
 /// `status` column; the migration's CHECK constraint pins the same set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
+#[schema(
+    description = "Lifecycle state of a task as it moves through aggregation. `ready` is \
+                        the state in which a task carries a submittable payload; `failed` and \
+                        `expired` both carry an `error`."
+)]
 pub enum TaskStatus {
     /// Accepted and waiting in the queue.
     Queued,
