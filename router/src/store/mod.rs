@@ -13,7 +13,7 @@ mod api_keys;
 mod tasks;
 
 pub use api_keys::{ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, KeyVerdict};
-pub use tasks::{ExpiryStage, SubmittedTask, Task, TaskStatus};
+pub use tasks::{ExpiryStage, SubmittedTask, Task, TaskCursor, TaskStatus};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

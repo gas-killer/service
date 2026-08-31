@@ -164,6 +164,38 @@ pub struct Task {
     pub updated_at: i64,
 }
 
+/// Statuses a task can still leave, spelled as the complement of the terminal ones.
+///
+/// Equivalent to `status IN ('queued', 'processing')` under the table's `CHECK` constraint, and
+/// the only one of the equivalent spellings SQLite's partial-index prover accepts for
+/// `idx_tasks_incomplete`. Must stay in step with that index's own predicate;
+/// `the_paged_walk_uses_the_incomplete_index` fails if they drift.
+const IN_FLIGHT_PREDICATE: &str = "status NOT IN ('ready', 'failed', 'expired')";
+
+/// Reads the upper bound of a re-queue walk. See [`SqliteStore::last_incomplete_task`].
+fn last_incomplete_task_sql() -> String {
+    format!(
+        "SELECT created_at, id FROM tasks WHERE {IN_FLIGHT_PREDICATE} \
+         ORDER BY created_at DESC, id DESC LIMIT 1"
+    )
+}
+
+/// Reads one page of a re-queue walk. See [`SqliteStore::incomplete_tasks_page`].
+fn incomplete_tasks_page_sql() -> String {
+    format!(
+        "SELECT {TASK_COLUMNS} FROM tasks WHERE {IN_FLIGHT_PREDICATE} \
+         AND (created_at, id) > (?1, ?2) AND (created_at, id) <= (?3, ?4) \
+         ORDER BY created_at, id LIMIT ?5"
+    )
+}
+
+/// Position in the `(created_at, id)` ordering the startup re-queue walks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCursor {
+    pub created_at: i64,
+    pub id: String,
+}
+
 /// Outcome of a deduplicated submission: the task the client polls, and whether the submission
 /// collapsed onto an existing task (`true`) rather than creating a fresh one (`false`).
 #[derive(Debug, Clone)]
@@ -596,16 +628,51 @@ impl SqliteStore {
         .context("marking task failed")
     }
 
-    /// Returns every task still in flight — `queued` or `processing` — oldest first. The router
-    /// calls this on startup to rebuild and re-enqueue work interrupted by a restart.
-    pub async fn incomplete_tasks(&self) -> anyhow::Result<Vec<Task>> {
-        let rows: Vec<TaskRow> = sqlx::query_as(&format!(
-            "SELECT {TASK_COLUMNS} FROM tasks \
-             WHERE status IN ('queued', 'processing') ORDER BY created_at, id",
-        ))
-        .fetch_all(self.pool())
-        .await
-        .context("loading incomplete tasks")?;
+    /// The last task still in flight in `(created_at, id)` order, or `None` when none are.
+    ///
+    /// The startup re-queue takes this before the ingress serves and walks up to it, so the walk
+    /// covers exactly the backlog a previous router life left and never a row the running ingress
+    /// has already put in the channel itself.
+    pub async fn last_incomplete_task(&self) -> anyhow::Result<Option<TaskCursor>> {
+        let row: Option<(i64, String)> = sqlx::query_as(&last_incomplete_task_sql())
+            .fetch_optional(self.pool())
+            .await
+            .context("loading the last incomplete task")?;
+
+        Ok(row.map(|(created_at, id)| TaskCursor { created_at, id }))
+    }
+
+    /// One page of tasks still in flight (`queued` or `processing`), ordered by
+    /// `(created_at, id)`, starting after `after` and ending at `through`.
+    ///
+    /// Keyed on the ordering rather than an offset because the caller settles and re-enqueues
+    /// rows as it drains, which moves rows out of the in-flight set mid-walk: a cursor resumes at
+    /// the right row regardless, where an offset would skip as many rows as left the set.
+    ///
+    /// The SQL selects the complement of the terminal statuses, which is the same set under the
+    /// table's `CHECK` constraint and the only spelling the partial index serving this walk will
+    /// match. See `0007_task_requeue_index.sql`.
+    pub async fn incomplete_tasks_page(
+        &self,
+        after: Option<&TaskCursor>,
+        through: &TaskCursor,
+        limit: u32,
+    ) -> anyhow::Result<Vec<Task>> {
+        // A `None` cursor starts before every row: `created_at` is `unixepoch()`, never negative,
+        // and no id sorts below the empty string.
+        let (after_created_at, after_id) = after
+            .map(|c| (c.created_at, c.id.as_str()))
+            .unwrap_or((-1, ""));
+
+        let rows: Vec<TaskRow> = sqlx::query_as(&incomplete_tasks_page_sql())
+            .bind(after_created_at)
+            .bind(after_id)
+            .bind(through.created_at)
+            .bind(&through.id)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .context("loading a page of incomplete tasks")?;
 
         rows.into_iter().map(Task::try_from).collect()
     }
@@ -915,7 +982,15 @@ mod tests {
         store.mark_task_ready(&ready.id, "0x00").await.unwrap();
         store.mark_task_failed(&failed.id, "nope").await.unwrap();
 
-        let incomplete = store.incomplete_tasks().await.unwrap();
+        let through = store
+            .last_incomplete_task()
+            .await
+            .unwrap()
+            .expect("two tasks are in flight");
+        let incomplete = store
+            .incomplete_tasks_page(None, &through, 100)
+            .await
+            .unwrap();
         let ids: Vec<&str> = incomplete.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(
             incomplete.len(),
@@ -924,6 +999,203 @@ mod tests {
         );
         assert!(ids.contains(&queued.id.as_str()));
         assert!(ids.contains(&processing.id.as_str()));
+    }
+
+    /// SQLite only uses a partial index when the query's WHERE implies the index's own, so
+    /// [`IN_FLIGHT_PREDICATE`] and `idx_tasks_incomplete`'s predicate must stay in step. Without
+    /// the index every page sorts the whole matching set, which is the cost paging exists to
+    /// avoid. Both plans are taken from the builders the store itself binds, so this fails on a
+    /// change to the real query rather than to a copy of it.
+    #[tokio::test]
+    async fn the_paged_walk_uses_the_incomplete_index() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        store.create_task(&key, &request()).await.unwrap();
+        let through = store.last_incomplete_task().await.unwrap().unwrap();
+
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            incomplete_tasks_page_sql()
+        ))
+        .bind(-1i64)
+        .bind("")
+        .bind(through.created_at)
+        .bind(&through.id)
+        .bind(10u32)
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+
+        let detail = plan
+            .iter()
+            .map(|(_, _, _, d)| d.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            detail.contains("idx_tasks_incomplete"),
+            "the walk should seek the partial index, got: {detail}"
+        );
+        assert!(
+            !detail.contains("TEMP B-TREE"),
+            "the index should supply the ordering, got: {detail}"
+        );
+
+        // The bound query runs once per startup over the whole table, so it must seek the same
+        // index rather than scan.
+        let bound: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            last_incomplete_task_sql()
+        ))
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        let bound_detail = bound
+            .iter()
+            .map(|(_, _, _, d)| d.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            bound_detail.contains("idx_tasks_incomplete") && !bound_detail.contains("TEMP B-TREE"),
+            "the bound query should reverse-scan the index, got: {bound_detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_incomplete_task_is_none_when_nothing_is_in_flight() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let done = store.create_task(&key, &request()).await.unwrap();
+        store.mark_task_ready(&done.id, "0x00").await.unwrap();
+
+        assert!(store.last_incomplete_task().await.unwrap().is_none());
+    }
+
+    /// The walk covers the backlog exactly once across pages, in `(created_at, id)` order.
+    #[tokio::test]
+    async fn paging_walks_the_whole_backlog_without_gaps_or_repeats() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let mut created = Vec::new();
+        for _ in 0..7 {
+            created.push(store.create_task(&key, &request()).await.unwrap().id);
+        }
+        created.sort();
+
+        let through = store.last_incomplete_task().await.unwrap().unwrap();
+        let mut cursor = None;
+        let mut seen = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = store
+                .incomplete_tasks_page(cursor.as_ref(), &through, 3)
+                .await
+                .unwrap();
+            let Some(last) = page.last() else { break };
+            pages += 1;
+            cursor = Some(TaskCursor {
+                created_at: last.created_at,
+                id: last.id.clone(),
+            });
+            seen.extend(page.into_iter().map(|t| t.id));
+        }
+
+        assert_eq!(pages, 3, "7 rows at a page size of 3 takes three pages");
+        // Every row shares a second here, so `(created_at, id)` order is uuid order: comparing
+        // against the sorted ids unsorted pins the traversal order as well as the coverage.
+        assert_eq!(
+            seen, created,
+            "every row appears exactly once, oldest first"
+        );
+    }
+
+    /// Settling rows mid-walk is what breaks offset paging; a cursor must still land on the rest.
+    #[tokio::test]
+    async fn paging_survives_rows_leaving_the_set_mid_walk() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let mut created = Vec::new();
+        for _ in 0..6 {
+            created.push(store.create_task(&key, &request()).await.unwrap().id);
+        }
+
+        let through = store.last_incomplete_task().await.unwrap().unwrap();
+        let first = store
+            .incomplete_tasks_page(None, &through, 2)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 2);
+
+        // Take the whole first page out of the `queued`/`processing` set, as the re-queue does
+        // when it settles a task whose transition index is spent.
+        for task in &first {
+            store.mark_task_expired(&task.id, "spent").await.unwrap();
+        }
+
+        let cursor = TaskCursor {
+            created_at: first[1].created_at,
+            id: first[1].id.clone(),
+        };
+        let mut seen: Vec<String> = first.iter().map(|t| t.id.clone()).collect();
+        let mut next = Some(cursor);
+        while let Some(c) = next.take() {
+            let page = store
+                .incomplete_tasks_page(Some(&c), &through, 2)
+                .await
+                .unwrap();
+            let Some(last) = page.last() else { break };
+            next = Some(TaskCursor {
+                created_at: last.created_at,
+                id: last.id.clone(),
+            });
+            seen.extend(page.into_iter().map(|t| t.id));
+        }
+
+        seen.sort();
+        created.sort();
+        assert_eq!(
+            seen, created,
+            "no row is skipped when earlier rows leave the set"
+        );
+    }
+
+    /// The bound's own tiebreak: a row sharing its second but ordering above it by id is outside
+    /// the walk. Bounding on `created_at` alone would sweep it in.
+    ///
+    /// A row ordering at or below the bound is inside the walk by definition, so the walk cannot
+    /// be what excludes a concurrently created one. That is why `create_ingress` reads the bound
+    /// before the HTTP server starts, when no row this process accepted can exist yet.
+    #[tokio::test]
+    async fn paging_stops_above_the_bound_within_the_same_second() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let existing = store.create_task(&key, &request()).await.unwrap();
+
+        let through = store.last_incomplete_task().await.unwrap().unwrap();
+
+        let later = store.create_task(&key, &request()).await.unwrap();
+        let above = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        sqlx::query("UPDATE tasks SET id = ?2, created_at = ?3 WHERE id = ?1")
+            .bind(&later.id)
+            .bind(above)
+            .bind(through.created_at)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            above > through.id.as_str(),
+            "the planted row must sort above the bound's id for this to test the tiebreak"
+        );
+
+        let page = store
+            .incomplete_tasks_page(None, &through, 100)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = page.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![existing.id.as_str()],
+            "only the id tiebreak separates the planted row from the bound"
+        );
     }
 
     // -- TTL expiry sweep --
