@@ -9,8 +9,6 @@ on:
   pull_request:
   release:
     # `published` fires exactly once on every publish route, draft-first or direct.
-    # `created` is skipped for draft saves and otherwise only doubles a direct
-    # publish, so subscribing to it adds a redundant build and never a needed one.
     types: [published]
   workflow_dispatch:
 
