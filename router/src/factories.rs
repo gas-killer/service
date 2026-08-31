@@ -117,6 +117,14 @@ pub struct IngressHandles {
     /// "what a previous life left" while no row the running ingress created can exist yet. Read
     /// after the server starts, a submission accepted in between would sort at or below it, and
     /// the walk would enqueue a task the ingress had already put in the channel.
+    ///
+    /// The separation it buys resolves to one wall second, since `created_at` is `unixepoch()`.
+    /// A submission accepted in the same second as this read, whose v4 uuid happens to sort below
+    /// the bound's, is inside the walk and reaches the channel twice. Reaching it takes the
+    /// previous life's newest row, this read, and a first request inside one second, which is
+    /// shorter than the bind-and-connect path that separates them, and the claim guard in
+    /// `GasKillerTaskSource` drops the duplicate without spending a round. Closing it needs a
+    /// monotonic insertion key rather than a timestamp.
     pub requeue_bound: Option<TaskCursor>,
 }
 
