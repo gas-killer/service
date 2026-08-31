@@ -8,7 +8,10 @@ on:
       - staging
   pull_request:
   release:
-    types: [created]
+    # `created` does not fire when a release that was saved as a draft is later
+    # published, so a draft-first release never builds its images. `published`
+    # covers that path; both are kept so either route builds exactly once.
+    types: [created, published]
   workflow_dispatch:
 
 env:
@@ -48,13 +51,21 @@ jobs:
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service"
           SHA_TAG="${IMAGE}:${{ matrix.component }}-${{ github.sha }}"
+          VERSION="${{ github.ref_name }}"
 
-          if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${{ github.ref_name }}"
-            if ! echo "$VERSION" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
-              echo "ERROR: release tag '${VERSION}' is not a valid semver (expected vX.Y.Z)" >&2
-              exit 1
-            fi
+          # A semver tag ref gets the full release tag set whichever event dispatched it,
+          # so a release that missed its own event rebuilds with `gh workflow run --ref <tag>`.
+          SEMVER_TAG=false
+          if [ "${{ github.ref_type }}" = "tag" ] && echo "$VERSION" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
+            SEMVER_TAG=true
+          fi
+
+          if [ "${{ github.event_name }}" = "release" ] && [ "$SEMVER_TAG" != "true" ]; then
+            echo "ERROR: release tag '${VERSION}' is not a valid semver (expected vX.Y.Z)" >&2
+            exit 1
+          fi
+
+          if [ "$SEMVER_TAG" = "true" ]; then
             BASE="${VERSION#v}"
             CORE="${BASE%%-*}"
             CORE="${CORE%%+*}"
