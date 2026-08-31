@@ -8,7 +8,8 @@ on:
       - staging
   pull_request:
   release:
-    types: [created]
+    # `published` fires exactly once on every publish route, draft-first or direct.
+    types: [published]
   workflow_dispatch:
 
 env:
@@ -48,13 +49,21 @@ jobs:
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.ORG_NAME }}/service"
           SHA_TAG="${IMAGE}:${{ matrix.component }}-${{ github.sha }}"
+          VERSION="${{ github.ref_name }}"
 
-          if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${{ github.ref_name }}"
-            if ! echo "$VERSION" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
-              echo "ERROR: release tag '${VERSION}' is not a valid semver (expected vX.Y.Z)" >&2
-              exit 1
-            fi
+          # A semver tag ref gets the full release tag set whichever event dispatched it,
+          # so a release that missed its own event rebuilds with `gh workflow run --ref <tag>`.
+          SEMVER_TAG=false
+          if [ "${{ github.ref_type }}" = "tag" ] && echo "$VERSION" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
+            SEMVER_TAG=true
+          fi
+
+          if [ "${{ github.event_name }}" = "release" ] && [ "$SEMVER_TAG" != "true" ]; then
+            echo "ERROR: release tag '${VERSION}' is not a valid semver (expected vX.Y.Z)" >&2
+            exit 1
+          fi
+
+          if [ "$SEMVER_TAG" = "true" ]; then
             BASE="${VERSION#v}"
             CORE="${BASE%%-*}"
             CORE="${CORE%%+*}"
