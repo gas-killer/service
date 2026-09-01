@@ -1786,6 +1786,13 @@ async fn wrap_framework_error(mut resp: Response) -> Response {
     resp
 }
 
+/// Builds the ingress router.
+///
+/// Adding a route here is three edits, because the OpenAPI document is generated from the
+/// handlers and axum offers no way to enumerate a `Router`: annotate the handler with
+/// `#[utoipa::path]`, add it to the `paths(...)` list in [`crate::openapi`], and update the route
+/// table in that module's `the_documented_routes_are_exactly_the_route_table` test. A route added
+/// only here compiles and serves, but ships undocumented.
 pub fn build_app() -> Router<IngressState> {
     Router::new()
         .route("/healthz", get(healthz_handler))

@@ -567,32 +567,53 @@ mod tests {
         assert!(statuses.contains(&serde_json::json!("ready")));
     }
 
-    /// Every route `build_app` serves has to appear in the document, or the generated spec is
-    /// silently narrower than the API. Paths are listed by hand in the `paths(...)` attribute,
-    /// which is exactly the list that can drift.
+    /// The table below mirrors [`build_app`](crate::ingress::build_app) by convention, and this
+    /// asserts the document describes exactly it: nothing annotated that the table omits, and
+    /// nothing in the table without an annotation.
+    ///
+    /// The mirror itself is maintained by hand, and that is the tradeoff of not using
+    /// `utoipa-axum`: axum exposes no way to enumerate a `Router`'s routes, so a route added to
+    /// `build_app` and to neither the annotations nor this table would ship undocumented. Adding
+    /// a route is therefore three edits, called out in a comment on `build_app`: the handler's
+    /// `#[utoipa::path]`, the `paths(...)` list above, and this table.
     #[test]
-    fn every_served_route_is_documented() {
-        let doc = serde_json::to_value(ApiDoc::openapi()).expect("the document serializes");
-        let paths = doc["paths"].as_object().expect("the document has paths");
-
-        // Written in OpenAPI's `{param}` form rather than axum's `:param`.
-        for (path, methods) in [
+    fn the_documented_routes_are_exactly_the_route_table() {
+        // Paths in OpenAPI's `{param}` form rather than axum's `:param`.
+        let route_table: BTreeSet<String> = [
             ("/healthz", &["get"][..]),
             ("/avs-metadata", &["get"][..]),
             ("/tasks", &["post", "get"][..]),
             ("/tasks/{task_id}", &["get"][..]),
             ("/admin/keys", &["post", "get"][..]),
             ("/admin/keys/{id}", &["delete"][..]),
-        ] {
-            let item = paths
-                .get(path)
-                .unwrap_or_else(|| panic!("{path} is served but not documented"));
-            for method in methods {
-                assert!(
-                    item.get(method).is_some(),
-                    "{method} {path} is served but not documented"
-                );
-            }
-        }
+        ]
+        .into_iter()
+        .flat_map(|(path, methods)| methods.iter().map(move |method| format!("{method} {path}")))
+        .collect();
+
+        // A path item can also carry `summary`, `parameters` and friends, so only the keys that
+        // name a method count as operations.
+        const METHODS: &[&str] = &[
+            "get", "put", "post", "delete", "options", "head", "patch", "trace",
+        ];
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("the document serializes");
+        let documented: BTreeSet<String> = document["paths"]
+            .as_object()
+            .expect("the document has paths")
+            .iter()
+            .flat_map(|(path, item)| {
+                item.as_object()
+                    .expect("a path item")
+                    .keys()
+                    .filter(|key| METHODS.contains(&key.as_str()))
+                    .map(move |method| format!("{method} {path}"))
+            })
+            .collect();
+
+        assert_eq!(
+            documented, route_table,
+            "the document and the mirror of `build_app` disagree; annotate the handler, list it \
+             in `paths(...)`, and update the table in this test"
+        );
     }
 }
