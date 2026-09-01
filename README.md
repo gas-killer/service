@@ -253,10 +253,8 @@ Operator (node) key files are generated automatically by the Docker setup and do
 
 ## Ingress Mode
 
-Enable HTTP endpoints for external task requests. The contract for these endpoints is
-`router/docs/openapi.json`, generated from the handlers themselves; see [Regenerating the OpenAPI
-documents](#regenerating-the-openapi-documents). The admin API is in
-`router/docs/openapi.internal.json` instead.
+Enable HTTP endpoints for external task requests. These endpoints are specified in
+[`router/docs/openapi.json`](#regenerating-the-openapi-documents).
 
 1. **Enable ingress in .env:**
 ```bash
@@ -365,30 +363,21 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ### Regenerating the OpenAPI documents
 
-Both documents are generated from the `#[utoipa::path]` annotations on the ingress handlers, so
-neither can drift from what the router actually serves. Rewrite them after changing a handler
-annotation or any type it exposes:
+Generated from the `#[utoipa::path]` annotations on the ingress handlers. Rewrite after changing an
+annotation or a type it exposes:
 
 ```bash
 cargo run --bin openapi
 ```
 
-- `router/docs/openapi.json` is the integrator API. The docs site renders it as its public API
-  reference, including an interactive playground.
-- `router/docs/openapi.internal.json` additionally describes the `/admin/keys` endpoints.
+- `router/docs/openapi.json`: the integrator API, rendered by the docs site.
+- `router/docs/openapi.internal.json`: the same, plus the `/admin/keys` endpoints.
 
-The admin API is absent from the published document by construction, not by configuration on the
-site: the generator drops operations tagged `Admin` along with the credential and types only they
-use. `ADMIN_KEY` mints and revokes every API key the router honours, and a public playground is
-the wrong place to invite someone to paste one.
+The generator drops `Admin`-tagged operations from the published document, along with the
+credential and types only they use, so the admin API cannot reach the public playground.
 
-Unit tests hold all of this, so `cargo test` is the only gate and CI needs no extra tooling. They
-compare both committed documents against what the code produces, assert the operator surface stays
-out of the published one, and check that each document is internally consistent: every reference
-resolves, every declared schema is used, operation ids are unique, security requirements name a
-defined scheme, and path templates match their declared parameters. The last group is what a
-renderer would otherwise catch for us, since utoipa guarantees well-formed JSON but not that the
-document hangs together.
+`cargo test` gates all of it: both committed documents against what the code produces, the
+operator surface staying out of the published one, and each document's internal consistency.
 
 ### Testing
 
