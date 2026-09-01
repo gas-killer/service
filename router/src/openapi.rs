@@ -1002,6 +1002,45 @@ mod tests {
         );
     }
 
+    /// Neither document may carry an em dash.
+    ///
+    /// Generating from code makes the doc comments on the annotated handlers and DTOs into
+    /// published copy, so the house style now reaches into Rust prose, where an em dash reads
+    /// naturally and slips in unnoticed. This is the gate that catches it before it reaches the
+    /// rendered API reference.
+    #[test]
+    fn the_documents_carry_no_em_dashes() {
+        for (rendered, label) in [
+            (
+                render().expect("the published document serializes"),
+                "router/docs/openapi.json",
+            ),
+            (
+                render_internal().expect("the internal document serializes"),
+                "router/docs/openapi.internal.json",
+            ),
+        ] {
+            let Some(at) = rendered.find('\u{2014}') else {
+                continue;
+            };
+            // Quote the surrounding prose so the failure names the doc comment to rewrite.
+            let start = rendered[..at]
+                .char_indices()
+                .rev()
+                .nth(90)
+                .map_or(0, |(i, _)| i);
+            let end = rendered[at..]
+                .char_indices()
+                .nth(90)
+                .map_or(rendered.len(), |(i, _)| at + i);
+            panic!(
+                "{label} contains an em dash, which the rendered reference publishes verbatim. \
+                 Rewrite the doc comment behind it:\n  ...{}...",
+                &rendered[start..end]
+            );
+        }
+    }
+
     /// Guards the representations a structural derive would get wrong, which is the whole reason
     /// the schemas above are hand-built. A regression here means the document promises a shape
     /// the handlers do not serve.

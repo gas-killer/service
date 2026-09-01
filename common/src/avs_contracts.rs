@@ -97,9 +97,9 @@ const RETRY_MAX_BACKOFF: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct AvsContracts {
     /// EVM chain ID every address below lives on, so an integrator can tell at a glance whether
-    /// they are pointed at the right network. True of the AVS trio by construction — they are read
-    /// through a provider for this chain — and of the demo contracts because each is checked for
-    /// code here before being published.
+    /// they are pointed at the right network. True of the AVS trio by construction, since they are
+    /// read through a provider for this chain, and of the demo contracts because each is checked
+    /// for code here before being published.
     #[serde(rename = "chainId")]
     #[schema(example = 11155111)]
     pub chain_id: u64,
