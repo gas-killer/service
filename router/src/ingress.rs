@@ -107,8 +107,8 @@ pub struct AvsMetadata {
     #[schema(nullable = false)]
     pub operator_sets: Option<Vec<AvsOperatorSetMetadata>>,
     /// Settlement-relevant contract addresses, resolved from the running deployment by a
-    /// background task. Absent until it establishes something — an integrator gets no answer rather
-    /// than a wrong one, since a wrong checker is what makes a target revert on every submission.
+    /// background task. Absent until it establishes something, so an integrator gets no answer
+    /// rather than a wrong one: a wrong checker is what makes a target revert on every submission.
     /// Held as a shared slot, so cloning this metadata for a response reads whatever the resolver
     /// has published rather than snapshotting what was known when the router started, and a record
     /// a deploy job writes later shows up without a restart.
@@ -738,7 +738,7 @@ impl GasKillerTaskRequest {
 /// and the task's current state.
 ///
 /// `deduplicated` is `true` when the submission collapsed onto an existing in-flight or `ready`
-/// task rather than creating a new one — a retry keyed on `(key_id, target_address,
+/// task rather than creating a new one. A retry keyed on `(key_id, target_address,
 /// transition_index)` is idempotent, returning the original task id with a `200 OK`. A fresh
 /// submission carries `false` and a `202 Accepted`.
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]

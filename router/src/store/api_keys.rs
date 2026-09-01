@@ -27,7 +27,7 @@ const KEY_BYTES: usize = 32;
 const ID_BYTES: usize = 8;
 
 /// A newly created API key, including the raw secret. The `key` is returned to the caller
-/// exactly once — it is never persisted in the clear and cannot be recovered afterwards.
+/// exactly once: it is never persisted in the clear and cannot be recovered afterwards.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CreatedApiKey {
     pub id: String,
