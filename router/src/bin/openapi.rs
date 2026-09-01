@@ -1,5 +1,4 @@
-//! Writes the ingress OpenAPI documents to `router/openapi.json` and
-//! `router/openapi.internal.json`.
+//! Writes the ingress OpenAPI documents into `router/docs/`.
 //!
 //! Run it after changing a handler annotation or a DTO: `cargo run --bin openapi`. The committed
 //! documents are what the docs site consumes, and a test in [`gas_killer_router::openapi`] fails
@@ -13,7 +12,7 @@ use std::path::PathBuf;
 fn main() -> anyhow::Result<()> {
     // Resolved against the crate rather than the working directory, so the binary writes the same
     // files wherever it is invoked from.
-    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let destination_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs");
 
     for (name, rendered) in [
         (
@@ -26,7 +25,7 @@ fn main() -> anyhow::Result<()> {
                 .context("rendering the internal document")?,
         ),
     ] {
-        let destination = crate_root.join(name);
+        let destination = destination_dir.join(name);
         std::fs::write(&destination, &rendered)
             .with_context(|| format!("writing {}", destination.display()))?;
         println!("wrote {} ({} bytes)", destination.display(), rendered.len());

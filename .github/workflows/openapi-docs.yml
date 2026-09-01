@@ -1,0 +1,42 @@
+name: OpenAPI Docs
+
+# Renders the published spec through the docs site's own generator. `cargo test` already proves
+# the committed documents are current with the handlers, so this covers the one thing it cannot:
+# whether anything can actually render them.
+#
+# Only the published document is rendered. `openapi.internal.json` describes the operator surface
+# and is never published, so rendering it is not a check that means anything.
+on:
+  push:
+    paths:
+      - "router/docs/openapi.json"
+      - ".github/scripts/render-openapi.mjs"
+      - ".github/workflows/openapi-docs.yml"
+  pull_request:
+    paths:
+      - "router/docs/openapi.json"
+      - ".github/scripts/render-openapi.mjs"
+      - ".github/workflows/openapi-docs.yml"
+  workflow_dispatch:
+
+jobs:
+  render:
+    name: Render the published spec
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Pinned to the version gas-killer/site resolves, so passing here means the render the site
+      # performs is the render that was checked.
+      - name: Install the docs renderer
+        run: npm install --no-save --no-package-lock fumadocs-openapi@11.1.1
+
+      - name: Render router/docs/openapi.json
+        run: node .github/scripts/render-openapi.mjs

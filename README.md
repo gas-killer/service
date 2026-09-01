@@ -254,9 +254,9 @@ Operator (node) key files are generated automatically by the Docker setup and do
 ## Ingress Mode
 
 Enable HTTP endpoints for external task requests. The contract for these endpoints is
-`router/openapi.json`, generated from the handlers themselves; see [Regenerating the OpenAPI
+`router/docs/openapi.json`, generated from the handlers themselves; see [Regenerating the OpenAPI
 documents](#regenerating-the-openapi-documents). The admin API is in
-`router/openapi.internal.json` instead.
+`router/docs/openapi.internal.json` instead.
 
 1. **Enable ingress in .env:**
 ```bash
@@ -373,9 +373,9 @@ annotation or any type it exposes:
 cargo run --bin openapi
 ```
 
-- `router/openapi.json` is the integrator API. The docs site renders it as its public API
+- `router/docs/openapi.json` is the integrator API. The docs site renders it as its public API
   reference, including an interactive playground.
-- `router/openapi.internal.json` additionally describes the `/admin/keys` endpoints.
+- `router/docs/openapi.internal.json` additionally describes the `/admin/keys` endpoints.
 
 The admin API is absent from the published document by construction, not by configuration on the
 site: the generator drops operations tagged `Admin` along with the credential and types only they

@@ -12,8 +12,8 @@
 //! primitives have the same problem and live in [`gas_killer_common::openapi`].
 //!
 //! The document is rendered to disk in two forms, both committed and both checked by the tests
-//! below. `router/openapi.json` is the integrator-facing API and is what the docs site renders;
-//! `router/openapi.internal.json` additionally carries the operator surface. See [`PRIVATE_TAGS`]
+//! below. `router/docs/openapi.json` is the integrator-facing API and is what the docs site renders;
+//! `router/docs/openapi.internal.json` additionally carries the operator surface. See [`PRIVATE_TAGS`]
 //! for what separates them and why. The `openapi` binary writes both.
 
 use crate::error::{ApiErrorBody, ApiErrorEnvelope, ErrorCode};
@@ -410,7 +410,7 @@ fn strip_private(document: &mut utoipa::openapi::OpenApi) {
     }
 }
 
-/// Renders the integrator-facing document, the bytes `router/openapi.json` holds and the docs site
+/// Renders the integrator-facing document, the bytes `router/docs/openapi.json` holds and the docs site
 /// renders. Pretty-printed JSON with a trailing newline, so the committed file is a well-formed
 /// text file and comparing the two is a plain string equality.
 pub fn render() -> Result<String, serde_json::Error> {
@@ -419,7 +419,7 @@ pub fn render() -> Result<String, serde_json::Error> {
     Ok(format!("{}\n", document.to_pretty_json()?))
 }
 
-/// Renders the whole API including the operator surface, the bytes `router/openapi.internal.json`
+/// Renders the whole API including the operator surface, the bytes `router/docs/openapi.internal.json`
 /// holds. Not for publication; see [`PRIVATE_TAGS`].
 pub fn render_internal() -> Result<String, serde_json::Error> {
     Ok(format!("{}\n", ApiDoc::openapi().to_pretty_json()?))
@@ -436,14 +436,14 @@ mod tests {
     fn committed_documents_match_the_handlers() {
         for (committed, generated, path) in [
             (
-                include_str!("../openapi.json"),
+                include_str!("../docs/openapi.json"),
                 render().expect("the published document serializes"),
-                "router/openapi.json",
+                "router/docs/openapi.json",
             ),
             (
-                include_str!("../openapi.internal.json"),
+                include_str!("../docs/openapi.internal.json"),
                 render_internal().expect("the internal document serializes"),
-                "router/openapi.internal.json",
+                "router/docs/openapi.internal.json",
             ),
         ] {
             assert_eq!(
