@@ -554,7 +554,7 @@
           "chainId": {
             "type": "integer",
             "format": "int64",
-            "description": "EVM chain ID every address below lives on, so an integrator can tell at a glance whether\nthey are pointed at the right network. True of the AVS trio by construction — they are read\nthrough a provider for this chain — and of the demo contracts because each is checked for\ncode here before being published.",
+            "description": "EVM chain ID every address below lives on, so an integrator can tell at a glance whether\nthey are pointed at the right network. True of the AVS trio by construction, since they are\nread through a provider for this chain, and of the demo contracts because each is checked\nfor code here before being published.",
             "example": 11155111,
             "minimum": 0
           },
@@ -612,7 +612,7 @@
           },
           "contracts": {
             "$ref": "#/components/schemas/AvsContracts",
-            "description": "Settlement-relevant contract addresses, resolved from the running deployment by a\nbackground task. Absent until it establishes something — an integrator gets no answer rather\nthan a wrong one, since a wrong checker is what makes a target revert on every submission.\nHeld as a shared slot, so cloning this metadata for a response reads whatever the resolver\nhas published rather than snapshotting what was known when the router started, and a record\na deploy job writes later shows up without a restart."
+            "description": "Settlement-relevant contract addresses, resolved from the running deployment by a\nbackground task. Absent until it establishes something, so an integrator gets no answer\nrather than a wrong one: a wrong checker is what makes a target revert on every submission.\nHeld as a shared slot, so cloning this metadata for a response reads whatever the resolver\nhas published rather than snapshotting what was known when the router started, and a record\na deploy job writes later shows up without a restart."
           }
         }
       },
@@ -823,7 +823,7 @@
       },
       "TaskAcceptedResponse": {
         "type": "object",
-        "description": "Body returned by `POST /tasks` when a task is accepted: the id the client polls for status,\nand the task's current state.\n\n`deduplicated` is `true` when the submission collapsed onto an existing in-flight or `ready`\ntask rather than creating a new one — a retry keyed on `(key_id, target_address,\ntransition_index)` is idempotent, returning the original task id with a `200 OK`. A fresh\nsubmission carries `false` and a `202 Accepted`.",
+        "description": "Body returned by `POST /tasks` when a task is accepted: the id the client polls for status,\nand the task's current state.\n\n`deduplicated` is `true` when the submission collapsed onto an existing in-flight or `ready`\ntask rather than creating a new one. A retry keyed on `(key_id, target_address,\ntransition_index)` is idempotent, returning the original task id with a `200 OK`. A fresh\nsubmission carries `false` and a `202 Accepted`.",
         "required": [
           "task_id",
           "status",
