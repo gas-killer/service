@@ -94,6 +94,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "INVALID_REQUEST",
+                    "message": "Failed to deserialize query string"
+                  }
                 }
               }
             }
@@ -104,6 +110,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "UNAUTHORIZED",
+                    "message": "Unauthorized"
+                  }
                 }
               }
             }
@@ -114,6 +126,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "INTERNAL",
+                    "message": "Internal error: task queue unavailable"
+                  }
                 }
               }
             }
@@ -124,6 +142,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "NOT_CONFIGURED",
+                    "message": "Persistence is not configured"
+                  }
                 }
               }
             }
@@ -159,6 +183,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TaskAcceptedResponse"
+                },
+                "example": {
+                  "task_id": "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11",
+                  "status": "queued",
+                  "deduplicated": true
                 }
               }
             }
@@ -169,6 +198,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TaskAcceptedResponse"
+                },
+                "example": {
+                  "task_id": "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11",
+                  "status": "queued",
+                  "deduplicated": false
                 }
               }
             }
@@ -179,6 +213,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "INVALID_ADDRESS",
+                    "message": "target_address is zero"
+                  }
                 }
               }
             }
@@ -189,6 +229,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "UNAUTHORIZED",
+                    "message": "Unauthorized"
+                  }
                 }
               }
             }
@@ -199,6 +245,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "INVALID_REQUEST",
+                    "message": "Failed to deserialize the JSON body into the target type"
+                  }
                 }
               }
             }
@@ -219,6 +271,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "RATE_LIMITED",
+                    "message": "Rate limit exceeded; retry after the indicated delay"
+                  }
                 }
               }
             }
@@ -229,6 +287,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "INTERNAL",
+                    "message": "Internal error: task queue unavailable"
+                  }
                 }
               }
             }
@@ -249,6 +313,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "QUEUE_FULL",
+                    "message": "Service at capacity, please try again in a few minutes"
+                  }
                 }
               }
             }
@@ -287,6 +357,21 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TaskView"
+                },
+                "example": {
+                  "task_id": "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11",
+                  "status": "ready",
+                  "created_at": 1753180800,
+                  "updated_at": 1753180812,
+                  "error": null,
+                  "payload": {
+                    "to": "0x0000000000000000000000000000000000000001",
+                    "data": "0x93de4531000000000000000000000000000000000000000000000000000000000000002a",
+                    "value": "0x0",
+                    "chain_id": 11155111,
+                    "estimated_gas": 234000,
+                    "valid_until_block": 22345678
+                  }
                 }
               }
             }
@@ -297,6 +382,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "UNAUTHORIZED",
+                    "message": "Unauthorized"
+                  }
                 }
               }
             }
@@ -307,6 +398,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "FORBIDDEN",
+                    "message": "Task belongs to a different API key"
+                  }
                 }
               }
             }
@@ -317,6 +414,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "NOT_FOUND",
+                    "message": "Task not found"
+                  }
                 }
               }
             }
@@ -327,6 +430,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "PAYLOAD_EXPIRED",
+                    "message": "payload valid_until_block 22345678 passed (current block 22345700); re-request"
+                  }
                 }
               }
             }
@@ -337,6 +446,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "INTERNAL",
+                    "message": "Internal error: task queue unavailable"
+                  }
                 }
               }
             }
@@ -347,6 +462,12 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorEnvelope"
+                },
+                "example": {
+                  "error": {
+                    "code": "RPC_UNAVAILABLE",
+                    "message": "Service temporarily unavailable"
+                  }
                 }
               }
             }
@@ -465,26 +586,12 @@
             "description": "Registry coordinator the operators are registered in. Published so an integrator can\nconfirm their own wiring independently: `blsSignatureChecker().registryCoordinator()` must\nequal this."
           },
           "demoTarget": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Address",
-                "description": "A deployed target anyone may submit against, for a first settlement with no Solidity\nwritten. Shared, so concurrent readers can invalidate each other's payloads on\n`transitionIndex`; `demoFactory` is the way to avoid that. Absent when none is configured."
-              }
-            ]
+            "$ref": "#/components/schemas/Address",
+            "description": "A deployed target anyone may submit against, for a first settlement with no Solidity\nwritten. Shared, so concurrent readers can invalidate each other's payloads on\n`transitionIndex`; `demoFactory` is the way to avoid that. Absent when none is configured."
           },
           "demoFactory": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Address",
-                "description": "Factory that deploys a caller-owned target, for a reader who wants an instance no one else\nis advancing. It takes the AVS and checker addresses as arguments rather than wiring them\nitself, so a caller should pass the two published above. Absent when none is configured."
-              }
-            ]
+            "$ref": "#/components/schemas/Address",
+            "description": "Factory that deploys a caller-owned target, for a reader who wants an instance no one else\nis advancing. It takes the AVS and checker addresses as arguments rather than wiring them\nitself, so a caller should pass the two published above. Absent when none is configured."
           }
         }
       },
@@ -507,36 +614,20 @@
             "type": "string"
           },
           "logo": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "twitter": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string"
           },
           "operatorSets": {
-            "type": [
-              "array",
-              "null"
-            ],
+            "type": "array",
             "items": {
               "$ref": "#/components/schemas/AvsOperatorSetMetadata"
             }
           },
           "contracts": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/AvsContracts",
-                "description": "Settlement-relevant contract addresses, resolved from the running deployment by a\nbackground task. Absent until it establishes something — an integrator gets no answer rather\nthan a wrong one, since a wrong checker is what makes a target revert on every submission.\nHeld as a shared slot, so cloning this metadata for a response reads whatever the resolver\nhas published rather than snapshotting what was known when the router started, and a record\na deploy job writes later shows up without a restart."
-              }
-            ]
+            "$ref": "#/components/schemas/AvsContracts",
+            "description": "Settlement-relevant contract addresses, resolved from the running deployment by a\nbackground task. Absent until it establishes something — an integrator gets no answer rather\nthan a wrong one, since a wrong checker is what makes a target revert on every submission.\nHeld as a shared slot, so cloning this metadata for a response reads whatever the resolver\nhas published rather than snapshotting what was known when the router started, and a record\na deploy job writes later shows up without a restart."
           }
         }
       },

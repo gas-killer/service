@@ -681,6 +681,108 @@ mod tests {
         assert!(internal["components"]["schemas"]["CreatedApiKey"].is_object());
     }
 
+    /// Every response example has to deserialize into the type its `body` names.
+    ///
+    /// The examples are literal JSON in the annotations, which is exactly the kind of thing that
+    /// goes stale when a response type changes. Parsing each one back into that type is what
+    /// stops an example describing a shape the handler cannot return.
+    #[test]
+    fn response_examples_deserialize_into_their_body_type() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("the document serializes");
+        let mut checked = 0;
+
+        for (method, path, operation) in operations_of(&document) {
+            for (status, response) in operation["responses"].as_object().into_iter().flatten() {
+                for media in response["content"].as_object().into_iter().flatten() {
+                    let (_, media) = media;
+                    let Some(example) = media.get("example") else {
+                        continue;
+                    };
+
+                    // A body is either a schema reference or an array of them.
+                    let schema = &media["schema"];
+                    let (body, is_list) = match schema["$ref"].as_str() {
+                        Some(reference) => (reference, false),
+                        None => (
+                            schema["items"]["$ref"].as_str().unwrap_or_else(|| {
+                                panic!("{method} {path} {status} has an example but no body schema")
+                            }),
+                            true,
+                        ),
+                    };
+                    let body = body.rsplit('/').next().unwrap_or(body);
+                    let label = format!("{method} {path} {status} ({body})");
+
+                    // Each element of a list body is checked as one value of the item type, so
+                    // the same arms serve both shapes.
+                    let values: Vec<&serde_json::Value> = if is_list {
+                        example
+                            .as_array()
+                            .unwrap_or_else(|| panic!("{label}: the example is not an array"))
+                            .iter()
+                            .collect()
+                    } else {
+                        vec![example]
+                    };
+
+                    for value in values {
+                        let value = value.clone();
+                        let outcome = match body {
+                            "ApiErrorEnvelope" => {
+                                serde_json::from_value::<ApiErrorEnvelope>(value).map(|_| ())
+                            }
+                            "TaskAcceptedResponse" => {
+                                serde_json::from_value::<TaskAcceptedResponse>(value).map(|_| ())
+                            }
+                            "TaskView" => serde_json::from_value::<TaskView>(value).map(|_| ()),
+                            "AvsMetadata" => {
+                                serde_json::from_value::<AvsMetadata>(value).map(|_| ())
+                            }
+                            other => panic!(
+                                "{label}: no check for body type `{other}`; add an arm here so \
+                                 its examples are validated too"
+                            ),
+                        };
+                        outcome.unwrap_or_else(|e| {
+                            panic!(
+                                "{label}: the example does not parse as \
+                                                           {body}: {e}"
+                            )
+                        });
+                        checked += 1;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked >= 19,
+            "only {checked} response examples were checked; the reference pages lost some"
+        );
+    }
+
+    /// The reference pages are much less useful without a worked example on the success path, so
+    /// the endpoints an integrator actually calls each carry one.
+    #[test]
+    fn the_integrator_endpoints_have_success_examples() {
+        let published: serde_json::Value =
+            serde_json::from_str(&render().expect("the published document serializes"))
+                .expect("the published document is JSON");
+
+        for (path, method, status) in [
+            ("/tasks", "post", "202"),
+            ("/tasks", "post", "200"),
+            ("/tasks/{task_id}", "get", "200"),
+        ] {
+            assert!(
+                published["paths"][path][method]["responses"][status]["content"]
+                    ["application/json"]["example"]
+                    .is_object(),
+                "{method} {path} {status} has no example"
+            );
+        }
+    }
+
     /// Guards the representations a structural derive would get wrong, which is the whole reason
     /// the schemas above are hand-built. A regression here means the document promises a shape
     /// the handlers do not serve.

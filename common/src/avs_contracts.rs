@@ -125,7 +125,7 @@ pub struct AvsContracts {
         skip_serializing_if = "Option::is_none",
         serialize_with = "checksummed_opt"
     )]
-    #[schema(value_type = Option<crate::openapi::Address>)]
+    #[schema(value_type = Option<crate::openapi::Address>, nullable = false)]
     pub demo_target: Option<Address>,
     /// Factory that deploys a caller-owned target, for a reader who wants an instance no one else
     /// is advancing. It takes the AVS and checker addresses as arguments rather than wiring them
@@ -135,7 +135,7 @@ pub struct AvsContracts {
         skip_serializing_if = "Option::is_none",
         serialize_with = "checksummed_opt"
     )]
-    #[schema(value_type = Option<crate::openapi::Address>)]
+    #[schema(value_type = Option<crate::openapi::Address>, nullable = false)]
     pub demo_factory: Option<Address>,
 }
 

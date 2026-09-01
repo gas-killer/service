@@ -98,10 +98,13 @@ pub struct AvsMetadata {
     pub website: String,
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub logo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub twitter: Option<String>,
     #[serde(rename = "operatorSets", skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub operator_sets: Option<Vec<AvsOperatorSetMetadata>>,
     /// Settlement-relevant contract addresses, resolved from the running deployment by a
     /// background task. Absent until it establishes something — an integrator gets no answer rather
@@ -110,7 +113,7 @@ pub struct AvsMetadata {
     /// has published rather than snapshotting what was known when the router started, and a record
     /// a deploy job writes later shows up without a restart.
     #[serde(default, skip_serializing_if = "ResolvedContracts::is_unresolved")]
-    #[schema(value_type = Option<gas_killer_common::avs_contracts::AvsContracts>)]
+    #[schema(value_type = Option<gas_killer_common::avs_contracts::AvsContracts>, nullable = false)]
     pub contracts: ResolvedContracts,
 }
 
@@ -855,36 +858,54 @@ impl Drop for QueueSlot<'_> {
         (
             status = 202,
             description = "Task accepted and queued. Poll `GET /tasks/{task_id}` for status.",
-            body = TaskAcceptedResponse
+            body = TaskAcceptedResponse,
+            example = json!({
+                "task_id": "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11",
+                "status": "queued",
+                "deduplicated": false
+            })
         ),
         (
             status = 200,
             description = "The submission matched a task already in flight for this key, target \
                            and transition index, so it returned the original task id rather than \
                            queueing a second one.",
-            body = TaskAcceptedResponse
+            body = TaskAcceptedResponse,
+            example = json!({
+                "task_id": "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11",
+                "status": "queued",
+                "deduplicated": true
+            })
         ),
         (
             status = 400,
             description = "The request failed validation. `code` is one of `INVALID_REQUEST`, \
                            `INVALID_ADDRESS`, `STALE_BLOCK`, `TRANSITION_MISMATCH`, \
                            `CALLDATA_TOO_LARGE`, `CONTRACT_NOT_FOUND`, or `TARGET_NOT_DEPLOYED`.",
-            body = ApiErrorEnvelope
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "INVALID_ADDRESS", "message": "target_address is zero" } })
         ),
-        (status = 401, description = "Missing or invalid API key.", body = ApiErrorEnvelope),
+        (
+            status = 401,
+            description = "Missing or invalid API key.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "UNAUTHORIZED", "message": "Unauthorized" } })
+        ),
         (
             status = 422,
             description = "The body is well-formed JSON but does not match the expected schema, \
                            for example a field of the wrong type. Returned with code \
                            `INVALID_REQUEST`.",
-            body = ApiErrorEnvelope
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "INVALID_REQUEST", "message": "Failed to deserialize the JSON body into the target type" } })
         ),
         (
             status = 429,
             description = "The API key exceeded its request rate limit. Wait for the number of \
                            seconds in the `Retry-After` header, then retry.",
             body = ApiErrorEnvelope,
-            headers(("Retry-After" = u64, description = "Seconds to wait before retrying."))
+            headers(("Retry-After" = u64, description = "Seconds to wait before retrying.")),
+            example = json!({ "error": { "code": "RATE_LIMITED", "message": "Rate limit exceeded; retry after the indicated delay" } })
         ),
         (
             status = 503,
@@ -896,9 +917,15 @@ impl Drop for QueueSlot<'_> {
             headers((
                 "Retry-After" = u64,
                 description = "Seconds to wait before retrying, on a `QUEUE_FULL` response."
-            ))
+            )),
+            example = json!({ "error": { "code": "QUEUE_FULL", "message": "Service at capacity, please try again in a few minutes" } })
         ),
-        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+        (
+            status = 500,
+            description = "An unexpected server-side error occurred.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "INTERNAL", "message": "Internal error: task queue unavailable" } })
+        )
     )
 )]
 pub async fn submit_task_handler(
@@ -1355,19 +1382,45 @@ async fn render_or_reject_payload<P: Provider + Clone>(
         ("task_id" = String, Path, description = "The task id returned by `POST /tasks`.")
     ),
     responses(
-        (status = 200, description = "Current task state.", body = TaskView),
-        (status = 401, description = "Missing or invalid API key.", body = ApiErrorEnvelope),
+        (
+            status = 200,
+            description = "Current task state.",
+            body = TaskView,
+            example = json!({
+                "task_id": "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11",
+                "status": "ready",
+                "created_at": 1753180800,
+                "updated_at": 1753180812,
+                "error": null,
+                "payload": {
+                    "to": "0x0000000000000000000000000000000000000001",
+                    "data": "0x93de4531000000000000000000000000000000000000000000000000000000000000002a",
+                    "value": "0x0",
+                    "chain_id": 11155111,
+                    "estimated_gas": 234000,
+                    "valid_until_block": 22345678
+                }
+            })
+        ),
+        (
+            status = 401,
+            description = "Missing or invalid API key.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "UNAUTHORIZED", "message": "Unauthorized" } })
+        ),
         (
             status = 403,
             description = "The credentials are valid but the task belongs to a different API key. \
                            Kept distinct from `404` so a caller can tell \"not yours\" from \
                            \"no such task\".",
-            body = ApiErrorEnvelope
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "FORBIDDEN", "message": "Task belongs to a different API key" } })
         ),
         (
             status = 404,
             description = "No task with this id exists.",
-            body = ApiErrorEnvelope
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "NOT_FOUND", "message": "Task not found" } })
         ),
         (
             status = 409,
@@ -1375,16 +1428,29 @@ async fn render_or_reject_payload<P: Provider + Clone>(
                            `valid_until_block` has passed, or the on-chain state-transition index \
                            has advanced and the round was already consumed. Submit a fresh task \
                            and poll again.",
-            body = ApiErrorEnvelope
+            body = ApiErrorEnvelope,
+            example = json!({
+                "error": {
+                    "code": "PAYLOAD_EXPIRED",
+                    "message": "payload valid_until_block 22345678 passed (current block \
+                                22345700); re-request"
+                }
+            })
         ),
         (
             status = 503,
             description = "An upstream RPC endpoint used for the freshness check is unreachable \
                            (`RPC_UNAVAILABLE`), or task persistence is not configured \
                            (`NOT_CONFIGURED`).",
-            body = ApiErrorEnvelope
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "RPC_UNAVAILABLE", "message": "Service temporarily unavailable" } })
         ),
-        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+        (
+            status = 500,
+            description = "An unexpected server-side error occurred.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "INTERNAL", "message": "Internal error: task queue unavailable" } })
+        )
     )
 )]
 pub async fn get_task_handler(
@@ -1458,16 +1524,28 @@ pub async fn get_task_handler(
             status = 400,
             description = "A query parameter is invalid, for example an unknown `status` value or \
                            a non-integer `limit`. Returned with code `INVALID_REQUEST`.",
-            body = ApiErrorEnvelope
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "INVALID_REQUEST", "message": "Failed to deserialize query string" } })
         ),
-        (status = 401, description = "Missing or invalid API key.", body = ApiErrorEnvelope),
+        (
+            status = 401,
+            description = "Missing or invalid API key.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "UNAUTHORIZED", "message": "Unauthorized" } })
+        ),
         (
             status = 503,
             description = "Task persistence is not configured, so the endpoint cannot serve the \
                            request.",
-            body = ApiErrorEnvelope
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "NOT_CONFIGURED", "message": "Persistence is not configured" } })
         ),
-        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+        (
+            status = 500,
+            description = "An unexpected server-side error occurred.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "INTERNAL", "message": "Internal error: task queue unavailable" } })
+        )
     )
 )]
 pub async fn list_tasks_handler(
@@ -1537,14 +1615,24 @@ pub struct CreateApiKeyRequest {
                            not valid JSON. Returned with code `INVALID_REQUEST`.",
             body = ApiErrorEnvelope
         ),
-        (status = 401, description = "Missing or invalid `ADMIN_KEY`.", body = ApiErrorEnvelope),
+        (
+            status = 401,
+            description = "Missing or invalid `ADMIN_KEY`.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "UNAUTHORIZED", "message": "Unauthorized" } })
+        ),
         (
             status = 503,
             description = "The admin API is not configured (`ADMIN_KEY` is unset), or task \
                            persistence is not configured.",
             body = ApiErrorEnvelope
         ),
-        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+        (
+            status = 500,
+            description = "An unexpected server-side error occurred.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "INTERNAL", "message": "Internal error: task queue unavailable" } })
+        )
     )
 )]
 pub async fn create_api_key_handler(
@@ -1616,14 +1704,24 @@ pub async fn create_api_key_handler(
     security(("AdminAuth" = [])),
     responses(
         (status = 200, description = "Metadata for the active keys.", body = Vec<ApiKeyMetadata>),
-        (status = 401, description = "Missing or invalid `ADMIN_KEY`.", body = ApiErrorEnvelope),
+        (
+            status = 401,
+            description = "Missing or invalid `ADMIN_KEY`.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "UNAUTHORIZED", "message": "Unauthorized" } })
+        ),
         (
             status = 503,
             description = "The admin API is not configured (`ADMIN_KEY` is unset), or task \
                            persistence is not configured.",
             body = ApiErrorEnvelope
         ),
-        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+        (
+            status = 500,
+            description = "An unexpected server-side error occurred.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "INTERNAL", "message": "Internal error: task queue unavailable" } })
+        )
     )
 )]
 pub async fn list_api_keys_handler(
@@ -1657,7 +1755,12 @@ pub async fn list_api_keys_handler(
     ),
     responses(
         (status = 204, description = "The key was revoked."),
-        (status = 401, description = "Missing or invalid `ADMIN_KEY`.", body = ApiErrorEnvelope),
+        (
+            status = 401,
+            description = "Missing or invalid `ADMIN_KEY`.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "UNAUTHORIZED", "message": "Unauthorized" } })
+        ),
         (
             status = 404,
             description = "No active key with this id exists.",
@@ -1669,7 +1772,12 @@ pub async fn list_api_keys_handler(
                            persistence is not configured.",
             body = ApiErrorEnvelope
         ),
-        (status = 500, description = "An unexpected server-side error occurred.", body = ApiErrorEnvelope)
+        (
+            status = 500,
+            description = "An unexpected server-side error occurred.",
+            body = ApiErrorEnvelope,
+            example = json!({ "error": { "code": "INTERNAL", "message": "Internal error: task queue unavailable" } })
+        )
     )
 )]
 pub async fn revoke_api_key_handler(
