@@ -799,6 +799,209 @@ mod tests {
         }
     }
 
+    /// Validates real serialized DTOs against the schemas the document publishes.
+    ///
+    /// Everything else here checks the document against itself. This checks it against serde,
+    /// which is the one thing generation does not guarantee: utoipa infers `required` and
+    /// nullability from the Rust type and the serde attributes it can see, and if that inference
+    /// ever diverges from what `Serialize` actually emits, the document is wrong in a way no
+    /// amount of internal consistency would reveal.
+    ///
+    /// Each type is checked twice, fully populated and as sparsely as it can legally be, because
+    /// the two catch opposite errors: a full instance catches a field the schema forbids or
+    /// mistypes, and a sparse one catches a field wrongly marked required, or one the schema
+    /// types as nullable that serde omits instead (or the reverse).
+    #[test]
+    fn serialized_dtos_validate_against_their_schemas() {
+        use alloy_primitives::{Address, Bytes, U256};
+        use gas_killer_common::avs_contracts::AvsContracts;
+        use gas_killer_common::payload::PayloadView;
+
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("the document serializes");
+
+        /// Validates one serialized instance against one named component schema.
+        ///
+        /// The schema root carries the whole component set alongside the reference, so the
+        /// `#/components/schemas/...` pointers inside the schemas resolve locally and the
+        /// validator never reaches for anything remote.
+        fn assert_valid<T: serde::Serialize>(
+            document: &serde_json::Value,
+            schema: &str,
+            instance: &T,
+            label: &str,
+        ) {
+            let root = serde_json::json!({
+                "$ref": format!("#/components/schemas/{schema}"),
+                "components": document["components"],
+            });
+            let validator = jsonschema::validator_for(&root)
+                .unwrap_or_else(|e| panic!("{schema} is not a usable schema: {e}"));
+            let instance = serde_json::to_value(instance).expect("the instance serializes");
+
+            let failures: Vec<String> = validator
+                .iter_errors(&instance)
+                .map(|error| format!("{} at `{}`", error, error.instance_path()))
+                .collect();
+            assert!(
+                failures.is_empty(),
+                "the {label} {schema} does not match the schema the document publishes:\n  {}\n\
+                 serialized as: {}",
+                failures.join("\n  "),
+                serde_json::to_string(&instance).unwrap_or_default()
+            );
+        }
+
+        let address = Address::with_last_byte(1);
+        let contracts = AvsContracts {
+            chain_id: 11155111,
+            avs_address: address,
+            bls_signature_checker: address,
+            registry_coordinator: address,
+            demo_target: Some(address),
+            demo_factory: Some(address),
+        };
+        let sparse_contracts = AvsContracts {
+            demo_target: None,
+            demo_factory: None,
+            ..contracts.clone()
+        };
+        assert_valid(&document, "AvsContracts", &contracts, "fully populated");
+        assert_valid(&document, "AvsContracts", &sparse_contracts, "sparse");
+
+        // The field this most needs to hold for: `logo`, `twitter` and `operatorSets` are typed
+        // as non-nullable optionals, which is only correct while they carry
+        // `skip_serializing_if`. A sparse instance is what proves they are omitted, not nulled.
+        let resolved = gas_killer_common::avs_contracts::ResolvedContracts::default();
+        resolved.publish(contracts);
+        let metadata = AvsMetadata {
+            name: "Gas Killer".to_string(),
+            website: "https://gaskiller.xyz".to_string(),
+            description: "Verifiable off-chain compute".to_string(),
+            logo: Some("https://gaskiller.xyz/logo.png".to_string()),
+            twitter: Some("gaskiller".to_string()),
+            operator_sets: Some(vec![AvsOperatorSetMetadata {
+                name: "default".to_string(),
+                id: "0".to_string(),
+                description: "The only operator set".to_string(),
+                software: vec![AvsOperatorSetSoftware {
+                    name: "gas-killer-node".to_string(),
+                    description: "Operator node".to_string(),
+                    url: "https://github.com/gas-killer/service".to_string(),
+                }],
+                slashing_conditions: vec!["none".to_string()],
+            }]),
+            contracts: resolved,
+        };
+        assert_valid(&document, "AvsMetadata", &metadata, "fully populated");
+        assert_valid(&document, "AvsMetadata", &AvsMetadata::default(), "sparse");
+
+        let payload = PayloadView {
+            to: address,
+            data: Bytes::from_static(&[0x93, 0xde, 0x45, 0x31]),
+            value: U256::ZERO,
+            chain_id: 11155111,
+            estimated_gas: 234_000,
+            valid_until_block: 22_345_678,
+        };
+        assert_valid(&document, "PayloadView", &payload, "fully populated");
+
+        // `TaskView` is the counterexample that keeps the check honest: `error` and `payload`
+        // carry no `skip_serializing_if`, so a sparse one serializes them as null and the schema
+        // has to allow it.
+        assert_valid(
+            &document,
+            "TaskView",
+            &TaskView {
+                task_id: "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11".to_string(),
+                status: TaskStatus::Ready,
+                created_at: 1_753_180_800,
+                updated_at: 1_753_180_812,
+                error: None,
+                payload: Some(payload),
+            },
+            "fully populated",
+        );
+        assert_valid(
+            &document,
+            "TaskView",
+            &TaskView {
+                task_id: "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11".to_string(),
+                status: TaskStatus::Queued,
+                created_at: 1_753_180_800,
+                updated_at: 1_753_180_800,
+                error: None,
+                payload: None,
+            },
+            "sparse",
+        );
+
+        assert_valid(
+            &document,
+            "TaskAcceptedResponse",
+            &TaskAcceptedResponse {
+                task_id: "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11".to_string(),
+                status: TaskStatus::Queued,
+                deduplicated: false,
+            },
+            "fully populated",
+        );
+
+        assert_valid(
+            &document,
+            "ApiErrorEnvelope",
+            &ApiErrorEnvelope {
+                error: ApiErrorBody {
+                    code: ErrorCode::PayloadExpired,
+                    message: "re-request".to_string(),
+                },
+            },
+            "fully populated",
+        );
+
+        let created = CreatedApiKey {
+            id: "k_1".to_string(),
+            key: "gk_example".to_string(),
+            label: Some("integration".to_string()),
+            created_at: 1_753_180_800,
+            invalid_at: Some(1_893_456_000),
+            rpm_limit: Some(600),
+        };
+        assert_valid(&document, "CreatedApiKey", &created, "fully populated");
+        assert_valid(
+            &document,
+            "CreatedApiKey",
+            &CreatedApiKey {
+                label: None,
+                invalid_at: None,
+                rpm_limit: None,
+                ..created
+            },
+            "sparse",
+        );
+
+        let listed = ApiKeyMetadata {
+            id: "k_1".to_string(),
+            label: Some("integration".to_string()),
+            created_at: 1_753_180_800,
+            last_used: Some(1_753_180_900),
+            invalid_at: Some(1_893_456_000),
+            rpm_limit: Some(600),
+        };
+        assert_valid(&document, "ApiKeyMetadata", &listed, "fully populated");
+        assert_valid(
+            &document,
+            "ApiKeyMetadata",
+            &ApiKeyMetadata {
+                label: None,
+                last_used: None,
+                invalid_at: None,
+                rpm_limit: None,
+                ..listed
+            },
+            "sparse",
+        );
+    }
+
     /// Guards the representations a structural derive would get wrong, which is the whole reason
     /// the schemas above are hand-built. A regression here means the document promises a shape
     /// the handlers do not serve.
