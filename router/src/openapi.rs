@@ -429,6 +429,161 @@ pub fn render_internal() -> Result<String, serde_json::Error> {
 mod tests {
     use super::*;
 
+    /// Path item keys that name an operation. A path item can also carry `summary`, `parameters`
+    /// and friends, so anything walking operations has to filter for these.
+    const METHODS: &[&str] = &[
+        "get", "put", "post", "delete", "options", "head", "patch", "trace",
+    ];
+
+    /// Every `$ref` target anywhere in `value`. Collected rather than resolved in place so a
+    /// caller can report each one against the document it belongs to.
+    fn all_references(value: &serde_json::Value) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut pending = vec![value];
+        while let Some(node) = pending.pop() {
+            match node {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        if key == "$ref"
+                            && let Some(target) = child.as_str()
+                        {
+                            found.push(target.to_string());
+                        }
+                        pending.push(child);
+                    }
+                }
+                serde_json::Value::Array(items) => pending.extend(items),
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// The operations a rendered document defines, as `(method, path, operation)`.
+    fn operations_of(document: &serde_json::Value) -> Vec<(&str, &str, &serde_json::Value)> {
+        document["paths"]
+            .as_object()
+            .expect("the document has paths")
+            .iter()
+            .flat_map(|(path, item)| {
+                item.as_object()
+                    .expect("a path item")
+                    .iter()
+                    .filter(|(key, _)| METHODS.contains(&key.as_str()))
+                    .map(move |(method, operation)| (method.as_str(), path.as_str(), operation))
+            })
+            .collect()
+    }
+
+    /// Asserts a rendered document is internally consistent.
+    ///
+    /// utoipa serializes from typed structs, so well-formed JSON is guaranteed and there is no
+    /// syntax left to get wrong. What is not guaranteed is that the document hangs together. A
+    /// `value_type` naming a type missing from `components(schemas(...))` emits a reference to a
+    /// schema that does not exist, and [`strip_private`] could prune one something still points
+    /// at. Either parses cleanly and then breaks whatever consumes it, which is how a
+    /// well-formed document still fails a renderer.
+    fn assert_consistent(rendered: &str, label: &str) {
+        let document: serde_json::Value = serde_json::from_str(rendered)
+            .unwrap_or_else(|e| panic!("{label} is not valid JSON: {e}"));
+
+        // Every reference resolves. `Value::pointer` reads the fragment as the JSON pointer it
+        // is, so this covers references to anything, not just component schemas.
+        let references = all_references(&document);
+        for reference in &references {
+            let pointer = reference
+                .strip_prefix('#')
+                .unwrap_or_else(|| panic!("{label} has a non-local reference `{reference}`"));
+            assert!(
+                document.pointer(pointer).is_some(),
+                "{label} references `{reference}`, which the document does not define"
+            );
+        }
+
+        // Nothing declared that nothing points at, so the component list cannot silently
+        // accumulate types the API no longer exposes.
+        let referenced: BTreeSet<&str> = references
+            .iter()
+            .filter_map(|reference| reference.rsplit('/').next())
+            .collect();
+        for name in document["components"]["schemas"]
+            .as_object()
+            .expect("the document has component schemas")
+            .keys()
+        {
+            assert!(
+                referenced.contains(name.as_str()),
+                "{label} defines the schema `{name}`, which nothing references"
+            );
+        }
+
+        let schemes: BTreeSet<&str> = document["components"]["securitySchemes"]
+            .as_object()
+            .map(|map| map.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        let mut operation_ids: BTreeSet<&str> = BTreeSet::new();
+
+        for (method, path, operation) in operations_of(&document) {
+            // Operation ids address a page in the generated reference, so a collision silently
+            // drops one of the two.
+            if let Some(id) = operation["operationId"].as_str() {
+                assert!(
+                    operation_ids.insert(id),
+                    "{label}: `{id}` is the operation id of more than one operation"
+                );
+            }
+
+            // A requirement naming a scheme the document does not define leaves a consumer with
+            // no way to authenticate the call it is describing.
+            for requirement in operation["security"].as_array().into_iter().flatten() {
+                for name in requirement
+                    .as_object()
+                    .expect("a security requirement")
+                    .keys()
+                {
+                    assert!(
+                        schemes.contains(name.as_str()),
+                        "{label}: {method} {path} requires the undefined security scheme `{name}`"
+                    );
+                }
+            }
+
+            // The path template and the declared path parameters have to agree in both
+            // directions: a `{param}` with no parameter is undocumented, and a parameter with no
+            // `{param}` is a typo in the annotation's path.
+            let templated: BTreeSet<&str> = path
+                .split('/')
+                .filter_map(|segment| segment.strip_prefix('{')?.strip_suffix('}'))
+                .collect();
+            let declared: BTreeSet<&str> = operation["parameters"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|parameter| parameter["in"] == "path")
+                .filter_map(|parameter| parameter["name"].as_str())
+                .collect();
+            assert_eq!(
+                templated, declared,
+                "{label}: {method} {path} templates {templated:?} but declares {declared:?}"
+            );
+        }
+    }
+
+    /// Both documents ship, so both are held to the same structural bar. The published one
+    /// matters most: it is the only one that has been through [`strip_private`], so it is the
+    /// only one where a reference can be left pointing at something that was pruned away.
+    #[test]
+    fn both_documents_are_internally_consistent() {
+        assert_consistent(
+            &render().expect("the published document serializes"),
+            "router/docs/openapi.json",
+        );
+        assert_consistent(
+            &render_internal().expect("the internal document serializes"),
+            "router/docs/openapi.internal.json",
+        );
+    }
+
     /// The committed documents are what the docs site consumes, so they have to be regenerated
     /// whenever a handler annotation or a DTO changes. This is the gate that makes forgetting
     /// visible, in CI as well as locally.
@@ -591,11 +746,6 @@ mod tests {
         .flat_map(|(path, methods)| methods.iter().map(move |method| format!("{method} {path}")))
         .collect();
 
-        // A path item can also carry `summary`, `parameters` and friends, so only the keys that
-        // name a method count as operations.
-        const METHODS: &[&str] = &[
-            "get", "put", "post", "delete", "options", "head", "patch", "trace",
-        ];
         let document = serde_json::to_value(ApiDoc::openapi()).expect("the document serializes");
         let documented: BTreeSet<String> = document["paths"]
             .as_object()

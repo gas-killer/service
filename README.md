@@ -382,8 +382,13 @@ site: the generator drops operations tagged `Admin` along with the credential an
 use. `ADMIN_KEY` mints and revokes every API key the router honours, and a public playground is
 the wrong place to invite someone to paste one.
 
-Unit tests compare both committed documents against what the code produces and assert the
-operator surface stays out of the published one, so CI fails on either kind of drift.
+Unit tests hold all of this, so `cargo test` is the only gate and CI needs no extra tooling. They
+compare both committed documents against what the code produces, assert the operator surface stays
+out of the published one, and check that each document is internally consistent: every reference
+resolves, every declared schema is used, operation ids are unique, security requirements name a
+defined scheme, and path templates match their declared parameters. The last group is what a
+renderer would otherwise catch for us, since utoipa guarantees well-formed JSON but not that the
+document hangs together.
 
 ### Testing
 
