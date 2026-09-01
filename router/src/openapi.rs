@@ -247,15 +247,16 @@ pub struct ApiDoc;
 
 /// Tags whose operations describe the operator surface rather than the integrator API.
 ///
-/// These are removed from the published document rather than merely left undocumented. The docs
-/// site renders that document as an interactive playground, and `ADMIN_KEY` mints and revokes
-/// every API key the router honours, so a public form is the wrong place to invite someone to
-/// paste one. Removing the operations means no site-side configuration can publish them by
-/// accident.
+/// These are removed from the published document rather than merely left undocumented, so no
+/// site-side configuration can publish them by accident. `Admin` mints and revokes every API key
+/// the router honours, and the docs site renders the published document as an interactive
+/// playground, which is the wrong place to invite someone to paste an `ADMIN_KEY`. `Health` is a
+/// deployment concern: an integrator has no use for the router's liveness, and publishing it
+/// invites it to be treated as an API to poll.
 ///
 /// The handlers keep their annotations either way: `openapi.internal.json` is the whole API, and
 /// the tests still require every served route to be documented there.
-pub const PRIVATE_TAGS: &[&str] = &["Admin"];
+pub const PRIVATE_TAGS: &[&str] = &["Admin", "Health"];
 
 /// The eight operation slots a path item can hold, as mutable references. `PathItem` models
 /// methods as named fields rather than a map, so anything walking every operation has to spell
@@ -618,10 +619,12 @@ mod tests {
                 .expect("the published document is JSON");
 
         for path in published["paths"].as_object().expect("paths").keys() {
-            assert!(
-                !path.starts_with("/admin"),
-                "{path} is an operator route and must not be published"
-            );
+            for operator_route in ["/admin", "/healthz"] {
+                assert!(
+                    !path.starts_with(operator_route),
+                    "{path} is an operator route and must not be published"
+                );
+            }
         }
         for operation in published["paths"]
             .as_object()
@@ -659,6 +662,14 @@ mod tests {
                 .any(|tag| tag["name"] == "Admin"),
             "the Admin tag is defined in the published document"
         );
+        assert!(
+            !published["tags"]
+                .as_array()
+                .expect("tags")
+                .iter()
+                .any(|tag| tag["name"] == "Health"),
+            "the Health tag is defined in the published document"
+        );
 
         // The integrator API is untouched by the pruning.
         assert!(published["paths"]["/tasks"]["post"].is_object());
@@ -674,6 +685,7 @@ mod tests {
             serde_json::from_str(&render_internal().expect("the internal document serializes"))
                 .expect("the internal document is JSON");
 
+        assert!(internal["paths"]["/healthz"]["get"].is_object());
         assert!(internal["paths"]["/admin/keys"]["post"].is_object());
         assert!(internal["paths"]["/admin/keys"]["get"].is_object());
         assert!(internal["paths"]["/admin/keys/{id}"]["delete"].is_object());

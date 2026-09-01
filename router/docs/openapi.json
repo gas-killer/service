@@ -501,21 +501,6 @@
           }
         }
       }
-    },
-    "/healthz": {
-      "get": {
-        "tags": [
-          "Health"
-        ],
-        "summary": "Liveness probe",
-        "description": "Answers `200` whenever the ingress is listening. It reports nothing about readiness or the operator network; the router's readiness and Prometheus endpoints are served on a separate operator port and are not part of this API.",
-        "operationId": "getHealthz",
-        "responses": {
-          "200": {
-            "description": "The ingress is listening."
-          }
-        }
-      }
     }
   },
   "components": {
@@ -955,10 +940,6 @@
     {
       "name": "Metadata",
       "description": "Public AVS identity and settlement addresses, consumed by the restaking indexer and by integrators wiring a target contract."
-    },
-    {
-      "name": "Health",
-      "description": "Liveness probing."
     }
   ]
 }

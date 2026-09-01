@@ -373,8 +373,9 @@ cargo run --bin openapi
 - `router/docs/openapi.json`: the integrator API, rendered by the docs site.
 - `router/docs/openapi.internal.json`: the same, plus the `/admin/keys` endpoints.
 
-The generator drops `Admin`-tagged operations from the published document, along with the
-credential and types only they use, so the admin API cannot reach the public playground.
+The generator drops `Admin`- and `Health`-tagged operations from the published document, along
+with the credential and types only they use, so the operator surface cannot reach the public
+playground.
 
 `cargo test` gates all of it: both committed documents against what the code produces, the
 operator surface staying out of the published one, and each document's internal consistency.

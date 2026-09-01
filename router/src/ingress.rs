@@ -1812,8 +1812,9 @@ pub async fn revoke_api_key_handler(
     operation_id = "getHealthz",
     summary = "Liveness probe",
     description = "Answers `200` whenever the ingress is listening. It reports nothing about \
-                   readiness or the operator network; the router's readiness and Prometheus \
-                   endpoints are served on a separate operator port and are not part of this API.",
+                   readiness or the operator network. The router also serves this path, along \
+                   with `/readyz` and `/metrics`, on its operator port (`HEALTHZ_PORT`, 8081 by \
+                   default).",
     responses(
         (status = 200, description = "The ingress is listening.")
     )
