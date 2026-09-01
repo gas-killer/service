@@ -1807,24 +1807,6 @@ pub async fn revoke_api_key_handler(
 
 #[utoipa::path(
     get,
-    path = "/healthz",
-    tag = "Health",
-    operation_id = "getHealthz",
-    summary = "Liveness probe",
-    description = "Answers `200` whenever the ingress is listening. It reports nothing about \
-                   readiness or the operator network. The router also serves this path, along \
-                   with `/readyz` and `/metrics`, on its operator port (`HEALTHZ_PORT`, 8081 by \
-                   default).",
-    responses(
-        (status = 200, description = "The ingress is listening.")
-    )
-)]
-pub async fn healthz_handler() -> StatusCode {
-    StatusCode::OK
-}
-
-#[utoipa::path(
-    get,
     path = "/avs-metadata",
     tag = "Metadata",
     operation_id = "getAvsMetadata",
@@ -1904,7 +1886,7 @@ async fn wrap_framework_error(mut resp: Response) -> Response {
 /// only here compiles and serves, but ships undocumented.
 pub fn build_app() -> Router<IngressState> {
     Router::new()
-        .route("/healthz", get(healthz_handler))
+        .route("/healthz", get(crate::operator_http::healthz_handler))
         .route("/avs-metadata", get(avs_metadata_handler))
         .route("/tasks", post(submit_task_handler).get(list_tasks_handler))
         .route("/tasks/:task_id", get(get_task_handler))

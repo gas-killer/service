@@ -213,7 +213,9 @@ Task submission and polling are authenticated with an API key.",
         crate::ingress::list_tasks_handler,
         crate::ingress::get_task_handler,
         crate::ingress::avs_metadata_handler,
-        crate::ingress::healthz_handler,
+        crate::operator_http::healthz_handler,
+        crate::operator_http::readyz_handler,
+        crate::operator_http::metrics_handler,
         crate::ingress::create_api_key_handler,
         crate::ingress::list_api_keys_handler,
         crate::ingress::revoke_api_key_handler,
@@ -619,7 +621,7 @@ mod tests {
                 .expect("the published document is JSON");
 
         for path in published["paths"].as_object().expect("paths").keys() {
-            for operator_route in ["/admin", "/healthz"] {
+            for operator_route in ["/admin", "/healthz", "/readyz", "/metrics"] {
                 assert!(
                     !path.starts_with(operator_route),
                     "{path} is an operator route and must not be published"
@@ -686,6 +688,8 @@ mod tests {
                 .expect("the internal document is JSON");
 
         assert!(internal["paths"]["/healthz"]["get"].is_object());
+        assert!(internal["paths"]["/readyz"]["get"].is_object());
+        assert!(internal["paths"]["/metrics"]["get"].is_object());
         assert!(internal["paths"]["/admin/keys"]["post"].is_object());
         assert!(internal["paths"]["/admin/keys"]["get"].is_object());
         assert!(internal["paths"]["/admin/keys/{id}"]["delete"].is_object());
@@ -836,29 +840,40 @@ mod tests {
         assert!(statuses.contains(&serde_json::json!("ready")));
     }
 
-    /// The table below mirrors [`build_app`](crate::ingress::build_app) by convention, and this
-    /// asserts the document describes exactly it: nothing annotated that the table omits, and
-    /// nothing in the table without an annotation.
+    /// The tables below mirror the router's two listeners by convention, and this asserts the
+    /// document describes exactly their union: nothing annotated that the tables omit, and
+    /// nothing in a table without an annotation.
     ///
     /// The mirror itself is maintained by hand, and that is the tradeoff of not using
     /// `utoipa-axum`: axum exposes no way to enumerate a `Router`'s routes, so a route added to
-    /// `build_app` and to neither the annotations nor this table would ship undocumented. Adding
-    /// a route is therefore three edits, called out in a comment on `build_app`: the handler's
-    /// `#[utoipa::path]`, the `paths(...)` list above, and this table.
+    /// one of the builders and to neither the annotations nor these tables would ship
+    /// undocumented. Adding a route is therefore three edits, called out in a comment on each
+    /// builder: the handler's `#[utoipa::path]`, the `paths(...)` list above, and the table here.
     #[test]
     fn the_documented_routes_are_exactly_the_route_table() {
-        // Paths in OpenAPI's `{param}` form rather than axum's `:param`.
-        let route_table: BTreeSet<String> = [
+        // Paths in OpenAPI's `{param}` form rather than axum's `:param`. `/healthz` appears in
+        // both tables because both listeners serve the same handler on it, and the document
+        // carries one entry naming both ports.
+        let ingress_routes = [
             ("/healthz", &["get"][..]),
             ("/avs-metadata", &["get"][..]),
             ("/tasks", &["post", "get"][..]),
             ("/tasks/{task_id}", &["get"][..]),
             ("/admin/keys", &["post", "get"][..]),
             ("/admin/keys/{id}", &["delete"][..]),
-        ]
-        .into_iter()
-        .flat_map(|(path, methods)| methods.iter().map(move |method| format!("{method} {path}")))
-        .collect();
+        ];
+        let operator_routes = [
+            ("/healthz", &["get"][..]),
+            ("/readyz", &["get"][..]),
+            ("/metrics", &["get"][..]),
+        ];
+        let route_table: BTreeSet<String> = ingress_routes
+            .into_iter()
+            .chain(operator_routes)
+            .flat_map(|(path, methods)| {
+                methods.iter().map(move |method| format!("{method} {path}"))
+            })
+            .collect();
 
         let document = serde_json::to_value(ApiDoc::openapi()).expect("the document serializes");
         let documented: BTreeSet<String> = document["paths"]
@@ -876,8 +891,8 @@ mod tests {
 
         assert_eq!(
             documented, route_table,
-            "the document and the mirror of `build_app` disagree; annotate the handler, list it \
-             in `paths(...)`, and update the table in this test"
+            "the document and the mirrors of the route builders disagree; annotate the handler, \
+             list it in `paths(...)`, and update the table in this test"
         );
     }
 }

@@ -9,6 +9,7 @@ pub mod ingress;
 mod log_capture;
 pub mod metrics;
 pub mod openapi;
+pub mod operator_http;
 pub mod payload_revert;
 pub mod rate_limit;
 pub mod rpc_health;

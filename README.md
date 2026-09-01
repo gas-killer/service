@@ -371,7 +371,8 @@ cargo run --bin openapi
 ```
 
 - `router/docs/openapi.json`: the integrator API, rendered by the docs site.
-- `router/docs/openapi.internal.json`: the same, plus the `/admin/keys` endpoints.
+- `router/docs/openapi.internal.json`: the same, plus `/admin/keys` and the operator port's
+  `/healthz`, `/readyz` and `/metrics`.
 
 The generator drops `Admin`- and `Health`-tagged operations from the published document, along
 with the credential and types only they use, so the operator surface cannot reach the public

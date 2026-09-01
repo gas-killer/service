@@ -508,13 +508,75 @@
           "Health"
         ],
         "summary": "Liveness probe",
-        "description": "Answers `200` whenever the ingress is listening. It reports nothing about readiness or the operator network. The router also serves this path, along with `/readyz` and `/metrics`, on its operator port (`HEALTHZ_PORT`, 8081 by default).",
+        "description": "Answers `200` whenever the process is listening. It reports nothing about readiness or the operator network, so a cluster should probe `/readyz` to decide whether to send traffic.\n\nServed on both listeners: the operator port that Kubernetes probes, and the ingress port, which the public ingress allowlists.",
         "operationId": "getHealthz",
         "responses": {
           "200": {
-            "description": "The ingress is listening."
+            "description": "The process is listening."
           }
-        }
+        },
+        "servers": [
+          {
+            "url": "http://localhost:8081",
+            "description": "Operator port (`HEALTHZ_PORT`)"
+          },
+          {
+            "url": "http://localhost:8080",
+            "description": "Ingress port"
+          }
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness probe",
+        "description": "Answers `200` once the aggregation engine, sequencer and submitter are spawned and the p2p network is starting, and `503` before that. This is the probe that decides whether the pod should receive traffic; `/healthz` only reports that the process exists.",
+        "operationId": "getReadyz",
+        "responses": {
+          "200": {
+            "description": "The router is ready to accept work."
+          },
+          "503": {
+            "description": "The router is still starting up."
+          }
+        },
+        "servers": [
+          {
+            "url": "http://localhost:8081",
+            "description": "Operator port (`HEALTHZ_PORT`)"
+          }
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Prometheus metrics",
+        "description": "Prometheus text exposition of the commonware runtime metrics followed by the router's own. Not JSON, and not versioned as part of the API: metric names may change with the code that emits them.",
+        "operationId": "getMetrics",
+        "responses": {
+          "200": {
+            "description": "The current metric values.",
+            "content": {
+              "text/plain; version=0.0.4; charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "servers": [
+          {
+            "url": "http://localhost:8081",
+            "description": "Operator port (`HEALTHZ_PORT`)"
+          }
+        ]
       }
     },
     "/admin/keys": {

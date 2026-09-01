@@ -12,9 +12,6 @@
 use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
 use ark_serialize::CanonicalDeserialize;
-use axum::{
-    Router, extract::State, http::StatusCode, http::header, response::IntoResponse, routing::get,
-};
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{Bn254Scheme, G1PublicKey, PublicKey, get_signer};
 use commonware_avs_core::consensus::StaticEpochMonitor;
@@ -32,7 +29,7 @@ use commonware_p2p::{Address, AddressableManager as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_runtime::{
-    Metrics, Quota, Runner, Spawner, Supervisor,
+    Quota, Runner, Spawner, Supervisor,
     tokio::{self},
 };
 use commonware_utils::ordered::{Map, Quorum as _, Set};
@@ -51,6 +48,7 @@ use gas_killer_router::factories::{
     create_ingress, create_schnorr_submitter, create_submitter, requeue_incomplete_tasks,
 };
 use gas_killer_router::metrics::MetricsCollector;
+use gas_killer_router::operator_http::{HealthState, build_operator_app};
 use gas_killer_router::schnorr_coordinator::{SchnorrCoordinator, schnorr_certified_channel};
 use gas_killer_router::sequencer::{GasKillerTaskSource, in_flight_task};
 use std::collections::{HashMap, HashSet};
@@ -79,42 +77,6 @@ const SCHNORR_CHANNEL: u64 = 2;
 /// Journal partition for the router's verifier-only engine (a subdirectory of
 /// the runtime storage directory).
 const JOURNAL_PARTITION: &str = "aggregation-router";
-
-#[derive(Clone)]
-struct HealthState {
-    ready: Arc<AtomicBool>,
-    // tokio::Context is !Clone in 2026.5.0; encode() works through a shared handle.
-    context: Arc<tokio::Context>,
-    metrics: Arc<MetricsCollector>,
-}
-
-/// Liveness probe — always 200 if the process is running.
-async fn healthz_handler() -> StatusCode {
-    StatusCode::OK
-}
-
-/// Readiness probe — 503 until the engine/sequencer/submitter are spawned and
-/// the network is starting.
-async fn readyz_handler(State(s): State<HealthState>) -> StatusCode {
-    if s.ready.load(Ordering::Relaxed) {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    }
-}
-
-/// Prometheus metrics endpoint — encodes commonware runtime metrics and gas-killer custom metrics.
-async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
-    let mut output = s.context.encode();
-    output.push_str(&s.metrics.encode());
-    (
-        [(
-            header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        output,
-    )
-}
 
 /// Resolve a hostname:port with retry logic for Docker DNS readiness
 fn resolve_with_retry(
@@ -700,11 +662,7 @@ fn main() {
             metrics: Arc::clone(&metrics),
         };
         context.child("healthz").spawn(move |_| async move {
-            let app = Router::new()
-                .route("/healthz", get(healthz_handler))
-                .route("/readyz", get(readyz_handler))
-                .route("/metrics", get(metrics_handler))
-                .with_state(health_state);
+            let app = build_operator_app().with_state(health_state);
             match TcpListener::bind(healthz_addr).await {
                 Ok(listener) => {
                     tracing::info!(%healthz_addr, "healthz server running");
