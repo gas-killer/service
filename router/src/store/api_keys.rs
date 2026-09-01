@@ -28,7 +28,7 @@ const ID_BYTES: usize = 8;
 
 /// A newly created API key, including the raw secret. The `key` is returned to the caller
 /// exactly once — it is never persisted in the clear and cannot be recovered afterwards.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CreatedApiKey {
     pub id: String,
     pub key: String,
@@ -43,7 +43,7 @@ pub struct CreatedApiKey {
 
 /// Non-secret metadata about an active API key, safe to list. Deliberately omits the key value
 /// and its hash so neither is ever exposed through the admin API.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ApiKeyMetadata {
     pub id: String,
     pub label: Option<String>,

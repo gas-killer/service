@@ -82,10 +82,12 @@ tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+utoipa = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 alloy-json-abi = { workspace = true }
+jsonschema = { workspace = true }
 tempfile = { workspace = true }
 
 [build-dependencies]

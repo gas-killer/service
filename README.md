@@ -253,7 +253,8 @@ Operator (node) key files are generated automatically by the Docker setup and do
 
 ## Ingress Mode
 
-Enable HTTP endpoints for external task requests:
+Enable HTTP endpoints for external task requests. These endpoints are specified in
+[`router/docs/openapi.json`](#regenerating-the-openapi-documents).
 
 1. **Enable ingress in .env:**
 ```bash
@@ -359,6 +360,26 @@ the aggregation migration; the parts still needed are vendored under `common/src
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+### Regenerating the OpenAPI documents
+
+Generated from the `#[utoipa::path]` annotations on the ingress handlers. Rewrite after changing an
+annotation or a type it exposes:
+
+```bash
+cargo run --bin openapi
+```
+
+- `router/docs/openapi.json`: the integrator API, rendered by the docs site.
+- `router/docs/openapi.internal.json`: the same, plus `/admin/keys` and the operator port's
+  `/healthz`, `/readyz` and `/metrics`.
+
+The generator drops `Admin`- and `Health`-tagged operations from the published document, along
+with the credential and types only they use, so the operator surface cannot reach the public
+playground.
+
+`cargo test` gates all of it: both committed documents against what the code produces, the
+operator surface staying out of the published one, and each document's internal consistency.
 
 ### Testing
 
