@@ -101,7 +101,7 @@ spec:
                 echo "ERROR: schnorrStakeRegistry not found in $AVS_JSON"; jq '.addresses' "$AVS_JSON"; exit 1
               fi
 
-              SCRIPT=script/SchnorrArraySummation.s.sol:SchnorrArraySummationScript
+              SCRIPT=script/DeploySchnorrArraySummation.s.sol:DeploySchnorrArraySummation
               {{- else }}
               echo "[deploy-target] RC=$REGISTRY_COORDINATOR_ADDRESS AVS=$AVS_ADDRESS"
               if [ -z "$REGISTRY_COORDINATOR_ADDRESS" ] || [ "$REGISTRY_COORDINATOR_ADDRESS" = "null" ]; then
@@ -109,7 +109,7 @@ spec:
               fi
 
               # SIG_CHECKER_ADDRESS intentionally unset -> the script provisions one from REGISTRY_COORDINATOR_ADDRESS.
-              SCRIPT=script/ArraySummation.s.sol:ArraySummationScript
+              SCRIPT=script/DeployArraySummation.s.sol:DeployArraySummation
               {{- end }}
 
               set +e
