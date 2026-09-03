@@ -112,10 +112,9 @@ spec:
               echo "Restored testacc{{ $nodeIndex }} BLS key"
               {{- end }}
 
-              # Restore each operator's secp256k1 key, the Schnorr signing key under
-              # SIGNATURE_SCHEME=schnorr. Written to a temporary file first: the redirect
-              # creates its target before gcloud runs, so a failed access would otherwise
-              # leave an empty file that reads as a present but invalid key.
+              # Restore each operator's secp256k1 key. Written to a temporary file first: the
+              # redirect creates its target before gcloud runs, so a failed access would leave
+              # an empty file that reads as a present but invalid key.
               restore_ecdsa_key() {
                 local index="$1"
                 local secret="${PREFIX}-node-${index}-ecdsa-key"
@@ -133,8 +132,7 @@ spec:
               }
 
               {{- if include "gas-killer.isSchnorr" $ }}
-              # Fatal under schnorr: the node reads this file at startup and panics without it,
-              # so a missing secret has to stop the install rather than crash-loop the fleet.
+              # Fatal under schnorr: the node reads this file at startup and panics without it.
               {{- range $i := until $nodeCount }}
               {{- $nodeIndex := add $i 1 }}
               if ! restore_ecdsa_key {{ $nodeIndex }}; then
@@ -144,8 +142,7 @@ spec:
               fi
               {{- end }}
               {{- else }}
-              # Tolerated under bls, where nothing reads them: a deployment predating the export
-              # of these keys has no such secret, and restoring the BLS state is still correct.
+              # Tolerated under bls, where nothing reads them.
               {{- range $i := until $nodeCount }}
               {{- $nodeIndex := add $i 1 }}
               restore_ecdsa_key {{ $nodeIndex }} \

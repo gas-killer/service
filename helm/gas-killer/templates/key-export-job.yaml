@@ -86,7 +86,6 @@ spec:
               export_secret "${PREFIX}-avs-deploy" /app/.nodes/avs_deploy.json
 
               # Export a file only when it is on the PVC, reporting the skip rather than failing.
-              # Used for the operators' secp256k1 keys, which only some deployments hold.
               export_secret_if_present() {
                 local name="$1"
                 local file="$2"
@@ -106,12 +105,9 @@ spec:
                 /app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.bls.key.json
               {{- end }}
 
-              # Export each operator's secp256k1 key. It is the Schnorr signing key under
-              # SIGNATURE_SCHEME=schnorr, and unused under bls. Exported in both modes and
-              # tolerated when absent, because the eigenlayer setup container writes these
-              # alongside the BLS keys and only a backup taken while they are still on the
-              # volume survives a PVC rebuild. A bls deployment that skips them here can
-              # never be switched to schnorr without re-registering the operator set.
+              # Export each operator's secp256k1 key, the Schnorr signing key under
+              # SIGNATURE_SCHEME=schnorr and unused under bls. Exported in both modes: only a
+              # backup taken while they are still on the volume survives a PVC rebuild.
               {{- range $i := until $nodeCount }}
               {{- $nodeIndex := add $i 1 }}
               export_secret_if_present "${PREFIX}-node-{{ $nodeIndex }}-ecdsa-key" \

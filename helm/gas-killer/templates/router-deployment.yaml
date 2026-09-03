@@ -401,9 +401,8 @@ spec:
             - name: SIGNATURE_SCHEME
               value: {{ include "gas-killer.signatureScheme" . | quote }}
             {{- if include "gas-killer.isSchnorr" . }}
-            # The coordinator's local participation floor. Read from the same values the
-            # schnorr-operators job fixes into the registry's on-chain threshold, so the
-            # off-chain and on-chain checks stay in lockstep.
+            # The coordinator's participation floor. Same values the schnorr-operators job
+            # fixes into the registry's on-chain threshold, keeping the two in lockstep.
             - name: QUORUM_THRESHOLD
               value: {{ .Values.eigenlayer.sdk.quorumThreshold | quote }}
             - name: THRESHOLD_DENOMINATOR

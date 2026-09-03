@@ -54,10 +54,9 @@ spec:
               echo "Setup complete! avs_deploy.json found."
               {{- if include "gas-killer.isSchnorr" . }}
 
-              # A Schnorr target's validity is checked against the registry's operator-set
-              # snapshot, and the registry fail-closes for reference blocks behind its
-              # effectiveBlock watermark. Deploying before every operator is registered would
-              # produce a target that can never settle.
+              # The registry fail-closes for reference blocks behind its effectiveBlock
+              # watermark, so a target deployed before every operator is registered can
+              # never settle.
               echo "Waiting for the schnorr operator set (timeout: {{ .Values.global.initTimeout }}s)..."
               ELAPSED=0
               until [ -f /app/.nodes/.schnorr_operators_complete ]; do

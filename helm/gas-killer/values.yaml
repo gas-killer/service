@@ -26,16 +26,14 @@ global:
   #
   # "schnorr" replaces the aggregation engine's BLS certificates with a two-round MuSig2
   # coordinator on p2p channel 2, producing one constant-gas signature verified against a
-  # SchnorrStakeRegistry. It changes three things about the deployment:
+  # SchnorrStakeRegistry. It changes three things:
   #   - each node also loads a secp256k1 signing key, separate from its BN254 p2p identity;
   #   - the schnorr-operators job deploys the registry and registers the operator set on install,
-  #     which must finish before any target deploys (see the `schnorr` block below);
-  #   - targets must be SchnorrGasKillerSDK consumers wired to that registry. A BLS target
-  #     verifies a different proof and cannot settle against a schnorr fleet, so switching an
-  #     existing deployment strands every target already deployed against it.
+  #     before any target deploys (see the `schnorr` block below);
+  #   - targets must be SchnorrGasKillerSDK consumers wired to that registry.
   #
-  # Switching is therefore a reinstall of the operator set and a redeploy of every target, not a
-  # rolling change. A mixed fleet certifies nothing.
+  # Switching an existing deployment strands every BLS target already deployed against it, so it
+  # is a reinstall of the operator set and a redeploy of every target, not a rolling change.
   signatureScheme: "bls"
 
   # Storage-update encoding: "legacy" (default), "canonical", or "prestate-net".
@@ -597,27 +595,20 @@ bridge:
 # BLSSignatureChecker against the freshly-deployed AVS, then publishes its address to a
 # ConfigMap for the local smoke test. Opt-in (off by default; enable on testnet).
 # Aggregate-Schnorr settings. Every field here is inert under global.signatureScheme=bls.
-#
-# Under schnorr the router runs a two-round MuSig2 coordinator on p2p channel 2 and submits a
-# single constant-gas signature verified against a SchnorrStakeRegistry, in place of the
-# aggregation engine's BLS certificates verified by a BLSSignatureChecker. The registry and the
-# operator-set registration come from the schnorr-operators job, which runs on install between
-# setup and deploy-target.
+# The registry and the operator-set registration come from the schnorr-operators job, which runs
+# on install between setup and deploy-target.
 schnorr:
   # Secret key (in the app secret) holding the funded key that deploys the registry and submits
   # the registrations: PRIVATE_KEY or FUNDED_KEY. The deployer becomes the registry's owner.
   deployerSecretKey: PRIVATE_KEY
 
-  # Blocks a registry operator-set change must be announced ahead of taking effect. Announcing
-  # publishes a horizon via nextPossibleMutationBlock(); the router reads it when rendering a
-  # payload and ends that payload's validity before it, so a settlement is never assembled
-  # against one operator set and verified against another.
+  # Blocks a registry operator-set change must be announced ahead of taking effect. The router
+  # ends a rendered payload's validity before the horizon this publishes, so a settlement is
+  # never assembled against one operator set and verified against another.
   #
-  # 0 applies changes as soon as they are committed, which is correct for this chart: the whole
-  # operator set is registered before any target deploys and no round is ever in flight for a
-  # mutation to invalidate. A deployment that changes its operator set while rounds are in
-  # flight must set this above the signing round's duration plus eigenlayer.sdk.blockStaleMeasure,
-  # since a rendered payload stays submittable for that long.
+  # 0 applies changes as soon as they are committed, correct here because the whole operator set
+  # is registered before any target deploys. A deployment that mutates its set while rounds are
+  # in flight must exceed the round duration plus eigenlayer.sdk.blockStaleMeasure.
   noticeWindow: 0
 
   # Reuse an already-populated SchnorrStakeRegistry instead of deploying a fresh one. Its

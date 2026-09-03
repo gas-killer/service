@@ -91,10 +91,9 @@ spec:
               AVS_JSON=/app/.nodes/avs_deploy.json
               MARKER=/app/.nodes/.schnorr_operators_complete
 
-              # A second run without SCHNORR_STAKE_REGISTRY_ADDRESS deploys a FRESH registry and
-              # re-registers everyone, which orphans every target already wired to the old one.
-              # Recording the address is the binary's last step, so its presence means the whole
-              # phase succeeded. Set rerun.schnorrOperators and clear this key to force a rebuild.
+              # Without SCHNORR_STAKE_REGISTRY_ADDRESS a second run deploys a FRESH registry and
+              # re-registers everyone, orphaning every target wired to the old one. Recording the
+              # address is the binary's last step, so its presence means the phase succeeded.
               EXISTING=$(grep -o '"schnorrStakeRegistry"[[:space:]]*:[[:space:]]*"0x[0-9a-fA-F]*"' "$AVS_JSON" \
                 | head -1 | grep -o '0x[0-9a-fA-F]*' || true)
               if [ -n "$EXISTING" ]; then
@@ -106,8 +105,7 @@ spec:
               echo "[schnorr-operators] deploying SchnorrStakeRegistry and registering the operator set"
               setup_schnorr_operators
 
-              # Re-read rather than trust the exit code: the marker gates the deploy-target job,
-              # and a target deployed against a missing registry address fails far less legibly.
+              # Re-read rather than trust the exit code: the marker gates the deploy-target job.
               if ! grep -q '"schnorrStakeRegistry"' "$AVS_JSON"; then
                 echo "ERROR: setup_schnorr_operators finished without recording schnorrStakeRegistry" >&2
                 exit 1
@@ -138,8 +136,7 @@ spec:
                   name: {{ include "gas-killer.secret.fullname" . }}
                   key: {{ .Values.schnorr.deployerSecretKey | default "PRIVATE_KEY" }}
             # The registry's on-chain stake threshold, fixed at deployment. Shares its env vars
-            # with the router coordinator's local participation floor, so the two agree only
-            # while both read the same eigenlayer.sdk values.
+            # with the router coordinator's participation floor, so both read eigenlayer.sdk.
             - name: QUORUM_THRESHOLD
               value: {{ .Values.eigenlayer.sdk.quorumThreshold | quote }}
             - name: THRESHOLD_DENOMINATOR
