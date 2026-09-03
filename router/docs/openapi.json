@@ -84,7 +84,32 @@
                   "items": {
                     "$ref": "#/components/schemas/TaskView"
                   }
-                }
+                },
+                "example": [
+                  {
+                    "task_id": "9b2f7d41-6c3a-4e58-9d0b-1a4f8e2c7b33",
+                    "status": "queued",
+                    "created_at": 1753180845,
+                    "updated_at": 1753180845,
+                    "error": null,
+                    "payload": null
+                  },
+                  {
+                    "task_id": "3f8c1e02-9a4b-4c7d-8e1f-2b6a5c9d0e11",
+                    "status": "ready",
+                    "created_at": 1753180800,
+                    "updated_at": 1753180812,
+                    "error": null,
+                    "payload": {
+                      "to": "0x0000000000000000000000000000000000000001",
+                      "data": "0x93de4531000000000000000000000000000000000000000000000000000000000000002a",
+                      "value": "0x0",
+                      "chain_id": 11155111,
+                      "estimated_gas": 234000,
+                      "valid_until_block": 22345678
+                    }
+                  }
+                ]
               }
             }
           },

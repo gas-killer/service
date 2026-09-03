@@ -772,7 +772,7 @@ mod tests {
         }
 
         assert!(
-            checked >= 19,
+            checked >= 21,
             "only {checked} response examples were checked; the reference pages lost some"
         );
     }
@@ -788,12 +788,13 @@ mod tests {
         for (path, method, status) in [
             ("/tasks", "post", "202"),
             ("/tasks", "post", "200"),
+            ("/tasks", "get", "200"),
             ("/tasks/{task_id}", "get", "200"),
         ] {
+            let response = &published["paths"][path][method]["responses"][status];
+            let example = &response["content"]["application/json"]["example"];
             assert!(
-                published["paths"][path][method]["responses"][status]["content"]
-                    ["application/json"]["example"]
-                    .is_object(),
+                !example.is_null(),
                 "{method} {path} {status} has no example"
             );
         }
