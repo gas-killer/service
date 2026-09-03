@@ -75,30 +75,18 @@ spec:
               PROJECT="{{ required "secretManager.projectId is required when secretManager.enabled=true" .Values.secretManager.projectId }}"
               PREFIX="{{ .Values.secretManager.keyPrefix }}"
 
-              # Manifest of what this run actually backed up: one "<secret> <sha256> <owner>"
-              # line per file. Exported last, as ${PREFIX}-key-manifest, and read by a restore
-              # path to decide whether its restore is complete.
-              #
-              # `owner` names the job responsible for restoring that secret, because no single
-              # job restores all of them: the setup job handles the deployment JSON and the
-              # operator keys, while the router keypair is the generate-router-key job's, and the
-              # two run concurrently. A verifier checks only its own rows, so it cannot fail on
-              # material another job had not written yet.
-              #
-              # The manifest exists because "complete" is not a fixed list. A deployment that
-              # predates the secp256k1 export has no such secrets and is still whole; one created
-              # after it is not. Recording the set at backup time lets the restore tell those two
-              # apart instead of guessing, which is the check that was missing when this
-              # deployment silently came back with only its BLS keys.
+              # What this run backed up: "<secret> <sha256> <owner>" per file, published last as
+              # ${PREFIX}-key-manifest. A restore reads it to decide whether it restored
+              # everything. `owner` is the job that restores that secret; a verifier checks only
+              # its own rows, since the setup and generate-router-key jobs run concurrently.
               MANIFEST=$(mktemp)
 
               # Export a file to GCP Secret Manager, creating the secret if needed and always
               # adding a new version. This means re-runs (e.g. after a fresh helm install
               # that regenerated keys) will overwrite with the latest values.
               #
-              # The version is read back and compared before the file is recorded in the
-              # manifest. A backup nobody has read is not a backup, and a silent truncation here
-              # is unrecoverable: the volume is the only other copy.
+              # Read back and compared before being recorded, so the manifest lists only
+              # backups that have been verified end to end.
               export_secret() {
                 local name="$1"
                 local file="$2"
@@ -171,16 +159,14 @@ spec:
                 /app/.nodes/operator_keys/testacc{{ $nodeIndex }}.private.ecdsa.key.json
               {{- end }}
 
-              # Export router keypair. Owned by generate-router-key, which restores it from its
-              # own init container, so the setup job's completeness check must not expect it.
+              # Export router keypair, owned by generate-router-key, which restores it.
               export_secret "${PREFIX}-router-private-key" \
                 /app/.nodes/router_orchestrator.json router-key
               export_secret "${PREFIX}-router-public-key" \
                 /app/.nodes/public_orchestrator.json router-key
 
-              # Report any key material on the volume this job did not back up. The lists above
-              # are hard-coded per node index, so a file the setup container starts writing under
-              # a name nobody added here would be invisible until a volume rebuild lost it.
+              # Key files the exports above do not cover. They are hard-coded per node index, so
+              # anything else on the volume is lost on a rebuild.
               UNBACKED=0
               for f in /app/.nodes/operator_keys/*.json; do
                 [ -e "$f" ] || continue
@@ -194,9 +180,7 @@ spec:
                 echo "WARNING: ${UNBACKED} unbacked file(s); a volume rebuild would lose them" >&2
               fi
 
-              # The manifest goes last so it only ever describes a run that got this far. A
-              # restore trusts it to decide completeness, so a manifest written before the
-              # exports it lists would license exactly the partial restore this guards against.
+              # Published last: a manifest must never list an export that did not complete.
               gcloud secrets describe "${PREFIX}-key-manifest" --project="$PROJECT" &>/dev/null \
                 || gcloud secrets create "${PREFIX}-key-manifest" \
                      --project="$PROJECT" --replication-policy=automatic

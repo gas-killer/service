@@ -716,18 +716,13 @@ sharedData:
   storageClass: ""
   size: 1Gi
   accessMode: ReadWriteOnce
-  # Keep the claim when the release is uninstalled.
+  # Keep the claim when the release is uninstalled. This volume holds the operator key files,
+  # which exist nowhere else until the key-export job copies them to Secret Manager and cannot
+  # be regenerated, since their addresses are registered on chain.
   #
-  # This volume holds the operators' key files. The eigenlayer setup container generates them
-  # once with a live RNG, and until the key-export job copies them to Secret Manager they exist
-  # nowhere else. A lost operator key cannot be recovered, only replaced, and replacing one means
-  # re-registering the operator set on chain, so this volume is not reconstructible the way the
-  # journals and caches are.
-  #
-  # Same trade-off as router.persistence.retainOnUninstall: the claim outlives the release, so
-  # removing or resizing it takes an explicit `kubectl delete pvc`, and repeated install/uninstall
-  # cycles against one long-lived cluster accumulate a claim. Set false there, or delete by label
-  # as scripts/run_helm_test.sh does.
+  # Same trade-off as router.persistence.retainOnUninstall: removing or resizing the claim takes
+  # an explicit `kubectl delete pvc`, and repeated install/uninstall cycles against one cluster
+  # accumulate a claim. Set false there, or delete by label as scripts/run_helm_test.sh does.
   retainOnUninstall: true
 
 # =============================================================================

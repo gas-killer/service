@@ -4,18 +4,13 @@ metadata:
   name: {{ include "gas-killer.shareddata.fullname" . }}
   {{- if .Values.sharedData.retainOnUninstall }}
   annotations:
-    # Outlives `helm uninstall`. This volume holds the operators' BLS and secp256k1 key
-    # files, which the eigenlayer setup container generates once with a live RNG and which
-    # exist nowhere else until the key-export job copies them to Secret Manager. An operator
-    # whose key is lost cannot be recovered, only replaced: its address is registered on
-    # chain, so a new key means re-registering the operator set.
+    # Outlives `helm uninstall`. This volume holds the operator key files, which exist
+    # nowhere else until the key-export job copies them to Secret Manager and cannot be
+    # regenerated, since their addresses are registered on chain. Keeping the claim also
+    # makes the PV's reclaim policy moot: it is never released, so `Delete` never fires.
     #
-    # Keeping the claim also makes the PV's reclaim policy moot, since the volume is never
-    # released and `Delete` never fires. That matters here because the default GKE
-    # StorageClass reclaims on delete, so dropping the claim destroys the disk.
-    #
-    # The costs are the same as for the router's claim: removing the volume takes an
-    # explicit `kubectl delete pvc`, and resizing it becomes a manual delete.
+    # The volume then only goes away on an explicit `kubectl delete pvc`, and resizing it
+    # means deleting it first.
     "helm.sh/resource-policy": keep
   {{- end }}
   labels:

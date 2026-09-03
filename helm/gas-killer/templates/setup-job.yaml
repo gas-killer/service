@@ -94,7 +94,7 @@ spec:
               echo "Secret found and no existing restore target files were detected. Restoring state from Secret Manager..."
               mkdir -p /root/.nodes/operator_keys
 
-              # Every secret this run restores, as "<secret> <path>". Checked against the
+              # Every secret this run restores, as "<secret> <path>", checked against the
               # key-export job's manifest before the completion marker is written.
               RESTORED=$(mktemp)
 
@@ -158,17 +158,12 @@ spec:
               {{- end }}
               {{- end }}
 
-              # Completeness gate. The marker below tells eigenlayer-setup the volume is already
-              # populated, so it never regenerates anything, which makes a partial restore
-              # permanent rather than merely wrong. Verify against the manifest the key-export job
-              # recorded before claiming completeness.
-              #
-              # A manifest entry that was not restored, or that came back with different bytes,
-              # means the volume is missing key material that once existed. Operator keys are not
-              # reconstructible: the addresses are registered on chain, so replacing a key means
-              # re-registering the operator set. Failing here leaves .setup_complete absent, which
-              # keeps the volume in the "partial state" the guard above refuses to restore over,
-              # so the damage stays visible instead of being locked in.
+              # The marker below tells eigenlayer-setup the volume is populated, so it never
+              # regenerates. Verify the restore against the key-export job's manifest first: an
+              # entry that is missing, or whose bytes differ, means key material that once existed
+              # is gone, and operator keys cannot be regenerated because their addresses are
+              # registered on chain. Failing leaves the marker off, which keeps the volume in the
+              # partial state the guard above refuses to restore over.
               MANIFEST=$(mktemp)
               if gcloud secrets versions access latest \
                   --secret="${PREFIX}-key-manifest" --project="${PROJECT}" > "$MANIFEST" 2>/dev/null; then
@@ -176,15 +171,12 @@ spec:
                 CHECKED=0
                 while read -r secret want owner; do
                   [ -n "$secret" ] || continue
-                  # Only this job's rows. The router keypair belongs to generate-router-key,
-                  # which runs concurrently, so it may legitimately not be on the volume yet.
-                  # A manifest written before owners existed has an empty column; treat those
-                  # as this job's, which is what they were.
+                  # Only this job's rows; generate-router-key restores the rest and runs
+                  # concurrently. An empty owner predates the column and belongs to setup.
                   case "${owner:-setup}" in setup) ;; *) continue ;; esac
                   CHECKED=$((CHECKED + 1))
-                  # `|| true`: grep exits 1 when the secret was not restored, which is the
-                  # case this loop exists to report. Without it `set -e` aborts here and the
-                  # job fails silently, with the reason never reaching the log.
+                  # `|| true`: grep exits 1 for a secret that was not restored, which is the
+                  # case being reported. Without it `set -e` aborts before the message.
                   path=$(grep "^${secret} " "$RESTORED" | head -1 | cut -d" " -f2- || true)
                   if [ -z "$path" ] || [ ! -f "$path" ]; then
                     echo "ERROR: manifest lists ${secret} but this restore did not write it" >&2
@@ -207,8 +199,8 @@ spec:
                 fi
                 echo "Restore matches the key manifest (${CHECKED} entries owned by setup)."
               else
-                # Deployments that last exported before the manifest existed have none. Restoring
-                # is still the right move, but nothing can vouch for its completeness.
+                # A deployment whose last export predates the manifest has none, so completeness
+                # cannot be checked. Restoring is still correct.
                 echo "WARNING: no ${PREFIX}-key-manifest secret; cannot verify this restore is complete." >&2
                 echo "WARNING: re-run the key-export job to record one." >&2
               fi
