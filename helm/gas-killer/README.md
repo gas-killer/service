@@ -182,7 +182,13 @@ Three independent guards keep that from happening quietly:
 
 A deployment whose last export predates the manifest has none; the restore warns loudly and
 proceeds, since refusing would strand a volume that is probably fine. Re-run the key-export job
-to record one.
+to record one. Only a `NOT_FOUND` counts as absent: any other Secret Manager failure fails the
+job rather than falling through to the unverified path.
+
+When the gate fails it leaves the restored files on the volume without the marker, which the
+partial-state guard then refuses to restore over. Recovery is to fix the secrets, then delete
+`avs_deploy.json` and `operator_keys/` from the volume before retrying. The job's error output
+says so.
 
 ## Architecture
 

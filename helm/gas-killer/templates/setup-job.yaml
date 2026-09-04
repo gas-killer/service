@@ -164,9 +164,15 @@ spec:
               # is gone, and operator keys cannot be regenerated because their addresses are
               # registered on chain. Failing leaves the marker off, which keeps the volume in the
               # partial state the guard above refuses to restore over.
+              #
+              # Only NOT_FOUND means "no manifest". A permission or network failure here must not
+              # fall through to the unverified path, or a transient error licenses exactly the
+              # partial restore this checks for. Same classification the avs-deploy probe above
+              # uses: `2>&1 >file` captures stderr while stdout goes to the file.
               MANIFEST=$(mktemp)
-              if gcloud secrets versions access latest \
-                  --secret="${PREFIX}-key-manifest" --project="${PROJECT}" > "$MANIFEST" 2>/dev/null; then
+              MANIFEST_SECRET="${PREFIX}-key-manifest"
+              if manifest_error="$(gcloud secrets versions access latest \
+                  --secret="${MANIFEST_SECRET}" --project="${PROJECT}" 2>&1 >"$MANIFEST")"; then
                 MISSING=0
                 CHECKED=0
                 while read -r secret want owner; do
@@ -193,16 +199,24 @@ spec:
                 if [ "$MISSING" -gt 0 ]; then
                   echo "ERROR: ${MISSING} manifest entr(ies) unaccounted for; refusing to mark setup complete." >&2
                   echo "Marking it complete would tell eigenlayer-setup to skip, making the loss permanent." >&2
-                  echo "Check the ${PREFIX}-* secrets in project ${PROJECT} before retrying." >&2
+                  echo "Recovery: fix the ${PREFIX}-* secrets in project ${PROJECT}, then delete" >&2
+                  echo "avs_deploy.json and operator_keys/ from the shared volume before retrying." >&2
+                  echo "This run left them in place without the marker, and the partial-state guard" >&2
+                  echo "refuses to restore over that." >&2
                   rm -f "$MANIFEST" "$RESTORED"
                   exit 1
                 fi
                 echo "Restore matches the key manifest (${CHECKED} entries owned by setup)."
-              else
+              elif printf '%s\n' "${manifest_error}" | grep -Eqi '(^|[[:space:][:punct:]])NOT_FOUND([[:space:][:punct:]]|$)|not found'; then
                 # A deployment whose last export predates the manifest has none, so completeness
                 # cannot be checked. Restoring is still correct.
-                echo "WARNING: no ${PREFIX}-key-manifest secret; cannot verify this restore is complete." >&2
+                echo "WARNING: no ${MANIFEST_SECRET} secret; cannot verify this restore is complete." >&2
                 echo "WARNING: re-run the key-export job to record one." >&2
+              else
+                echo "ERROR: could not read ${MANIFEST_SECRET}: ${manifest_error}" >&2
+                echo "Refusing to mark setup complete without verifying the restore." >&2
+                rm -f "$MANIFEST" "$RESTORED"
+                exit 1
               fi
               rm -f "$MANIFEST" "$RESTORED"
 
