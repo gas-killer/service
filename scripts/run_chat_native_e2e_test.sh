@@ -31,6 +31,10 @@
 #   GK_SDK_REPO / GK_SDK_REF
 #   GK_CHAT_PROMPT_IDS / GK_CHAT_MAX_TOKENS / GK_CHAT_EXPECT
 #   GK_VERIFY_TIMEOUT_SECS  poll window for the applied transition (default 300)
+#   GK_E2E_NEGATIVE=1       negative leg: node-3 runs without the guest program
+#                           (docker-compose.gkvm-negative.yml); the round must land on
+#                           node-1 + node-2 alone and step 10d asserts node-3 refused at
+#                           the guest-VM gate and signed nothing
 
 set -e
 

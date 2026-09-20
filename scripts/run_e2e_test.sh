@@ -22,8 +22,17 @@ export ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 # executor with the consumer's guest program installed behind the gkvm precompile —
 # docker-compose.gkvm.yml layers that onto the base file for every compose call below,
 # cleanup included. The chain stays a vanilla anvil.
+#
+# GK_E2E_NEGATIVE=1 (chat-native only) adds the negative leg: node-3 runs WITHOUT the
+# guest program (docker-compose.gkvm-negative.yml). The round must still land on the
+# other two operators' signatures, and node-3 must have refused at the guest-VM gate
+# and signed nothing (step 10d).
 if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
-    export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml:docker-compose.gkvm.yml}"
+    if [ "${GK_E2E_NEGATIVE:-0}" = "1" ]; then
+        export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml:docker-compose.gkvm.yml:docker-compose.gkvm-negative.yml}"
+    else
+        export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml:docker-compose.gkvm.yml}"
+    fi
 fi
 
 # Track if test passed
@@ -500,6 +509,37 @@ if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ] && [ -n "$TX_HASH" 
         *"${GK_CHAT_EXPECT:-because native so operator stay native}"*) echo -e "${GREEN}✅ Answer matches the guest's reference generation${NC}" ;;
         *) echo -e "${RED}Answer does not contain expected substring '${GK_CHAT_EXPECT:-because native so operator stay native}'${NC}"; exit 1 ;;
     esac
+fi
+
+# Step 10d (chat-native negative leg only): the transition above landed WITHOUT node-3.
+# An operator without the guest program abstains — it refuses the task at the guest-VM
+# gate and never signs; it must not have produced a signature over anything else
+# either (the GkVmUnavailable revert transition is what a guest-less analysis yields).
+# The in-process version of this check, with the signatures themselves verified, is
+# node/tests/gkvm_abstain_quorum.rs.
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ] && [ "${GK_E2E_NEGATIVE:-0}" = "1" ]; then
+    echo -e "${YELLOW}Step 10d: Asserting node-3 (no guest program) abstained...${NC}"
+    NODE3_LOGS=$(docker compose logs node-3 2>/dev/null)
+    case "$NODE3_LOGS" in
+        *"guest-VM gate"*) ;;
+        *)
+            echo -e "${RED}node-3 never refused the task at the guest-VM gate${NC}"
+            exit 1
+            ;;
+    esac
+    case "$NODE3_LOGS" in
+        *"Generating signature for round"*|*"Sending signature for round"*)
+            echo -e "${RED}node-3 signed a round without the guest program installed${NC}"
+            exit 1
+            ;;
+    esac
+    for signer_node in node-1 node-2; do
+        if ! docker compose logs "$signer_node" 2>/dev/null | grep -q "Sending signature for round"; then
+            echo -e "${RED}$signer_node did not sign — the quorum was not the two operators with the program${NC}"
+            exit 1
+        fi
+    done
+    echo -e "${GREEN}✅ node-3 abstained; node-1 and node-2 carried the round${NC}"
 fi
 
 echo -e "${GREEN}✅ Test passed - Stack is up and the tracked transition completed successfully!${NC}"

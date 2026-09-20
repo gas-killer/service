@@ -4262,6 +4262,7 @@ dependencies = [
  "axum 0.7.9",
  "bytes",
  "clap",
+ "commonware-actor",
  "commonware-avs-core",
  "commonware-avs-eigenlayer",
  "commonware-avs-node",

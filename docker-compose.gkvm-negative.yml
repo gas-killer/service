@@ -1,0 +1,16 @@
+# UNBOUNDED_V3 negative leg: node-3 is an operator WITHOUT the guest program. Layer
+# it on top of the guest-VM override:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.gkvm.yml:docker-compose.gkvm-negative.yml
+#
+# (GK_E2E_NEGATIVE=1 scripts/run_chat_native_e2e_test.sh does exactly that). An empty
+# GK_GUEST_* value counts as unset, so node-3 starts with no guest VM while still
+# carrying the requiresGuestVm registry: it refuses the consumer's tasks at the
+# guest-VM gate and signs nothing. node-1 and node-2 meet the 2-of-3 quorum
+# threshold without it — the round degrades, it does not diverge.
+
+services:
+  node-3:
+    environment:
+      - GK_GUEST_PROGRAM=
+      - GK_GUEST_PROGRAM_HASH=
