@@ -4137,6 +4137,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=Rubydusa%2Fgkvm-m6-host#4865b090605bb02f36a167c2ca63a601c3f5f69d"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -4151,6 +4152,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=Rubydusa%2Fgkvm-m6-host#4865b090605bb02f36a167c2ca63a601c3f5f69d"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -4166,6 +4168,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=Rubydusa%2Fgkvm-m6-host#4865b090605bb02f36a167c2ca63a601c3f5f69d"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -4194,6 +4197,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-gkvm"
 version = "0.1.0"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=Rubydusa%2Fgkvm-m6-host#4865b090605bb02f36a167c2ca63a601c3f5f69d"
 dependencies = [
  "alloy-primitives",
  "anyhow",
@@ -4211,6 +4215,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=Rubydusa%2Fgkvm-m6-host#4865b090605bb02f36a167c2ca63a601c3f5f69d"
 dependencies = [
  "alloy",
  "alloy-eips",
