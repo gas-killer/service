@@ -14,7 +14,9 @@ use tracing::{debug, info, warn};
 
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
-use crate::local_exec_shim::{prefer_mmap_overlay, sim_executor_from_env};
+use crate::local_exec_shim::{
+    GkvmHost, gkvm_host_from_env, prefer_mmap_overlay, sim_executor_from_env,
+};
 use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
 use commonware_avs_router::wire;
@@ -164,6 +166,14 @@ pub struct GasKillerValidator {
     /// here 1:1 — see `gas_analyzer::LocalStateCache` docs). Always
     /// constructed (cheap, lazily populated) so flipping `GK_SIM_EXECUTOR`
     /// doesn't need a validator rebuild.
+    ///
+    /// UNBOUNDED_V3: also carries the operator's installed guest programs
+    /// and artifacts (`GK_GUEST_*`, see `local_exec_shim::gkvm_host_from_env`)
+    /// for the analyzer's gkvm precompile. Pinned-environment configuration
+    /// of a different kind than the fields above: an operator WITHOUT a
+    /// task's program does not diverge, it abstains (the analysis fails, no
+    /// payload is signed). What must agree is the bytes behind a given
+    /// `programHash`/`artifactRoot`, and the analyzer verifies those at load.
     local_state_cache: Arc<LocalStateCache>,
 }
 
@@ -410,6 +420,20 @@ fn overlay_files_from_env() -> Vec<(String, String, alloy::primitives::B256)> {
     specs
 }
 
+/// The local executor's state cache, carrying the operator's installed guest
+/// programs (`GK_GUEST_*`, UNBOUNDED_V3) when any are configured — see
+/// [`gkvm_host_from_env`] for the fail-loud rules. The cache is what every
+/// local analyzer entry point already receives, so the gkvm precompile is
+/// served on all of them (plain, overlay, multi-overlay) with no further
+/// plumbing.
+fn local_state_cache_from_env() -> Arc<LocalStateCache> {
+    let cache = LocalStateCache::default();
+    Arc::new(match gkvm_host_from_env(sim_executor_from_env()) {
+        Some(host) => cache.with_gkvm_host(host),
+        None => cache,
+    })
+}
+
 impl GasKillerValidator {
     /// Creates a new GasKillerValidator with multi-chain support.
     ///
@@ -486,7 +510,7 @@ impl GasKillerValidator {
                 }
                 executor
             },
-            local_state_cache: Arc::new(LocalStateCache::default()),
+            local_state_cache: local_state_cache_from_env(),
         })
     }
 
@@ -521,7 +545,7 @@ impl GasKillerValidator {
                 }
                 executor
             },
-            local_state_cache: Arc::new(LocalStateCache::default()),
+            local_state_cache: local_state_cache_from_env(),
         }
     }
 
@@ -552,7 +576,7 @@ impl GasKillerValidator {
                 }
                 executor
             },
-            local_state_cache: Arc::new(LocalStateCache::default()),
+            local_state_cache: local_state_cache_from_env(),
         }
     }
 
@@ -560,6 +584,20 @@ impl GasKillerValidator {
     pub fn with_validator_metrics(mut self, metrics: Arc<ValidatorMetrics>) -> Self {
         self.validator_metrics = Some(metrics);
         self
+    }
+
+    /// Installs `host` as the guest-program set behind the local executor's
+    /// gkvm precompile, replacing whatever `GK_GUEST_*` configured (and
+    /// starting from an empty local state cache — call this at construction).
+    /// For embedding and tests; operators configure through the environment.
+    pub fn with_gkvm_host(mut self, host: Arc<GkvmHost>) -> Self {
+        self.local_state_cache = Arc::new(LocalStateCache::default().with_gkvm_host(host));
+        self
+    }
+
+    /// The installed guest programs and artifacts, if any are configured.
+    pub fn gkvm_host(&self) -> Option<Arc<GkvmHost>> {
+        self.local_state_cache.gkvm_host()
     }
 
     /// Returns the RPC URL for the default chain
@@ -912,6 +950,18 @@ impl GasKillerValidator {
         // runtime is multi-threaded — `Handle::block_on` on a current-thread
         // runtime from inside `spawn_blocking` would deadlock, but that does
         // not apply to this runtime.
+        //
+        // UNBOUNDED_V3 (gkvm): a tracked function that calls the guest-VM
+        // precompile runs its guest INSIDE that same revm `transact` — one
+        // synchronous, single-threaded stretch per task (minutes for a
+        // flagship model, and up to ~2GB of guest memory), on the blocking
+        // pool and never on the 2-worker pool. The installed programs ride
+        // on `local_state_cache` (see `local_state_cache_from_env`), so all
+        // three local entry points below serve the precompile unchanged; the
+        // `Rpc` arm cannot (no guest VM behind `debug_traceCall`). A task
+        // whose program or artifact this operator has not installed fails
+        // here as an analyzer error — the operator abstains, it does not
+        // sign.
         let handle = tokio::runtime::Handle::current();
         let rpc_url = rpc_url.to_owned();
         let executor_cache = Arc::clone(&self.executor_cache);

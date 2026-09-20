@@ -69,3 +69,12 @@ tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 url = { version = "2.5.4", features = ["serde"] }
+
+# LOCAL-ONLY (UNBOUNDED_V3 M6, v3-campaign Blockers B9): the gkvm precompile
+# stack (gas-analyzer `Rubydusa/gkvm-m6-host`, stacked on ron/local-execution
+# @ 541c9e7) is not on origin yet, so the analyzer resolves from the SIBLING
+# CHECKOUT — which must sit on that branch. Once the stack is pushed: delete
+# this block and repoint the `gas-analyzer` line above at the pushed branch.
+# This block must not reach main.
+[patch."https://github.com/gas-killer/gas-analyzer"]
+gas-analyzer-evmsketch = { path = "../gas-analyzer/crates/evmsketch" }

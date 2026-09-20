@@ -22,10 +22,29 @@
 //! `call_to_encoded_state_updates_local_multi`: chunk addresses are derived
 //! per-manifest, so distinct models' address sets are disjoint and one
 //! composite lookup serves them all.
+//!
+//! UNBOUNDED_V3 (gkvm, gas-analyzer#197): under `GK_SIM_EXECUTOR=local` the
+//! analyzer also serves the guest-VM precompile. The operator installs guest
+//! programs and artifacts through the analyzer's own `GK_GUEST_PROGRAM[_N]` +
+//! `GK_GUEST_PROGRAM_HASH[_N]` / `GK_GUEST_ARTIFACT[_N]` +
+//! `GK_GUEST_ARTIFACT_ROOT[_N]` slots; [`gkvm_host_from_env`] loads and
+//! verifies them once at validator construction, and the validator hangs the
+//! resulting [`GkvmHost`] on its `LocalStateCache`, which every local entry
+//! point already receives — no new analyzer call. The guest VM does not
+//! exist under `rpc`: there the precompile address is an empty account, the
+//! consumer reverts `GkVmUnavailable`, and that revert is a signable
+//! transition the `local` operators do not produce — so `GK_GUEST_*` under
+//! `rpc` refuses to start.
+
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 
 pub use gas_analyzer::SimExecutor;
+// The gkvm config types, so the rest of the service names them from here.
+pub use gas_analyzer::{
+    ArtifactMountV3, GkVmMountError, GkvmHost, GkvmHostError, GuestProgramSet, LoadedGuestProgram,
+};
 
 /// Parses `GK_SIM_EXECUTOR` into a [`SimExecutor`]. Accepted values: `rpc`
 /// (default) and `local` (case-insensitive) — delegates to
@@ -76,5 +95,85 @@ pub fn prefer_mmap_overlay(executor: SimExecutor) -> bool {
             "false" | "0" => false,
             other => panic!("invalid GK_OVERLAY_MMAP {other:?}: expected \"true\" or \"false\""),
         },
+    }
+}
+
+/// Whether any `GK_GUEST_*` slot variable carries a value. Empty values are
+/// "unset", as for the overlay slots (Helm renders unset values as `""`).
+fn guest_vm_configured_from(mut vars: impl Iterator<Item = (String, String)>) -> bool {
+    vars.any(|(key, value)| key.starts_with("GK_GUEST_") && !value.trim().is_empty())
+}
+
+/// Loads the operator's installed guest programs and artifacts
+/// (`GK_GUEST_PROGRAM[_N]` / `GK_GUEST_ARTIFACT[_N]`, each with its committed
+/// hash/root) into a [`GkvmHost`] for the local executor. `None` when no
+/// `GK_GUEST_*` variable is set — the analyzer then fails any gkvm call as an
+/// environment error, so this operator abstains on guest-VM tasks instead of
+/// signing anything.
+///
+/// Every mounted artifact is served front to back
+/// ([`GkvmHost::with_sequential_schedules`]): the env slots carry no schedule
+/// and every shipped guest loads its artifacts once, sequentially. A guest
+/// that reads in another order traps deterministically — on every operator
+/// alike.
+///
+/// Panics, same fail-loud pattern as [`sim_executor_from_env`]: on a slot
+/// that is half-configured, unreadable, or whose bytes do not hash to the
+/// committed value (an operator running different bytes under the same
+/// commitment would sign divergent results); and on `GK_GUEST_*` under
+/// `GK_SIM_EXECUTOR=rpc`, where the guest VM does not exist and every
+/// guest-VM task would become a signed `GkVmUnavailable` revert transition.
+pub fn gkvm_host_from_env(executor: SimExecutor) -> Option<Arc<GkvmHost>> {
+    if !guest_vm_configured_from(std::env::vars()) {
+        return None;
+    }
+    assert!(
+        executor == SimExecutor::Local,
+        "GK_GUEST_* is configured but GK_SIM_EXECUTOR is {executor}: guest programs run only \
+         under GK_SIM_EXECUTOR=local (the rpc executor would sign GkVmUnavailable reverts)"
+    );
+    let host = GkvmHost::from_env()
+        .unwrap_or_else(|e| panic!("invalid GK_GUEST_* configuration: {e}"))
+        .with_sequential_schedules();
+    tracing::info!(
+        programs = ?host.programs().program_hashes(),
+        artifacts = ?host.programs().artifact_roots(),
+        "UNBOUNDED_V3: guest programs installed for the gkvm precompile"
+    );
+    Some(Arc::new(host))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Iterator<Item = (String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn test_guest_vm_configured_ignores_empty_and_unrelated_vars() {
+        assert!(!guest_vm_configured_from(vars(&[])));
+        assert!(!guest_vm_configured_from(vars(&[
+            ("GK_GUEST_PROGRAM", ""),
+            ("GK_GUEST_PROGRAM_HASH", "  "),
+            ("GK_SIM_EXECUTOR", "local"),
+            ("GK_OVERLAY_WEIGHTS", "/m/weights.bin"),
+        ])));
+        assert!(guest_vm_configured_from(vars(&[(
+            "GK_GUEST_PROGRAM",
+            "/g/answer.elf"
+        )])));
+        // A lone digest still counts: the analyzer then refuses the
+        // half-configured slot loudly instead of this operator silently
+        // abstaining.
+        assert!(guest_vm_configured_from(vars(&[(
+            "GK_GUEST_ARTIFACT_ROOT_2",
+            "0x00"
+        )])));
     }
 }
