@@ -15,7 +15,8 @@ use tracing::{debug, info, warn};
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
 use crate::local_exec_shim::{
-    GkvmHost, gkvm_host_from_env, prefer_mmap_overlay, sim_executor_from_env,
+    GkvmHost, GuestVmConsumers, gkvm_host_from_env, guest_vm_consumers_from_env,
+    prefer_mmap_overlay, sim_executor_from_env,
 };
 use crate::task_data::GasKillerTaskData;
 use commonware_avs_router::validator::ValidatorTrait;
@@ -175,6 +176,13 @@ pub struct GasKillerValidator {
     /// payload is signed). What must agree is the bytes behind a given
     /// `programHash`/`artifactRoot`, and the analyzer verifies those at load.
     local_state_cache: Arc<LocalStateCache>,
+    /// UNBOUNDED_V3 consumer registry (`GK_GUEST_VM_CONSUMERS`): consumers
+    /// whose tracked functions require the guest VM, with the program each
+    /// runs. `analyze_transaction` refuses such a consumer unless
+    /// `sim_executor == Local` and the program is installed — under `Rpc` the
+    /// analysis would otherwise succeed with the consumer's `GkVmUnavailable`
+    /// revert transition, a payload the `local` operators do not produce.
+    guest_vm_consumers: Arc<GuestVmConsumers>,
 }
 
 /// How often a validation blocked on an in-flight prewarm re-checks the digest
@@ -511,6 +519,7 @@ impl GasKillerValidator {
                 executor
             },
             local_state_cache: local_state_cache_from_env(),
+            guest_vm_consumers: guest_vm_consumers_from_env(),
         })
     }
 
@@ -546,6 +555,7 @@ impl GasKillerValidator {
                 executor
             },
             local_state_cache: local_state_cache_from_env(),
+            guest_vm_consumers: guest_vm_consumers_from_env(),
         }
     }
 
@@ -577,6 +587,7 @@ impl GasKillerValidator {
                 executor
             },
             local_state_cache: local_state_cache_from_env(),
+            guest_vm_consumers: guest_vm_consumers_from_env(),
         }
     }
 
@@ -598,6 +609,14 @@ impl GasKillerValidator {
     /// The installed guest programs and artifacts, if any are configured.
     pub fn gkvm_host(&self) -> Option<Arc<GkvmHost>> {
         self.local_state_cache.gkvm_host()
+    }
+
+    /// Replaces the guest-VM consumer registry `GK_GUEST_VM_CONSUMERS`
+    /// configured. For embedding and tests; operators configure through the
+    /// environment.
+    pub fn with_guest_vm_consumers(mut self, consumers: GuestVmConsumers) -> Self {
+        self.guest_vm_consumers = Arc::new(consumers);
+        self
     }
 
     /// Returns the RPC URL for the default chain
@@ -880,6 +899,21 @@ impl GasKillerValidator {
             call_data_len = call_data.len(),
             "Analyzing transaction at block"
         );
+
+        // UNBOUNDED_V3 `requiresGuestVm` gate, before any simulation: a
+        // registered guest-VM consumer is analyzed only when this operator
+        // runs the local executor with the consumer's program installed.
+        // Every analysis path (validation, prewarm, the router's creator)
+        // funnels through here, so an abstaining operator never holds a
+        // payload for the task — nothing to sign, nothing to cache.
+        if let Err(e) = self.guest_vm_consumers.check(
+            &contract_address,
+            self.sim_executor,
+            self.gkvm_host().as_deref(),
+        ) {
+            warn!(contract = %contract_address, block_height, "guest-VM gate: {e}");
+            return Err(e.context("guest-VM gate"));
+        }
 
         // Build transaction request
         let from = from_address.unwrap_or(alloy::primitives::Address::ZERO);

@@ -35,10 +35,20 @@
 //! consumer reverts `GkVmUnavailable`, and that revert is a signable
 //! transition the `local` operators do not produce — so `GK_GUEST_*` under
 //! `rpc` refuses to start.
+//!
+//! That refusal only protects an operator that configured `GK_GUEST_*`. The
+//! consumer registry ([`GuestVmConsumers`], `GK_GUEST_VM_CONSUMERS`) covers
+//! the rest: it names the consumers whose tracked functions need the guest VM
+//! (`requiresGuestVm`) and the program each one runs, and the validator
+//! analyzes such a consumer only when `executor == local ∧ program installed`
+//! — otherwise it abstains before any simulation, so the `GkVmUnavailable`
+//! revert transition is never computed, let alone signed.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use alloy::primitives::{Address, B256};
+use anyhow::{Result, anyhow, bail};
 
 pub use gas_analyzer::SimExecutor;
 // The gkvm config types, so the rest of the service names them from here.
@@ -143,6 +153,130 @@ pub fn gkvm_host_from_env(executor: SimExecutor) -> Option<Arc<GkvmHost>> {
     Some(Arc::new(host))
 }
 
+/// The consumer registry's `requiresGuestVm` bit: the consumers whose tracked
+/// functions call the gkvm precompile, each with the `programHash`(es) it
+/// runs. Read from `GK_GUEST_VM_CONSUMERS`.
+///
+/// Why a registry and not the analyzer's own abstain: under
+/// `GK_SIM_EXECUTOR=rpc` there is nothing to abstain — the precompile address
+/// is an empty account, the consumer reverts `GkVmUnavailable`, and the
+/// analysis SUCCEEDS with that revert's fallback transition, which competes
+/// with the honest quorum's result (the signed digest does not bind the
+/// environment). The registry is how such an operator learns, before
+/// simulating, that the task is not its to sign.
+///
+/// Pinned-environment configuration, shared by the router and every node. It
+/// can only make an operator abstain, never change a payload: a consumer
+/// missing from one operator's registry costs that operator the protection,
+/// not the quorum its agreement.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GuestVmConsumers(BTreeMap<Address, Vec<B256>>);
+
+impl GuestVmConsumers {
+    /// Parses `consumer=programHash` entries separated by commas and/or
+    /// whitespace. A consumer that runs several programs repeats its address,
+    /// one entry per program.
+    pub fn parse(raw: &str) -> Result<Self> {
+        let mut consumers: BTreeMap<Address, Vec<B256>> = BTreeMap::new();
+        for entry in raw
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|entry| !entry.is_empty())
+        {
+            let Some((consumer, program_hash)) = entry.split_once('=') else {
+                bail!("entry {entry:?}: expected <consumer address>=<programHash>");
+            };
+            let consumer: Address = consumer
+                .parse()
+                .map_err(|e| anyhow!("entry {entry:?}: invalid consumer address: {e}"))?;
+            let program_hash: B256 = program_hash
+                .parse()
+                .map_err(|e| anyhow!("entry {entry:?}: invalid programHash: {e}"))?;
+            let programs = consumers.entry(consumer).or_default();
+            if !programs.contains(&program_hash) {
+                programs.push(program_hash);
+            }
+        }
+        Ok(Self(consumers))
+    }
+
+    /// Registers `consumer` as requiring `program_hash`. For embedding and
+    /// tests; operators configure through the environment.
+    pub fn with_consumer(mut self, consumer: Address, program_hash: B256) -> Self {
+        let programs = self.0.entry(consumer).or_default();
+        if !programs.contains(&program_hash) {
+            programs.push(program_hash);
+        }
+        self
+    }
+
+    /// The programs `consumer` requires, or `None` when it is not registered
+    /// as a guest-VM consumer.
+    pub fn required_programs(&self, consumer: &Address) -> Option<&[B256]> {
+        self.0.get(consumer).map(Vec::as_slice)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The gate: `Ok` for an unregistered consumer; for a registered one only
+    /// when `executor == local` and every program it requires is installed in
+    /// `host`. An `Err` means this operator abstains on the task — it must
+    /// not simulate it, and has nothing to sign.
+    pub fn check(
+        &self,
+        consumer: &Address,
+        executor: SimExecutor,
+        host: Option<&GkvmHost>,
+    ) -> Result<()> {
+        let Some(required) = self.required_programs(consumer) else {
+            return Ok(());
+        };
+        if executor != SimExecutor::Local {
+            bail!(
+                "consumer {consumer} requires the guest VM but GK_SIM_EXECUTOR is {executor}: \
+                 abstaining (the {executor} executor would produce the GkVmUnavailable revert \
+                 transition)"
+            );
+        }
+        let Some(host) = host else {
+            bail!(
+                "consumer {consumer} requires the guest VM but no guest programs are \
+                 configured (GK_GUEST_PROGRAM): abstaining"
+            );
+        };
+        for program_hash in required {
+            if host.programs().program(program_hash).is_none() {
+                bail!(
+                    "consumer {consumer} requires guest program {program_hash}, which is not \
+                     installed on this operator: abstaining"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reads the guest-VM consumer registry from `GK_GUEST_VM_CONSUMERS` (empty
+/// or unset = no registered consumers). Panics on a malformed entry, same
+/// fail-loud pattern as [`sim_executor_from_env`]: a typo here would silently
+/// drop the gate for that consumer.
+pub fn guest_vm_consumers_from_env() -> Arc<GuestVmConsumers> {
+    let consumers = match std::env::var("GK_GUEST_VM_CONSUMERS") {
+        Err(_) => GuestVmConsumers::default(),
+        Ok(raw) => GuestVmConsumers::parse(&raw)
+            .unwrap_or_else(|e| panic!("invalid GK_GUEST_VM_CONSUMERS: {e}")),
+    };
+    if !consumers.is_empty() {
+        tracing::info!(
+            consumers = ?consumers.0,
+            "UNBOUNDED_V3: guest-VM consumers registered; each is analyzed only under \
+             GK_SIM_EXECUTOR=local with its program installed"
+        );
+    }
+    Arc::new(consumers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +309,79 @@ mod tests {
             "GK_GUEST_ARTIFACT_ROOT_2",
             "0x00"
         )])));
+    }
+
+    const CONSUMER: Address = Address::repeat_byte(0xc0);
+    const PROGRAM: B256 = B256::repeat_byte(0x11);
+    const OTHER_PROGRAM: B256 = B256::repeat_byte(0x22);
+
+    #[test]
+    fn test_guest_vm_consumers_parse() {
+        assert!(GuestVmConsumers::parse("").unwrap().is_empty());
+        assert!(GuestVmConsumers::parse(" ,\n").unwrap().is_empty());
+
+        let parsed = GuestVmConsumers::parse(&format!(
+            "{CONSUMER}={PROGRAM},\n  {CONSUMER}={OTHER_PROGRAM} {CONSUMER}={PROGRAM}"
+        ))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            GuestVmConsumers::default()
+                .with_consumer(CONSUMER, PROGRAM)
+                .with_consumer(CONSUMER, OTHER_PROGRAM)
+        );
+        assert_eq!(
+            parsed.required_programs(&CONSUMER),
+            Some(&[PROGRAM, OTHER_PROGRAM][..])
+        );
+        assert_eq!(parsed.required_programs(&Address::ZERO), None);
+
+        for malformed in [
+            format!("{CONSUMER}"),
+            format!("{CONSUMER}="),
+            format!("={PROGRAM}"),
+            format!("{CONSUMER}=0x1234"),
+            format!("0x1234={PROGRAM}"),
+            format!("{CONSUMER}={PROGRAM}={PROGRAM}"),
+        ] {
+            assert!(
+                GuestVmConsumers::parse(&malformed).is_err(),
+                "{malformed:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn test_guest_vm_gate_requires_local_executor_and_installed_program() {
+        let registry = GuestVmConsumers::default().with_consumer(CONSUMER, PROGRAM);
+        let empty_host = GkvmHost::new(GuestProgramSet::default());
+
+        // Unregistered consumers pass whatever the configuration.
+        for executor in [SimExecutor::Rpc, SimExecutor::Local] {
+            registry.check(&Address::ZERO, executor, None).unwrap();
+            GuestVmConsumers::default()
+                .check(&CONSUMER, executor, None)
+                .unwrap();
+        }
+
+        // Registered: rpc abstains even with a guest VM at hand ...
+        let err = registry
+            .check(&CONSUMER, SimExecutor::Rpc, Some(&empty_host))
+            .unwrap_err();
+        assert!(err.to_string().contains("GK_SIM_EXECUTOR is rpc"), "{err}");
+        // ... local abstains without a guest VM ...
+        let err = registry
+            .check(&CONSUMER, SimExecutor::Local, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no guest programs are configured"),
+            "{err}"
+        );
+        // ... and without the program. (The pass case needs a real ELF: see
+        // tests/gkvm_analysis.rs.)
+        let err = registry
+            .check(&CONSUMER, SimExecutor::Local, Some(&empty_host))
+            .unwrap_err();
+        assert!(err.to_string().contains("is not installed"), "{err}");
     }
 }

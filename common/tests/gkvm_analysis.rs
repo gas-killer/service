@@ -8,7 +8,11 @@
 //! the ffi shim (`fixtures/gkvm/parity_tasks.json`, written by
 //! gas-killer/solidity-sdk `make -C tools/gk parity`; the two ELFs are
 //! gas-analyzer's committed M1 guests). An operator WITHOUT the program gets
-//! an analysis error — it abstains, it never signs.
+//! an analysis error — it abstains, it never signs. An operator on the `rpc`
+//! executor does not get that error by itself (it would sign the consumer's
+//! `GkVmUnavailable` revert transition): the `requiresGuestVm` registry
+//! (`GK_GUEST_VM_CONSUMERS`) is what makes it abstain, and the last phase
+//! shows both halves.
 //!
 //! The chain node stays vanilla: anvil knows nothing about the precompile.
 //!
@@ -20,7 +24,7 @@ use std::sync::Arc;
 
 use alloy::primitives::{Address, B256, Bytes, address, keccak256};
 use alloy::providers::{Provider, ProviderBuilder};
-use gas_killer_common::local_exec_shim::{GkvmHost, GuestProgramSet};
+use gas_killer_common::local_exec_shim::{GkvmHost, GuestProgramSet, GuestVmConsumers};
 use gas_killer_common::validator::GasKillerValidator;
 
 const PARITY_TASKS: &str = include_str!("fixtures/gkvm/parity_tasks.json");
@@ -241,4 +245,139 @@ async fn installed_guest_programs_serve_gkvm_tasks_and_a_missing_one_abstains() 
         format!("{err:#}").contains("no guest programs are configured"),
         "{err:#}"
     );
+
+    // ---- the `requiresGuestVm` gate -----------------------------------------
+    // What it exists for: an operator on the rpc executor does NOT abstain by
+    // itself. The precompile address is an empty account behind
+    // `debug_traceCall`, the consumer reverts `GkVmUnavailable`, and the
+    // analysis succeeds with a payload the local operators never produce.
+    unsafe { std::env::set_var("GK_SIM_EXECUTOR", "rpc") };
+    let registry = GuestVmConsumers::default().with_consumer(CONSUMER, hello);
+    let ungated_rpc = GasKillerValidator::with_rpc_url(&anvil.url);
+    let divergent = ungated_rpc
+        .analyze_transaction(
+            &anvil.url,
+            CONSUMER,
+            &answered.calldata,
+            Some(CALLER),
+            None,
+            block_height,
+        )
+        .await
+        .expect("without the registry the rpc executor analyzes the task");
+    println!(
+        "rpc, ungated: a {}-byte payload (keccak {}) vs the local operators' {} bytes (keccak {})",
+        divergent.storage_updates.len(),
+        keccak256(&divergent.storage_updates),
+        answered.storage_updates.len(),
+        keccak256(&answered.storage_updates)
+    );
+    assert_ne!(
+        Bytes::from(divergent.storage_updates),
+        answered.storage_updates,
+        "the rpc executor has no guest VM: it cannot produce the local operators' payload"
+    );
+
+    // Registered, the same operator refuses before simulating anything.
+    let gated_rpc =
+        GasKillerValidator::with_rpc_url(&anvil.url).with_guest_vm_consumers(registry.clone());
+    let err = gated_rpc
+        .analyze_transaction(
+            &anvil.url,
+            CONSUMER,
+            &answered.calldata,
+            Some(CALLER),
+            None,
+            block_height,
+        )
+        .await
+        .expect_err("a registered guest-VM consumer must not be analyzed under rpc");
+    assert!(
+        format!("{err:#}").contains("guest-VM gate") && format!("{err:#}").contains("is rpc"),
+        "{err:#}"
+    );
+    // The gate is per consumer: the same code at an unregistered address is
+    // still analyzed (and still diverges — registration is what protects).
+    let unregistered = address!("0x00000000000000000000000000000000000050a2");
+    provider
+        .raw_request::<_, ()>(
+            "anvil_setCode".into(),
+            (unregistered, fixture.consumer_code.clone()),
+        )
+        .await
+        .expect("anvil_setCode");
+    let block_height = provider.get_block_number().await.expect("block number");
+    gated_rpc
+        .analyze_transaction(
+            &anvil.url,
+            unregistered,
+            &answered.calldata,
+            Some(CALLER),
+            None,
+            block_height,
+        )
+        .await
+        .expect("an unregistered consumer is not gated");
+
+    // Under local the gate asks for the consumer's program: read from the
+    // environment like an operator would configure it.
+    unsafe {
+        std::env::set_var("GK_SIM_EXECUTOR", "local");
+        std::env::set_var("GK_GUEST_PROGRAM", format!("{FIXTURE_DIR}/bench-c.elf"));
+        std::env::set_var("GK_GUEST_PROGRAM_HASH", bench.to_string());
+        std::env::set_var("GK_GUEST_VM_CONSUMERS", format!("{CONSUMER}={hello}"));
+    }
+    let wrong_program = GasKillerValidator::with_rpc_url(&anvil.url);
+    let err = wrong_program
+        .analyze_transaction(
+            &anvil.url,
+            CONSUMER,
+            &answered.calldata,
+            Some(CALLER),
+            None,
+            block_height,
+        )
+        .await
+        .expect_err("a local operator without the registered program must abstain");
+    assert!(
+        format!("{err:#}").contains("guest-VM gate")
+            && format!("{err:#}").contains(&hello.to_string()),
+        "{err:#}"
+    );
+    let host = wrong_program.gkvm_host().expect("bench-c is installed");
+    assert_eq!(
+        host.guest_runs(),
+        0,
+        "the gate refuses before anything runs"
+    );
+
+    unsafe {
+        std::env::set_var("GK_GUEST_PROGRAM", format!("{FIXTURE_DIR}/hello-c.elf"));
+        std::env::set_var("GK_GUEST_PROGRAM_HASH", hello.to_string());
+    }
+    let gated_local = GasKillerValidator::with_rpc_url(&anvil.url);
+    let analysis = gated_local
+        .analyze_transaction(
+            &anvil.url,
+            CONSUMER,
+            &answered.calldata,
+            Some(CALLER),
+            None,
+            block_height,
+        )
+        .await
+        .expect("registered consumer, local executor, program installed");
+    assert_eq!(
+        Bytes::from(analysis.storage_updates),
+        answered.storage_updates
+    );
+    unsafe {
+        for var in [
+            "GK_GUEST_PROGRAM",
+            "GK_GUEST_PROGRAM_HASH",
+            "GK_GUEST_VM_CONSUMERS",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
 }
