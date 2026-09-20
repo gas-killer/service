@@ -1,3 +1,4 @@
+{{- include "gas-killer.guestVm.validate" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -237,6 +238,13 @@ spec:
               mountPath: /overlay
         {{- end }}
 
+        {{- if include "gas-killer.guestVm.enabled" . }}
+        # UNBOUNDED_V3: download the guest programs / artifact bundles the gkvm
+        # precompile serves (verified by the service at startup). The router
+        # simulates too, so it installs the same set as every node.
+        {{- include "gas-killer.guestVm.initContainer" . | nindent 8 }}
+        {{- end }}
+
         {{- $routerDelay := mul (int .Values.global.nodeCount) (int .Values.node.startupDelaySecsPerNode) }}
         {{- if gt $routerDelay 0 }}
         # Stagger EigenSDK eth_getLogs backfill: router waits {{ $routerDelay }}s so it runs its
@@ -371,6 +379,18 @@ spec:
               value: {{ $model.manifest | quote }}
             {{- end }}
             {{- end }}
+            {{- if include "gas-killer.guestVm.enabled" . }}
+            # UNBOUNDED_V3 guest programs / artifacts (gkvm precompile), fetched
+            # by the fetch-guest-vm initContainer and hash-verified at startup.
+            # Pinned-env config shared by router and all nodes, like GK_SIM_PROFILE.
+            {{- include "gas-killer.guestVm.env" . | trim | nindent 12 }}
+            {{- end }}
+            {{- with include "gas-killer.guestVm.consumers" . }}
+            # requiresGuestVm consumer registry: registered consumers are analyzed
+            # only with the guest VM installed; otherwise the router refuses the task.
+            - name: GK_GUEST_VM_CONSUMERS
+              value: {{ . | quote }}
+            {{- end }}
             - name: DATA_DIR
               value: {{ .Values.router.persistence.mountPath | quote }}
             - name: INGRESS_TIMEOUT_MS
@@ -476,6 +496,11 @@ spec:
               mountPath: {{ .Values.overlay.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if include "gas-killer.guestVm.enabled" . }}
+            - name: guest-vm
+              mountPath: {{ .Values.global.guestMountPath }}
+              readOnly: true
+            {{- end }}
             - name: router-data
               mountPath: {{ .Values.router.persistence.mountPath }}
             {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
@@ -498,6 +523,10 @@ spec:
             claimName: {{ include "gas-killer.shareddata.fullname" . }}
         {{- if dig "enabled" false (.Values.overlay | default dict) }}
         - name: overlay-artifacts
+          emptyDir: {}
+        {{- end }}
+        {{- if include "gas-killer.guestVm.enabled" . }}
+        - name: guest-vm
           emptyDir: {}
         {{- end }}
         - name: router-data

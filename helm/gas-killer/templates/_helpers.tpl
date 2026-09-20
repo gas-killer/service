@@ -82,6 +82,155 @@ some operators honor it.
 {{- end }}
 
 {{/*
+UNBOUNDED_V3 guest VM (gkvm precompile): "true" when any guest program or
+artifact is configured. Router and every node render the same initContainer,
+env slots and mount from the same global lists, so they cannot disagree on
+the installed set.
+*/}}
+{{- define "gas-killer.guestVm.enabled" -}}
+{{- if or .Values.global.guestPrograms .Values.global.guestArtifacts -}}true{{- end -}}
+{{- end }}
+
+{{/*
+Validates global.guestPrograms / guestArtifacts / guestVmConsumers so a typo
+fails at `helm install` rather than crash-looping every pod on the binary's
+own startup panic (gkvm_host_from_env / guest_vm_consumers_from_env). Guest
+programs under simExecutor "rpc" are refused here for the same reason the
+binary refuses them: no guest VM exists behind debug_traceCall, so every
+guest-VM task would become a signed GkVmUnavailable revert transition.
+*/}}
+{{- define "gas-killer.guestVm.validate" -}}
+{{- $digest := "^0x[0-9a-fA-F]{64}$" -}}
+{{- $name := "^[A-Za-z0-9][A-Za-z0-9._-]*$" -}}
+{{- if and (include "gas-killer.guestVm.enabled" .) (ne (include "gas-killer.simExecutor" .) "local") -}}
+{{- fail "global.guestPrograms / global.guestArtifacts require global.simExecutor \"local\" (guest programs do not run under the rpc executor)" -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $i, $p := (.Values.global.guestPrograms | default list) -}}
+{{- if not (regexMatch $name ($p.name | default "")) -}}
+{{- fail (printf "global.guestPrograms[%d].name must match %s, got %q" $i $name ($p.name | default "")) -}}
+{{- end -}}
+{{- if hasKey $seen $p.name -}}
+{{- fail (printf "global.guestPrograms[%d].name %q is used twice" $i $p.name) -}}
+{{- end -}}
+{{- $_ := set $seen $p.name true -}}
+{{- if not $p.url -}}
+{{- fail (printf "global.guestPrograms[%d] (%s): url must be set" $i $p.name) -}}
+{{- end -}}
+{{- if not (regexMatch $digest ($p.programHash | default "")) -}}
+{{- fail (printf "global.guestPrograms[%d] (%s): programHash must be 0x + 64 hex digits, got %q" $i $p.name ($p.programHash | default "")) -}}
+{{- end -}}
+{{- end -}}
+{{- $seen = dict -}}
+{{- range $i, $a := (.Values.global.guestArtifacts | default list) -}}
+{{- if not (regexMatch $name ($a.name | default "")) -}}
+{{- fail (printf "global.guestArtifacts[%d].name must match %s, got %q" $i $name ($a.name | default "")) -}}
+{{- end -}}
+{{- if hasKey $seen $a.name -}}
+{{- fail (printf "global.guestArtifacts[%d].name %q is used twice" $i $a.name) -}}
+{{- end -}}
+{{- $_ := set $seen $a.name true -}}
+{{- if not $a.baseUrl -}}
+{{- fail (printf "global.guestArtifacts[%d] (%s): baseUrl must be set" $i $a.name) -}}
+{{- end -}}
+{{- if not $a.files -}}
+{{- fail (printf "global.guestArtifacts[%d] (%s): files must list the bundle's files in manifest order" $i $a.name) -}}
+{{- end -}}
+{{- range $f := $a.files -}}
+{{- if not (regexMatch $name $f) -}}
+{{- fail (printf "global.guestArtifacts[%d] (%s): file name must match %s, got %q" $i $a.name $name $f) -}}
+{{- end -}}
+{{- end -}}
+{{- if not (regexMatch $digest ($a.artifactRoot | default "")) -}}
+{{- fail (printf "global.guestArtifacts[%d] (%s): artifactRoot must be 0x + 64 hex digits, got %q" $i $a.name ($a.artifactRoot | default "")) -}}
+{{- end -}}
+{{- end -}}
+{{- range $i, $c := (.Values.global.guestVmConsumers | default list) -}}
+{{- if not (regexMatch "^0x[0-9a-fA-F]{40}$" ($c.consumer | default "")) -}}
+{{- fail (printf "global.guestVmConsumers[%d].consumer must be 0x + 40 hex digits, got %q" $i ($c.consumer | default "")) -}}
+{{- end -}}
+{{- if not (regexMatch $digest ($c.programHash | default "")) -}}
+{{- fail (printf "global.guestVmConsumers[%d].programHash must be 0x + 64 hex digits, got %q" $i ($c.programHash | default "")) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+initContainer downloading the guest programs and artifact bundles into the
+guest-vm emptyDir: programs to programs/<name>.elf, each bundle's files to
+artifacts/<name>/<file>. Integrity is enforced by the service itself: at
+startup it keccaks every program against GK_GUEST_PROGRAM_HASH[_N] and
+rebuilds every bundle's Merkle v3 root against GK_GUEST_ARTIFACT_ROOT[_N],
+and refuses to boot on a mismatch — a corrupted download cannot be served.
+*/}}
+{{- define "gas-killer.guestVm.initContainer" -}}
+- name: fetch-guest-vm
+  image: {{ .Values.global.guestDownloaderImage | quote }}
+  command:
+    - sh
+    - -c
+    - |
+      set -e
+      mkdir -p /guest/programs /guest/artifacts
+      {{- range $p := (.Values.global.guestPrograms | default list) }}
+      echo "Downloading guest program {{ $p.name }} ({{ $p.url }})..."
+      curl -fSL --retry 5 --retry-delay 10 -o "/guest/programs/{{ $p.name }}.elf" "{{ $p.url }}"
+      {{- end }}
+      {{- range $a := (.Values.global.guestArtifacts | default list) }}
+      mkdir -p "/guest/artifacts/{{ $a.name }}"
+      {{- range $f := $a.files }}
+      echo "Downloading guest artifact {{ $a.name }}/{{ $f }}..."
+      curl -fSL --retry 5 --retry-delay 10 -o "/guest/artifacts/{{ $a.name }}/{{ $f }}" "{{ $a.baseUrl }}/{{ $f }}"
+      {{- end }}
+      {{- end }}
+      echo "Guest programs and artifacts downloaded."
+  volumeMounts:
+    - name: guest-vm
+      mountPath: /guest
+{{- end }}
+
+{{/*
+GK_GUEST_PROGRAM[_N] / GK_GUEST_ARTIFACT[_N] env slots, in list order: the
+first entry takes the bare names, the rest _1, _2, ... without gaps
+(GuestProgramSet::from_env stops at the first missing slot). An artifact
+slot's path is the bundle's files joined with ":" in manifest order.
+*/}}
+{{- define "gas-killer.guestVm.env" -}}
+{{- $mount := .Values.global.guestMountPath -}}
+{{- range $i, $p := (.Values.global.guestPrograms | default list) }}
+{{- $slot := ternary "" (printf "_%d" $i) (eq $i 0) }}
+- name: GK_GUEST_PROGRAM{{ $slot }}
+  value: "{{ $mount }}/programs/{{ $p.name }}.elf"
+- name: GK_GUEST_PROGRAM_HASH{{ $slot }}
+  value: {{ $p.programHash | quote }}
+{{- end }}
+{{- range $i, $a := (.Values.global.guestArtifacts | default list) }}
+{{- $slot := ternary "" (printf "_%d" $i) (eq $i 0) }}
+{{- $paths := list }}
+{{- range $f := $a.files }}
+{{- $paths = append $paths (printf "%s/artifacts/%s/%s" $mount $a.name $f) }}
+{{- end }}
+- name: GK_GUEST_ARTIFACT{{ $slot }}
+  value: {{ join ":" $paths | quote }}
+- name: GK_GUEST_ARTIFACT_ROOT{{ $slot }}
+  value: {{ $a.artifactRoot | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
+GK_GUEST_VM_CONSUMERS: the requiresGuestVm consumer registry, rendered
+whatever the executor — it is what makes an operator WITHOUT the guest VM
+abstain instead of signing the GkVmUnavailable revert transition.
+*/}}
+{{- define "gas-killer.guestVm.consumers" -}}
+{{- $entries := list -}}
+{{- range $c := (.Values.global.guestVmConsumers | default list) -}}
+{{- $entries = append $entries (printf "%s=%s" $c.consumer $c.programHash) -}}
+{{- end -}}
+{{- join "," $entries -}}
+{{- end }}
+
+{{/*
 L1 service name
 */}}
 {{- define "gas-killer.l1.fullname" -}}

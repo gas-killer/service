@@ -1,0 +1,38 @@
+# UNBOUNDED_V3 guest-VM override for the compose harness. Layer it on the base file:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.gkvm.yml docker compose up -d
+#
+# (scripts/run_chat_native_e2e_test.sh does exactly that). Every operator and the
+# router run the local executor with the guest program staged in ./config/guest
+# (scripts/stage_guest_program.sh) installed behind the gkvm precompile — the ELF
+# is keccak'd against GK_GUEST_PROGRAM_HASH at startup and a mismatch refuses to
+# boot. GK_GUEST_VM_CONSUMERS is the requiresGuestVm registry; the harness fills
+# it after deploying the consumer, which is why the e2e starts the operators
+# only then. The chain (the `ethereum` anvil) is untouched: it has no guest VM,
+# and the consumer reverts GkVmUnavailable there.
+#
+# Set here rather than in .env because the host-side helpers read .env too, and
+# /app/guest/... is a container path.
+
+x-guest-vm-environment: &guest-vm-environment
+  - GK_SIM_EXECUTOR=local
+  - GK_GUEST_PROGRAM=/app/guest/${GK_E2E_GUEST_ELF:-answer.elf}
+  - GK_GUEST_PROGRAM_HASH=${GK_GUEST_PROGRAM_HASH:-}
+  - GK_GUEST_VM_CONSUMERS=${GK_GUEST_VM_CONSUMERS:-}
+
+x-guest-vm-volumes: &guest-vm-volumes
+  - ./config/guest:/app/guest:ro
+
+services:
+  node-1:
+    environment: *guest-vm-environment
+    volumes: *guest-vm-volumes
+  node-2:
+    environment: *guest-vm-environment
+    volumes: *guest-vm-volumes
+  node-3:
+    environment: *guest-vm-environment
+    volumes: *guest-vm-volumes
+  router:
+    environment: *guest-vm-environment
+    volumes: *guest-vm-volumes

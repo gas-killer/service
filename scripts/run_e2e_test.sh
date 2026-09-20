@@ -18,6 +18,14 @@ LOG_DIR="$PROJECT_ROOT/logs"
 # reads the same default for the router so the two stay in sync.
 export ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 
+# GK_E2E_CONSUMER=chat-native (UNBOUNDED_V3): the router and every node run the local
+# executor with the consumer's guest program installed behind the gkvm precompile —
+# docker-compose.gkvm.yml layers that onto the base file for every compose call below,
+# cleanup included. The chain stays a vanilla anvil.
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
+    export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml:docker-compose.gkvm.yml}"
+fi
+
 # Track if test passed
 TEST_PASSED=false
 
@@ -104,9 +112,28 @@ docker compose pull
 echo -e "${YELLOW}Step 4: Building service Docker images...${NC}"
 docker compose build
 
+# Step 4b (chat-native only): stage the guest program the operators install. The
+# staged image must hash to the PROGRAM_HASH the consumer's binding commits to; the
+# same hash is what every operator verifies the file against at startup.
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
+    echo -e "${YELLOW}Step 4b: Staging the chat-native guest program...${NC}"
+    GK_GUEST_PROGRAM_HASH=$(bash "$PROJECT_ROOT/scripts/stage_guest_program.sh" | tee /dev/stderr | grep '^GUEST_PROGRAM_HASH=' | cut -d= -f2)
+    if [ -z "$GK_GUEST_PROGRAM_HASH" ]; then
+        echo -e "${RED}guest program staging failed${NC}"
+        exit 1
+    fi
+    export GK_GUEST_PROGRAM_HASH
+fi
+
 # Step 5: Start Docker Compose services
 echo -e "${YELLOW}Step 5: Starting Docker Compose services...${NC}"
-docker compose up -d
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
+    # Chain + AVS setup only. The operators start in step 7c, once the consumer exists
+    # and can be entered in their registry (GK_GUEST_VM_CONSUMERS is read at startup).
+    docker compose up -d ethereum eigenlayer
+else
+    docker compose up -d
+fi
 
 # Show running containers
 docker compose ps
@@ -139,13 +166,37 @@ fi
 echo "Fixing file permissions..."
 sudo chmod -R 777 config/.nodes || chmod -R 777 config/.nodes
 
-# Give extra time for nodes to initialize
-echo "Waiting for nodes to initialize..."
-sleep 30
+# Give extra time for nodes to initialize (chat-native starts them in step 7c)
+if [ "${GK_E2E_CONSUMER:-array-summation}" != "chat-native" ]; then
+    echo "Waiting for nodes to initialize..."
+    sleep 30
+fi
 
 # Step 7: Deploy the Gas Killer consumer under test (GK_E2E_CONSUMER:
-# array-summation [default] or onchain-llm — the solidity-sdk LLM example).
-if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
+# array-summation [default], onchain-llm — the solidity-sdk LLM example, or
+# chat-native — the same chat consumer with the engine replaced by a guest program).
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
+    echo -e "${YELLOW}Step 7: Deploying Gas Killer native chat consumer (guest: answer.py)...${NC}"
+    # Load harness config for this branch (the Rust helpers read .env themselves)
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
+    export AVS_DEPLOYMENT_PATH="$PROJECT_ROOT/config/.nodes/avs_deploy.json"
+    CHAT_ADDRESS=$(bash "$PROJECT_ROOT/scripts/deploy_chat_native.sh" | tee /dev/stderr | grep '^CHAT_NATIVE_TARGET=' | cut -d= -f2)
+    if [ -z "$CHAT_ADDRESS" ]; then
+        echo -e "${RED}native chat consumer deployment failed${NC}"
+        exit 1
+    fi
+    echo "Discovered GasKillerChatNative address: $CHAT_ADDRESS"
+    export GAS_KILLER_TARGET_ADDRESS="$CHAT_ADDRESS"
+    # Default task = the sdk's "doc-vector" (test/fixtures/gkvm/native_tasks.json).
+    export GAS_KILLER_CALL_DATA=$(cast calldata "ask(uint256[],uint256)" "${GK_CHAT_PROMPT_IDS:-[9707,11,151644]}" "${GK_CHAT_MAX_TOKENS:-6}")
+    export GAS_KILLER_FROM_ADDRESS=$(cast wallet address --private-key "$PRIVATE_KEY")
+    export GAS_KILLER_TRANSITION_INDEX=auto
+    export GK_VERIFY_MODE=transition-count
+    export GK_VERIFY_TIMEOUT_SECS="${GK_VERIFY_TIMEOUT_SECS:-300}"
+elif [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
     echo -e "${YELLOW}Step 7: Deploying Gas Killer on-chain LLM consumer (stories260K)...${NC}"
     # Load harness config for this branch (the Rust helpers read .env themselves)
     set -a
@@ -215,7 +266,38 @@ fi
 # verifyAndUpdate tx (asserted after step 10). Requires the anvil service to run
 # with --disable-block-gas-limit (ANVIL_EXTRA_ARGS) so the estimate can complete.
 MAINNET_BLOCK_GAS_LIMIT=30000000
-if [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ] && [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
+    # Native consumers are unlandable for a different reason than gas: the gkvm
+    # precompile exists only inside the operators' simulation environment. On the chain —
+    # this vanilla anvil, like every real chain — the guest call finds an empty account
+    # and the consumer reverts GkVmUnavailable, at any gas limit.
+    echo -e "${YELLOW}Step 7a: Asserting direct ask() reverts GkVmUnavailable on the chain...${NC}"
+    UNAVAILABLE_SELECTOR=$(cast sig "GkVmUnavailable()")
+    if DIRECT_OUT=$(cast call "$GAS_KILLER_TARGET_ADDRESS" "ask(uint256[],uint256)(string)" \
+        "${GK_CHAT_PROMPT_IDS:-[9707,11,151644]}" "${GK_CHAT_MAX_TOKENS:-6}" \
+        --from "$GAS_KILLER_FROM_ADDRESS" --rpc-url http://localhost:8545 2>&1); then
+        echo -e "${RED}Direct ask() executed on the chain — expected GkVmUnavailable: $DIRECT_OUT${NC}"
+        exit 1
+    fi
+    case "$DIRECT_OUT" in
+        *GkVmUnavailable*|*"${UNAVAILABLE_SELECTOR#0x}"*) ;;
+        *)
+            echo -e "${RED}Direct ask() failed, but not with GkVmUnavailable ($UNAVAILABLE_SELECTOR): $DIRECT_OUT${NC}"
+            exit 1
+            ;;
+    esac
+    echo -e "${GREEN}✅ Direct execution reverts GkVmUnavailable — the guest runs only off-chain, proceeding with Gas Killer${NC}"
+
+    # Step 7c: start the operators with the consumer registered as a guest-VM consumer
+    # (requiresGuestVm): each analyzes its tasks only under the local executor with
+    # exactly this program installed, and abstains otherwise.
+    echo -e "${YELLOW}Step 7c: Starting router and nodes (guest VM installed, consumer registered)...${NC}"
+    export GK_GUEST_VM_CONSUMERS="${GAS_KILLER_TARGET_ADDRESS}=${GK_GUEST_PROGRAM_HASH}"
+    docker compose up -d
+    docker compose ps
+    echo "Waiting for nodes to initialize..."
+    sleep 30
+elif [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ] && [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
     echo -e "${YELLOW}Step 7a: Asserting direct tellStory() cannot execute within a mainnet block...${NC}"
     # A full estimate binary-searches a ~1.4B-gas call and exceeds cast's client
     # timeout; the sharper, cheap assertion is that a 30M-gas-capped call OOGs.
@@ -247,7 +329,7 @@ cd "$PROJECT_ROOT"
 
 # Step 7b: Verify the router's local payload hash matches the contract's getMessageHash
 # (builds an ArraySummation sum() payload; skipped for other consumers)
-if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ]; then
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ] || [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
     echo -e "${YELLOW}Step 7b: Skipped (ArraySummation-specific parity harness)${NC}"
 else
 echo -e "${YELLOW}Step 7b: Verifying message-hash parity (build_payload_hash vs on-chain getMessageHash)...${NC}"
@@ -351,13 +433,23 @@ if [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ]; then
     fi
     VU_GAS=$(cast receipt "$VU_TX_HASH" gasUsed --rpc-url http://localhost:8545)
     VU_GAS=$((VU_GAS))  # normalize possible hex to decimal
-    echo "verifyAndUpdate used $VU_GAS gas vs $DIRECT_GAS gas for direct execution"
+    if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
+        # No direct-execution gas figure exists to compare against: the guest cannot
+        # run on the chain at all (step 7a).
+        echo "verifyAndUpdate used $VU_GAS gas; direct execution reverts GkVmUnavailable"
+    else
+        echo "verifyAndUpdate used $VU_GAS gas vs $DIRECT_GAS gas for direct execution"
+    fi
     if [ "$VU_GAS" -ge "$MAINNET_BLOCK_GAS_LIMIT" ]; then
         echo -e "${RED}verifyAndUpdate unexpectedly used a full block's gas${NC}"
         exit 1
     fi
-    RATIO=$((DIRECT_GAS / VU_GAS))
-    echo -e "${GREEN}✅ Unbounded transition applied on-chain: ${VU_GAS} gas (direct execution: ${DIRECT_GAS} gas, ~${RATIO}x more) — above-block-limit compute, one small on-chain tx${NC}"
+    if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
+        echo -e "${GREEN}✅ Native transition applied on-chain: ${VU_GAS} gas — off-chain guest compute, one small on-chain tx${NC}"
+    else
+        RATIO=$((DIRECT_GAS / VU_GAS))
+        echo -e "${GREEN}✅ Unbounded transition applied on-chain: ${VU_GAS} gas (direct execution: ${DIRECT_GAS} gas, ~${RATIO}x more) — above-block-limit compute, one small on-chain tx${NC}"
+    fi
 fi
 
 # Print the execution trace of the successful verifyAndUpdate for inspection.
@@ -385,6 +477,28 @@ if [ "${GK_E2E_CONSUMER:-array-summation}" = "onchain-llm" ] && [ -n "$TX_HASH" 
     case "$STORY" in
         *"${GK_LLM_EXPECT:-Lily}"*) echo -e "${GREEN}✅ Story matches the expected reference generation${NC}" ;;
         *) echo -e "${RED}Story does not contain expected substring '${GK_LLM_EXPECT:-Lily}'${NC}"; exit 1 ;;
+    esac
+fi
+
+# Step 10c (chat-native only): decode the ChatAnswered event from the applied
+# verifyAndUpdate receipt and print the answer the quorum signed. The text was
+# computed by the guest program inside every operator's simulation environment;
+# the chain never ran it. The default expectation is the doc-vector's answer
+# (gk-run on the staged image reproduces it).
+if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ] && [ -n "$TX_HASH" ]; then
+    echo -e "${YELLOW}Step 10c: Decoding the quorum-signed answer...${NC}"
+    CHAT_TOPIC=$(cast keccak "ChatAnswered(uint256,bytes32,uint256[],string,uint256[])")
+    LOG_DATA=$(cast receipt "$TX_HASH" --json --rpc-url http://localhost:8545 | jq -r ".logs[] | select(.topics[0] == \"$CHAT_TOPIC\") | .data")
+    if [ -z "$LOG_DATA" ] || [ "$LOG_DATA" = "null" ]; then
+        echo -e "${RED}ChatAnswered event not found in the verifyAndUpdate receipt${NC}"
+        exit 1
+    fi
+    ANSWER=$(cast abi-decode "x()(uint256[],string,uint256[])" "$LOG_DATA" | sed -n 2p)
+    echo -e "${GREEN}💬 Native chat answer (prompt ids: ${GK_CHAT_PROMPT_IDS:-[9707,11,151644]}):${NC}"
+    echo "$ANSWER"
+    case "$ANSWER" in
+        *"${GK_CHAT_EXPECT:-because native so operator stay native}"*) echo -e "${GREEN}✅ Answer matches the guest's reference generation${NC}" ;;
+        *) echo -e "${RED}Answer does not contain expected substring '${GK_CHAT_EXPECT:-because native so operator stay native}'${NC}"; exit 1 ;;
     esac
 fi
 

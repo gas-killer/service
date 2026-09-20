@@ -89,6 +89,53 @@ global:
   prewarm:
     enabled: true
 
+  # UNBOUNDED_V3 guest programs (gkvm precompile): the native programs this
+  # deployment's operators run for guest-VM consumers. When any is listed, an
+  # initContainer on the router and every node downloads them into an emptyDir
+  # and the service installs them at startup (GK_GUEST_PROGRAM[_N] +
+  # GK_GUEST_PROGRAM_HASH[_N], in list order) — each ELF is keccak'd against
+  # its programHash and a mismatch refuses to boot. Requires simExecutor
+  # "local": no guest VM exists behind debug_traceCall (the chart and the
+  # binary both refuse the combination). Part of the pinned simulation
+  # environment like simProfile — a single global list, so router and nodes
+  # cannot disagree; an operator WITHOUT a program abstains on its tasks.
+  #
+  # guestPrograms:
+  #   - name: answer          # file name inside the pod: <guestMountPath>/programs/answer.elf
+  #     url: "https://github.com/<org>/<repo>/releases/download/<tag>/answer.elf"
+  #     programHash: "0x..."  # keccak256(elf) — the consumer's PROGRAM_HASH
+  guestPrograms: []
+  # Artifact bundles (Merkle v3) the guest programs read through
+  # gk_artifact_read — e.g. model weights. Same download flow; `files` is the
+  # bundle in MANIFEST ORDER (the root commits to the order), mounted as one
+  # GK_GUEST_ARTIFACT[_N] slot and verified at startup against artifactRoot
+  # (`gk-run --print-artifact-root --artifact <files,comma-separated>`).
+  # Artifacts are served front to back (the sequential schedule).
+  #
+  # guestArtifacts:
+  #   - name: qwen3-0.6b
+  #     baseUrl: "https://github.com/gas-killer/solidity-sdk/releases/download/qwen3-0.6b-onchain-v1"
+  #     files: ["weights.bin", "tokenizer.bin"]
+  #     artifactRoot: "0x..."  # the consumer's artifactRoot immutable
+  guestArtifacts: []
+  # Consumer registry (GK_GUEST_VM_CONSUMERS, the requiresGuestVm bit): the
+  # consumers whose tracked functions call the gkvm precompile, each with the
+  # programHash it runs (repeat the consumer for several programs). A
+  # registered consumer is analyzed only under simExecutor "local" with that
+  # program installed; any other operator abstains. Set it on EVERY
+  # deployment that may see these consumers' tasks, whatever its executor:
+  # without the entry an rpc-executor operator would sign the GkVmUnavailable
+  # revert as a transition competing with the quorum's.
+  #
+  # guestVmConsumers:
+  #   - consumer: "0x..."
+  #     programHash: "0x..."
+  guestVmConsumers: []
+  # Image used by the guest download initContainer (needs curl).
+  guestDownloaderImage: "curlimages/curl:8.10.1"
+  # Where programs/ and artifacts/ land inside the pods.
+  guestMountPath: /guest
+
 # Pinned code overlays (UNBOUNDED_V2, gas-analyzer docs/UNBOUNDED_OVERLAYS.md).
 # When enabled, an initContainer on the router and every node downloads the model
 # artifacts (weights + tokenizer) into an emptyDir, and the service mounts them

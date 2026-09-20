@@ -186,6 +186,12 @@ spec:
               mountPath: /overlay
         {{- end }}
 
+        {{- if include "gas-killer.guestVm.enabled" $root }}
+        # UNBOUNDED_V3: download the guest programs / artifact bundles the gkvm
+        # precompile serves (verified by the service at startup).
+        {{- include "gas-killer.guestVm.initContainer" $root | nindent 8 }}
+        {{- end }}
+
         {{- $delayPerNode := int $root.Values.node.startupDelaySecsPerNode }}
         {{- $nodeDelay := mul $i $delayPerNode }}
         {{- if gt $nodeDelay 0 }}
@@ -306,6 +312,18 @@ spec:
               value: {{ $model.manifest | quote }}
             {{- end }}
             {{- end }}
+            {{- if include "gas-killer.guestVm.enabled" $root }}
+            # UNBOUNDED_V3 guest programs / artifacts (gkvm precompile), fetched
+            # by the fetch-guest-vm initContainer and hash-verified at startup.
+            # Pinned-env config shared by router and all nodes, like GK_SIM_PROFILE.
+            {{- include "gas-killer.guestVm.env" $root | trim | nindent 12 }}
+            {{- end }}
+            {{- with include "gas-killer.guestVm.consumers" $root }}
+            # requiresGuestVm consumer registry: registered consumers are analyzed
+            # only with the guest VM installed; otherwise this operator abstains.
+            - name: GK_GUEST_VM_CONSUMERS
+              value: {{ . | quote }}
+            {{- end }}
             - name: AVS_DEPLOYMENT_PATH
               {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
               value: "/app/secrets/avs_deploy.json"
@@ -364,6 +382,11 @@ spec:
               mountPath: {{ $root.Values.overlay.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if include "gas-killer.guestVm.enabled" $root }}
+            - name: guest-vm
+              mountPath: {{ $root.Values.global.guestMountPath }}
+              readOnly: true
+            {{- end }}
             {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
             - name: node-secrets
               mountPath: /app/secrets
@@ -384,6 +407,10 @@ spec:
             claimName: {{ include "gas-killer.shareddata.fullname" $root }}
         {{- if dig "enabled" false ($root.Values.overlay | default dict) }}
         - name: overlay-artifacts
+          emptyDir: {}
+        {{- end }}
+        {{- if include "gas-killer.guestVm.enabled" $root }}
+        - name: guest-vm
           emptyDir: {}
         {{- end }}
         {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
