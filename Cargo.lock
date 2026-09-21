@@ -2252,7 +2252,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-bindings"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=RonTuretzky%2Fcontributor-survives-refusal#7c1f73ab76c5f075ee6c3d2051c03a8ef2daeab0"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -2267,7 +2267,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-core"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=RonTuretzky%2Fcontributor-survives-refusal#7c1f73ab76c5f075ee6c3d2051c03a8ef2daeab0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -2292,7 +2292,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-eigenlayer"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=RonTuretzky%2Fcontributor-survives-refusal#7c1f73ab76c5f075ee6c3d2051c03a8ef2daeab0"
 dependencies = [
  "alloy-primitives",
  "alloy-provider",
@@ -2310,7 +2310,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-node"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=RonTuretzky%2Fcontributor-survives-refusal#7c1f73ab76c5f075ee6c3d2051c03a8ef2daeab0"
 dependencies = [
  "alloy",
  "alloy-network",
@@ -2355,7 +2355,7 @@ dependencies = [
 [[package]]
 name = "commonware-avs-router"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/commonware-restaking#1a9716ce659d1fb9b3c53e8e1047b3df9a04e416"
+source = "git+https://github.com/BreadchainCoop/commonware-restaking?branch=RonTuretzky%2Fcontributor-survives-refusal#7c1f73ab76c5f075ee6c3d2051c03a8ef2daeab0"
 dependencies = [
  "alloy",
  "alloy-primitives",
