@@ -305,7 +305,11 @@ if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
     # exactly this program installed, and abstains otherwise.
     echo -e "${YELLOW}Step 7c: Starting router and nodes (guest VM installed, consumer registered)...${NC}"
     export GK_GUEST_VM_CONSUMERS="${GAS_KILLER_TARGET_ADDRESS}=${GK_GUEST_PROGRAM_HASH}"
-    docker compose up -d
+    # --no-deps: the operators depend on the one-shot `eigenlayer` setup container, which
+    # has already run and exited. A plain `up -d` starts it AGAIN, re-running the AVS
+    # setup against the live chain and moving the quorum state out from under the
+    # consumer deployed in step 7 — the settled round then reverts InvalidQuorumApkHash.
+    docker compose up -d --no-deps signer node-1 node-2 node-3 router
     docker compose ps
     echo "Waiting for nodes to initialize..."
     sleep 30
