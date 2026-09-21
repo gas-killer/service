@@ -29,9 +29,9 @@ export ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 # and signed nothing (step 10d).
 if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
     if [ "${GK_E2E_NEGATIVE:-0}" = "1" ]; then
-        export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml:docker-compose.gkvm.yml:docker-compose.gkvm-negative.yml}"
+        export COMPOSE_FILE="${COMPOSE_FILE:-$PROJECT_ROOT/docker-compose.yml:$PROJECT_ROOT/docker-compose.gkvm.yml:$PROJECT_ROOT/docker-compose.gkvm-negative.yml}"
     else
-        export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml:docker-compose.gkvm.yml}"
+        export COMPOSE_FILE="${COMPOSE_FILE:-$PROJECT_ROOT/docker-compose.yml:$PROJECT_ROOT/docker-compose.gkvm.yml}"
     fi
 fi
 
@@ -43,6 +43,9 @@ mkdir -p "$LOG_DIR"
 
 # Cleanup function
 cleanup() {
+    # `set -e` can fire while the script sits in scripts/ (the send_request step): compose
+    # must run from the project root or it finds no containers and the dump comes out empty.
+    cd "$PROJECT_ROOT" || true
     echo -e "${YELLOW}Cleaning up Docker containers...${NC}"
 
     # If test didn't pass, dump all container logs for debugging
@@ -435,7 +438,14 @@ docker compose logs --tail=50 router || true
 # unbounded-mode claim in one comparison: unbounded compute, O(1) on-chain state.
 if [ "${GK_SIM_PROFILE:-chain}" = "unbounded-v1" ]; then
     echo -e "${YELLOW}Step 10b: Asserting verifyAndUpdate landed far below the block gas limit...${NC}"
-    VU_TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -o "transaction_hash=0x[a-fA-F0-9]*" | sed 's/transaction_hash=//' | tail -1)
+    # The router logs the result only after it has the receipt, which can trail the state
+    # change this script just observed by a few polls — wait for the line, don't race it.
+    VU_TX_HASH=""
+    for _ in $(seq 1 30); do
+        VU_TX_HASH=$(docker compose logs router 2>/dev/null | grep "Contract execution result" | grep -o "transaction_hash=0x[a-fA-F0-9]*" | sed 's/transaction_hash=//' | tail -1)
+        [ -n "$VU_TX_HASH" ] && break
+        sleep 2
+    done
     if [ -z "$VU_TX_HASH" ]; then
         echo -e "${RED}Could not find the verifyAndUpdate transaction hash in router logs${NC}"
         exit 1
