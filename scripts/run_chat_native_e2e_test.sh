@@ -21,9 +21,7 @@
 #   - step 10c: decodes ChatAnswered from the applied receipt
 #
 # The simulation profile is unbounded-v1, the profile guest-VM consumers run under (the
-# precompile charges guest cycles as gas against the profile's budget). `chain` is not an
-# option with the local executor on an Osaka chain today: its default tx gas exceeds the
-# EIP-7825 cap and every analysis fails before any code runs.
+# precompile charges guest cycles as gas against the profile's budget).
 #
 # Knobs:
 #   GK_GUEST_ELF            prebuilt guest image (skips the docker guest build)

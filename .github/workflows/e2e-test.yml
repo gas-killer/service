@@ -1,11 +1,14 @@
 name: E2E Test
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
       - dev
       - staging
+      # UNBOUNDED_V3 (gkvm) stack: not PR'd against a branch listed below yet
+      - "*/gkvm-*"
   pull_request:
     branches:
       - main
@@ -224,4 +227,84 @@ jobs:
         with:
           name: e2e-test-llm-output
           path: e2e-test-output.log
+          retention-days: 1
+
+  e2e-test-chat-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create .env file
+        run: |
+          cp example.env .env
+          if grep -q '^FORK_URL=' .env; then
+            sed -i "s|^FORK_URL=.*|FORK_URL=${{ secrets.HTTP_RPC }}|" .env
+          else
+            echo "FORK_URL=${{ secrets.HTTP_RPC }}" >> .env
+          fi
+
+      # UNBOUNDED_V3: the consumer is GasKillerChatNative — its answer comes from a
+      # Python guest (answer.py) the operators run behind the gkvm precompile, which
+      # exists only in their simulation env. The chain stays vanilla: step 7a asserts a
+      # direct ask() reverts GkVmUnavailable, step 10c decodes ChatAnswered from the
+      # applied verifyAndUpdate receipt.
+      - name: Run test
+        run: bash ./scripts/run_chat_native_e2e_test.sh 2>&1 | tee e2e-test-output.log; exit ${PIPESTATUS[0]}
+
+      # One operator runs without the guest program: it must decline at the gate, sign
+      # nothing divergent, and the round must still settle on the others' quorum.
+      - name: Run negative test (an operator without the program abstains)
+        run: |
+          docker compose down -v || true
+          GK_E2E_NEGATIVE=1 bash ./scripts/run_chat_native_e2e_test.sh 2>&1 | tee e2e-negative-output.log; exit ${PIPESTATUS[0]}
+
+      - name: Show router logs
+        if: always()
+        run: |
+          echo "=== Router Logs ==="
+          docker compose logs router || true
+
+      - name: Upload test output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-chat-native-output
+          path: |
+            e2e-test-output.log
+            e2e-negative-output.log
           retention-days: 1

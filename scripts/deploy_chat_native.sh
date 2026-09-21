@@ -28,7 +28,7 @@ fi
 
 HTTP_RPC="${HTTP_RPC:-http://localhost:8545}"
 SDK_REPO="${GK_SDK_REPO:-https://github.com/gas-killer/solidity-sdk}"
-SDK_REF="${GK_SDK_REF:-Rubydusa/gkvm-m5-dx}"
+SDK_REF="${GK_SDK_REF:-RonTuretzky/gkvm-m5-dx}"
 SDK_DIR="${GK_SDK_DIR:-.gk-solidity-sdk-native}"
 
 : "${PRIVATE_KEY:?PRIVATE_KEY is required}"
