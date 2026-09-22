@@ -268,11 +268,11 @@ l1:
   service:
     type: ClusterIP
     port: 8545
-  # Sized for a LOCAL Anvil serving a test chain. Under l1.simFork.enabled this one pod runs
+  # Enough for a LOCAL Anvil serving a test chain. Under l1.simFork.enabled this one pod runs
   # every task's heavy simulation for the router and every node and caches forked state in
-  # memory, where a call above the block limit is CPU-bound — 2/4 CPU and 4/8Gi is the floor
-  # that path wants. A starved fork shows up as gas_killer_evmsketch_trace_fetch_seconds
-  # climbing rather than as an error.
+  # memory, where a call above the block limit is CPU-bound; that path wants 2/4 CPU and 4/8Gi.
+  # A starved fork shows up as gas_killer_evmsketch_trace_fetch_seconds climbing rather than as
+  # an error.
   resources:
     requests:
       memory: "1Gi"

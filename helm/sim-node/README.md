@@ -2,13 +2,13 @@
 
 A Sepolia full node (reth + lighthouse) that serves the Gas Killer fleet's `debug_traceCall` with
 the execution gas cap lifted. It is the endpoint `simRpc.url` points at in
-`helm/gas-killer/testnet-overrides.yaml`, and the reason `global.simProfile=unbounded` is truthful
-there: a hosted provider clamps `debug_traceCall` silently (service#442), and a clamped trace is
-indistinguishable from a real one downstream.
+`helm/gas-killer/testnet-overrides.yaml`, and what makes `global.simProfile=unbounded` truthful:
+a hosted provider clamps `debug_traceCall` silently, and a clamped trace is indistinguishable
+from a real one downstream.
 
-reth rather than geth: anvil is revm too, so callTracer/prestateTracer output stays digest-
-compatible with every e2e leg (gas-analyzer#178), and reth has neither geth's 5s default trace
-timeout nor its 30s HTTP write timeout.
+The client is reth because anvil is revm too, so callTracer and prestateTracer output stays
+digest-compatible with every e2e leg. geth orders callTracer logs differently, and carries a 5s
+default trace timeout and a 30s HTTP write timeout that a multi-minute trace runs into.
 
 The node is a consensus input for the fleet — every operator's `storage_updates` come from it — so
 the fleet reads exactly one of these. Two endpoints fork the quorum's digests.

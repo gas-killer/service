@@ -110,11 +110,11 @@ spec:
             - name: sim
               containerPort: {{ .Values.l1.simFork.refork.port }}
               protocol: TCP
-          # TCP rather than the /healthz round trip, which anvil cannot answer inside 5s while it
-          # is executing the multi-minute trace this path exists for — failing the probe would
-          # kill the only simulation endpoint mid-trace. The proxy binds its port only after anvil
-          # has answered once, so a connect already proves the fork is up. /healthz and /readyz
-          # stay for operators (they report the fork block and reset count).
+          # TCP: anvil cannot answer an RPC health check inside 5s while it executes a
+          # multi-minute trace, and a probe that fails there takes the only simulation endpoint
+          # down mid-trace. The proxy binds its port only after anvil has answered once, so a
+          # connect proves the fork is up. /healthz and /readyz serve operators, reporting the
+          # fork block and reset count.
           readinessProbe:
             tcpSocket:
               port: sim

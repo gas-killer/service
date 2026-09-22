@@ -440,9 +440,9 @@ helm upgrade --install gas-killer ./helm/gas-killer \
   --wait --timeout 15m
 ```
 
-`--wait` is what turns a pod the cluster refuses to schedule into a failed release rather than a
-green upgrade in front of a fleet pointed at nothing. See the note in `testnet-overrides.yaml` for
-what it costs.
+`--wait` fails the release when a workload does not become ready, rather than reporting success in
+front of a pod the cluster refuses to schedule. See the note in `testnet-overrides.yaml` for what
+it costs.
 
 ### Accessing Grafana
 
