@@ -22,6 +22,26 @@ global:
   # condition on the stateEncoding block in values.yaml.
   stateEncoding: "prestate-net"
 
+  # What this testnet exists to run: tracked functions whose direct execution exceeds a block.
+  # The profile changes the derived storage_updates and therefore the task digest, so the router
+  # and every node take it from one value and flip together — a partially migrated fleet fails
+  # quorum until it converges. Truthful only against a simulation endpoint whose execution cap is
+  # lifted, which is what simRpc.url below points at. Roll back with --set global.simProfile=chain.
+  simProfile: unbounded
+
+# The fleet's simulation endpoint (SIM_HTTP_RPC on the router and every node): the in-cluster
+# Sepolia reth from helm/sim-node, started with --rpc.gascap=max. Extraction and the EVMSketch gas
+# estimate go here; settlement, chain detection and stateTransitionCount stay on secrets.httpRpc,
+# so this node never sees a transaction. A hosted provider will not do — it clamps debug_traceCall
+# silently (service#442), and a clamped trace is indistinguishable from a real one downstream.
+#
+# Mutually exclusive with l1.simFork.enabled (the bundled anvil fork), which is the small-target
+# fallback: it refetches state from upstream on every re-fork, which never converges for a target
+# reading a 24k-chunk weight directory. Falling back is --set simRpc.url= --set
+# l1.simFork.enabled=true, and the node can stay up.
+simRpc:
+  url: http://sim-node:8545
+
 imagePullSecrets:
   - name: ghcr-pull-secret
 
@@ -67,8 +87,26 @@ monitoring:
       host: grafana-testnet.gaskiller.xyz
 
 router:
+  # A tracked call under `unbounded` is traced by the router and then again by every node, in
+  # series (service#449), and the trace runs at ~0.2 Ggas/s on the current sim node — the first
+  # quorum-signed inference spent 12.5 min in the router and 19.5 min across the nodes, ready at
+  # 1,924s. The stock 300s abandons that round long before the nodes can certify it. The ceiling
+  # on this and payloadBlockBuffer together is eigenlayer.sdk.blockStaleMeasure above: 300 blocks,
+  # ~60 min from the anchor block to settlement, inside which both phases have to fit.
+  # Normal tasks are unaffected; the cost is that a round which never reaches quorum blocks the
+  # queue for the full window.
+  roundTimeout: "2400"
+  # Blocks a rendered payload stays valid, raised alongside roundTimeout so a payload outlives the
+  # round that produced it. Coupled to admission: ingress.stalenessWindowBlocks derives as
+  # blockStaleMeasure - payloadBlockBuffer, so raising this to 250 narrows the accepted anchor
+  # window to 50 blocks — a task anchored more than ~10 min back is refused with 400 STALE_BLOCK.
+  payloadBlockBuffer: "250"
   ingress:
     timeoutMs: "0"
+    # The derived default is payloadBlockBuffer x 12s = 3000s, which a 1,924s round plus queueing
+    # can reach. Note this exceeds the payload's own validity window, so a task that goes ready in
+    # the last 600s of its TTL holds a payload the contract will no longer accept.
+    taskTtlSeconds: "3600"
 
 # The bridge mirrors EigenLayer operator state from L1 to L2, so it has nothing to do
 # on an L1-only testnet: bridge-to-l2.sh exits non-zero without an L2 RPC. Both keys

@@ -222,10 +222,9 @@ helm upgrade --install gas-killer ./helm/gas-killer \
   --set router.image.tag=router-<sha> \
   --set node.image.tag=node-<sha> \
   --set kube-prometheus-stack.grafana.adminPassword=<password> \
+  --set simRpc.url= \
   --set l1.simFork.enabled=true \
-  --set-string l1.extraArgs="--disable-block-gas-limit" \
-  --set l1.priorityClassName= \
-  --set global.simProfile=unbounded
+  --set-string l1.extraArgs="--disable-block-gas-limit"
 ```
 
 `--set-string` on `extraArgs` matters: `--set` reads the leading dashes as flags.
