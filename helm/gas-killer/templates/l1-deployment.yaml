@@ -110,15 +110,18 @@ spec:
             - name: sim
               containerPort: {{ .Values.l1.simFork.refork.port }}
               protocol: TCP
+          # TCP rather than the /healthz round trip, which anvil cannot answer inside 5s while it
+          # is executing the multi-minute trace this path exists for — failing the probe would
+          # kill the only simulation endpoint mid-trace. The proxy binds its port only after anvil
+          # has answered once, so a connect already proves the fork is up. /healthz and /readyz
+          # stay for operators (they report the fork block and reset count).
           readinessProbe:
-            httpGet:
-              path: /readyz
+            tcpSocket:
               port: sim
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: sim
             initialDelaySeconds: 30
             periodSeconds: 30
