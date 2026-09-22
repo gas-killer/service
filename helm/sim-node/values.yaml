@@ -35,6 +35,9 @@ reth:
       cpu: "7"
       memory: 26Gi
   # Sepolia full node was ~890 GB uncompressed from the 2026-09 snapshot; leave headroom.
+  # volumeClaimTemplates are immutable, so this size only applies to a PVC that does not exist
+  # yet: growing a live one is `kubectl edit pvc` plus `kubectl delete sts <name>
+  # --cascade=orphan` and a re-install, or the next upgrade is rejected outright.
   storage:
     className: premium-rwo
     size: 2Ti
@@ -63,6 +66,14 @@ lighthouse:
 # part is extracted over the base. Procedure: `--set replicas=0 --set snapshot.restore.enabled=true`
 # (the node must not be writing), wait for the Job, then `--set replicas=1 --set
 # snapshot.restore.enabled=false`. The Job wipes the datadir first. Match nodeVersion to reth.image.tag.
+#
+# Install at replicas=1 before restoring, even on a fresh cluster: the datadir PVC comes from the
+# StatefulSet's volumeClaimTemplate, so it exists only once the set has created pod 0, and the Job
+# mounts it by name. Restoring first leaves the Job pending on a PVC nothing has created.
+#
+# The archives are trusted as downloaded — no checksum is published to verify. A corrupt datadir
+# surfaces quickly rather than quietly, since reth recomputes the state root for each block it
+# syncs forward, but confirm the head matches a trusted RPC before pointing the fleet here.
 replicas: 1
 snapshot:
   restore:
