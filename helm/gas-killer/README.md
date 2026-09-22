@@ -177,10 +177,13 @@ Two things about the router bump in that command:
 - **The image tag carries the full 40-character commit SHA**, not an abbreviated one. The publish
   workflow tags `router-${{ github.sha }}`, so an abbreviated SHA is simply `not found` and the
   pod lands in `ErrImagePull`. Read the tag off the workflow run rather than composing it.
-- **The router's deployment strategy is `Recreate` with a 360s termination grace**, so any image
-  or env change drops the ingress rather than rolling it. Budget several minutes of downtime for
-  each router-affecting upgrade, and reset `rerun.schnorrOperators` to `false` afterwards so a
-  later unrelated upgrade does not trip over the kept Job.
+- **The router's deployment strategy is `Recreate` with a 30s termination grace**, so any image
+  or env change drops the ingress rather than rolling it. Budget that grace plus the router's
+  startup for each router-affecting upgrade. The grace is short because the binary runs as PID 1
+  and registers no SIGTERM handler: Linux discards unhandled signals at PID 1, so SIGKILL is what
+  stops the router either way and a longer window is idle time rather than a drain. Reset
+  `rerun.schnorrOperators` to `false` afterwards so a later unrelated upgrade does not trip over
+  the kept Job.
 
 | `schnorr.provision` | Deploys and publishes | Registers the operator set |
 |---|---|---|
@@ -243,7 +246,8 @@ orphans every target wired to the previous one. The job is otherwise install-onl
 | `schnorr.provision` | Provision the Schnorr scaffolding while the fleet signs another scheme: `""`, `registry` or `full`. Ignored under `signatureScheme=schnorr`. | `""` |
 | `schnorr.noticeWindow` | Blocks an operator-set change must be announced ahead of taking effect, fixed at registry deployment. `0` applies changes immediately, correct only when the set is registered before any target deploys. | `0` |
 | `schnorr.stakeRegistryAddress` | The registry this deployment uses. The operator-set job reuses it instead of deploying one, assuming its set is complete, so it submits no registrations; the router publishes it as `schnorrStakeRegistry` on `GET /avs-metadata` in either scheme. | `""` |
-| `schnorr.stageTimeoutSecs` | Per-stage timeout for the coordinator's rounds. Empty uses `min(5, ROUND_TIMEOUT/6)`. | `""` |
+| `schnorr.stageTimeoutSecs` | Nonce-collection timeout for the coordinator's rounds. Round 1 is message-independent, so this is a bare p2p round trip. Empty uses `min(5, ROUND_TIMEOUT/6)`. | `""` |
+| `schnorr.signStageTimeoutSecs` | Partial-signature collection timeout. This stage holds the signer's EVMSketch, so it must cover a full cold trace rather than a round trip. Empty uses `roundTimeout/2`. | `""` |
 | `schnorr.messagesPerSecond` | Per-peer rate on the schnorr channel, rendered into both the router and the nodes. The p2p sender silently drops over-rate messages, and a dropped round message costs a whole retry. Empty uses `64`. | `""` |
 
 The registry's on-chain threshold comes from `eigenlayer.sdk.quorumThreshold` /
