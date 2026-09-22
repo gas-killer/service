@@ -49,26 +49,6 @@ The setup job (`helm.sh/hook: post-install`) only runs on fresh installs, NOT on
 
 Kubernetes DNS labels are limited to 63 characters. If your release name is long, resource names may be truncated. The chart handles this automatically, but be aware that very long release names combined with component suffixes may result in truncated names.
 
-### Priority Classes
-
-The Ethereum (Anvil) pod uses `system-cluster-critical` priority class to ensure it stays running, as it holds critical blockchain state. Consider creating a custom priority class if you don't want to use system-reserved classes:
-
-```yaml
-apiVersion: scheduling.k8s.io/v1
-kind: PriorityClass
-metadata:
-  name: gas-killer-critical
-value: 1000000
-globalDefault: false
-description: "Priority class for Gas Killer critical components"
-```
-
-Then set in values:
-```yaml
-ethereum:
-  priorityClassName: gas-killer-critical
-```
-
 ### Node Readiness
 
 The current node readiness probe checks if the `gas-killer` process is running. For production deployments, consider implementing a proper health/readiness endpoint in the node application that verifies:
@@ -85,6 +65,27 @@ helm install gas-killer ./helm/gas-killer \
   --set global.initTimeout=600
 ```
 
+### Flipping the simulation profile
+
+`global.simProfile` changes the derived `storage_updates` and therefore the task digest, so the
+router and every node have to flip together. One value feeds both deployments, so a single
+`helm upgrade` does it — but this is not a rolling update. A partially migrated fleet fails
+quorum until it converges, and nothing reports that as an error.
+
+Confirm the fleet agrees before trusting it:
+
+```bash
+kubectl get pods -o json | jq -r '.items[].spec.containers[].env[]
+  | select(.name=="GK_SIM_PROFILE" or .name=="SIM_HTTP_RPC") | "\(.name)=\(.value)"' | sort | uniq -c
+```
+
+Every node plus the router should appear, with one distinct value each. Two values for either is
+a partial rollout.
+
+Then canary it with a task anchored at the live head (`block_height = 0` in a `run_scenario`
+file), which is what a real client does. One anchored by hand at the simulation fork's own block
+passes even when the re-fork proxy is broken.
+
 ## Configuration
 
 See `values.yaml` for all available configuration options.
@@ -98,7 +99,9 @@ See `values.yaml` for all available configuration options.
 | `global.initTimeout` | Init container timeout in seconds | `300` |
 | `global.simProfile` | Tracked-function simulation profile (`chain` or `unbounded`), shared by the router and every node so their signed payloads agree. `unbounded` simulates under the pinned unbounded gas limits, allowing functions whose direct execution exceeds the block gas limit; it needs the RPC's execution cap lifted and pairs with `global.stateEncoding=prestate-net`. **Not production-ready — see the preconditions in `values.yaml` and gas-killer/service#356.** | `chain` |
 | `global.localAnvilUnboundedReady` | Confirms the ethereum image starts Anvil with `--disable-block-gas-limit`. An escape hatch for an image that bakes the flag in; prefer `l1.extraArgs`, which the chart can set directly. | `false` |
+| `simRpc.url` | Explicit simulation endpoint for the router and every node (`SIM_HTTP_RPC`), e.g. `http://sim-node:8545` from `helm/sim-node`. Settlement stays on `secrets.httpRpc`. Mutually exclusive with `l1.simFork.enabled`; the endpoint's gas cap is the operator's responsibility (`reth --rpc.gascap=max`). | `""` |
 | `l1.simFork.enabled` | Runs the bundled Anvil as a **simulation fork** beside an external chain RPC, and points the router and every node at it via `SIM_HTTP_RPC`. Settlement and chain reads stay on `secrets.httpRpc`, so the fork never sees a transaction. This is what makes `global.simProfile=unbounded` usable against a hosted provider, whose `debug_traceCall` cap is clamped silently. Requires `secrets.forkUrl`. | `false` |
+| `l1.simFork.refork.enabled` | Runs a sidecar (`files/refork-proxy.py`) between `SIM_HTTP_RPC` and Anvil that re-forks to the block each request asks for. Anvil forks at one block and never follows the chain, while tasks are simulated at their anchor block (the head at submission), so without this every head-anchored task fails with `BlockOutOfRangeError`. Requests at the fork's current block pass through; a reset drains in-flight traces first. | `true` |
 | `l1.extraArgs` | Appended to the bundled Anvil's command line (`ANVIL_EXTRA_ARGS`). `--disable-block-gas-limit` is required whenever `global.simProfile=unbounded` runs against a chart-managed Anvil — rendering fails otherwise. | `""` |
 | `secrets.forkUrl` | Anvil fork URL (required for LOCAL mode) | `""` |
 | `secrets.privateKey` | Deployer private key | `""` |
@@ -433,8 +436,13 @@ helm upgrade --install gas-killer ./helm/gas-killer \
   --set secrets.l2HttpRpc=https://... \
   --set router.image.tag=router-<sha> \
   --set node.image.tag=node-<sha> \
-  --set kube-prometheus-stack.grafana.adminPassword=<password>
+  --set kube-prometheus-stack.grafana.adminPassword=<password> \
+  --wait --timeout 15m
 ```
+
+`--wait` fails the release when a workload does not become ready, rather than reporting success in
+front of a pod the cluster refuses to schedule. See the note in `testnet-overrides.yaml` for what
+it costs.
 
 ### Accessing Grafana
 
