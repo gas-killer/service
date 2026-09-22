@@ -66,7 +66,12 @@ export GK_SIM_PROFILE=unbounded-v1
 export ANVIL_EXTRA_ARGS=
 export GK_E2E_CONSUMER=chat-native
 if [ "${GK_E2E_GUEST:-answer}" = "qwen" ]; then
-    # four operators (router + 3 nodes) each load 597 MB of weights and run ~5.5e10 cycles
+    # Four operators (router + 3 nodes) each load 597 MB of weights and run ~5.5e10 cycles:
+    # ~40-55 s per operator on a CI runner, past the router's default 30 s round timeout
+    # (the first run: all three nodes signed one digest, 41-55 s after Start, and the
+    # router had already closed the round). Same knob the LLM e2e raises.
+    set_env_var ROUND_TIMEOUT "${ROUND_TIMEOUT:-300}"
+    export ROUND_TIMEOUT="${ROUND_TIMEOUT:-300}"
     export GK_VERIFY_TIMEOUT_SECS="${GK_VERIFY_TIMEOUT_SECS:-900}"
 else
     export GK_VERIFY_TIMEOUT_SECS="${GK_VERIFY_TIMEOUT_SECS:-300}"
