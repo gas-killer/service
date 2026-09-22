@@ -259,10 +259,11 @@ l1:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: latest
     pullPolicy: IfNotPresent
-  # Priority class for L1 pod - it holds critical blockchain state
-  # Consider creating a custom priority class instead of using system-cluster-critical
-  # See README.md for details
-  priorityClassName: "system-cluster-critical"
+  # Priority class for the L1 pod. Empty because GKE admits system-cluster-critical only in
+  # kube-system: anywhere else the ReplicaSet creates no pod while `helm upgrade` reports success,
+  # so the router and every node flip to a simulation fork that does not exist. Set a class the
+  # namespace can actually use (see README.md), not a system-reserved one.
+  priorityClassName: ""
   service:
     type: ClusterIP
     port: 8545

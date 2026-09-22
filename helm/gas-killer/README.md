@@ -51,7 +51,7 @@ Kubernetes DNS labels are limited to 63 characters. If your release name is long
 
 ### Priority Classes
 
-The Ethereum (Anvil) pod uses `system-cluster-critical` priority class to ensure it stays running, as it holds critical blockchain state. Consider creating a custom priority class if you don't want to use system-reserved classes:
+The L1 (Anvil) pod runs with no priority class. `system-cluster-critical` looks right for a pod holding chain state, but GKE admits it only in `kube-system` — elsewhere the ReplicaSet never creates a pod, `helm upgrade` still reports success, and under `l1.simFork.enabled` the fleet flips to a fork that is not there. Give it a class of your own instead:
 
 ```yaml
 apiVersion: scheduling.k8s.io/v1
@@ -65,7 +65,7 @@ description: "Priority class for Gas Killer critical components"
 
 Then set in values:
 ```yaml
-ethereum:
+l1:
   priorityClassName: gas-killer-critical
 ```
 
