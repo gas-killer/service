@@ -49,16 +49,6 @@ The setup job (`helm.sh/hook: post-install`) only runs on fresh installs, NOT on
 
 Kubernetes DNS labels are limited to 63 characters. If your release name is long, resource names may be truncated. The chart handles this automatically, but be aware that very long release names combined with component suffixes may result in truncated names.
 
-### Priority Classes
-
-The L1 (Anvil) pod runs with no priority class: it schedules and is evicted like any other
-workload. Priority is cluster policy rather than something a chart should assume, and the failure
-mode of assuming wrong is quiet — a class the namespace is not allowed to use is refused when the
-ReplicaSet creates the pod, not when Helm applies the Deployment, so the release reports success in
-front of a workload that never starts.
-
-If your cluster policy calls for one, `l1.priorityClassName` takes the name of a class you manage.
-
 ### Node Readiness
 
 The current node readiness probe checks if the `gas-killer` process is running. For production deployments, consider implementing a proper health/readiness endpoint in the node application that verifies:
