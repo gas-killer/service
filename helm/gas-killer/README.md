@@ -65,6 +65,27 @@ helm install gas-killer ./helm/gas-killer \
   --set global.initTimeout=600
 ```
 
+### Flipping the simulation profile
+
+`global.simProfile` changes the derived `storage_updates` and therefore the task digest, so the
+router and every node have to flip together. One value feeds both deployments, so a single
+`helm upgrade` does it — but this is not a rolling update. A partially migrated fleet fails
+quorum until it converges, and nothing reports that as an error.
+
+Confirm the fleet agrees before trusting it:
+
+```bash
+kubectl get pods -o json | jq -r '.items[].spec.containers[].env[]
+  | select(.name=="GK_SIM_PROFILE" or .name=="SIM_HTTP_RPC") | "\(.name)=\(.value)"' | sort | uniq -c
+```
+
+Every node plus the router should appear, with one distinct value each. Two values for either is
+a partial rollout.
+
+Then canary it with a task anchored at the live head (`block_height = 0` in a `run_scenario`
+file), which is what a real client does. One anchored by hand at the simulation fork's own block
+passes even when the re-fork proxy is broken.
+
 ## Configuration
 
 See `values.yaml` for all available configuration options.
