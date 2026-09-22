@@ -455,21 +455,16 @@ router:
   # Max seconds the router waits for operator signatures on a round before abandoning
   # it and moving to the next queued task. The orchestrator submits immediately once
   # the signature threshold is reached, so this is a stalled-round recovery window,
-  # not a throttle. Must comfortably exceed worst-case node compute + sign time:
-  # a signer runs a full EVMSketch before it will sign, and directory-mode LLM calls
-  # trace for tens of minutes. The cost of a larger value is that a round which never
-  # reaches quorum blocks the task queue for the full window. In schnorr mode this is
-  # also the base for the coordinator's partial-collection deadline
-  # (schnorr.signStageTimeoutSecs, default roundTimeout/2), so the stage holding that
-  # compute scales with this value. A longer round also leaves the analysis staler by the time
-  # it settles: staleness at settlement is the admission age (ingress.stalenessWindowBlocks)
-  # plus this window, and a stale analysis resolves as a transition-index mismatch re-request
-  # rather than a settled payload. eigenlayer.sdk.blockStaleMeasure does not bound this window —
-  # it bounds the operator-set reference block, which both the BLS and schnorr paths pick fresh
-  # at submit time. Stays below ingress.taskTtlSeconds, which bounds how long a task queued
-  # behind this round survives. Tune against gas_killer_p2p_round_trip_seconds and the
-  # round-timeout panel in the Grafana dashboard.
-  roundTimeout: "1800"
+  # not a throttle. Must comfortably exceed worst-case node compute + sign time
+  # (production transactions can take several minutes of EVMSketch compute); the cost
+  # of a larger value is that a round that never reaches quorum blocks the task queue
+  # for the full window. In schnorr mode it is also the base for the coordinator's
+  # partial-collection deadline (schnorr.signStageTimeoutSecs, default roundTimeout/2),
+  # so the stage that holds node compute scales with this value. Keep it below
+  # ingress.taskTtlSeconds, which bounds how long a task queued behind this round
+  # survives. Tune against gas_killer_p2p_round_trip_seconds and the round-timeout
+  # panel in the Grafana dashboard.
+  roundTimeout: "300"
   # How often (in seconds) the router re-sends the TaskDirective (Announce, then Skip
   # after roundTimeout) for an in-flight height. Under the aggregation engine,
   # rebroadcast-until-certified is a liveness requirement: a node that misses every
@@ -538,18 +533,11 @@ router:
     # gas_killer_tasks_expired_total — sustained expiries mean the queue is not draining ahead of
     # the staleness window (TASK_TTL_SECONDS). Restart recovery settles separately, under
     # gas_killer_tasks_expired_at_requeue_total.
-    # Must exceed router.roundTimeout. The router runs exactly one round at a time and a queued
-    # task ages from the moment it was accepted, so a TTL below the round window expires every
-    # task waiting behind the round in front of it, unreached. The router's own default (600s,
-    # the wall-clock life of a rendered payload at the stock payloadBlockBuffer) is below the
-    # round window this chart sets, so the value is explicit here rather than left empty.
-    #
-    # The ceiling on this plus roundTimeout together is eigenlayer.sdk.blockStaleMeasure: queue
-    # wait, round and settlement all anchor off the task's block_height, so queue depth past that
-    # budget only holds work that can no longer produce a payload the contract accepts. Watch
-    # gas_killer_tasks_expired_total. On a target chain with faster blocks the payload window is
-    # proportionally shorter and this comes down with it.
-    taskTtlSeconds: "2400"
+    # Leave empty to use the router's own default, which is sized to the wall-clock life of a
+    # rendered payload on L1 (payloadBlockBuffer blocks x 12s = 600s at the stock buffer) so the
+    # sweep never withdraws a payload the chain would still accept. Set a shorter value only for a
+    # target chain with faster blocks, where the payload window is proportionally shorter.
+    taskTtlSeconds: ""
     # How far behind the target chain's head a submitted block_height may be and still be admitted;
     # past it POST /tasks returns 400 STALE_BLOCK. The analysis is anchored at that block, and both
     # the aggregation round and the rendered payload's validity window have to fit in what is left
