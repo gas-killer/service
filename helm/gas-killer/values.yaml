@@ -738,8 +738,10 @@ schnorr:
   # binary's default of roundTimeout/2. This stage holds the node's EVMSketch — a signer resolves
   # the announced task's digest locally before it will produce a partial — so it has to cover a
   # full cold trace rather than a p2p round trip. Half a round rather than the whole one keeps a
-  # retry in budget: a dropped signing-round message costs an attempt, and the node's digest cache
-  # is warm by then, so the retry resolves from cache and is cheap.
+  # retry in budget, but the two retry cases differ: a retry after a dropped signing-round message
+  # resolves from the node's digest cache and is cheap, while a retry after the stage ran to its
+  # deadline leaves the first attempt's trace still running and uncached, so the node carries two
+  # concurrent EVMSketches for one task and both get slower.
   signStageTimeoutSecs: ""
 
   # Per-peer message rate for the schnorr protocol channel. Empty uses the binary's default of

@@ -715,7 +715,7 @@ fn schnorr_stage_timeout_from(
 
 /// Divisor applied to `ROUND_TIMEOUT` for the default partial-signature collection
 /// timeout. Half a round leaves budget for one more attempt after a stage that ran
-/// to its deadline.
+/// to its deadline; see [`schnorr_sign_stage_timeout`] for what that attempt costs.
 const SCHNORR_SIGN_STAGE_ROUND_FRACTION: u32 = 2;
 
 /// Reads the Schnorr partial-signature collection timeout from
@@ -729,9 +729,14 @@ const SCHNORR_SIGN_STAGE_ROUND_FRACTION: u32 = 2;
 /// minutes of compute raises `ROUND_TIMEOUT` and both the round and this stage grow
 /// with it.
 ///
-/// The fraction, rather than the whole round, keeps a retry in budget: a dropped
-/// signing-round message costs an attempt, and the node's digest cache is warm by
-/// then, so the second attempt resolves from cache and is cheap.
+/// The fraction, rather than the whole round, keeps a retry in budget. The two retry
+/// cases are not alike. A retry after a dropped signing-round message resolves from
+/// the node's digest cache, which the finished trace already filled, and is cheap. A
+/// retry after the stage ran to its deadline does not: the first attempt's sign task
+/// is detached and never cancelled, its trace is still running, and
+/// `GasKillerValidator::expected_digest_for_task` writes the cache only on completion
+/// and holds no in-flight entry, so the new attempt starts a second concurrent
+/// EVMSketch for the same task and both contend for the same CPU.
 pub fn schnorr_sign_stage_timeout() -> std::time::Duration {
     schnorr_sign_stage_timeout_from(
         round_timeout(),
