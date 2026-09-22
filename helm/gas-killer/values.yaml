@@ -259,10 +259,10 @@ l1:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: latest
     pullPolicy: IfNotPresent
-  # Priority class for the L1 pod. Empty because GKE admits system-cluster-critical only in
-  # kube-system: anywhere else the ReplicaSet creates no pod while `helm upgrade` reports success,
-  # so the router and every node flip to a simulation fork that does not exist. Set a class the
-  # namespace can actually use (see README.md), not a system-reserved one.
+  # Priority class for the L1 pod. Unset, so it schedules and is evicted like any other workload.
+  # Priority is cluster policy rather than a chart decision, and a class the namespace is not
+  # allowed to use is refused when the ReplicaSet creates the pod, not when Helm applies the
+  # Deployment — the release reports success in front of a workload that never starts.
   priorityClassName: ""
   service:
     type: ClusterIP

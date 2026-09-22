@@ -51,23 +51,13 @@ Kubernetes DNS labels are limited to 63 characters. If your release name is long
 
 ### Priority Classes
 
-The L1 (Anvil) pod runs with no priority class. `system-cluster-critical` looks right for a pod holding chain state, but GKE admits it only in `kube-system` — elsewhere the ReplicaSet never creates a pod, `helm upgrade` still reports success, and under `l1.simFork.enabled` the fleet flips to a fork that is not there. Give it a class of your own instead:
+The L1 (Anvil) pod runs with no priority class: it schedules and is evicted like any other
+workload. Priority is cluster policy rather than something a chart should assume, and the failure
+mode of assuming wrong is quiet — a class the namespace is not allowed to use is refused when the
+ReplicaSet creates the pod, not when Helm applies the Deployment, so the release reports success in
+front of a workload that never starts.
 
-```yaml
-apiVersion: scheduling.k8s.io/v1
-kind: PriorityClass
-metadata:
-  name: gas-killer-critical
-value: 1000000
-globalDefault: false
-description: "Priority class for Gas Killer critical components"
-```
-
-Then set in values:
-```yaml
-l1:
-  priorityClassName: gas-killer-critical
-```
+If your cluster policy calls for one, `l1.priorityClassName` takes the name of a class you manage.
 
 ### Node Readiness
 
