@@ -463,7 +463,8 @@ router:
   # (schnorr.signStageTimeoutSecs, default roundTimeout/2), so the stage holding that
   # compute scales with this value. A round must still fit inside the contract's
   # staleness window alongside the router's own analysis — see
-  # eigenlayer.sdk.blockStaleMeasure. Tune against gas_killer_p2p_round_trip_seconds
+  # eigenlayer.sdk.blockStaleMeasure. Stays below ingress.taskTtlSeconds, which bounds how long
+  # a task queued behind this round survives. Tune against gas_killer_p2p_round_trip_seconds
   # and the round-timeout panel in the Grafana dashboard.
   roundTimeout: "1800"
   # How often (in seconds) the router re-sends the TaskDirective (Announce, then Skip
@@ -534,11 +535,18 @@ router:
     # gas_killer_tasks_expired_total — sustained expiries mean the queue is not draining ahead of
     # the staleness window (TASK_TTL_SECONDS). Restart recovery settles separately, under
     # gas_killer_tasks_expired_at_requeue_total.
-    # Leave empty to use the router's own default, which is sized to the wall-clock life of a
-    # rendered payload on L1 (payloadBlockBuffer blocks x 12s = 600s at the stock buffer) so the
-    # sweep never withdraws a payload the chain would still accept. Set a shorter value only for a
-    # target chain with faster blocks, where the payload window is proportionally shorter.
-    taskTtlSeconds: ""
+    # Must exceed router.roundTimeout. The router runs exactly one round at a time and a queued
+    # task ages from the moment it was accepted, so a TTL below the round window expires every
+    # task waiting behind the round in front of it, unreached. The router's own default (600s,
+    # the wall-clock life of a rendered payload at the stock payloadBlockBuffer) is below the
+    # round window this chart sets, so the value is explicit here rather than left empty.
+    #
+    # The ceiling on this plus roundTimeout together is eigenlayer.sdk.blockStaleMeasure: queue
+    # wait, round and settlement all anchor off the task's block_height, so queue depth past that
+    # budget only holds work that can no longer produce a payload the contract accepts. Watch
+    # gas_killer_tasks_expired_total. On a target chain with faster blocks the payload window is
+    # proportionally shorter and this comes down with it.
+    taskTtlSeconds: "2400"
     # How far behind the target chain's head a submitted block_height may be and still be admitted;
     # past it POST /tasks returns 400 STALE_BLOCK. The analysis is anchored at that block, and both
     # the aggregation round and the rendered payload's validity window have to fit in what is left
