@@ -19,6 +19,10 @@ x-guest-vm-environment: &guest-vm-environment
   - GK_GUEST_PROGRAM=/app/guest/${GK_E2E_GUEST_ELF:-answer.elf}
   - GK_GUEST_PROGRAM_HASH=${GK_GUEST_PROGRAM_HASH:-}
   - GK_GUEST_VM_CONSUMERS=${GK_GUEST_VM_CONSUMERS:-}
+  # The guest's artifact bundle, when it has one (GK_E2E_GUEST=qwen: the real weights).
+  # Blank = no artifact; a set root is verified against the files at startup.
+  - GK_GUEST_ARTIFACT=${GK_GUEST_ARTIFACT:-}
+  - GK_GUEST_ARTIFACT_ROOT=${GK_GUEST_ARTIFACT_ROOT:-}
 
 x-guest-vm-volumes: &guest-vm-volumes
   - ./config/guest:/app/guest:ro

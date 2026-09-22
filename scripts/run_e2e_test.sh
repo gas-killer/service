@@ -128,13 +128,29 @@ docker compose build
 # staged image must hash to the PROGRAM_HASH the consumer's binding commits to; the
 # same hash is what every operator verifies the file against at startup.
 if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
-    echo -e "${YELLOW}Step 4b: Staging the chat-native guest program...${NC}"
-    GK_GUEST_PROGRAM_HASH=$(bash "$PROJECT_ROOT/scripts/stage_guest_program.sh" | tee /dev/stderr | grep '^GUEST_PROGRAM_HASH=' | cut -d= -f2)
-    if [ -z "$GK_GUEST_PROGRAM_HASH" ]; then
-        echo -e "${RED}guest program staging failed${NC}"
-        exit 1
+    if [ "${GK_E2E_GUEST:-answer}" = "qwen" ]; then
+        # The flagship: gas-analyzer's qwen guest over the real Qwen3-0.6B release bytes,
+        # mounted into every operator as a manifest-v3 artifact (GK_GUEST_ARTIFACT[_ROOT]).
+        echo -e "${YELLOW}Step 4b: Staging the qwen guest + the qwen3-0.6b-onchain-v1 weights...${NC}"
+        STAGED=$(bash "$PROJECT_ROOT/scripts/stage_qwen_guest.sh" | tee /dev/stderr)
+        GK_GUEST_PROGRAM_HASH=$(printf '%s\n' "$STAGED" | grep '^GUEST_PROGRAM_HASH=' | cut -d= -f2)
+        GK_GUEST_ARTIFACT_ROOT=$(printf '%s\n' "$STAGED" | grep '^ARTIFACT_ROOT=' | cut -d= -f2)
+        if [ -z "$GK_GUEST_PROGRAM_HASH" ] || [ -z "$GK_GUEST_ARTIFACT_ROOT" ]; then
+            echo -e "${RED}qwen guest staging failed${NC}"
+            exit 1
+        fi
+        export GK_GUEST_PROGRAM_HASH GK_GUEST_ARTIFACT_ROOT
+        export GK_E2E_GUEST_ELF=qwen.elf
+        export GK_GUEST_ARTIFACT=/app/guest/weights.bin:/app/guest/tokenizer.bin
+    else
+        echo -e "${YELLOW}Step 4b: Staging the chat-native guest program...${NC}"
+        GK_GUEST_PROGRAM_HASH=$(bash "$PROJECT_ROOT/scripts/stage_guest_program.sh" | tee /dev/stderr | grep '^GUEST_PROGRAM_HASH=' | cut -d= -f2)
+        if [ -z "$GK_GUEST_PROGRAM_HASH" ]; then
+            echo -e "${RED}guest program staging failed${NC}"
+            exit 1
+        fi
+        export GK_GUEST_PROGRAM_HASH
     fi
-    export GK_GUEST_PROGRAM_HASH
 fi
 
 # Step 5: Start Docker Compose services
@@ -188,7 +204,19 @@ fi
 # array-summation [default], onchain-llm — the solidity-sdk LLM example, or
 # chat-native — the same chat consumer with the engine replaced by a guest program).
 if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
-    echo -e "${YELLOW}Step 7: Deploying Gas Killer native chat consumer (guest: answer.py)...${NC}"
+    if [ "${GK_E2E_GUEST:-answer}" = "qwen" ]; then
+        echo -e "${YELLOW}Step 7: Deploying Gas Killer native chat consumer (guest: qwen, Qwen3-0.6B)...${NC}"
+        export GK_CHAT_CONTRACT=GasKillerChatQwen
+        export GK_ARTIFACT_ROOT="$GK_GUEST_ARTIFACT_ROOT"
+        # Qwen3Engine's packedConfig for qwen3-0.6b-onchain-v1 (gas-analyzer scripts/flagship/run.sh)
+        export GK_PACKED_CONFIG="${GK_PACKED_CONFIG:-0x04000c001c100800800002518004000101000000000000000000000000000000,0x0000000010c6f7a10000000016a09e6600000000239791f10000000000000000,0x00182bc20002505d0002505b0000000000000000000000000000000000000000}"
+        # the chat-templated "What is Ethereum?" and the answer the guest gives it
+        export GK_CHAT_PROMPT_IDS="${GK_CHAT_PROMPT_IDS:-[151644,872,198,3838,374,33946,30,151645,198,151644,77091,198,151667,271,151668,271]}"
+        export GK_CHAT_MAX_TOKENS="${GK_CHAT_MAX_TOKENS:-8}"
+        export GK_CHAT_EXPECT="${GK_CHAT_EXPECT:-Ethereum is a decentralized blockchain platform}"
+    else
+        echo -e "${YELLOW}Step 7: Deploying Gas Killer native chat consumer (guest: answer.py)...${NC}"
+    fi
     # Load harness config for this branch (the Rust helpers read .env themselves)
     set -a
     # shellcheck disable=SC1091
@@ -200,7 +228,7 @@ if [ "${GK_E2E_CONSUMER:-array-summation}" = "chat-native" ]; then
         echo -e "${RED}native chat consumer deployment failed${NC}"
         exit 1
     fi
-    echo "Discovered GasKillerChatNative address: $CHAT_ADDRESS"
+    echo "Discovered ${GK_CHAT_CONTRACT:-GasKillerChatNative} address: $CHAT_ADDRESS"
     export GAS_KILLER_TARGET_ADDRESS="$CHAT_ADDRESS"
     # Default task = the sdk's "doc-vector" (test/fixtures/gkvm/native_tasks.json).
     export GAS_KILLER_CALL_DATA=$(cast calldata "ask(uint256[],uint256)" "${GK_CHAT_PROMPT_IDS:-[9707,11,151644]}" "${GK_CHAT_MAX_TOKENS:-6}")
