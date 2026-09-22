@@ -461,11 +461,14 @@ router:
   # reaches quorum blocks the task queue for the full window. In schnorr mode this is
   # also the base for the coordinator's partial-collection deadline
   # (schnorr.signStageTimeoutSecs, default roundTimeout/2), so the stage holding that
-  # compute scales with this value. A round must still fit inside the contract's
-  # staleness window alongside the router's own analysis — see
-  # eigenlayer.sdk.blockStaleMeasure. Stays below ingress.taskTtlSeconds, which bounds how long
-  # a task queued behind this round survives. Tune against gas_killer_p2p_round_trip_seconds
-  # and the round-timeout panel in the Grafana dashboard.
+  # compute scales with this value. A longer round also leaves the analysis staler by the time
+  # it settles: staleness at settlement is the admission age (ingress.stalenessWindowBlocks)
+  # plus this window, and a stale analysis resolves as a transition-index mismatch re-request
+  # rather than a settled payload. eigenlayer.sdk.blockStaleMeasure does not bound this window —
+  # it bounds the operator-set reference block, which both the BLS and schnorr paths pick fresh
+  # at submit time. Stays below ingress.taskTtlSeconds, which bounds how long a task queued
+  # behind this round survives. Tune against gas_killer_p2p_round_trip_seconds and the
+  # round-timeout panel in the Grafana dashboard.
   roundTimeout: "1800"
   # How often (in seconds) the router re-sends the TaskDirective (Announce, then Skip
   # after roundTimeout) for an in-flight height. Under the aggregation engine,
