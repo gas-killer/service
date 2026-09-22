@@ -14,6 +14,112 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Renders every supported chart configuration. The kind job below installs exactly one of
+  # them (LOCAL), so without this the render-time guards — the simRpc/simFork exclusion, the
+  # sim-node restore guard — and both non-LOCAL simulation paths have no coverage at all.
+  helm-render:
+    name: Lint and render every chart configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Enough to satisfy the chart's required-value guards; none of it is reachable.
+      COMMON: >-
+        --set secrets.httpRpc=https://rpc.invalid
+        --set secrets.privateKey=0x01
+        --set secrets.fundedKey=0x02
+        --set secrets.adminKey=ci-admin-key
+        --set orchestrator.routerPrivateKey=0x03
+        --set secretManager.enabled=false
+        --set monitoring.enabled=false
+        --set router.image.tag=router-ci
+        --set node.image.tag=node-ci
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "latest"
+
+      - name: Fetch Helm dependencies
+        # build, not update: render against the versions Chart.lock pins rather than
+        # re-resolving them, so a subchart release upstream cannot change what CI checked.
+        # build reads the lock, which needs the repos it names to be registered first.
+        run: |
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm dependency build ./helm/gas-killer
+
+      - name: Lint
+        run: |
+          helm lint ./helm/gas-killer
+          helm lint ./helm/sim-node
+
+      - name: Render sim-node
+        run: |
+          helm template sim-node ./helm/sim-node > /dev/null
+          helm template sim-node ./helm/sim-node \
+            --set replicas=0 --set snapshot.restore.enabled=true > /dev/null
+
+      - name: Reject a snapshot restore that would race the node
+        run: |
+          # The Job wipes the datadir, so it must not render while the StatefulSet is writing.
+          if helm template sim-node ./helm/sim-node --set snapshot.restore.enabled=true \
+               > /dev/null 2>&1; then
+            echo "restoring at replicas=1 rendered; the guard is gone" >&2
+            exit 1
+          fi
+
+      - name: Render LOCAL
+        run: |
+          helm template gk ./helm/gas-killer -f helm/gas-killer/local-overrides.yaml \
+            --set secrets.forkUrl=https://rpc.invalid \
+            --set secrets.privateKey=0x01 --set secrets.fundedKey=0x02 \
+            --set monitoring.enabled=false \
+            --set router.image.tag=router-ci --set node.image.tag=node-ci > "$RUNNER_TEMP/local.yaml"
+          # LOCAL anvil is the chain, so nothing may point the fleet at a simulation endpoint.
+          if grep -q 'name: SIM_HTTP_RPC' "$RUNNER_TEMP/local.yaml"; then
+            echo "LOCAL grew a simulation endpoint" >&2
+            exit 1
+          fi
+          echo "LOCAL renders with no sim endpoint"
+
+      - name: Render TESTNET against the in-cluster node
+        run: |
+          helm template gk ./helm/gas-killer -f helm/gas-killer/testnet-overrides.yaml \
+            $COMMON > "$RUNNER_TEMP/node.yaml"
+          # The digest depends on every operator simulating against the same endpoint under the
+          # same profile, so the router and all three nodes must agree on both.
+          test "$(grep -A1 'name: SIM_HTTP_RPC' "$RUNNER_TEMP/node.yaml" | grep -c 'http://sim-node:8545')" = 4
+          test "$(grep -A1 'name: GK_SIM_PROFILE' "$RUNNER_TEMP/node.yaml" | grep -c 'unbounded')" = 4
+          echo "router and nodes agree on endpoint and profile"
+
+      - name: Render TESTNET against the bundled fork
+        run: |
+          helm template gk ./helm/gas-killer -f helm/gas-killer/testnet-overrides.yaml \
+            $COMMON \
+            --set secrets.forkUrl=https://rpc.invalid \
+            --set simRpc.url= --set l1.simFork.enabled=true \
+            --set-string l1.extraArgs="--disable-block-gas-limit" > "$RUNNER_TEMP/fork.yaml"
+          test "$(grep -A1 'name: SIM_HTTP_RPC' "$RUNNER_TEMP/fork.yaml" | grep -c 'gk-gas-killer-l1')" = 4
+          # The l1 Service has to reach the proxy, or the fork never follows the task's block.
+          grep -q 'targetPort: sim' "$RUNNER_TEMP/fork.yaml"
+          echo "fork path renders behind the re-fork proxy"
+
+      - name: Reject two simulation endpoints at once
+        run: |
+          # Two endpoints would fork the quorum's digests, so this must fail at render time.
+          if helm template gk ./helm/gas-killer -f helm/gas-killer/testnet-overrides.yaml \
+               $COMMON \
+               --set secrets.forkUrl=https://rpc.invalid \
+               --set l1.simFork.enabled=true \
+               --set-string l1.extraArgs="--disable-block-gas-limit" > /dev/null 2>&1; then
+            echo "simRpc.url and l1.simFork.enabled both rendered; the guard is gone" >&2
+            exit 1
+          fi
+
   helm-test:
     name: Test with Helm Charts
     runs-on: ubuntu-latest

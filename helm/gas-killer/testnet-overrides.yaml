@@ -115,11 +115,11 @@ router:
   payloadBlockBuffer: "250"
   ingress:
     timeoutMs: "0"
-    # Long enough for a multi-minute round plus the time it waits in the queue. It sits above the
-    # derived default of payloadBlockBuffer x 12s = 3000s, and therefore above the payload's own
-    # validity window: a task that goes ready in the last 600s of its TTL holds a payload the
-    # contract will no longer accept.
-    taskTtlSeconds: "3600"
+    # Equal to the payload's own validity window (payloadBlockBuffer x 12s), so a task can never
+    # reach `ready` holding a payload the contract will no longer accept — it expires as a task
+    # first. Long enough for a multi-minute round plus its wait in the queue, and above
+    # router.roundTimeout, which a queued task has to outlive to be reached at all.
+    taskTtlSeconds: "3000"
 
 # The bridge mirrors EigenLayer operator state from L1 to L2, so it has nothing to do
 # on an L1-only testnet: bridge-to-l2.sh exits non-zero without an L2 RPC. Both keys

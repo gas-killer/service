@@ -55,6 +55,27 @@ kubectl exec -it sim-node-0 -c reth -- \
 Then flip the fleet with `--set simRpc.url=http://sim-node:8545`, which
 `helm/gas-killer/testnet-overrides.yaml` already carries.
 
+## What it costs to trace here
+
+Figures from the `e2-standard-8` this chart is sized for, on Sepolia. They are what sizing the
+fleet's timeouts rests on, so re-measure after a machine-type change.
+
+| | |
+|---|---|
+| Sustained trace rate | ~0.2 Ggas/s; a higher-clock series roughly halves the wall clock |
+| 49M-gas prestate diff (`onchainLife.step(3)`) | 0.3 s |
+| 663 Ggas `eth_call` (on-chain Qwen3 `dryRun`, 16 prompt ids, 8 new tokens) | 1,309 s |
+| ~150 Ggas tracked call | 12.5 min in the router, 19.5 min across three nodes, ready at 1,924 s |
+| `2^40` `debug_traceCall` | granted in full — `1099511627776`, not a round number |
+
+The router traces a tracked call and then every node traces it again, in series, and the whole
+sequence has to land inside the contract's 300-block staleness window (~60 min). At the rate
+above that puts the ceiling near 150 Ggas per phase; the 663 Ggas reference prompt needs the two
+phases overlapped and a faster machine type.
+
+Concurrency is capped at `--rpc.max-tracing-requests=8`, which covers three nodes tracing two
+calls each alongside the router's two.
+
 ## Serviceability notes
 
 - **No readiness probe, deliberately.** Readiness would pull the Service during the hours of
