@@ -102,11 +102,15 @@ monitoring:
 router:
   # A tracked call under `unbounded` is traced by the router and then again by every node, in
   # series, at roughly 0.2 Ggas/s on the sim node — a round for a call of that size spans tens of
-  # minutes rather than the seconds an ordinary task takes. The ceiling on this and
-  # payloadBlockBuffer together is eigenlayer.sdk.blockStaleMeasure above: 300 blocks, ~60 min
-  # from the anchor block to settlement, inside which both phases have to fit. Ordinary tasks are
-  # unaffected; the cost is that a round which never reaches quorum blocks the queue for the full
-  # window.
+  # minutes rather than the seconds an ordinary task takes. Ordinary tasks are unaffected; the
+  # cost is that a round which never reaches quorum blocks the queue for the full window.
+  #
+  # eigenlayer.sdk.blockStaleMeasure does not cap this window. It bounds referenceBlockNumber,
+  # which verifyAndUpdate takes and the router picks fresh at submit time (current block - 1), so
+  # the block_height an analysis is anchored at never reaches the contract. What a long round
+  # risks instead is the pinned transitionIndex no longer matching stateTransitionCount() when the
+  # payload settles, which tracks how busy the target is rather than any block budget. Stays below
+  # ingress.taskTtlSeconds, which bounds how long a task queued behind this round survives.
   roundTimeout: "2400"
   # Blocks a rendered payload stays valid, sized so a payload outlives the round that produced it.
   # Coupled to admission: ingress.stalenessWindowBlocks derives as blockStaleMeasure -
