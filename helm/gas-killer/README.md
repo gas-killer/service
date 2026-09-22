@@ -435,8 +435,13 @@ helm upgrade --install gas-killer ./helm/gas-killer \
   --set secrets.l2HttpRpc=https://... \
   --set router.image.tag=router-<sha> \
   --set node.image.tag=node-<sha> \
-  --set kube-prometheus-stack.grafana.adminPassword=<password>
+  --set kube-prometheus-stack.grafana.adminPassword=<password> \
+  --wait --timeout 15m
 ```
+
+`--wait` is what turns a pod the cluster refuses to schedule into a failed release rather than a
+green upgrade in front of a fleet pointed at nothing. See the note in `testnet-overrides.yaml` for
+what it costs.
 
 ### Accessing Grafana
 

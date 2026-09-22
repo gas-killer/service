@@ -11,7 +11,20 @@
 #     --set l2.enabled=true \
 #     --set router.image.tag=router-<sha> \
 #     --set node.image.tag=node-<sha> \
-#     --set kube-prometheus-stack.grafana.adminPassword=<password>
+#     --set kube-prometheus-stack.grafana.adminPassword=<password> \
+#     --wait --timeout 15m
+#
+# --wait because a green `helm upgrade` does not mean the fleet is running. The apiserver accepts
+# a Deployment whose pods it will then refuse — a priority class the namespace cannot use, a pool
+# with no room for the fork's 2-4 CPU — and the error stops at the ReplicaSet's events while this
+# same upgrade has already pointed the router and every node at the endpoint that never came up.
+# Without --wait nothing surfaces that until tasks start failing.
+#
+# It costs upgrade time: setup, deploy-target and schnorr-operators carry ttlSecondsAfterFinished,
+# so they are recreated and re-run on every upgrade, and --wait holds the release open until they
+# complete. A Job that fails on a transient RPC error fails the release even when the fleet is
+# healthy. 15m covers them plus global.initTimeout. Prefer --wait over --atomic here: rolling a
+# fleet-wide profile flip back automatically strands whatever rounds were in flight.
 
 global:
   environment: TESTNET
