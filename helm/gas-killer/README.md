@@ -49,26 +49,6 @@ The setup job (`helm.sh/hook: post-install`) only runs on fresh installs, NOT on
 
 Kubernetes DNS labels are limited to 63 characters. If your release name is long, resource names may be truncated. The chart handles this automatically, but be aware that very long release names combined with component suffixes may result in truncated names.
 
-### Priority Classes
-
-The Ethereum (Anvil) pod uses `system-cluster-critical` priority class to ensure it stays running, as it holds critical blockchain state. Consider creating a custom priority class if you don't want to use system-reserved classes:
-
-```yaml
-apiVersion: scheduling.k8s.io/v1
-kind: PriorityClass
-metadata:
-  name: gas-killer-critical
-value: 1000000
-globalDefault: false
-description: "Priority class for Gas Killer critical components"
-```
-
-Then set in values:
-```yaml
-ethereum:
-  priorityClassName: gas-killer-critical
-```
-
 ### Node Readiness
 
 The current node readiness probe checks if the `gas-killer` process is running. For production deployments, consider implementing a proper health/readiness endpoint in the node application that verifies:
@@ -84,6 +64,27 @@ All init containers have a configurable timeout (default: 300 seconds). If your 
 helm install gas-killer ./helm/gas-killer \
   --set global.initTimeout=600
 ```
+
+### Flipping the simulation profile
+
+`global.simProfile` changes the derived `storage_updates` and therefore the task digest, so the
+router and every node have to flip together. One value feeds both deployments, so a single
+`helm upgrade` does it — but this is not a rolling update. A partially migrated fleet fails
+quorum until it converges, and nothing reports that as an error.
+
+Confirm the fleet agrees before trusting it:
+
+```bash
+kubectl get pods -o json | jq -r '.items[].spec.containers[].env[]
+  | select(.name=="GK_SIM_PROFILE" or .name=="SIM_HTTP_RPC") | "\(.name)=\(.value)"' | sort | uniq -c
+```
+
+Every node plus the router should appear, with one distinct value each. Two values for either is
+a partial rollout.
+
+Then canary it with a task anchored at the live head (`block_height = 0` in a `run_scenario`
+file), which is what a real client does. One anchored by hand at the simulation fork's own block
+passes even when the re-fork proxy is broken.
 
 ## Configuration
 
@@ -435,8 +436,13 @@ helm upgrade --install gas-killer ./helm/gas-killer \
   --set secrets.l2HttpRpc=https://... \
   --set router.image.tag=router-<sha> \
   --set node.image.tag=node-<sha> \
-  --set kube-prometheus-stack.grafana.adminPassword=<password>
+  --set kube-prometheus-stack.grafana.adminPassword=<password> \
+  --wait --timeout 15m
 ```
+
+`--wait` fails the release when a workload does not become ready, rather than reporting success in
+front of a pod the cluster refuses to schedule. See the note in `testnet-overrides.yaml` for what
+it costs.
 
 ### Accessing Grafana
 

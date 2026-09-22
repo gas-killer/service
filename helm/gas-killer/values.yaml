@@ -252,20 +252,27 @@ l1:
 
   # Appended to the bundled Anvil's command line (ANVIL_EXTRA_ARGS). The unbounded profile needs
   # --disable-block-gas-limit here, without which an above-block-limit call OOGs inside the tracer
-  # and analysis returns a truncated result rather than failing.
+  # and analysis returns a truncated result rather than failing. Pass it with `--set-string`:
+  # plain `--set` reads the leading dashes as flags of its own.
   extraArgs: ""
 
   image:
     repository: ghcr.io/breadchaincoop/ethereum
     tag: latest
     pullPolicy: IfNotPresent
-  # Priority class for L1 pod - it holds critical blockchain state
-  # Consider creating a custom priority class instead of using system-cluster-critical
-  # See README.md for details
-  priorityClassName: "system-cluster-critical"
+  # Priority class for the L1 pod. Unset, so it schedules and is evicted like any other workload.
+  # Priority is cluster policy rather than a chart decision, and a class the namespace is not
+  # allowed to use is refused when the ReplicaSet creates the pod, not when Helm applies the
+  # Deployment — the release reports success in front of a workload that never starts.
+  priorityClassName: ""
   service:
     type: ClusterIP
     port: 8545
+  # Enough for a LOCAL Anvil serving a test chain. Under l1.simFork.enabled this one pod runs
+  # every task's heavy simulation for the router and every node and caches forked state in
+  # memory, where a call above the block limit is CPU-bound; that path wants 2/4 CPU and 4/8Gi.
+  # A starved fork shows up as gas_killer_evmsketch_trace_fetch_seconds climbing rather than as
+  # an error.
   resources:
     requests:
       memory: "1Gi"
