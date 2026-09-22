@@ -676,15 +676,19 @@ fn parse_schnorr_notice_window(raw: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_SCHNORR_NOTICE_WINDOW)
 }
 
-/// Default per-stage timeout cap for the Schnorr coordinator's protocol rounds
-/// (nonce collection, partial-signature collection), before the `ROUND_TIMEOUT /
-/// 6` floor is applied.
+/// Default nonce-collection timeout cap for the Schnorr coordinator's protocol
+/// rounds, before the `ROUND_TIMEOUT / 6` floor is applied.
 pub const DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS: f64 = 5.0;
 
-/// Reads the Schnorr per-stage timeout from `SCHNORR_STAGE_TIMEOUT_SECS` (seconds,
-/// fractional allowed). When unset, defaults to
+/// Reads the Schnorr nonce-collection timeout from `SCHNORR_STAGE_TIMEOUT_SECS`
+/// (seconds, fractional allowed). When unset, defaults to
 /// `min(DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS, round_timeout() / 6)` so several
 /// attempts fit inside one round-timeout window.
+///
+/// Round 1 is message-independent — a node answers from a fresh nonce pair without
+/// touching the task — so this stage is a bare p2p round trip and a short deadline
+/// is what lets the coordinator drop an unresponsive operator quickly. The partial
+/// stage is the one that contains node compute; see [`schnorr_sign_stage_timeout`].
 pub fn schnorr_stage_timeout() -> std::time::Duration {
     schnorr_stage_timeout_from(
         round_timeout(),
@@ -692,9 +696,10 @@ pub fn schnorr_stage_timeout() -> std::time::Duration {
     )
 }
 
-/// Computes the Schnorr per-stage timeout given the current round timeout and an
-/// optional `SCHNORR_STAGE_TIMEOUT_SECS` override. An override is parsed as a flat
-/// seconds value (no `/ 6` floor); the floor only applies to the unset-default path.
+/// Computes the Schnorr nonce-collection timeout given the current round timeout
+/// and an optional `SCHNORR_STAGE_TIMEOUT_SECS` override. An override is parsed as
+/// a flat seconds value (no `/ 6` floor); the floor only applies to the
+/// unset-default path.
 fn schnorr_stage_timeout_from(
     round_timeout_duration: std::time::Duration,
     override_value: Option<&str>,
@@ -705,6 +710,45 @@ fn schnorr_stage_timeout_from(
             std::time::Duration::from_secs_f64(DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS),
             round_timeout_duration / 6,
         ),
+    }
+}
+
+/// Divisor applied to `ROUND_TIMEOUT` for the default partial-signature collection
+/// timeout. Half a round leaves budget for one more attempt after a stage that ran
+/// to its deadline.
+const SCHNORR_SIGN_STAGE_ROUND_FRACTION: u32 = 2;
+
+/// Reads the Schnorr partial-signature collection timeout from
+/// `SCHNORR_SIGN_STAGE_TIMEOUT_SECS` (seconds, fractional allowed), defaulting to
+/// `round_timeout() / SCHNORR_SIGN_STAGE_ROUND_FRACTION`.
+///
+/// This stage holds the node's EVMSketch: a signer resolves the announced task's
+/// digest locally before it will produce a partial, so the deadline has to cover a
+/// full cold trace, not a p2p round trip. It therefore scales with `ROUND_TIMEOUT`
+/// rather than sharing the nonce stage's fixed cap — a deployment whose tasks take
+/// minutes of compute raises `ROUND_TIMEOUT` and both the round and this stage grow
+/// with it.
+///
+/// The fraction, rather than the whole round, keeps a retry in budget: a dropped
+/// signing-round message costs an attempt, and the node's digest cache is warm by
+/// then, so the second attempt resolves from cache and is cheap.
+pub fn schnorr_sign_stage_timeout() -> std::time::Duration {
+    schnorr_sign_stage_timeout_from(
+        round_timeout(),
+        env::var("SCHNORR_SIGN_STAGE_TIMEOUT_SECS").ok().as_deref(),
+    )
+}
+
+/// Computes the Schnorr partial-collection timeout given the current round timeout
+/// and an optional `SCHNORR_SIGN_STAGE_TIMEOUT_SECS` override.
+fn schnorr_sign_stage_timeout_from(
+    round_timeout_duration: std::time::Duration,
+    override_value: Option<&str>,
+) -> std::time::Duration {
+    let default = round_timeout_duration / SCHNORR_SIGN_STAGE_ROUND_FRACTION;
+    match override_value {
+        Some(raw) => parse_secs_env_duration(Some(raw), default.as_secs_f64()),
+        None => default,
     }
 }
 
@@ -1159,6 +1203,52 @@ mod tests {
         assert_eq!(
             schnorr_stage_timeout_from(Duration::from_secs(60), Some("1.5")),
             Duration::from_millis(1500)
+        );
+    }
+
+    #[test]
+    fn schnorr_sign_stage_timeout_defaults_to_half_the_round() {
+        assert_eq!(
+            schnorr_sign_stage_timeout_from(Duration::from_secs(60), None),
+            Duration::from_secs(30)
+        );
+    }
+
+    /// The nonce stage caps at 5s however long the round is; the partial stage must
+    /// keep growing with it, because that is where a multi-minute EVMSketch lands.
+    #[test]
+    fn schnorr_sign_stage_timeout_scales_past_the_nonce_stage_cap() {
+        let round = Duration::from_secs(1800);
+        assert_eq!(
+            schnorr_stage_timeout_from(round, None),
+            Duration::from_secs_f64(DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            schnorr_sign_stage_timeout_from(round, None),
+            Duration::from_secs(900)
+        );
+    }
+
+    #[test]
+    fn schnorr_sign_stage_timeout_reads_override() {
+        assert_eq!(
+            schnorr_sign_stage_timeout_from(Duration::from_secs(60), Some("45")),
+            Duration::from_secs(45)
+        );
+    }
+
+    /// An unusable override falls back to the derived default rather than the nonce
+    /// stage's flat constant, so a typo cannot silently shrink the stage that holds
+    /// node compute.
+    #[test]
+    fn schnorr_sign_stage_timeout_falls_back_to_the_derived_default() {
+        assert_eq!(
+            schnorr_sign_stage_timeout_from(Duration::from_secs(600), Some("abc")),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            schnorr_sign_stage_timeout_from(Duration::from_secs(600), Some("0")),
+            Duration::from_secs(300)
         );
     }
 

@@ -388,10 +388,11 @@ node:
   # Port for the node's /healthz HTTP endpoint (used by Kubernetes probes)
   healthzPort: 8081
   # How long Kubernetes waits for a node to finish in-flight work after SIGTERM.
-  # Must be >= the time needed to complete a validation + sign cycle. Production
-  # transactions can take several minutes of EVMSketch compute (see the
-  # roundTimeout comment), so 360s covers a full round plus buffer.
-  terminationGracePeriodSeconds: 360
+  # Must be >= the time needed to complete a validation + sign cycle, which is bounded
+  # by router.roundTimeout (1800s) because a signer runs a full EVMSketch before it
+  # signs, so 1920s covers a full round plus buffer. This is a ceiling, not a delay:
+  # an idle node exits immediately and only a live round holds a rolling deploy.
+  terminationGracePeriodSeconds: 1920
   # Stagger EigenSDK eth_getLogs backfill sweeps across nodes so at most one runs at a time.
   # node-1 starts immediately; node-N waits (N-1) * startupDelaySecsPerNode before launching.
   # The router waits nodeCount * startupDelaySecsPerNode. Set to 0 to disable.
@@ -435,8 +436,10 @@ router:
   healthzPort: 8081
   # How long Kubernetes waits for a router to finish in-flight work after SIGTERM.
   # Must be >= the time needed to complete an aggregation round, which is bounded by
-  # roundTimeout (300s), so 360s lets an in-flight round finish plus buffer.
-  terminationGracePeriodSeconds: 360
+  # roundTimeout (1800s), so 1920s lets an in-flight round finish plus buffer. This is
+  # a ceiling, not a delay: an idle router exits immediately and only a live round
+  # holds a rolling deploy.
+  terminationGracePeriodSeconds: 1920
   # How often (in milliseconds) to poll for a new round between task cycles.
   # Only applies when INGRESS=false (Basic creator). When INGRESS=true the creator
   # blocks on an event-driven channel and this value has no effect.
@@ -444,12 +447,17 @@ router:
   # Max seconds the router waits for operator signatures on a round before abandoning
   # it and moving to the next queued task. The orchestrator submits immediately once
   # the signature threshold is reached, so this is a stalled-round recovery window,
-  # not a throttle. Must comfortably exceed worst-case node compute + sign time
-  # (production transactions can take several minutes of EVMSketch compute); the cost
-  # of a larger value is that a round that never reaches quorum blocks the task queue
-  # for the full window. Tune against gas_killer_p2p_round_trip_seconds and the
-  # round-timeout panel in the Grafana dashboard.
-  roundTimeout: "300"
+  # not a throttle. Must comfortably exceed worst-case node compute + sign time:
+  # a signer runs a full EVMSketch before it will sign, and directory-mode LLM calls
+  # trace for tens of minutes. The cost of a larger value is that a round which never
+  # reaches quorum blocks the task queue for the full window. In schnorr mode this is
+  # also the base for the coordinator's partial-collection deadline
+  # (schnorr.signStageTimeoutSecs, default roundTimeout/2), so the stage holding that
+  # compute scales with this value. A round must still fit inside the contract's
+  # staleness window alongside the router's own analysis — see
+  # eigenlayer.sdk.blockStaleMeasure. Tune against gas_killer_p2p_round_trip_seconds
+  # and the round-timeout panel in the Grafana dashboard.
+  roundTimeout: "1800"
   # How often (in seconds) the router re-sends the TaskDirective (Announce, then Skip
   # after roundTimeout) for an in-flight height. Under the aggregation engine,
   # rebroadcast-until-certified is a liveness requirement: a node that misses every
@@ -700,10 +708,20 @@ schnorr:
   #     record to have reached the router's copy of the file.
   stakeRegistryAddress: ""
 
-  # Per-stage timeout (nonce collection, partial collection) for the coordinator's rounds, in
-  # seconds. Empty uses the binary's default of min(5, ROUND_TIMEOUT/6), so several attempts fit
-  # inside one round-timeout window.
+  # Nonce-collection timeout for the coordinator's rounds, in seconds. Empty uses the binary's
+  # default of min(5, ROUND_TIMEOUT/6), so several attempts fit inside one round-timeout window.
+  # Round 1 is message-independent — a node answers from a fresh nonce pair without touching the
+  # task — so this is a bare p2p round trip, and a short deadline is what lets the coordinator
+  # drop an unresponsive operator quickly.
   stageTimeoutSecs: ""
+
+  # Partial-signature collection timeout for the coordinator's rounds, in seconds. Empty uses the
+  # binary's default of roundTimeout/2. This stage holds the node's EVMSketch — a signer resolves
+  # the announced task's digest locally before it will produce a partial — so it has to cover a
+  # full cold trace rather than a p2p round trip. Half a round rather than the whole one keeps a
+  # retry in budget: a dropped signing-round message costs an attempt, and the node's digest cache
+  # is warm by then, so the retry resolves from cache and is cheap.
+  signStageTimeoutSecs: ""
 
   # Per-peer message rate for the schnorr protocol channel. Empty uses the binary's default of
   # 64. Size it generously: the p2p sender SILENTLY DROPS messages beyond the rate, and a dropped

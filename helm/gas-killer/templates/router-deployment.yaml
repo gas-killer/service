@@ -434,6 +434,10 @@ spec:
             - name: SCHNORR_STAGE_TIMEOUT_SECS
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.schnorr.signStageTimeoutSecs }}
+            - name: SCHNORR_SIGN_STAGE_TIMEOUT_SECS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.schnorr.messagesPerSecond }}
             - name: P2P_SCHNORR_MESSAGES_PER_SECOND
               value: {{ . | quote }}

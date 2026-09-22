@@ -243,7 +243,8 @@ orphans every target wired to the previous one. The job is otherwise install-onl
 | `schnorr.provision` | Provision the Schnorr scaffolding while the fleet signs another scheme: `""`, `registry` or `full`. Ignored under `signatureScheme=schnorr`. | `""` |
 | `schnorr.noticeWindow` | Blocks an operator-set change must be announced ahead of taking effect, fixed at registry deployment. `0` applies changes immediately, correct only when the set is registered before any target deploys. | `0` |
 | `schnorr.stakeRegistryAddress` | The registry this deployment uses. The operator-set job reuses it instead of deploying one, assuming its set is complete, so it submits no registrations; the router publishes it as `schnorrStakeRegistry` on `GET /avs-metadata` in either scheme. | `""` |
-| `schnorr.stageTimeoutSecs` | Per-stage timeout for the coordinator's rounds. Empty uses `min(5, ROUND_TIMEOUT/6)`. | `""` |
+| `schnorr.stageTimeoutSecs` | Nonce-collection timeout for the coordinator's rounds. Round 1 is message-independent, so this is a bare p2p round trip. Empty uses `min(5, ROUND_TIMEOUT/6)`. | `""` |
+| `schnorr.signStageTimeoutSecs` | Partial-signature collection timeout. This stage holds the signer's EVMSketch, so it must cover a full cold trace rather than a round trip. Empty uses `roundTimeout/2`. | `""` |
 | `schnorr.messagesPerSecond` | Per-peer rate on the schnorr channel, rendered into both the router and the nodes. The p2p sender silently drops over-rate messages, and a dropped round message costs a whole retry. Empty uses `64`. | `""` |
 
 The registry's on-chain threshold comes from `eigenlayer.sdk.quorumThreshold` /

@@ -41,8 +41,8 @@ use gas_killer_common::{
     IngressStalenessWindow, SignatureScheme, SpeculativePrebuildConfig, ValidatorMetrics,
     ack_messages_per_second, agg_activity_timeout, agg_window, config_fingerprint,
     load_key_from_file, p2p_message_backlog, p2p_quota_period, quorum_threshold_fraction,
-    rebroadcast_interval, round_timeout, schnorr_messages_per_second, schnorr_stage_timeout,
-    signature_scheme, storage_directory, task_ttl,
+    rebroadcast_interval, round_timeout, schnorr_messages_per_second, schnorr_sign_stage_timeout,
+    schnorr_stage_timeout, signature_scheme, storage_directory, task_ttl,
 };
 use gas_killer_router::directive_metrics::CountingSender;
 use gas_killer_router::expiry::run_expiry_sweeper;
@@ -646,6 +646,7 @@ fn main() {
                     APPLICATION_NAMESPACE.to_vec(),
                     quorum_threshold_fraction(),
                     schnorr_stage_timeout(),
+                    schnorr_sign_stage_timeout(),
                     round_timeout(),
                 );
                 context

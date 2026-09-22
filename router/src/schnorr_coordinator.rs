@@ -13,13 +13,13 @@
 //! ```text
 //! attempt = 1, 2, … (fresh nonces each — a nonce is bound to one session):
 //!   NonceRequest{h,a}  → all operators
-//!   collect NonceCommit until all reply or the stage timeout; verify each
+//!   collect NonceCommit until all reply or the nonce stage timeout; verify each
 //!     commit's pubkey point maps to the sender's operator address
 //!   participation ≥ ceil(N·num/den)?  else next attempt
 //!   build_context → SignRequest{h,a, digest, signer points, R aggregates} → subset
-//!   collect PartialSig from exactly the subset; each partial is verified against
-//!     the signer's own nonce commitment (bad partials are attributed and the
-//!     signer is excluded from the next attempt)
+//!   collect PartialSig from exactly the subset until the sign stage timeout; each
+//!     partial is verified against the signer's own nonce commitment (bad partials
+//!     are attributed and the signer is excluded from the next attempt)
 //!   all partials → assemble (self-verifies) → Certified{h, digest, sig, nonSigners}
 //! deadline (ROUND_TIMEOUT from first sight of the assignment) →
 //!   Certified{h, skip_digest(h), no signature} — the sequencer's own deadline is
@@ -152,7 +152,12 @@ where
     /// Local participation floor `num/den` before a signing round is attempted
     /// (the authoritative stake check is the on-chain registry threshold).
     threshold: (u64, u64),
+    /// Round-1 (nonce collection) deadline: a bare p2p round trip.
     stage_timeout: Duration,
+    /// Round-2 (partial collection) deadline. Longer than `stage_timeout` because a
+    /// signer resolves the task digest with EVMSketch before it will produce a
+    /// partial, so this stage has to cover a full cold trace.
+    sign_stage_timeout: Duration,
     round_timeout: Duration,
 }
 
@@ -171,6 +176,7 @@ where
         namespace: Vec<u8>,
         threshold: (u64, u64),
         stage_timeout: Duration,
+        sign_stage_timeout: Duration,
         round_timeout: Duration,
     ) -> (Self, SchnorrCoordinatorMailbox) {
         let mailbox = SchnorrCoordinatorMailbox::default();
@@ -193,6 +199,7 @@ where
                 namespace,
                 threshold,
                 stage_timeout,
+                sign_stage_timeout,
                 round_timeout,
             },
             mailbox,
@@ -214,6 +221,7 @@ where
             operators = self.operator_keys.len(),
             min_signers = self.min_signers(),
             stage_timeout_secs = self.stage_timeout.as_secs_f64(),
+            sign_stage_timeout_secs = self.sign_stage_timeout.as_secs_f64(),
             "schnorr coordinator running"
         );
         loop {
@@ -396,7 +404,7 @@ where
             .sender
             .send(Recipients::Some(recipients), sign_request, true);
 
-        let stage_deadline = (Instant::now() + self.stage_timeout).min(deadline);
+        let stage_deadline = (Instant::now() + self.sign_stage_timeout).min(deadline);
         // (address, partial scalar) pairs; the scalar type is inferred so the
         // router crate does not need a direct k256 dependency.
         let mut partials = Vec::new();
