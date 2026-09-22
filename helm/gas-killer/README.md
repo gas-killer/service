@@ -177,10 +177,13 @@ Two things about the router bump in that command:
 - **The image tag carries the full 40-character commit SHA**, not an abbreviated one. The publish
   workflow tags `router-${{ github.sha }}`, so an abbreviated SHA is simply `not found` and the
   pod lands in `ErrImagePull`. Read the tag off the workflow run rather than composing it.
-- **The router's deployment strategy is `Recreate` with a 360s termination grace**, so any image
-  or env change drops the ingress rather than rolling it. Budget several minutes of downtime for
-  each router-affecting upgrade, and reset `rerun.schnorrOperators` to `false` afterwards so a
-  later unrelated upgrade does not trip over the kept Job.
+- **The router's deployment strategy is `Recreate` with a 30s termination grace**, so any image
+  or env change drops the ingress rather than rolling it. Budget that grace plus the router's
+  startup for each router-affecting upgrade. The grace is short because the binary runs as PID 1
+  and registers no SIGTERM handler: Linux discards unhandled signals at PID 1, so SIGKILL is what
+  stops the router either way and a longer window is idle time rather than a drain. Reset
+  `rerun.schnorrOperators` to `false` afterwards so a later unrelated upgrade does not trip over
+  the kept Job.
 
 | `schnorr.provision` | Deploys and publishes | Registers the operator set |
 |---|---|---|
