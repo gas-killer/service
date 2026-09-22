@@ -220,7 +220,13 @@ jobs:
           kubectl get pods -A
 
       - name: Fetch Helm dependencies
-        run: helm dependency update ./helm/gas-killer
+        # build, not update: Chart.yaml floats every subchart (alloy "1.x.x"), so update
+        # re-resolves to whatever is newest and the cluster under test stops matching
+        # Chart.lock. build installs the locked versions, which needs their repos registered.
+        run: |
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm dependency build ./helm/gas-killer
 
       - name: Install Helm chart
         run: |
