@@ -19,7 +19,8 @@
 //!   build_context → SignRequest{h,a, digest, signer points, R aggregates} → subset
 //!   collect PartialSig from exactly the subset until the sign stage timeout; each
 //!     partial is verified against the signer's own nonce commitment (bad partials
-//!     are attributed and the signer is excluded from the next attempt)
+//!     are attributed and the signer is excluded from the next attempt, and the
+//!     attempt is abandoned at once rather than waiting out a stage it cannot win)
 //!   all partials → assemble (self-verifies) → Certified{h, digest, sig, nonSigners}
 //! deadline (ROUND_TIMEOUT from first sight of the assignment) →
 //!   Certified{h, skip_digest(h), no signature} — the sequencer's own deadline is
@@ -61,6 +62,28 @@ use tracing::{debug, info, warn};
 
 /// How often the actor re-checks the assignments map for new work.
 const ASSIGNMENT_POLL: Duration = Duration::from_millis(250);
+
+/// Which invited signers to hold against the next attempt after round 2 came up short.
+///
+/// Silence is evidence only once the stage has actually run its course. `foreclosed` marks
+/// the attempt that ended early because a signer was proven bad: the signers that had not
+/// answered yet were never given their full window, so blaming them would drop them from the
+/// next attempt's subset and pad the on-chain non-signer list for no reason. The proven-bad
+/// signer is recorded by the caller at the point it is detected, not here.
+fn silent_signers<T>(
+    subset: &[Address],
+    partials: &[(Address, T)],
+    foreclosed: bool,
+) -> Vec<Address> {
+    if foreclosed {
+        return Vec::new();
+    }
+    subset
+        .iter()
+        .filter(|addr| !partials.iter().any(|(seen, _)| seen == *addr))
+        .copied()
+        .collect()
+}
 
 /// An aggregate-signature observation handed to the schnorr submitter.
 #[derive(Debug, Clone)]
@@ -408,6 +431,11 @@ where
         // (address, partial scalar) pairs; the scalar type is inferred so the
         // router crate does not need a direct k256 dependency.
         let mut partials = Vec::new();
+        // Set when a signer is proven bad, which forecloses this attempt: assembly needs a
+        // verified partial from every invited signer, so waiting out the rest of the stage
+        // could only reach the same failure later. Distinguished from a plain shortfall
+        // because the two attribute blame differently below.
+        let mut foreclosed = false;
         while partials.len() < subset.len() {
             let Some((peer, msg)) = self.recv_until(stage_deadline).await else {
                 break;
@@ -435,18 +463,17 @@ where
                 if !Coordinator::verify_partial(&ctx, pk, nonce, &partial) {
                     warn!(height, attempt, signer = %addr, "invalid partial signature; excluding signer");
                     suspects.insert(addr);
-                    continue;
+                    foreclosed = true;
+                    break;
                 }
                 partials.push((addr, partial));
             }
         }
 
         if partials.len() < subset.len() {
-            for addr in &subset {
-                if !partials.iter().any(|(a, _)| a == addr) {
-                    debug!(height, attempt, signer = %addr, "no partial before stage timeout");
-                    suspects.insert(*addr);
-                }
+            for addr in silent_signers(&subset, &partials, foreclosed) {
+                debug!(height, attempt, signer = %addr, "no partial before stage timeout");
+                suspects.insert(addr);
             }
             return None;
         }
@@ -486,5 +513,46 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(n: u8) -> Address {
+        Address::from([n; 20])
+    }
+
+    /// A stage that ran its course blames everyone who stayed silent, which is what keeps a
+    /// dead operator out of the next attempt's subset.
+    #[test]
+    fn a_stage_that_timed_out_blames_every_signer_that_never_answered() {
+        let subset = [addr(1), addr(2), addr(3)];
+        let partials = [(addr(1), ())];
+
+        assert_eq!(
+            silent_signers(&subset, &partials, false),
+            vec![addr(2), addr(3)]
+        );
+    }
+
+    /// Leaving early on a proven-bad partial says nothing about the signers still working, so
+    /// none of them are blamed — they would otherwise be dropped from the next attempt and
+    /// padded onto the on-chain non-signer list without ever having missed a deadline.
+    #[test]
+    fn an_attempt_abandoned_early_blames_nobody_for_silence() {
+        let subset = [addr(1), addr(2), addr(3)];
+        let partials = [(addr(1), ())];
+
+        assert!(silent_signers(&subset, &partials, true).is_empty());
+    }
+
+    #[test]
+    fn a_complete_subset_leaves_nobody_to_blame() {
+        let subset = [addr(1), addr(2)];
+        let partials = [(addr(1), ()), (addr(2), ())];
+
+        assert!(silent_signers(&subset, &partials, false).is_empty());
     }
 }

@@ -396,6 +396,13 @@ node:
   # in-flight sessions (see schnorr_participant), and the coordinator retries the
   # attempt with fresh nonces from the remaining quorum. Raise this only alongside a
   # SIGTERM handler that drains something.
+  #
+  # The retry is correct but not free. A node that committed a nonce and then died
+  # sends nothing back, and the coordinator cannot tell that apart from one still
+  # tracing, so it waits out the whole partial stage (schnorr.signStageTimeoutSecs,
+  # roundTimeout/2 by default) before starting over. Drain a node pool between
+  # rounds: one deletion mid-round costs half the round, and two overlapping ones
+  # lose the height to a skip.
   terminationGracePeriodSeconds: 30
   # Stagger EigenSDK eth_getLogs backfill sweeps across nodes so at most one runs at a time.
   # node-1 starts immediately; node-N waits (N-1) * startupDelaySecsPerNode before launching.
