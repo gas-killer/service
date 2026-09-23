@@ -83,14 +83,6 @@ global:
   # change rather than a rolling one: a partially migrated fleet fails quorum until it converges.
   simProfile: "chain"
 
-  # Acknowledges that the ethereum image's entrypoint starts Anvil with
-  # --disable-block-gas-limit, which simProfile: "unbounded" needs in LOCAL mode to execute an
-  # above-block-limit call at all. The chart cannot supply that flag — it lives in the image — so
-  # rendering fails on the LOCAL + unbounded combination until this is set. That turns a
-  # runtime failure of every heavy task into an install-time error. Irrelevant for TESTNET, where
-  # the RPC is external and its cap is the operator's responsibility.
-  localAnvilUnboundedReady: false
-
   # Number of operator nodes to deploy
   nodeCount: 3
 

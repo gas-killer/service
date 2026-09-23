@@ -120,6 +120,17 @@ jobs:
             exit 1
           fi
 
+      - name: Reject a sim fork with nothing to fork
+        run: |
+          # Without forkUrl no fork renders, and the fleet would simulate against HTTP_RPC unbounded.
+          if helm template gk ./helm/gas-killer -f helm/gas-killer/testnet-overrides.yaml \
+               $COMMON \
+               --set simRpc.url= --set l1.simFork.enabled=true \
+               --set-string l1.extraArgs="--disable-block-gas-limit" > /dev/null 2>&1; then
+            echo "l1.simFork.enabled rendered without secrets.forkUrl; the guard is gone" >&2
+            exit 1
+          fi
+
   helm-test:
     name: Test with Helm Charts
     runs-on: ubuntu-latest

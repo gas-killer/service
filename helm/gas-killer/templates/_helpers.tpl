@@ -55,6 +55,9 @@ Distinct from LOCAL mode, where the same workload is the chain itself rather tha
 Rendered as a string so callers can test it: `include "gas-killer.simFork.enabled" . | eq "true"`.
 */}}
 {{- define "gas-killer.simFork.enabled" -}}
+{{- if and (.Values.l1.simFork).enabled (ne .Values.global.environment "LOCAL") (not (and .Values.l1.enabled .Values.secrets.forkUrl)) -}}
+{{- fail "l1.simFork.enabled needs l1.enabled=true and secrets.forkUrl set. Without them no fork renders and the fleet simulates against HTTP_RPC, whose trace cap clamps silently." -}}
+{{- end -}}
 {{- if and .Values.l1.enabled .Values.secrets.forkUrl (.Values.l1.simFork).enabled (ne .Values.global.environment "LOCAL") -}}
 {{- if (.Values.simRpc).url -}}
 {{- fail "simRpc.url and l1.simFork.enabled both set: the fleet simulates against exactly one endpoint. Unset one." -}}
@@ -96,8 +99,8 @@ this one helper, so they cannot be given different values — a divergence would
 storage_updates on one side and fork the quorum's digests.
 
 Rejects unbounded unless the deployment's own Anvil is explicitly started with its block gas limit
-disabled. Satisfied by l1.extraArgs carrying --disable-block-gas-limit, or by
-global.localAnvilUnboundedReady for an image that bakes the flag into its entrypoint.
+disabled, via l1.extraArgs carrying --disable-block-gas-limit. The l1 container overrides the
+image's entrypoint, so extraArgs is the only way the flag reaches Anvil.
 
 Measured on anvil 1.5.1, the flag does NOT gate debug_traceCall: a 104M-gas call traces fine on a
 default 60M-limit anvil, with or without blockOverrides, because the flag governs block
@@ -116,9 +119,9 @@ cannot see, which is what l1.simFork.enabled exists to bring in-cluster.
 {{- fail (printf "global.simProfile must be \"chain\" or \"unbounded\", got %q" $profile) -}}
 {{- end -}}
 {{- $bundledAnvil := or (eq .Values.global.environment "LOCAL") (include "gas-killer.simFork.enabled" . | eq "true") -}}
-{{- $capLifted := or (contains "--disable-block-gas-limit" (.Values.l1.extraArgs | default "")) .Values.global.localAnvilUnboundedReady -}}
+{{- $capLifted := contains "--disable-block-gas-limit" (.Values.l1.extraArgs | default "") -}}
 {{- if and (eq $profile "unbounded") $bundledAnvil (not $capLifted) -}}
-{{- fail "global.simProfile=unbounded needs the bundled Anvil to run with --disable-block-gas-limit, or an above-block-limit call OOGs inside the tracer and analysis returns a truncated payload instead of an error. Set l1.extraArgs=\"--disable-block-gas-limit\", or global.localAnvilUnboundedReady=true if the ethereum image already supplies it." -}}
+{{- fail "global.simProfile=unbounded needs the bundled Anvil to run with --disable-block-gas-limit, or an above-block-limit call OOGs inside the tracer and analysis returns a truncated payload instead of an error. Set l1.extraArgs=\"--disable-block-gas-limit\"." -}}
 {{- end -}}
 {{- $profile -}}
 {{- end }}
