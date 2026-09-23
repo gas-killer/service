@@ -85,6 +85,10 @@ jobs:
             exit 1
           fi
           echo "LOCAL renders with no sim endpoint"
+          # Setup retries are free against anvil.
+          SETUP='select(.kind == "Job" and .metadata.name == "gk-gas-killer-setup")'
+          test "$(yq "$SETUP | .spec.backoffLimit" "$RUNNER_TEMP/local.yaml")" = 3
+          test "$(yq "$SETUP | .spec.template.spec.restartPolicy" "$RUNNER_TEMP/local.yaml")" = OnFailure
 
       - name: Render TESTNET against the in-cluster node
         run: |
@@ -95,6 +99,12 @@ jobs:
           test "$(grep -A1 'name: SIM_HTTP_RPC' "$RUNNER_TEMP/node.yaml" | grep -c 'http://sim-node:8545')" = 4
           test "$(grep -A1 'name: GK_SIM_PROFILE' "$RUNNER_TEMP/node.yaml" | grep -c 'unbounded')" = 4
           echo "router and nodes agree on endpoint and profile"
+          # Each setup attempt deploys a fresh AVS on a live network, so a failure must stop at
+          # one: backoffLimit alone still lets the kubelet restart the container in place.
+          SETUP='select(.kind == "Job" and .metadata.name == "gk-gas-killer-setup")'
+          test "$(yq "$SETUP | .spec.backoffLimit" "$RUNNER_TEMP/node.yaml")" = 0
+          test "$(yq "$SETUP | .spec.template.spec.restartPolicy" "$RUNNER_TEMP/node.yaml")" = Never
+          echo "setup runs once on testnet"
 
       - name: Render TESTNET against the bundled fork
         run: |

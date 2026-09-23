@@ -12,7 +12,11 @@ metadata:
     # Runs automatically on helm install. On helm upgrade, only fires when rerun.setup=true.
     "helm.sh/resource-policy": keep
 spec:
-  backoffLimit: 3
+  # Each attempt runs setup from scratch: new operator accounts and a new AVS. On a live network
+  # that is a full deployment's gas per retry, so a failure stops at the first one there. That
+  # takes restartPolicy Never as well: under OnFailure the kubelet restarts the container in place
+  # before the Job controller acts on backoffLimit, so a second deployment starts anyway.
+  backoffLimit: {{ if eq .Values.global.environment "TESTNET" }}0{{ else }}3{{ end }}
   ttlSecondsAfterFinished: 3600
   template:
     metadata:
@@ -20,7 +24,7 @@ spec:
         {{- include "gas-killer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: setup
     spec:
-      restartPolicy: OnFailure
+      restartPolicy: {{ if eq .Values.global.environment "TESTNET" }}Never{{ else }}OnFailure{{ end }}
       {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
       serviceAccountName: {{ default (include "gas-killer.serviceaccount.fullname" .) .Values.secretManager.serviceAccountName }}
       {{- end }}
