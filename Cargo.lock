@@ -4137,7 +4137,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#2a68613923de81a74947f039838a6a0bf496aa6c"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#517fde4cf2dbd05bca63388fa2356cc53d5e2ece"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -4152,7 +4152,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#2a68613923de81a74947f039838a6a0bf496aa6c"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#517fde4cf2dbd05bca63388fa2356cc53d5e2ece"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -4168,7 +4168,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#2a68613923de81a74947f039838a6a0bf496aa6c"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#517fde4cf2dbd05bca63388fa2356cc53d5e2ece"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -4197,7 +4197,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-gkvm"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#2a68613923de81a74947f039838a6a0bf496aa6c"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#517fde4cf2dbd05bca63388fa2356cc53d5e2ece"
 dependencies = [
  "alloy-primitives",
  "anyhow",
@@ -4215,7 +4215,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#2a68613923de81a74947f039838a6a0bf496aa6c"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=RonTuretzky%2Fgkvm-m6-host#517fde4cf2dbd05bca63388fa2356cc53d5e2ece"
 dependencies = [
  "alloy",
  "alloy-eips",
