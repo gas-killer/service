@@ -12,7 +12,9 @@ metadata:
     # Runs automatically on helm install. On helm upgrade, only fires when rerun.setup=true.
     "helm.sh/resource-policy": keep
 spec:
-  backoffLimit: 3
+  # Each attempt runs setup from scratch: new operator accounts and a new AVS. On a live network
+  # that is a full deployment's gas per retry, so a failure stops at the first one there.
+  backoffLimit: {{ if eq .Values.global.environment "TESTNET" }}0{{ else }}3{{ end }}
   ttlSecondsAfterFinished: 3600
   template:
     metadata:
@@ -383,6 +385,10 @@ spec:
               value: {{ .Values.eigenlayer.sdk.thresholdDenominator | quote }}
             - name: BLOCK_STALE_MEASURE
               value: {{ .Values.eigenlayer.sdk.blockStaleMeasure | quote }}
+            {{- with .Values.eigenlayer.stakeAmount }}
+            - name: STAKE_AMOUNT
+              value: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             - name: shared-data
               mountPath: /root/.nodes
