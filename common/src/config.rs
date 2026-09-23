@@ -732,11 +732,11 @@ const SCHNORR_SIGN_STAGE_ROUND_FRACTION: u32 = 2;
 /// The fraction, rather than the whole round, keeps a retry in budget. The two retry
 /// cases are not alike. A retry after a dropped signing-round message resolves from
 /// the node's digest cache, which the finished trace already filled, and is cheap. A
-/// retry after the stage ran to its deadline does not: the first attempt's sign task
-/// is detached and never cancelled, its trace is still running, and
-/// `GasKillerValidator::expected_digest_for_task` writes the cache only on completion
-/// and holds no in-flight entry, so the new attempt starts a second concurrent
-/// EVMSketch for the same task and both contend for the same CPU.
+/// retry after the stage ran to its deadline is not: the first attempt's sign task is
+/// detached and never cancelled, so its trace is still running, and the new attempt
+/// queues behind it on `GasKillerValidator::expected_digest_for_task`'s flight lock.
+/// It costs the remainder of that trace, not a second one — unless the trace fails,
+/// in which case the retry traces again from the start.
 pub fn schnorr_sign_stage_timeout() -> std::time::Duration {
     schnorr_sign_stage_timeout_from(
         round_timeout(),
