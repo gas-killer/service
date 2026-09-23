@@ -68,10 +68,10 @@ imagePullSecrets:
 secretManager:
   enabled: true
   projectId: gas-killer-testnet
-  # `-v2` is the schnorr operator set. The unsuffixed prefix holds the retired bls set, whose
-  # secp256k1 keys were never exported; setup restores from whatever prefix is set here, so
-  # reusing it would bring those operators back.
-  keyPrefix: gas-killer-testnet-v2
+  # The unsuffixed prefix holds the retired bls operator set, whose secp256k1 keys were never
+  # exported; setup restores from whatever prefix is set here, so reusing it would bring those
+  # operators back.
+  keyPrefix: gas-killer-testnet-schnorr
   gcpServiceAccount: gas-killer-app@gas-killer-testnet.iam.gserviceaccount.com
 
 eigenlayer:
