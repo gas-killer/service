@@ -6,6 +6,7 @@ use commonware_runtime::telemetry::metrics::raw::{Counter, Family, Histogram};
 use commonware_runtime::telemetry::metrics::registry::Registry;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -40,6 +41,41 @@ fn digest_cache_key(task: &GasKillerTaskData) -> DigestCacheKey {
         task.call_data.clone(),
     )
 }
+
+/// In-progress digest resolutions: one flight lock per [`DigestCacheKey`] being traced.
+type FlightMap = HashMap<DigestCacheKey, Arc<Mutex<()>>>;
+
+/// A caller's hold on a key's flight, removing the map entry when the last holder lets go.
+///
+/// Cleanup lives in `Drop` so it also runs for a caller cancelled while waiting or tracing.
+/// The handle is released under the map lock, not after it: checking the count and dropping
+/// the handle as two steps lets two holders leaving together each see the other and both
+/// keep the entry.
+struct DigestFlight {
+    flights: Arc<StdMutex<FlightMap>>,
+    key: DigestCacheKey,
+    lock: Option<Arc<Mutex<()>>>,
+}
+
+impl DigestFlight {
+    fn lock(&self) -> &Mutex<()> {
+        self.lock.as_deref().expect("released only in drop")
+    }
+}
+
+impl Drop for DigestFlight {
+    fn drop(&mut self) {
+        let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+        self.lock.take();
+        if flights
+            .get(&self.key)
+            .is_some_and(|flight| Arc::strong_count(flight) == 1)
+        {
+            flights.remove(&self.key);
+        }
+    }
+}
+
 use gas_analyzer::{
     EncodePhaseTimings, EvmSketchExecutorCache, Extraction,
     call_to_encoded_state_updates_with_evmsketch_profiled,
@@ -357,7 +393,11 @@ pub struct GasKillerValidator {
     /// the same task, competing for the same CPU. A caller that misses takes the key's flight
     /// lock, and whoever waits re-reads the cache the leader filled instead of tracing again.
     /// Entries are dropped once no caller holds one, so the map tracks live flights only.
-    digest_flights: Arc<Mutex<HashMap<DigestCacheKey, Arc<Mutex<()>>>>>,
+    ///
+    /// A std mutex so [`DigestFlight`]'s `Drop` can take it: cleanup has to run for a caller
+    /// cancelled mid-trace too, and code after an `.await` never runs for a dropped future.
+    /// It is never held across an await.
+    digest_flights: Arc<StdMutex<FlightMap>>,
     /// LRU cache of pre-built EvmSketch executors keyed by (rpc_url, block_number).
     /// Eliminates the 2× eth_getBlockByNumber build cost (~80–120 ms) for the
     /// 2nd…Nth request at the same block height.
@@ -400,7 +440,7 @@ impl GasKillerValidator {
             providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
-            digest_flights: Arc::new(Mutex::new(HashMap::new())),
+            digest_flights: Arc::new(StdMutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             // Production path: node and router both call `new()`, so reading the
@@ -424,7 +464,7 @@ impl GasKillerValidator {
             providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
-            digest_flights: Arc::new(Mutex::new(HashMap::new())),
+            digest_flights: Arc::new(StdMutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             state_encoding: gas_analyzer::StateEncoding::Legacy,
@@ -442,7 +482,7 @@ impl GasKillerValidator {
             providers,
             default_chain: ChainRole::L1,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
-            digest_flights: Arc::new(Mutex::new(HashMap::new())),
+            digest_flights: Arc::new(StdMutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
             state_encoding: gas_analyzer::StateEncoding::Legacy,
@@ -864,15 +904,12 @@ impl GasKillerValidator {
         }
 
         // Missed: claim this key's flight, or wait behind the caller already tracing it. The
-        // trace runs under the flight lock so only one runs per key at a time.
-        let flight = self.acquire_digest_flight(&cache_key).await;
-        let permit = flight.lock().await;
+        // trace runs under the flight lock so only one runs per key at a time. Errors are not
+        // shared, so waiters behind a failed trace each retry it in turn rather than together.
+        let flight = self.acquire_digest_flight(&cache_key);
+        let _permit = flight.lock().lock().await;
 
-        let outcome = self.resolve_digest_uncached(task_data, &cache_key).await;
-
-        drop(permit);
-        self.release_digest_flight(&cache_key, flight).await;
-        outcome
+        self.resolve_digest_uncached(task_data, &cache_key).await
     }
 
     /// Reads a digest already in the cache, counting the lookup.
@@ -927,20 +964,16 @@ impl GasKillerValidator {
     ///
     /// Handing back the same `Arc` for a key is what makes callers queue behind each other
     /// rather than each trace independently.
-    async fn acquire_digest_flight(&self, cache_key: &DigestCacheKey) -> Arc<Mutex<()>> {
-        let mut flights = self.digest_flights.lock().await;
-        Arc::clone(flights.entry(cache_key.clone()).or_default())
-    }
-
-    /// Drops a finished flight once nobody else holds it.
-    ///
-    /// Two strong references means the map's and this caller's, so no one is waiting and the
-    /// entry is dead weight. The count cannot grow while the map lock is held, since a waiter
-    /// has to take that lock to clone the handle.
-    async fn release_digest_flight(&self, cache_key: &DigestCacheKey, flight: Arc<Mutex<()>>) {
-        let mut flights = self.digest_flights.lock().await;
-        if Arc::strong_count(&flight) <= 2 {
-            flights.remove(cache_key);
+    fn acquire_digest_flight(&self, cache_key: &DigestCacheKey) -> DigestFlight {
+        let mut flights = self
+            .digest_flights
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let lock = Arc::clone(flights.entry(cache_key.clone()).or_default());
+        DigestFlight {
+            flights: Arc::clone(&self.digest_flights),
+            key: cache_key.clone(),
+            lock: Some(lock),
         }
     }
 }
@@ -1038,16 +1071,16 @@ mod tests {
         other_task.block_height += 1;
         let other_key = digest_cache_key(&other_task);
 
-        let first = validator.acquire_digest_flight(&key).await;
-        let second = validator.acquire_digest_flight(&key).await;
-        let unrelated = validator.acquire_digest_flight(&other_key).await;
+        let first = validator.acquire_digest_flight(&key);
+        let second = validator.acquire_digest_flight(&key);
+        let unrelated = validator.acquire_digest_flight(&other_key);
 
         assert!(
-            Arc::ptr_eq(&first, &second),
+            std::ptr::eq(first.lock(), second.lock()),
             "the same task must map to one flight, or both callers trace it"
         );
         assert!(
-            !Arc::ptr_eq(&first, &unrelated),
+            !std::ptr::eq(first.lock(), unrelated.lock()),
             "different tasks must not serialize against each other"
         );
     }
@@ -1057,11 +1090,10 @@ mod tests {
         let validator = GasKillerValidator::with_rpc_url("https://example.com");
         let key = digest_cache_key(&create_test_task_data());
 
-        let flight = validator.acquire_digest_flight(&key).await;
-        validator.release_digest_flight(&key, flight).await;
+        drop(validator.acquire_digest_flight(&key));
 
         assert!(
-            validator.digest_flights.lock().await.is_empty(),
+            validator.digest_flights.lock().unwrap().is_empty(),
             "a flight nobody holds must not outlive the trace it guarded"
         );
     }
@@ -1071,16 +1103,47 @@ mod tests {
         let validator = GasKillerValidator::with_rpc_url("https://example.com");
         let key = digest_cache_key(&create_test_task_data());
 
-        let leader = validator.acquire_digest_flight(&key).await;
-        let waiter = validator.acquire_digest_flight(&key).await;
-        validator.release_digest_flight(&key, leader).await;
+        let leader = validator.acquire_digest_flight(&key);
+        let waiter = validator.acquire_digest_flight(&key);
+        drop(leader);
 
         assert_eq!(
-            validator.digest_flights.lock().await.len(),
+            validator.digest_flights.lock().unwrap().len(),
             1,
             "dropping the entry while a waiter holds it would let the next caller trace in parallel"
         );
         drop(waiter);
+        assert!(validator.digest_flights.lock().unwrap().is_empty());
+    }
+
+    /// A resolve dropped mid-flight never reaches code after its `.await`, so the entry has
+    /// to be released by the guard, or every cancelled resolution leaks one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_caller_leaves_no_entry_behind() {
+        let validator = Arc::new(GasKillerValidator::with_rpc_url(
+            "http://127.0.0.1:1/unreachable",
+        ));
+        let task_data = create_test_task_data();
+        let key = digest_cache_key(&task_data);
+
+        let leader = validator.acquire_digest_flight(&key);
+        let permit = leader.lock().lock().await;
+
+        let follower = tokio::spawn({
+            let validator = Arc::clone(&validator);
+            let task_data = task_data.clone();
+            async move { validator.expected_digest_for_task(&task_data).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        follower.abort();
+        let _ = follower.await;
+
+        drop(permit);
+        drop(leader);
+        assert!(
+            validator.digest_flights.lock().unwrap().is_empty(),
+            "a caller cancelled while waiting must not leave its flight behind"
+        );
     }
 
     /// The property the flight exists for: a caller that arrives while the same task is being
@@ -1097,8 +1160,8 @@ mod tests {
         let key = digest_cache_key(&task_data);
 
         // Stand in for a trace already running: hold the key's flight.
-        let flight = validator.acquire_digest_flight(&key).await;
-        let permit = flight.lock().await;
+        let flight = validator.acquire_digest_flight(&key);
+        let permit = flight.lock().lock().await;
 
         let follower = tokio::spawn({
             let validator = Arc::clone(&validator);
