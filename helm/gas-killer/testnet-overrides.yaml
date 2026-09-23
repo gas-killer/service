@@ -156,7 +156,9 @@ deployTarget:
 #
 # `registry` rather than `full`: this deployment's operator secp256k1 keys are gone, so nobody can
 # be registered. The registry verifies nothing until it is filled, which only matters once a fleet
-# signs schnorr, and its owner can fill it then without the address changing.
+# signs schnorr. The schnorr install that registers a new operator set fills it through
+# schnorr-operators, since the job registers into a pinned registry that holds nothing else, so
+# the address does not change.
 schnorr:
   provision: registry
 

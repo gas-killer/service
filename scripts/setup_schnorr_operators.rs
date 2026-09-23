@@ -26,6 +26,9 @@
 //! settle under whichever scheme the fleet is running; the registry verifies nothing until
 //! operators are registered, which its owner can do later into the same registry. Both explicit
 //! values run whatever scheme the fleet signs, which is the point of them.
+//!
+//! `SCHNORR_STAKE_REGISTRY_ADDRESS` reuses a deployed registry instead. Registering into one is
+//! only done while it holds nothing but this operator set; see [`FillPlan`].
 
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
@@ -122,11 +125,9 @@ async fn main() -> Result<(), DynError> {
         .into());
     }
 
-    // Reuse SCHNORR_STAKE_REGISTRY_ADDRESS when it points at deployed code (its operator set is
-    // assumed already registered), otherwise deploy a fresh registry and register everyone.
-    let (registry_address, register_operators) = match env_address(
-        "SCHNORR_STAKE_REGISTRY_ADDRESS",
-    )? {
+    // Reuse SCHNORR_STAKE_REGISTRY_ADDRESS when it points at deployed code, otherwise deploy a
+    // fresh registry.
+    let (registry_address, reused) = match env_address("SCHNORR_STAKE_REGISTRY_ADDRESS")? {
         Some(addr) => {
             let code = provider
                 .get_code_at(addr)
@@ -139,10 +140,8 @@ async fn main() -> Result<(), DynError> {
                 )
                 .into());
             }
-            println!(
-                "🏦 Using existing SchnorrStakeRegistry at: {addr} (skipping operator registrations)"
-            );
-            (addr, false)
+            println!("🏦 Using existing SchnorrStakeRegistry at: {addr}");
+            (addr, true)
         }
         None => {
             println!(
@@ -160,7 +159,7 @@ async fn main() -> Result<(), DynError> {
             .map_err(|e| format!("Failed to deploy SchnorrStakeRegistry: {e}"))?;
             let address = *registry.address();
             println!("✅ SchnorrStakeRegistry deployed at: {address}");
-            (address, true)
+            (address, false)
         }
     };
 
@@ -169,7 +168,9 @@ async fn main() -> Result<(), DynError> {
             "⏭️  No operator registered. The registry verifies nothing until one is, and its \
              owner {deployer} is who can register them."
         );
-    } else if register_operators {
+    } else if reused {
+        fill_reused_registry(&provider, registry_address, deployer, &operator_keys).await?;
+    } else {
         register_operator_set(&provider, registry_address, &operator_keys).await?;
     }
 
@@ -234,6 +235,120 @@ async fn register_operator_set<P: Provider + Clone>(
         println!("✅ Registered operator {operator} (weight 1)");
     }
     Ok(())
+}
+
+/// What a reused registry needs, from what it already holds.
+#[derive(Debug, PartialEq, Eq)]
+enum FillPlan {
+    /// It holds exactly this operator set.
+    Complete,
+    /// It holds part of this operator set or none of it, and nothing else. The forced path can
+    /// then only invalidate a round assembled against this fleet's own partial set, which a retry
+    /// recovers, and completing a partial set is what lets a run that died mid-fill be re-run.
+    Register,
+    /// It holds weight that is not this deployment's, or has changes scheduled. Either is a set
+    /// someone else is managing, through the announce path, and a foreign operator would sit in
+    /// the quorum as a permanent non-signer.
+    Refuse,
+}
+
+/// What a reused registry holds, as far as [`FillPlan`] is concerned.
+struct RegistryState {
+    /// This deployment's operators not yet registered.
+    missing: usize,
+    /// Weight registered to this deployment's operators.
+    own_weight: U256,
+    total_weight: U256,
+    pending_changes: U256,
+}
+
+impl FillPlan {
+    fn for_registry(state: &RegistryState) -> Self {
+        if state.total_weight != state.own_weight || !state.pending_changes.is_zero() {
+            Self::Refuse
+        } else if state.missing == 0 {
+            Self::Complete
+        } else {
+            Self::Register
+        }
+    }
+}
+
+/// Registers the operator set into a reused registry when [`FillPlan`] allows it.
+async fn fill_reused_registry<P: Provider + Clone>(
+    provider: &P,
+    registry_address: Address,
+    deployer: Address,
+    operator_keys: &[PrivateKey],
+) -> Result<(), DynError> {
+    let registry = SchnorrStakeRegistry::new(registry_address, provider.clone());
+
+    let mut missing = Vec::new();
+    let mut own_weight = U256::ZERO;
+    for key in operator_keys {
+        let operator = key.public_key().eth_address();
+        let record = registry.operators(operator).call().await.map_err(|e| {
+            format!("Failed to read operator {operator} from {registry_address}: {e}")
+        })?;
+        if record.registered {
+            own_weight += U256::from(record.weight);
+        } else {
+            missing.push(key.clone());
+        }
+    }
+    let total_weight = registry
+        .totalWeight()
+        .call()
+        .await
+        .map_err(|e| format!("Failed to read totalWeight from {registry_address}: {e}"))?;
+    let pending_changes =
+        registry.pendingChangeCount().call().await.map_err(|e| {
+            format!("Failed to read pendingChangeCount from {registry_address}: {e}")
+        })?;
+    let state = RegistryState {
+        missing: missing.len(),
+        own_weight,
+        total_weight,
+        pending_changes,
+    };
+
+    match FillPlan::for_registry(&state) {
+        FillPlan::Complete => {
+            println!(
+                "✅ All {} operator(s) already registered (registry total weight {total_weight})",
+                operator_keys.len()
+            );
+            Ok(())
+        }
+        FillPlan::Register => {
+            // Checked here because the revert would only say NotOwner.
+            let owner = registry
+                .owner()
+                .call()
+                .await
+                .map_err(|e| format!("Failed to read owner of {registry_address}: {e}"))?;
+            if owner != deployer {
+                return Err(format!(
+                    "SchnorrStakeRegistry {registry_address} is owned by {owner}, not the deployer \
+                     {deployer}; only its owner can register the operator set"
+                )
+                .into());
+            }
+            println!(
+                "📋 Registering {} of {} operator(s)",
+                missing.len(),
+                operator_keys.len()
+            );
+            register_operator_set(provider, registry_address, &missing).await
+        }
+        FillPlan::Refuse => Err(format!(
+            "SchnorrStakeRegistry {registry_address} holds weight {total_weight}, of which \
+             {own_weight} is this deployment's, with {pending_changes} change(s) scheduled. A \
+             registry holding other operators or scheduled changes is managed through \
+             announceRegister and commitNextChange, not this job."
+        )
+        .into()),
+    }
 }
 
 /// Loads every operator's secp256k1 key from the `*.private.ecdsa.key.json` files the eigenlayer
@@ -385,8 +500,50 @@ fn env_address(name: &str) -> Result<Option<Address>, DynError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Provision, parse_provision};
+    use super::{FillPlan, Provision, RegistryState, parse_provision};
+    use alloy::primitives::U256;
     use gas_killer_common::SignatureScheme;
+
+    fn state(missing: usize, own: u64, total: u64, pending: u64) -> RegistryState {
+        RegistryState {
+            missing,
+            own_weight: U256::from(own),
+            total_weight: U256::from(total),
+            pending_changes: U256::from(pending),
+        }
+    }
+
+    #[test]
+    fn a_reused_registry_is_filled_only_while_it_holds_nothing_else() {
+        assert_eq!(
+            FillPlan::for_registry(&state(3, 0, 0, 0)),
+            FillPlan::Register
+        );
+        assert_eq!(
+            FillPlan::for_registry(&state(2, 1, 1, 0)),
+            FillPlan::Register,
+            "a fill that died partway must be resumable"
+        );
+        assert_eq!(
+            FillPlan::for_registry(&state(0, 3, 3, 0)),
+            FillPlan::Complete
+        );
+        assert_eq!(
+            FillPlan::for_registry(&state(0, 3, 5, 0)),
+            FillPlan::Refuse,
+            "a superset leaves a foreign operator in the quorum"
+        );
+        assert_eq!(
+            FillPlan::for_registry(&state(3, 0, 3, 0)),
+            FillPlan::Refuse,
+            "another deployment's operator set must not be joined through the forced path"
+        );
+        assert_eq!(
+            FillPlan::for_registry(&state(3, 0, 0, 1)),
+            FillPlan::Refuse,
+            "a scheduled change means someone else is managing the set"
+        );
+    }
 
     #[test]
     fn an_unset_provision_follows_the_signature_scheme() {

@@ -705,8 +705,9 @@ schnorr:
 
   # The SchnorrStakeRegistry this deployment uses, read by two things:
   #
-  #   - the schnorr-operators job reuses it instead of deploying a fresh one, assuming its operator
-  #     set is complete, so it submits no registrations. Leave empty to deploy one.
+  #   - the schnorr-operators job reuses it instead of deploying a fresh one. Where the job
+  #     registers operators, it registers whichever of this set are missing, but only while the
+  #     registry holds nothing else and has no change scheduled. Leave empty to deploy one.
   #   - the router publishes it as `schnorrStakeRegistry` on GET /avs-metadata, in either scheme.
   #     Under bls the router never verifies against it; publishing is what lets an integrator wire
   #     a target that accepts both schemes before the fleet switches. Left empty, the router reads
