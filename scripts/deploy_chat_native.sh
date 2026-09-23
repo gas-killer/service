@@ -15,6 +15,11 @@
 #   GK_SDK_REPO / GK_SDK_REF   consumer source (default: the gkvm M5 branch)
 #   GK_SDK_DIR            checkout cache dir (default .gk-solidity-sdk-native); point it
 #                         at an existing solidity-sdk checkout to use that as-is
+#   GK_CHAT_CONTRACT      consumer to deploy: GasKillerChatNative (default, answer.py, no
+#                         artifact) or GasKillerChatQwen (the flagship: qwen guest over the
+#                         real weights — needs GK_ARTIFACT_ROOT and GK_PACKED_CONFIG)
+#   GK_ARTIFACT_ROOT      manifest-v3 root passed to the constructor (default: zero)
+#   GK_PACKED_CONFIG      Qwen3Engine packedConfig, three 0x words separated by commas
 set -euo pipefail
 
 # The compose harness keeps its configuration in .env (the Rust helpers read it
@@ -28,7 +33,7 @@ fi
 
 HTTP_RPC="${HTTP_RPC:-http://localhost:8545}"
 SDK_REPO="${GK_SDK_REPO:-https://github.com/gas-killer/solidity-sdk}"
-SDK_REF="${GK_SDK_REF:-Rubydusa/gkvm-m5-dx}"
+SDK_REF="${GK_SDK_REF:-RonTuretzky/gkvm-m5-dx}"
 SDK_DIR="${GK_SDK_DIR:-.gk-solidity-sdk-native}"
 
 : "${PRIVATE_KEY:?PRIVATE_KEY is required}"
@@ -50,10 +55,17 @@ fi
 ZERO_ADDRESS=0x0000000000000000000000000000000000000000
 ZERO_ROOT=0x0000000000000000000000000000000000000000000000000000000000000000
 
+CONTRACT="${GK_CHAT_CONTRACT:-GasKillerChatNative}"
+ROOT="${GK_ARTIFACT_ROOT:-$ZERO_ROOT}"
+ARGS=("$AVS_ADDRESS" "$SIG_CHECKER_ADDRESS" "$ZERO_ADDRESS" "$ROOT")
+if [ "$CONTRACT" = "GasKillerChatQwen" ]; then
+    : "${GK_PACKED_CONFIG:?GK_PACKED_CONFIG (3 comma-separated 0x words) is required for GasKillerChatQwen}"
+    ARGS+=("[${GK_PACKED_CONFIG}]")
+fi
 OUT=$(cd "$SDK_DIR" && forge create \
-    src/examples/onchain-llm-native/GasKillerChatNative.sol:GasKillerChatNative \
+    "src/examples/onchain-llm-native/$CONTRACT.sol:$CONTRACT" \
     --rpc-url "$HTTP_RPC" --private-key "$PRIVATE_KEY" --broadcast \
-    --constructor-args "$AVS_ADDRESS" "$SIG_CHECKER_ADDRESS" "$ZERO_ADDRESS" "$ZERO_ROOT" 2>&1)
+    --constructor-args "${ARGS[@]}" 2>&1)
 echo "$OUT" >&2
 
 TARGET=$(printf '%s\n' "$OUT" | grep -o 'Deployed to: 0x[a-fA-F0-9]*' | tail -1 | grep -o '0x[a-fA-F0-9]*')

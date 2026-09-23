@@ -26,10 +26,12 @@
 //! quorum if `threshold` operators are misconfigured the same way.
 //! `GK_GUEST_VM_CONSUMERS` belongs on every operator, whatever its executor.
 //!
-//! Observed, printed, NOT asserted (it is upstream behavior this repo does not
-//! own): commonware-avs-node's `Contributor::run` propagates a validation
+//! Asserted: abstaining costs an operator that round and nothing else. At
+//! commonware-restaking 1a9716c `Contributor::run` propagated a validation
 //! error on a round's `Start` with `?`, so an abstaining operator's signing
-//! loop EXITS — the process stays up, but signs nothing again until restarted.
+//! loop exited — process up, signing nothing until restarted. The service now
+//! builds against `RonTuretzky/contributor-survives-refusal`, which declines
+//! the round and keeps listening.
 //!
 //! Requires `anvil` (foundry) on PATH; soft-skips otherwise. One `#[test]`:
 //! validator construction reads the process environment.
@@ -551,8 +553,7 @@ async fn an_operator_without_the_guest_program_abstains_and_no_divergent_transit
         );
     }
 
-    // Upstream behavior, reported only (module docs): what abstaining costs
-    // the operator today.
+    // What abstaining costs the operator, reported per operator.
     for (op, signing_loop) in operators.iter().zip(&loops) {
         println!(
             "operator {}: start verdict {}, signing loop {}",
@@ -569,9 +570,12 @@ async fn an_operator_without_the_guest_program_abstains_and_no_divergent_transit
             }
         );
     }
+    // With the contributor fix (commonware-restaking
+    // `RonTuretzky/contributor-survives-refusal`) declining a round costs the
+    // operator that round only: every loop, refusing ones included, is still up.
     assert!(
-        !loops[0].is_finished() && !loops[1].is_finished(),
-        "the signing operators keep serving"
+        loops.iter().all(|signing_loop| !signing_loop.is_finished()),
+        "every operator keeps serving — a refusal declines one round, not all later ones"
     );
     for signing_loop in loops {
         signing_loop.abort();

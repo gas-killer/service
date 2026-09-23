@@ -25,11 +25,13 @@ axum = "0.7"
 bytes = "1.10.1"
 clap = "4.5.37"
 commonware-actor = "2026.5.0"
-commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
-commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking" }
+# legacy-orchestrator lineage (1a9716c) + the contributor fix: an operator that declines a
+# round keeps signing later ones (BreadchainCoop/commonware-restaking PR, UNBOUNDED_V3 B16).
+commonware-avs-bindings = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "RonTuretzky/contributor-survives-refusal" }
+commonware-avs-core = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "RonTuretzky/contributor-survives-refusal" }
+commonware-avs-eigenlayer = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "RonTuretzky/contributor-survives-refusal" }
+commonware-avs-node = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "RonTuretzky/contributor-survives-refusal" }
+commonware-avs-router = { git = "https://github.com/BreadchainCoop/commonware-restaking", branch = "RonTuretzky/contributor-survives-refusal" }
 commonware-codec = "2026.5.0"
 commonware-cryptography = "2026.5.0"
 commonware-macros = "2026.5.0"
@@ -51,7 +53,9 @@ futures-util = "0.3.31"
 # see ron/local-execution) merge. ron/local-execution is a superset of
 # ron/unbounded-v2-code-overlays (stacked on top of it — includes the UnboundedV1Xl tier
 # and UNBOUNDED_V2 overlay commits), so this repoint is additive.
-gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch", branch = "ron/local-execution" }
+# UNBOUNDED_V3 (M6): RonTuretzky/gkvm-m6-host is the gkvm precompile stack, itself stacked on
+# ron/local-execution — repoint back along with the TODO above once it lands.
+gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch", branch = "RonTuretzky/gkvm-m6-host" }
 gas-killer-common = { path = "common" }
 governor = "0.10.4"
 hex = "0.4"
@@ -70,12 +74,3 @@ tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 url = { version = "2.5.4", features = ["serde"] }
-
-# LOCAL-ONLY (UNBOUNDED_V3 M6, v3-campaign Blockers B9): the gkvm precompile
-# stack (gas-analyzer `Rubydusa/gkvm-m6-host`, stacked on ron/local-execution
-# @ 541c9e7) is not on origin yet, so the analyzer resolves from the SIBLING
-# CHECKOUT — which must sit on that branch. Once the stack is pushed: delete
-# this block and repoint the `gas-analyzer` line above at the pushed branch.
-# This block must not reach main.
-[patch."https://github.com/gas-killer/gas-analyzer"]
-gas-analyzer-evmsketch = { path = "../gas-analyzer/crates/evmsketch" }

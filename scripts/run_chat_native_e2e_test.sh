@@ -21,14 +21,14 @@
 #   - step 10c: decodes ChatAnswered from the applied receipt
 #
 # The simulation profile is unbounded-v1, the profile guest-VM consumers run under (the
-# precompile charges guest cycles as gas against the profile's budget). `chain` is not an
-# option with the local executor on an Osaka chain today: its default tx gas exceeds the
-# EIP-7825 cap and every analysis fails before any code runs.
+# precompile charges guest cycles as gas against the profile's budget).
 #
 # Knobs:
 #   GK_GUEST_ELF            prebuilt guest image (skips the docker guest build)
 #   GK_SDK_DIR              existing solidity-sdk checkout to use instead of cloning
 #   GK_SDK_REPO / GK_SDK_REF
+#   GK_E2E_GUEST=qwen       the flagship instead of answer.py: GasKillerChatQwen over the real
+#                           Qwen3-0.6B weights (scripts/stage_qwen_guest.sh; 597 MB download)
 #   GK_CHAT_PROMPT_IDS / GK_CHAT_MAX_TOKENS / GK_CHAT_EXPECT
 #   GK_VERIFY_TIMEOUT_SECS  poll window for the applied transition (default 300)
 #   GK_E2E_NEGATIVE=1       negative leg: node-3 runs without the guest program
@@ -65,7 +65,17 @@ set_env_var ANVIL_EXTRA_ARGS ""
 export GK_SIM_PROFILE=unbounded-v1
 export ANVIL_EXTRA_ARGS=
 export GK_E2E_CONSUMER=chat-native
-export GK_VERIFY_TIMEOUT_SECS="${GK_VERIFY_TIMEOUT_SECS:-300}"
+if [ "${GK_E2E_GUEST:-answer}" = "qwen" ]; then
+    # Four operators (router + 3 nodes) each load 597 MB of weights and run ~5.5e10 cycles:
+    # ~40-55 s per operator on a CI runner, past the router's default 30 s round timeout
+    # (the first run: all three nodes signed one digest, 41-55 s after Start, and the
+    # router had already closed the round). Same knob the LLM e2e raises.
+    set_env_var ROUND_TIMEOUT "${ROUND_TIMEOUT:-300}"
+    export ROUND_TIMEOUT="${ROUND_TIMEOUT:-300}"
+    export GK_VERIFY_TIMEOUT_SECS="${GK_VERIFY_TIMEOUT_SECS:-900}"
+else
+    export GK_VERIFY_TIMEOUT_SECS="${GK_VERIFY_TIMEOUT_SECS:-300}"
+fi
 
-echo "Native chat e2e: GK_SIM_PROFILE=unbounded-v1, GK_SIM_EXECUTOR=local (containers), consumer=chat-native"
+echo "Native chat e2e: GK_SIM_PROFILE=unbounded-v1, GK_SIM_EXECUTOR=local (containers), consumer=chat-native, guest=${GK_E2E_GUEST:-answer}"
 exec bash "$SCRIPT_DIR/run_e2e_test.sh" "$@"

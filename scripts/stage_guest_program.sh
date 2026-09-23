@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 SDK_REPO="${GK_SDK_REPO:-https://github.com/gas-killer/solidity-sdk}"
-SDK_REF="${GK_SDK_REF:-Rubydusa/gkvm-m5-dx}"
+SDK_REF="${GK_SDK_REF:-RonTuretzky/gkvm-m5-dx}"
 SDK_DIR="${GK_SDK_DIR:-$PROJECT_ROOT/.gk-solidity-sdk-native}"
 GUEST_DIR="$PROJECT_ROOT/config/guest"
 STAGED="$GUEST_DIR/${GK_E2E_GUEST_ELF:-answer.elf}"
