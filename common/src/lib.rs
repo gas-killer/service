@@ -18,12 +18,12 @@ pub use config::{
     ingress_staleness_window, load_key_from_file, load_orchestrator_config, max_queue_depth,
     p2p_message_backlog, p2p_quota_period, payload_block_buffer, quorum_threshold_fraction,
     rate_limit_rpm, rebroadcast_interval, round_timeout, rpc_failure_threshold,
-    schnorr_messages_per_second, schnorr_notice_window, schnorr_stage_timeout, signature_scheme,
-    storage_directory, task_ttl,
+    schnorr_messages_per_second, schnorr_notice_window, schnorr_sign_stage_timeout,
+    schnorr_stage_timeout, signature_scheme, storage_directory, task_ttl,
 };
 pub use metrics::ConfigMetrics;
 pub use payload::{BundleProof, PayloadView, TaskBundle};
-pub use providers::{build_read_providers, chain_rpc_urls_from_env};
+pub use providers::{build_read_providers, chain_rpc_urls_from_env, sim_rpc_urls_from_env};
 pub use task_data::GasKillerTaskData;
 pub use validator::{GasKillerValidator, ValidatorMetrics};
 
