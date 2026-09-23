@@ -18,16 +18,22 @@
 # ReplicaSet's events, while the same upgrade has already pointed the router and every node at
 # the endpoint behind it.
 #
-# The cost is upgrade time: setup, deploy-target and schnorr-operators carry
-# ttlSecondsAfterFinished, so they re-run on every upgrade and the release waits for all three.
-# A Job that dies on a transient RPC error fails the release with the fleet healthy. 15m covers
-# them plus global.initTimeout. --atomic would additionally roll a fleet-wide profile flip back
-# on its own, stranding whatever rounds were in flight.
+# setup, generate-router-key, schnorr-operators and deploy-target are install-only: an upgrade
+# renders them only under the matching rerun.* flag. 15m covers a routine upgrade plus
+# global.initTimeout. --atomic would additionally roll a fleet-wide profile flip back on its own,
+# stranding whatever rounds were in flight.
 #
-# The exception is an install that runs setup from scratch, as a new keyPrefix does. Pods then
-# wait on secrets that only the post-upgrade key-export hook writes, and --wait holds that hook
-# until the pods are ready. Run that one without --wait, with global.initTimeout raised past
-# setup's Sepolia deploys, and watch the rollout instead.
+# The exception is an upgrade that runs setup from scratch, as a new keyPrefix does:
+#
+#   - move the old state on the shared-data volume aside first (avs_deploy.json, operator_keys/,
+#     the router key files and every .*_complete marker), or setup skips itself;
+#   - set rerun.setup, rerun.generateRouterKey, rerun.schnorrOperators and rerun.deployTarget, or
+#     nothing runs setup at all;
+#   - drop --wait and raise global.initTimeout past setup's Sepolia deploys (1800 covers it). Pods
+#     wait on secrets that only the post-upgrade key-export hook writes, and --wait holds that
+#     hook until the pods are ready. Watch the rollout instead;
+#   - reset the four rerun flags to false with a follow-up upgrade. --reuse-values carries them
+#     forward otherwise, and the next routine upgrade would redeploy the AVS.
 
 global:
   environment: TESTNET
