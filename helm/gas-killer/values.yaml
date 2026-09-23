@@ -299,11 +299,6 @@ eigenlayer:
     kickBIPsOfOperatorStake: 10000
     # BIPs of total quorum stake below which an operator can be kicked (100 = 1%).
     kickBIPsOfTotalStake: 100
-  # Wei of LST each operator mints and stakes during setup, which becomes its whole stake. Must be
-  # at least quorum.minimumStake or registration reverts; the setup image checks this before
-  # deploying anything. Empty uses the image's default of 1e14. On TESTNET the funded key pays
-  # nodeCount times this, plus gas.
-  stakeAmount: ""
   # Immutable constructor parameters for AvsServiceManagerWrapper — baked into the
   # contract at deploy time. Cannot be changed without redeploying (rerun.setup=true).
   sdk:
