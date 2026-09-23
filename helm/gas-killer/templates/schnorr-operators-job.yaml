@@ -185,7 +185,8 @@ spec:
               value: {{ .Values.schnorr.noticeWindow | quote }}
             {{- with .Values.schnorr.stakeRegistryAddress }}
             # Reuse a deployed registry rather than deploying one. The binary registers into it
-            # only while it is empty; a live set is left to the announce path.
+            # only while it holds nothing but this operator set; anything else is left to the
+            # announce path.
             - name: SCHNORR_STAKE_REGISTRY_ADDRESS
               value: {{ . | quote }}
             {{- end }}
