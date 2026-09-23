@@ -6,9 +6,7 @@
 #     --set secrets.privateKey=0x... \
 #     --set secrets.fundedKey=0x... \
 #     --set secrets.httpRpc=https://... \
-#     --set secrets.l2HttpRpc=https://... \
 #     --set secrets.adminKey=<admin-key> \
-#     --set l2.enabled=true \
 #     --set router.image.tag=router-<sha> \
 #     --set node.image.tag=node-<sha> \
 #     --set kube-prometheus-stack.grafana.adminPassword=<password> \
@@ -25,9 +23,18 @@
 # A Job that dies on a transient RPC error fails the release with the fleet healthy. 15m covers
 # them plus global.initTimeout. --atomic would additionally roll a fleet-wide profile flip back
 # on its own, stranding whatever rounds were in flight.
+#
+# The exception is an install that runs setup from scratch, as a new keyPrefix does. Pods then
+# wait on secrets that only the post-upgrade key-export hook writes, and --wait holds that hook
+# until the pods are ready. Run that one without --wait, with global.initTimeout raised past
+# setup's Sepolia deploys, and watch the rollout instead.
 
 global:
   environment: TESTNET
+
+  # Aggregate Schnorr against schnorr.stakeRegistryAddress. Not a rolling change: the operator set
+  # and every target are scheme-specific, so switching back is another fresh install.
+  signatureScheme: schnorr
 
   # Heavy-compute tracked functions are only extractable from the net diff; a struct-log
   # trace of a call that expensive does not complete. The fleet shares one RPC serving
@@ -61,7 +68,10 @@ imagePullSecrets:
 secretManager:
   enabled: true
   projectId: gas-killer-testnet
-  keyPrefix: gas-killer-testnet
+  # `-v2` is the schnorr operator set. The unsuffixed prefix holds the retired bls set, whose
+  # secp256k1 keys were never exported; setup restores from whatever prefix is set here, so
+  # reusing it would bring those operators back.
+  keyPrefix: gas-killer-testnet-v2
   gcpServiceAccount: gas-killer-app@gas-killer-testnet.iam.gserviceaccount.com
 
 eigenlayer:
@@ -129,14 +139,14 @@ router:
 # on an L1-only testnet: bridge-to-l2.sh exits non-zero without an L2 RPC. Both keys
 # must move together — waitForBridge is read independently of enabled, so disabling
 # only the job leaves every node and the router waiting 300s for a .bridge_complete
-# marker that nothing writes, then failing their init container. Set both back to true
-# alongside l2.enabled=true and secrets.l2HttpRpc.
+# marker that nothing writes, then failing their init container. It also stays off under
+# schnorr: the bridge and yield distributor are BLS-interface targets.
 bridge:
   enabled: false
   waitForBridge: false
 
-# Deploy the smoke-test target (ArraySummation) wired to a real BLSSignatureChecker after
-# AVS setup, then publish its address to a ConfigMap. Read it for the local smoke test:
+# Deploy the smoke-test target (SchnorrArraySummation, wired to schnorr.stakeRegistryAddress)
+# after the operator set is registered, then publish its address to a ConfigMap:
 #   kubectl get configmap gas-killer-smoke-target -o jsonpath='{.data.target}'
 deployTarget:
   enabled: true
@@ -145,38 +155,31 @@ deployTarget:
     # Pin with --set deployTarget.image.tag=<sha> if you need a specific build.
     tag: latest
   configMapName: gas-killer-smoke-target
-  # ArraySummation params (smoke test sums indexes [1,2,3], so arraySize must be >= 4).
+  # SchnorrArraySummation params (smoke test sums indexes [1,2,3], so arraySize must be >= 4).
   arraySize: 10
   maxValue: 10000
   arraySeed: 1
 
-# Provision the SchnorrStakeRegistry while the fleet keeps signing BLS, so the router publishes its
-# address as `schnorrStakeRegistry` on GET /avs-metadata and an integrator can wire a target that
-# accepts both schemes ahead of the cutover.
-#
-# `registry` rather than `full`: this deployment's operator secp256k1 keys are gone, so nobody can
-# be registered. The registry verifies nothing until it is filled, which only matters once a fleet
-# signs schnorr. The schnorr install that registers a new operator set fills it through
-# schnorr-operators, since the job registers into a pinned registry that holds nothing else, so
-# the address does not change.
+# The fleet's SchnorrStakeRegistry. schnorr.provision is ignored under signatureScheme=schnorr,
+# where the operator-set job always registers: into the pinned registry below, which it fills
+# while it holds nothing but this operator set.
 schnorr:
-  provision: registry
-
   # Fixed at registry deployment, immutable afterwards. Sized against the longest window a
   # settlement can span: eigenlayer.sdk.blockStaleMeasure (300 blocks) plus router.roundTimeout
-  # (300s, ~25 blocks at a 12s slot) gives a 325-block floor, so 600 leaves ~1.85x margin.
+  # (2400s, 200 blocks at a 12s slot) gives a 500-block floor, so 600 leaves ~1.2x margin.
   #
   # Deliberately not the chart's default of 0. At 0 even announceRegister is committable in the
   # same block, so the announce path would give no protection at all. The window costs nothing at
-  # the cutover itself: the operator set is registered through the immediate path while the fleet
-  # still signs BLS, so no schnorr round exists to invalidate. What it protects is operator churn
-  # afterwards, against a live schnorr fleet.
+  # the cutover itself: the install registers the operator set through the immediate path before
+  # anything can settle against the registry. What it protects is operator churn afterwards,
+  # against a live schnorr fleet.
   noticeWindow: 600
 
-  # Deployed 2026-09-10, owner 0x5DD2e7db868e33c03daB85d0C623048A7980634E, threshold 2/3, no
-  # operator registered. Pinning it here is what makes the address durable: a PVC rebuilt and
-  # restored without addresses.schnorrStakeRegistry in avs_deploy.json would otherwise let
-  # rerun.schnorrOperators deploy a FRESH registry, orphaning every target wired to this one.
+  # Deployed 2026-09-10 while the fleet signed bls, owner
+  # 0x5DD2e7db868e33c03daB85d0C623048A7980634E, threshold 2/3, filled by the schnorr install.
+  # Pinning it here is what makes the address durable: a PVC rebuilt and restored without
+  # addresses.schnorrStakeRegistry in avs_deploy.json would otherwise let rerun.schnorrOperators
+  # deploy a FRESH registry, orphaning every target wired to this one.
   #
   # Changing this value strands every integrator target whose constructor took the old address, so
   # it moves only alongside a coordinated migration.
