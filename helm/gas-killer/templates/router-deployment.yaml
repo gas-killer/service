@@ -265,6 +265,12 @@ spec:
             - name: WS_RPC
               value: "ws://{{ include "gas-killer.l1.fullname" . }}:{{ .Values.l1.service.port }}"
             {{- end }}
+            {{- with include "gas-killer.simRpcUrl" . }}
+            # Extraction runs against the fleet's simulation endpoint (simRpc.url, or the
+            # in-cluster fork); everything else stays on HTTP_RPC so settlement reaches the chain.
+            - name: SIM_HTTP_RPC
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.l2.enabled }}
             {{- if eq .Values.global.environment "LOCAL" }}
             - name: L2_HTTP_RPC
@@ -426,6 +432,10 @@ spec:
               value: {{ .Values.eigenlayer.sdk.thresholdDenominator | quote }}
             {{- with .Values.schnorr.stageTimeoutSecs }}
             - name: SCHNORR_STAGE_TIMEOUT_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.schnorr.signStageTimeoutSecs }}
+            - name: SCHNORR_SIGN_STAGE_TIMEOUT_SECS
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.schnorr.messagesPerSecond }}

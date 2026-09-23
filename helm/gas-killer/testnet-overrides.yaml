@@ -11,7 +11,20 @@
 #     --set l2.enabled=true \
 #     --set router.image.tag=router-<sha> \
 #     --set node.image.tag=node-<sha> \
-#     --set kube-prometheus-stack.grafana.adminPassword=<password>
+#     --set kube-prometheus-stack.grafana.adminPassword=<password> \
+#     --wait --timeout 15m
+#
+# --wait holds the release open until every workload is ready, and fails it otherwise. The
+# apiserver accepts a Deployment whose pods it then refuses — a priority class the namespace
+# cannot use, a pool with no room for the fork's 2-4 CPU — and that error stops at the
+# ReplicaSet's events, while the same upgrade has already pointed the router and every node at
+# the endpoint behind it.
+#
+# The cost is upgrade time: setup, deploy-target and schnorr-operators carry
+# ttlSecondsAfterFinished, so they re-run on every upgrade and the release waits for all three.
+# A Job that dies on a transient RPC error fails the release with the fleet healthy. 15m covers
+# them plus global.initTimeout. --atomic would additionally roll a fleet-wide profile flip back
+# on its own, stranding whatever rounds were in flight.
 
 global:
   environment: TESTNET
@@ -21,6 +34,26 @@ global:
   # prestateTracer (diffMode) and callTracer (withLog), meeting the single-client
   # condition on the stateEncoding block in values.yaml.
   stateEncoding: "prestate-net"
+
+  # What this testnet exists to run: tracked functions whose direct execution exceeds a block.
+  # The profile changes the derived storage_updates and therefore the task digest, so the router
+  # and every node take it from one value and flip together — a partially migrated fleet fails
+  # quorum until it converges. Truthful only against a simulation endpoint whose execution cap is
+  # lifted, which is what simRpc.url below points at. `--set global.simProfile=chain` reverts it.
+  simProfile: unbounded
+
+# The fleet's simulation endpoint (SIM_HTTP_RPC on the router and every node): the in-cluster
+# Sepolia reth from helm/sim-node, started with --rpc.gascap=max. Extraction and the EVMSketch gas
+# estimate go here; settlement, chain detection and stateTransitionCount stay on secrets.httpRpc,
+# so this node never sees a transaction. A hosted provider will not do: it clamps debug_traceCall
+# silently, and a clamped trace is indistinguishable from a real one downstream.
+#
+# Mutually exclusive with l1.simFork.enabled (the bundled anvil fork), which is the small-target
+# fallback: it refetches state from upstream on every re-fork, which never converges for a target
+# reading a 24k-chunk weight directory. Falling back is --set simRpc.url= --set
+# l1.simFork.enabled=true, and the node can stay up.
+simRpc:
+  url: http://sim-node:8545
 
 imagePullSecrets:
   - name: ghcr-pull-secret
@@ -67,8 +100,30 @@ monitoring:
       host: grafana-testnet.gaskiller.xyz
 
 router:
+  # A tracked call under `unbounded` is traced by the router and then again by every node, in
+  # series, at roughly 0.2 Ggas/s on the sim node — a round for a call of that size spans tens of
+  # minutes rather than the seconds an ordinary task takes. Ordinary tasks are unaffected; the
+  # cost is that a round which never reaches quorum blocks the queue for the full window.
+  #
+  # eigenlayer.sdk.blockStaleMeasure does not cap this window. It bounds referenceBlockNumber,
+  # which verifyAndUpdate takes and the router picks fresh at submit time (current block - 1), so
+  # the block_height an analysis is anchored at never reaches the contract. What a long round
+  # risks instead is the pinned transitionIndex no longer matching stateTransitionCount() when the
+  # payload settles, which tracks how busy the target is rather than any block budget. Stays below
+  # ingress.taskTtlSeconds, which bounds how long a task queued behind this round survives.
+  roundTimeout: "2400"
+  # Blocks a rendered payload stays valid, sized so a payload outlives the round that produced it.
+  # Coupled to admission: ingress.stalenessWindowBlocks derives as blockStaleMeasure -
+  # payloadBlockBuffer, so at 250 the accepted anchor window is 50 blocks and a task anchored more
+  # than ~10 min back is refused with 400 STALE_BLOCK.
+  payloadBlockBuffer: "250"
   ingress:
     timeoutMs: "0"
+    # Equal to the payload's own validity window (payloadBlockBuffer x 12s), so a task can never
+    # reach `ready` holding a payload the contract will no longer accept — it expires as a task
+    # first. Long enough for a multi-minute round plus its wait in the queue, and above
+    # router.roundTimeout, which a queued task has to outlive to be reached at all.
+    taskTtlSeconds: "3000"
 
 # The bridge mirrors EigenLayer operator state from L1 to L2, so it has nothing to do
 # on an L1-only testnet: bridge-to-l2.sh exits non-zero without an L2 RPC. Both keys
