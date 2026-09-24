@@ -38,8 +38,12 @@
 //! (b) address round-2 `SignRequest`s to the p2p keys of a subset chosen by
 //! address.
 //!
-//! The certified log lives in memory only (no journal): after a router restart the
-//! sequencer recovers its height from node TipReports exactly as in BLS mode.
+//! The certified log lives in memory only (no journal), and each router life starts
+//! its heights at the wall clock in milliseconds ([`clock_tip`]). Node TipReports
+//! cannot recover the height the way they recover a lost BLS journal: a Schnorr node
+//! reports only directives below the highest height it has seen, and a router
+//! restarting from 0 re-announces exactly that height, which the node's TaskBook
+//! drops as a conflict.
 
 use alloy_primitives::Address;
 use commonware_avs_core::bn254::PublicKey;
@@ -56,7 +60,7 @@ use gas_killer_common::schnorr::{self, AggregateSignature};
 use gas_killer_common::task_data::GasKillerTaskData;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, info, warn};
 
@@ -83,6 +87,25 @@ fn silent_signers<T>(
         .filter(|addr| !partials.iter().any(|(seen, _)| seen == *addr))
         .copied()
         .collect()
+}
+
+/// The height a router life starts at: Unix time in milliseconds.
+///
+/// Heights are an internal sequence (neither the task digest nor the chain sees them) and
+/// nodes resolve passed-over heights as skips, so a start far above the last height costs
+/// nothing. A previous life started at its own boot time and advanced one height per
+/// resolved task, and no task resolves within a millisecond (two p2p signing rounds), so it
+/// never reached the current clock: the margin is that life's whole uptime. The wall clock is
+/// not monotonic, so a backward step larger than that uptime would re-announce recorded
+/// heights and wedge signing; restarting the nodes clears their TaskBooks.
+fn clock_tip() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_millis() as u64,
+        Err(_) => {
+            warn!("system clock is before the Unix epoch; schnorr heights start at 0");
+            0
+        }
+    }
 }
 
 /// An aggregate-signature observation handed to the schnorr submitter.
@@ -114,7 +137,7 @@ struct CertLog {
 }
 
 /// Cheap-to-clone handle over the coordinator's certified log.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SchnorrCoordinatorMailbox {
     log: Arc<RwLock<CertLog>>,
 }
@@ -135,6 +158,15 @@ impl CertIndex for SchnorrCoordinatorMailbox {
 }
 
 impl SchnorrCoordinatorMailbox {
+    fn starting_at(tip: u64) -> Self {
+        Self {
+            log: Arc::new(RwLock::new(CertLog {
+                certified: BTreeMap::new(),
+                tip,
+            })),
+        }
+    }
+
     /// Records a certified height and advances the tip, pruning old entries.
     fn record(&self, height: u64, digest: Digest) {
         let mut log = self.log.write().expect("cert log lock");
@@ -202,7 +234,9 @@ where
         sign_stage_timeout: Duration,
         round_timeout: Duration,
     ) -> (Self, SchnorrCoordinatorMailbox) {
-        let mailbox = SchnorrCoordinatorMailbox::default();
+        let tip = clock_tip();
+        info!(tip, "schnorr heights start at the clock");
+        let mailbox = SchnorrCoordinatorMailbox::starting_at(tip);
         let operator_keys: Vec<PublicKey> = operators.iter().map(|(k, _)| k.clone()).collect();
         let peer_to_address: HashMap<PublicKey, Address> = operators.iter().cloned().collect();
         let address_to_peer: HashMap<Address, PublicKey> =
@@ -546,6 +580,20 @@ mod tests {
         let partials = [(addr(1), ())];
 
         assert!(silent_signers(&subset, &partials, true).is_empty());
+    }
+
+    /// The nodes keep the first directive they record per height, so a restarted router must
+    /// start above every height its previous life announced, the in-flight one included.
+    #[tokio::test]
+    async fn a_restarted_router_starts_above_every_height_its_previous_life_announced() {
+        let previous = SchnorrCoordinatorMailbox::starting_at(clock_tip());
+        let first = previous.get_tip().await;
+        previous.record(first, Digest::from([1; 32]));
+        previous.record(first + 1, Digest::from([2; 32]));
+        let in_flight = previous.get_tip().await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        assert!(clock_tip() > in_flight);
     }
 
     #[test]

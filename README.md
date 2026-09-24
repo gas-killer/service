@@ -198,6 +198,13 @@ while this one has none) — never on a bare timer.
   below their own tip and reply with a rate-limited `TipReport`; the router takes the
   `(f+1)`-th highest reported tip (the same trust rule as the engine's safe-tip) and
   fast-forwards its next assignment, re-assigning the in-flight task there.
+- **Router restart under Schnorr**: there is no engine journal, and TipReports cannot
+  recover the height: a node reports only directives below the highest height it has
+  seen, while a router restarting from 0 would re-announce exactly that height, which
+  the node drops as a conflict. Each router life instead starts its heights at the wall
+  clock in milliseconds, above anything a previous life announced. Heights never reach
+  the chain, and nodes resolve the skipped range as skips. A clock stepped back by more
+  than the previous life's uptime would bring the wedge back; restart the nodes to clear it.
 - **Operator-set changes**: the participant set (and therefore every participant
   index) is frozen per process at startup from the on-chain registry. Registering or
   deregistering an operator requires restarting the router and all nodes together —
