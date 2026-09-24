@@ -648,6 +648,7 @@ fn main() {
                     schnorr_stage_timeout(),
                     schnorr_sign_stage_timeout(),
                     round_timeout(),
+                    storage_directory().join("router").join("schnorr_tip"),
                 );
                 context
                     .child("schnorr_coordinator")

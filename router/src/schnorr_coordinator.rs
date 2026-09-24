@@ -38,8 +38,13 @@
 //! (b) address round-2 `SignRequest`s to the p2p keys of a subset chosen by
 //! address.
 //!
-//! The certified log lives in memory only (no journal): after a router restart the
-//! sequencer recovers its height from node TipReports exactly as in BLS mode.
+//! The certified log lives in memory, but its tip is persisted to `tip_file`. Node
+//! TipReports cannot recover it here the way they recover a BLS journal: a Schnorr
+//! node reports only directives below the highest height it has seen, and a router
+//! restarting from 0 re-announces exactly that height, which the node's TaskBook
+//! then drops as a conflict. A restart resumes one height above the persisted tip
+//! instead, past the in-flight height the previous life may have announced
+//! without resolving.
 
 use alloy_primitives::Address;
 use commonware_avs_core::bn254::PublicKey;
@@ -55,6 +60,7 @@ use gas_killer_common::schnorr::wire::{SchnorrMsg, SignRequest};
 use gas_killer_common::schnorr::{self, AggregateSignature};
 use gas_killer_common::task_data::GasKillerTaskData;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -114,9 +120,10 @@ struct CertLog {
 }
 
 /// Cheap-to-clone handle over the coordinator's certified log.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SchnorrCoordinatorMailbox {
     log: Arc<RwLock<CertLog>>,
+    tip_file: PathBuf,
 }
 
 impl CertIndex for SchnorrCoordinatorMailbox {
@@ -135,16 +142,65 @@ impl CertIndex for SchnorrCoordinatorMailbox {
 }
 
 impl SchnorrCoordinatorMailbox {
+    /// Opens the log at the tip persisted in `tip_file`, or at 0 when there is none.
+    fn open(tip_file: PathBuf) -> Self {
+        let tip = match std::fs::read_to_string(&tip_file) {
+            Ok(saved) => match saved.trim().parse::<u64>() {
+                Ok(saved) => {
+                    let tip = saved + 1;
+                    info!(
+                        saved,
+                        tip, "resuming schnorr coordinator above persisted tip"
+                    );
+                    tip
+                }
+                Err(error) => {
+                    warn!(%error, path = %tip_file.display(), "unreadable persisted tip; starting at 0");
+                    0
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => {
+                warn!(%error, path = %tip_file.display(), "cannot read persisted tip; starting at 0");
+                0
+            }
+        };
+        Self {
+            log: Arc::new(RwLock::new(CertLog {
+                certified: BTreeMap::new(),
+                tip,
+            })),
+            tip_file,
+        }
+    }
+
     /// Records a certified height and advances the tip, pruning old entries.
     fn record(&self, height: u64, digest: Digest) {
         let mut log = self.log.write().expect("cert log lock");
         log.certified.insert(height, digest);
-        log.tip = log.tip.max(height + 1);
+        let tip = log.tip.max(height + 1);
+        // Persisted before the tip is visible, so the sequencer cannot announce the next
+        // height ahead of the file that keeps a restart above it.
+        if let Err(error) = persist_tip(&self.tip_file, tip) {
+            warn!(%error, path = %self.tip_file.display(), "failed to persist schnorr tip");
+        }
+        log.tip = tip;
         let floor = log.tip.saturating_sub(PRUNE_SLACK);
         if floor > 0 {
             log.certified = log.certified.split_off(&floor);
         }
     }
+}
+
+/// Replaces `path` through a rename so a crash mid-write never leaves a truncated tip.
+fn persist_tip(path: &Path, tip: u64) -> std::io::Result<()> {
+    // Nothing else creates the directory under schnorr: it is the BLS engine journal's.
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let staging = path.with_extension("tmp");
+    std::fs::write(&staging, tip.to_string())?;
+    std::fs::rename(&staging, path)
 }
 
 /// The coordinator actor. Owns the channel-2 endpoints; single-threaded per
@@ -201,8 +257,9 @@ where
         stage_timeout: Duration,
         sign_stage_timeout: Duration,
         round_timeout: Duration,
+        tip_file: PathBuf,
     ) -> (Self, SchnorrCoordinatorMailbox) {
-        let mailbox = SchnorrCoordinatorMailbox::default();
+        let mailbox = SchnorrCoordinatorMailbox::open(tip_file);
         let operator_keys: Vec<PublicKey> = operators.iter().map(|(k, _)| k.clone()).collect();
         let peer_to_address: HashMap<PublicKey, Address> = operators.iter().cloned().collect();
         let address_to_peer: HashMap<Address, PublicKey> =
@@ -546,6 +603,45 @@ mod tests {
         let partials = [(addr(1), ())];
 
         assert!(silent_signers(&subset, &partials, true).is_empty());
+    }
+
+    fn digest(n: u8) -> Digest {
+        Digest::from([n; 32])
+    }
+
+    #[tokio::test]
+    async fn a_fresh_log_starts_at_height_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let mailbox = SchnorrCoordinatorMailbox::open(dir.path().join("schnorr_tip"));
+
+        assert_eq!(mailbox.get_tip().await, 0);
+    }
+
+    /// The nodes keep the first directive they record per height, so a restarted router
+    /// must never announce a height its previous life did — including the in-flight one
+    /// it announced but had not resolved.
+    #[tokio::test]
+    async fn a_restart_resumes_above_every_height_the_previous_life_could_have_announced() {
+        let dir = tempfile::tempdir().unwrap();
+        let tip_file = dir.path().join("router").join("schnorr_tip");
+
+        let before = SchnorrCoordinatorMailbox::open(tip_file.clone());
+        before.record(0, digest(1));
+        before.record(1, digest(2));
+        assert_eq!(before.get_tip().await, 2);
+
+        let after = SchnorrCoordinatorMailbox::open(tip_file);
+        assert_eq!(after.get_tip().await, 3);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_tip_file_starts_at_height_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let tip_file = dir.path().join("schnorr_tip");
+        std::fs::write(&tip_file, "not a height").unwrap();
+
+        let mailbox = SchnorrCoordinatorMailbox::open(tip_file);
+        assert_eq!(mailbox.get_tip().await, 0);
     }
 
     #[test]
