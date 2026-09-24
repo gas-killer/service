@@ -203,7 +203,8 @@ while this one has none) — never on a bare timer.
   seen, while a router restarting from 0 would re-announce exactly that height, which
   the node drops as a conflict. Each router life instead starts its heights at the wall
   clock in milliseconds, above anything a previous life announced. Heights never reach
-  the chain, and nodes resolve the skipped range as skips.
+  the chain, and nodes resolve the skipped range as skips. A clock stepped back by more
+  than the previous life's uptime would bring the wedge back; restart the nodes to clear it.
 - **Operator-set changes**: the participant set (and therefore every participant
   index) is frozen per process at startup from the on-chain registry. Registering or
   deregistering an operator requires restarting the router and all nodes together —

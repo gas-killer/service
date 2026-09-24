@@ -95,11 +95,17 @@ fn silent_signers<T>(
 /// nodes resolve passed-over heights as skips, so a start far above the last height costs
 /// nothing. A previous life started at its own boot time and advanced one height per
 /// resolved task, and no task resolves within a millisecond (two p2p signing rounds), so it
-/// never reached the current clock: the margin is that life's whole uptime.
+/// never reached the current clock: the margin is that life's whole uptime. The wall clock is
+/// not monotonic, so a backward step larger than that uptime would re-announce recorded
+/// heights and wedge signing; restarting the nodes clears their TaskBooks.
 fn clock_tip() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_millis() as u64,
+        Err(_) => {
+            warn!("system clock is before the Unix epoch; schnorr heights start at 0");
+            0
+        }
+    }
 }
 
 /// An aggregate-signature observation handed to the schnorr submitter.

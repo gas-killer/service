@@ -382,3 +382,42 @@ fn prune_sessions(shared: &Shared, max_height: u64) {
         .expect("sessions lock")
         .retain(|(h, _), _| *h >= floor);
 }
+
+#[cfg(test)]
+mod tests {
+    use commonware_avs_core::wire::TaskDirective;
+    use commonware_avs_node::task_book::{Resolution, TaskBook};
+    use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+    use gas_killer_common::task_data::GasKillerTaskData;
+
+    fn announce(height: u64, transition_index: u64) -> TaskDirective<GasKillerTaskData> {
+        TaskDirective::Announce {
+            height,
+            task: GasKillerTaskData {
+                transition_index,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A restarted router starts its heights at the clock, far past this node's window. The
+    /// directive still has to reach the TaskBook, or `sign` cannot resolve the digest and every
+    /// node refuses the round the restart fix exists to unblock.
+    #[test]
+    fn a_directive_at_a_restarted_routers_clock_height_resolves_to_its_task() {
+        deterministic::Runner::default().start(|context| async move {
+            let (task_book, mailbox) =
+                TaskBook::<GasKillerTaskData>::new(context.child("task_book"));
+            context.child("actor").spawn(move |_| task_book.run());
+
+            mailbox.deliver(announce(3, 1));
+            let clock_height = 1_790_000_000_000;
+            mailbox.deliver(announce(clock_height, 2));
+
+            assert!(matches!(
+                mailbox.subscribe(clock_height).await.unwrap(),
+                Resolution::Announce(task) if task.transition_index == 2
+            ));
+        });
+    }
+}
