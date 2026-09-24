@@ -200,11 +200,10 @@ while this one has none) — never on a bare timer.
   fast-forwards its next assignment, re-assigning the in-flight task there.
 - **Router restart under Schnorr**: there is no engine journal, and TipReports cannot
   recover the height: a node reports only directives below the highest height it has
-  seen, while a router restarting from 0 re-announces exactly that height, which the
-  node drops as a conflict. The coordinator instead persists its tip to
-  `$STORAGE_DIR/router/schnorr_tip` and resumes one height above it, past the height a
-  previous life may have announced without resolving. Losing that file brings the
-  wedge back; restart the nodes after the router to clear it.
+  seen, while a router restarting from 0 would re-announce exactly that height, which
+  the node drops as a conflict. Each router life instead starts its heights at the wall
+  clock in milliseconds, above anything a previous life announced. Heights never reach
+  the chain, and nodes resolve the skipped range as skips.
 - **Operator-set changes**: the participant set (and therefore every participant
   index) is frozen per process at startup from the on-chain registry. Registering or
   deregistering an operator requires restarting the router and all nodes together —
