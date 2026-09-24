@@ -792,8 +792,12 @@ jobs:
           pkill -f 'port-forward service/.*8080:8080' || true
           ROUTER_SERVICE=$(kubectl get services -o name | grep router | head -1 | sed 's|service/||')
           kubectl port-forward service/$ROUTER_SERVICE 8080:8080 &
-          for _ in $(seq 1 30); do
+          for i in $(seq 1 30); do
             curl -sf http://localhost:8080/healthz > /dev/null && break
+            if [ "$i" -eq 30 ]; then
+              echo "❌ router ingress not reachable after restart"
+              exit 1
+            fi
             sleep 2
           done
 

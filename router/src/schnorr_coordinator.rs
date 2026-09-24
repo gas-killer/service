@@ -193,6 +193,7 @@ impl SchnorrCoordinatorMailbox {
 }
 
 /// Replaces `path` through a rename so a crash mid-write never leaves a truncated tip.
+/// No fsync: it covers a pod restart, and a tip lost to host power loss falls back to 0.
 fn persist_tip(path: &Path, tip: u64) -> std::io::Result<()> {
     // Nothing else creates the directory under schnorr: it is the BLS engine journal's.
     if let Some(dir) = path.parent() {
