@@ -159,9 +159,10 @@ bridge:
 deployTarget:
   enabled: true
   image:
-    # `latest` is published on pushes to main (solidity-sdk docker-publish workflow).
-    # Pin with --set deployTarget.image.tag=<sha> if you need a specific build.
-    tag: latest
+    # The build the current smoke target was deployed from. Pinned rather than `latest` so a
+    # rerun.deployTarget upgrade deploys the same contract, and because the deploy job calls
+    # DeploySchnorrArraySummation, which later SDK builds rename.
+    tag: sha-e82dce3
   configMapName: gas-killer-smoke-target
   # SchnorrArraySummation params (smoke test sums indexes [1,2,3], so arraySize must be >= 4).
   arraySize: 10
