@@ -142,6 +142,10 @@ router:
     # first. Long enough for a multi-minute round plus its wait in the queue, and above
     # router.roundTimeout, which a queued task has to outlive to be reached at all.
     taskTtlSeconds: "3000"
+    # The shared ArraySummation the docs' Quickstart points at (16 elements, wired to
+    # schnorr.stakeRegistryAddress), published as demoTarget so the docs read it live. Deployed by
+    # hand on 2026-09-24 because the playground job only deploys BLS targets.
+    demoTarget: "0xCAcD6fd494cde74A84e7e5F6816ca7C87aa88aaD"
 
 # The bridge mirrors EigenLayer operator state from L1 to L2, so it has nothing to do
 # on an L1-only testnet: bridge-to-l2.sh exits non-zero without an L2 RPC. Both keys
