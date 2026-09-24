@@ -277,7 +277,10 @@ l1:
 eigenlayer:
   image:
     repository: ghcr.io/breadchaincoop/eigenlayer
-    tag: latest
+    # Pinned to an immutable build (eigenlayer-bls-local f88ad66, sha256:3ee1b67…). `latest` under
+    # IfNotPresent runs whatever each node has cached, and this image decides how operators register
+    # and what they stake. Bump deliberately; CI and docker-compose.yml read or mirror this tag.
+    tag: latest-f88ad66
     pullPolicy: IfNotPresent
   # L1 contract addresses — required in all modes. In LOCAL mode these must match the
   # network being forked (forkUrl); in TESTNET mode they must match the live network.
