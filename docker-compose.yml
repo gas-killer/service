@@ -16,8 +16,7 @@ services:
 
   eigenlayer:
     platform: linux/amd64
-    # Same build as eigenlayer.image.tag in helm/gas-killer/values.yaml.
-    image: ghcr.io/breadchaincoop/eigenlayer:latest-f88ad66
+    image: ghcr.io/breadchaincoop/eigenlayer:latest
     depends_on:
       ethereum:
         condition: service_started
