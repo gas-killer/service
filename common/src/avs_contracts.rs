@@ -145,7 +145,8 @@ pub struct AvsContracts {
     pub bls_signature_checker: Option<Address>,
     /// Registry coordinator the operators are registered in. Under BLS, published so an integrator
     /// can confirm their own wiring independently: `blsSignatureChecker().registryCoordinator()`
-    /// must equal this.
+    /// must equal this. Under Schnorr nothing on chain ties it to the verifier, so it is read from
+    /// `avs_deploy.json` unverified and is advisory only.
     #[serde(rename = "registryCoordinator", serialize_with = "checksummed")]
     #[schema(value_type = crate::openapi::Address)]
     pub registry_coordinator: Address,
