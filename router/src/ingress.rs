@@ -2810,7 +2810,7 @@ mod tests {
             contracts.publish(gas_killer_common::avs_contracts::AvsContracts {
                 chain_id: 11155111,
                 avs_address: address!("dCec8ce0a03848B55989Bcc711e424Ca31d9eeD9"),
-                bls_signature_checker: address!("6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9"),
+                bls_signature_checker: Some(address!("6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9")),
                 registry_coordinator: address!("0a032D62dde46670Ae40Ce532C97f6CE9Af72Dc4"),
                 schnorr_stake_registry: Some(address!("00000000000000000000000000000000000000ee")),
                 demo_target: Some(address!("00000000000000000000000000000000000000aa")),

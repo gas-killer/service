@@ -472,7 +472,7 @@ pub async fn requeue_incomplete_tasks(
 ///
 /// Everything it needs comes from the running deployment: the operators' registry coordinator and
 /// the Schnorr stake registry through the same `avs_deploy.json` loader the submitter reads, and the
-/// AVS/checker pair from a live target's own getters. Anything missing leaves the block off, because
+/// AVS/verifier pair from a live target's own getters, for whichever scheme the fleet signs. Anything missing leaves the block off, because
 /// the endpoint's other fields are identity information still worth serving, and an integrator reads
 /// an absent block as "no authoritative answer" rather than being handed a wrong one.
 fn spawn_contracts_resolver(
@@ -541,6 +541,7 @@ fn spawn_contracts_resolver(
     };
     avs_contracts::spawn_resolver(
         provider.clone(),
+        gas_killer_common::signature_scheme(),
         registry_coordinator,
         schnorr_stake_registry,
         deployment_path,

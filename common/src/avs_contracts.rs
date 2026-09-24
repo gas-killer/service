@@ -1,11 +1,11 @@
 //! Resolves the contract addresses that make up a deployment's settlement wiring.
 //!
-//! A target contract must be wired to two addresses: the AVS service manager and the
-//! `IBLSSignatureChecker`. Get the checker wrong and the target still passes every router-side
-//! check — it is handed a `ready` payload — and then reverts `InvalidQuorumApkHash` on chain,
-//! because the router computes quorum APK indices against the live registry while the contract
-//! checks them against a superseded one. Publishing the pair from the running deployment is what
-//! makes that unwireable by accident.
+//! A target contract must be wired to two addresses: the AVS service manager and the verifier the
+//! fleet's scheme signs for — an `IBLSSignatureChecker` under BLS, a `SchnorrStakeRegistry` under
+//! Schnorr. Get the verifier wrong and the target still passes every router-side check — it is
+//! handed a `ready` payload — and then reverts on chain (`InvalidQuorumApkHash` under BLS,
+//! `InvalidQuorumSignature` under Schnorr), because it verifies against a superseded operator set.
+//! Publishing the pair from the running deployment is what makes that unwireable by accident.
 //!
 //! The set is shared because the wiring is: the router aggregates certificates against the
 //! operators' registry coordinator and submits to a target that verifies through the checker, and a
@@ -24,14 +24,16 @@
 //! - The two are then cross-checked: the checker's own `registryCoordinator()` must be the
 //!   coordinator the operators are registered in. A mismatch means the reference target belongs to
 //!   a superseded deployment, so nothing is published rather than publishing a pair that reverts.
-//! - `schnorrStakeRegistry` comes from `SCHNORR_STAKE_REGISTRY_ADDRESS`, or failing that from the
-//!   record the operator-set job writes, or failing that from `avs_deploy.json`, and publishes
-//!   only once a registry answers at it. A target's registry is
-//!   fixed by its constructor, so a wrong one settles BLS rounds today and can never settle a
-//!   Schnorr round: a mistake that surfaces at a scheme cutover, long after it was made.
+//! - Under Schnorr there is no checker: `avsAddress` and the registry are read from the target's
+//!   own getters instead, and the registry is cross-checked against the fleet's (below). A target
+//!   whose registry is not the fleet's belongs to a superseded deployment, so nothing is published.
+//! - The fleet's `schnorrStakeRegistry` comes from `SCHNORR_STAKE_REGISTRY_ADDRESS`, or failing
+//!   that from the record the operator-set job writes, or failing that from `avs_deploy.json`, and
+//!   publishes only once a registry answers at it. Under BLS it is published alongside the pair,
+//!   optionally, so a target can be wired for the registry before a cutover.
 //! - `demoTarget` and `demoFactory` come from configuration or, failing that, from what the
 //!   playground job recorded. The playground target doubles as the preferred reference target, so
-//!   the checker published is the one `demoTarget.blsSignatureChecker()` itself returns.
+//!   the verifier published is the one `demoTarget` itself returns.
 //!
 //! Resolution costs up to eight RPC round-trips, so the answer is cached in a
 //! [`ResolvedContracts`] slot rather than recomputed per use: `/avs-metadata` is public and
@@ -51,7 +53,9 @@ use std::time::Duration;
 
 use crate::bindings::IBLSSignatureCheckerRegistry;
 use crate::bindings::gaskillersdk::GasKillerSDK;
+use crate::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
 use crate::bindings::schnorrstakeregistry::ISchnorrStakeRegistry;
+use crate::config::SignatureScheme;
 use alloy_primitives::Address;
 use alloy_provider::Provider;
 use anyhow::Context;
@@ -130,22 +134,27 @@ pub struct AvsContracts {
     #[serde(rename = "avsAddress", serialize_with = "checksummed")]
     #[schema(value_type = crate::openapi::Address)]
     pub avs_address: Address,
-    /// Signature checker a target must verify against. The verification-blocking one of the pair.
-    #[serde(rename = "blsSignatureChecker", serialize_with = "checksummed")]
-    #[schema(value_type = crate::openapi::Address)]
-    pub bls_signature_checker: Address,
-    /// Registry coordinator the operators are registered in. Published so an integrator can
-    /// confirm their own wiring independently: `blsSignatureChecker().registryCoordinator()` must
-    /// equal this.
+    /// BLS signature checker a target must verify against. Present only when the fleet signs BLS;
+    /// under Schnorr `schnorrStakeRegistry` is the verifier instead.
+    #[serde(
+        rename = "blsSignatureChecker",
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "checksummed_opt"
+    )]
+    #[schema(value_type = Option<crate::openapi::Address>, nullable = false)]
+    pub bls_signature_checker: Option<Address>,
+    /// Registry coordinator the operators are registered in. Under BLS, published so an integrator
+    /// can confirm their own wiring independently: `blsSignatureChecker().registryCoordinator()`
+    /// must equal this. Under Schnorr nothing on chain ties it to the verifier, so it is read from
+    /// `avs_deploy.json` unverified and is advisory only.
     #[serde(rename = "registryCoordinator", serialize_with = "checksummed")]
     #[schema(value_type = crate::openapi::Address)]
     pub registry_coordinator: Address,
     /// `SchnorrStakeRegistry` a target verifies aggregate Schnorr signatures against.
     ///
-    /// Published so a target can be wired to both schemes at once. A fleet signs exactly one of
-    /// them, fixed by its own `SIGNATURE_SCHEME`, and probes only that scheme's ERC-165 ID, so a
-    /// target that accepts both settles under either without redeploying across a cutover. Absent
-    /// while the deployment has provisioned no registry, which is every BLS-only one.
+    /// Always present when the fleet signs Schnorr, where it is the verification-blocking address.
+    /// Under BLS it is published when the deployment has provisioned one, so a target can be wired
+    /// for it ahead of a cutover, and absent otherwise.
     #[serde(
         rename = "schnorrStakeRegistry",
         skip_serializing_if = "Option::is_none",
@@ -164,7 +173,7 @@ pub struct AvsContracts {
     #[schema(value_type = Option<crate::openapi::Address>, nullable = false)]
     pub demo_target: Option<Address>,
     /// Factory that deploys a caller-owned target, for a reader who wants an instance no one else
-    /// is advancing. It takes the AVS and checker addresses as arguments rather than wiring them
+    /// is advancing. It takes the AVS and verifier addresses as arguments rather than wiring them
     /// itself, so a caller should pass the two published above. Absent when none is configured.
     #[serde(
         rename = "demoFactory",
@@ -511,6 +520,71 @@ async fn registry_on_chain<P: Provider>(
     }
 }
 
+/// Reads the AVS/checker pair off a BLS target and confirms the checker is the operators' own.
+///
+/// The pairing check is what makes it safe to publish: a reference target left over from a
+/// superseded deployment reads back a checker bound to that deployment's coordinator, and
+/// publishing it would hand every integrator the wiring that reverts.
+async fn bls_pair<P: Provider>(
+    provider: &P,
+    target: Address,
+    registry_coordinator: Address,
+) -> anyhow::Result<(Address, Address)> {
+    let sdk = GasKillerSDK::new(target, provider);
+    let avs_address = sdk
+        .avsAddress()
+        .call()
+        .await
+        .with_context(|| format!("reading avsAddress() from reference target {target}"))?;
+    let checker =
+        sdk.blsSignatureChecker().call().await.with_context(|| {
+            format!("reading blsSignatureChecker() from reference target {target}")
+        })?;
+    let checker_coordinator = IBLSSignatureCheckerRegistry::new(checker, provider)
+        .registryCoordinator()
+        .call()
+        .await
+        .with_context(|| format!("reading registryCoordinator() from checker {checker}"))?;
+    if checker_coordinator != registry_coordinator {
+        anyhow::bail!(
+            "reference target {target} verifies against checker {checker}, whose registry \
+             coordinator {checker_coordinator} is not the operators' coordinator \
+             {registry_coordinator}: the target belongs to a superseded deployment"
+        );
+    }
+    Ok((avs_address, checker))
+}
+
+/// Reads `avsAddress` off a Schnorr target and confirms it verifies against the fleet's registry.
+///
+/// The Schnorr counterpart of the pairing check in [`bls_pair`]: a reference target wired to any
+/// other registry belongs to a superseded operator set, and publishing its AVS beside the fleet's
+/// registry would describe a pair no target actually has.
+async fn schnorr_pair<P: Provider>(
+    provider: &P,
+    target: Address,
+    fleet_registry: Address,
+) -> anyhow::Result<Address> {
+    let sdk = SchnorrGasKillerSDK::new(target, provider);
+    let avs_address = sdk
+        .avsAddress()
+        .call()
+        .await
+        .with_context(|| format!("reading avsAddress() from reference target {target}"))?;
+    let target_registry = sdk
+        .schnorrRegistry()
+        .call()
+        .await
+        .with_context(|| format!("reading schnorrRegistry() from reference target {target}"))?;
+    if target_registry != fleet_registry {
+        anyhow::bail!(
+            "reference target {target} verifies against registry {target_registry}, not the \
+             fleet's registry {fleet_registry}: the target belongs to a superseded deployment"
+        );
+    }
+    Ok(avs_address)
+}
+
 /// What one resolution attempt established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
@@ -536,8 +610,12 @@ pub struct Resolution {
 /// [`SCHNORR_STAKE_REGISTRY_FILE_ENV`], then this. The order is what lets a registry provisioned
 /// outside the chart's job be published without editing the deployment file the jobs own, and lets
 /// the job's own record beat a stale copy of that file.
+///
+/// `scheme` is the fleet's own: it decides which verifier the reference target is read for and
+/// cross-checked against. Under Schnorr the registry is required, since it is the verifier.
 pub async fn resolve<P: Provider>(
     provider: &P,
+    scheme: SignatureScheme,
     registry_coordinator: Address,
     deployment_schnorr_registry: Option<Address>,
     deployment_path: &Path,
@@ -555,35 +633,6 @@ pub async fn resolve<P: Provider>(
         .get_chain_id()
         .await
         .context("reading chain id for the published contract set")?;
-
-    let sdk = GasKillerSDK::new(target, provider);
-    let avs_address = sdk
-        .avsAddress()
-        .call()
-        .await
-        .with_context(|| format!("reading avsAddress() from reference target {target}"))?;
-    let bls_signature_checker =
-        sdk.blsSignatureChecker().call().await.with_context(|| {
-            format!("reading blsSignatureChecker() from reference target {target}")
-        })?;
-
-    // The pairing check. A reference target left over from a superseded deployment reads back a
-    // checker bound to that deployment's coordinator, and publishing it would hand every
-    // integrator the wiring that reverts.
-    let checker_coordinator = IBLSSignatureCheckerRegistry::new(bls_signature_checker, provider)
-        .registryCoordinator()
-        .call()
-        .await
-        .with_context(|| {
-            format!("reading registryCoordinator() from checker {bls_signature_checker}")
-        })?;
-    if checker_coordinator != registry_coordinator {
-        anyhow::bail!(
-            "reference target {target} verifies against checker {bls_signature_checker}, whose \
-             registry coordinator {checker_coordinator} is not the operators' coordinator \
-             {registry_coordinator}: the target belongs to a superseded deployment"
-        );
-    }
 
     let demo_target = configured_or_recorded(
         config.demo_target,
@@ -603,8 +652,42 @@ pub async fn resolve<P: Provider>(
         &mut records,
     )
     .or(deployment_schnorr_registry);
-    let schnorr_stake_registry =
-        registry_on_chain(provider, recorded_registry, &mut records).await?;
+
+    let (avs_address, bls_signature_checker, schnorr_stake_registry) = match scheme {
+        SignatureScheme::Bls => {
+            let (avs_address, checker) = bls_pair(provider, target, registry_coordinator).await?;
+            let registry = registry_on_chain(provider, recorded_registry, &mut records).await?;
+            (avs_address, Some(checker), registry)
+        }
+        SignatureScheme::Schnorr => {
+            let Some(fleet_registry) = recorded_registry else {
+                if records.pending {
+                    return Ok(Resolution {
+                        contracts: None,
+                        incomplete: true,
+                    });
+                }
+                anyhow::bail!(
+                    "the fleet signs schnorr but no stake registry is configured \
+                     (SCHNORR_STAKE_REGISTRY_ADDRESS, {SCHNORR_STAKE_REGISTRY_FILE_ENV} or \
+                     {SCHNORR_STAKE_REGISTRY_KEY} in avs_deploy.json), so reference target \
+                     {target}'s registry cannot be confirmed"
+                );
+            };
+            let avs_address = schnorr_pair(provider, target, fleet_registry).await?;
+            // Without a registry answering there is no verifier to publish, and the rest of the
+            // set is useless to a Schnorr integrator without it.
+            let Some(registry) =
+                registry_on_chain(provider, Some(fleet_registry), &mut records).await?
+            else {
+                return Ok(Resolution {
+                    contracts: None,
+                    incomplete: true,
+                });
+            };
+            (avs_address, None, Some(registry))
+        }
+    };
 
     Ok(Resolution {
         contracts: Some(AvsContracts {
@@ -635,6 +718,7 @@ pub async fn resolve<P: Provider>(
 /// once at startup, and a job that lands late upgrades what is already being served.
 pub fn spawn_resolver<P: Provider + 'static>(
     provider: P,
+    scheme: SignatureScheme,
     registry_coordinator: Address,
     deployment_schnorr_registry: Option<Address>,
     deployment_path: PathBuf,
@@ -646,6 +730,7 @@ pub fn spawn_resolver<P: Provider + 'static>(
         loop {
             let attempt = resolve(
                 &provider,
+                scheme,
                 registry_coordinator,
                 deployment_schnorr_registry,
                 &deployment_path,
@@ -664,7 +749,7 @@ pub fn spawn_resolver<P: Provider + 'static>(
                             if published {
                                 info!(
                                     avs_address = %contracts.avs_address,
-                                    bls_signature_checker = %contracts.bls_signature_checker,
+                                    bls_signature_checker = ?contracts.bls_signature_checker,
                                     registry_coordinator = %contracts.registry_coordinator,
                                     chain_id = contracts.chain_id,
                                     schnorr_stake_registry = ?schnorr_stake_registry,
@@ -998,6 +1083,7 @@ mod tests {
     async fn resolve_pinned<P: Provider>(provider: &P, config: &ContractsConfig) -> Resolution {
         resolve(
             provider,
+            SignatureScheme::Bls,
             COORDINATOR,
             None,
             Path::new(NO_DEPLOYMENT),
@@ -1025,7 +1111,7 @@ mod tests {
 
         assert_eq!(contracts.chain_id, 11155111);
         assert_eq!(contracts.avs_address, AVS);
-        assert_eq!(contracts.bls_signature_checker, CHECKER);
+        assert_eq!(contracts.bls_signature_checker, Some(CHECKER));
         assert_eq!(contracts.registry_coordinator, COORDINATOR);
         assert!(
             !resolution.incomplete,
@@ -1040,6 +1126,7 @@ mod tests {
 
         let err = resolve(
             &provider,
+            SignatureScheme::Bls,
             COORDINATOR,
             None,
             Path::new(NO_DEPLOYMENT),
@@ -1066,6 +1153,7 @@ mod tests {
         // No responses are queued: nothing to read the pair from means no RPC is made at all.
         let resolution = resolve(
             &provider,
+            SignatureScheme::Bls,
             COORDINATOR,
             None,
             &deployment,
@@ -1148,6 +1236,7 @@ mod tests {
     ) -> Resolution {
         resolve(
             provider,
+            SignatureScheme::Bls,
             COORDINATOR,
             recorded,
             Path::new(NO_DEPLOYMENT),
@@ -1331,6 +1420,138 @@ mod tests {
         );
     }
 
+    // -- a schnorr fleet --
+    //
+    // RPC order under schnorr:
+    //   1. eth_chainId
+    //   2. eth_call   avsAddress() on the reference target
+    //   3. eth_call   schnorrRegistry() on the reference target
+    //   4. eth_getCode then eth_call nextPossibleMutationBlock() on the fleet's registry
+    //   5. eth_getCode demoTarget, then demoFactory, each only when one was established
+
+    /// Queues the three reads off a schnorr reference target, with `target_registry` as the
+    /// registry the target reports.
+    fn push_schnorr_wiring(asserter: &Asserter, target_registry: Address) {
+        asserter.push_success(&U64::from(11155111u64));
+        push_address(asserter, AVS);
+        push_address(asserter, target_registry);
+    }
+
+    async fn resolve_schnorr<P: Provider>(
+        provider: &P,
+        recorded: Option<Address>,
+        config: &ContractsConfig,
+    ) -> anyhow::Result<Resolution> {
+        resolve(
+            provider,
+            SignatureScheme::Schnorr,
+            COORDINATOR,
+            recorded,
+            Path::new(NO_DEPLOYMENT),
+            config,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_schnorr_fleet_publishes_its_registry_and_no_checker() {
+        let (provider, asserter) = mock_provider();
+        push_schnorr_wiring(&asserter, REGISTRY);
+        push_registry(&asserter);
+
+        let resolution = resolve_schnorr(&provider, Some(REGISTRY), &pinned(None))
+            .await
+            .expect("a target wired to the fleet's registry resolves");
+        let contracts = resolution.contracts.expect("the set publishes");
+
+        assert_eq!(contracts.avs_address, AVS);
+        assert_eq!(contracts.schnorr_stake_registry, Some(REGISTRY));
+        assert_eq!(contracts.registry_coordinator, COORDINATOR);
+        assert!(
+            contracts.bls_signature_checker.is_none(),
+            "a schnorr target has no checker, and asking it for one is what failed before"
+        );
+        assert!(!resolution.incomplete);
+
+        let json = serde_json::to_value(&contracts).unwrap();
+        assert!(
+            json.get("blsSignatureChecker").is_none(),
+            "an absent checker is omitted, not null"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_a_schnorr_target_wired_to_another_registry() {
+        let (provider, asserter) = mock_provider();
+        push_schnorr_wiring(&asserter, OTHER_REGISTRY);
+
+        let err = resolve_schnorr(&provider, Some(REGISTRY), &pinned(None))
+            .await
+            .expect_err("a target on a superseded registry must not be published");
+
+        let message = format!("{err}");
+        assert!(
+            message.contains("superseded deployment"),
+            "expected the registry cross-check to reject it, got {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_schnorr_fleet_with_no_registry_configured_is_an_error() {
+        let (provider, asserter) = mock_provider();
+        asserter.push_success(&U64::from(11155111u64));
+
+        let err = resolve_schnorr(&provider, None, &pinned(None))
+            .await
+            .expect_err("without the fleet's registry there is nothing to cross-check against");
+
+        assert!(format!("{err}").contains("no stake registry is configured"));
+    }
+
+    #[tokio::test]
+    async fn a_schnorr_fleet_waits_for_an_unwritten_registry_record() {
+        let (provider, asserter) = mock_provider();
+        asserter.push_success(&U64::from(11155111u64));
+
+        let config = ContractsConfig {
+            schnorr_stake_registry_file: Some(unwritten("schnorr_stake_registry.txt")),
+            ..pinned(None)
+        };
+        let resolution = resolve_schnorr(&provider, None, &config)
+            .await
+            .expect("a record still being written is not a failure");
+
+        assert_eq!(
+            resolution,
+            Resolution {
+                contracts: None,
+                incomplete: true
+            },
+            "the operator-set job may finish after the router starts serving"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_schnorr_fleet_withholds_the_set_while_its_registry_does_not_answer() {
+        let (provider, asserter) = mock_provider();
+        push_schnorr_wiring(&asserter, REGISTRY);
+        asserter.push_success(&Bytes::from(vec![0x60u8]));
+        asserter.push_failure_msg("execution reverted");
+
+        let resolution = resolve_schnorr(&provider, Some(REGISTRY), &pinned(None))
+            .await
+            .expect("an unanswering registry is retried, not a failure");
+
+        assert_eq!(
+            resolution,
+            Resolution {
+                contracts: None,
+                incomplete: true
+            },
+            "under schnorr the registry is the verifier, so a set without it is not worth serving"
+        );
+    }
+
     /// The router reads the registry back through the same deployment loader the rest of the
     /// service uses, and that loader names only three keys explicitly: anything else reaches it
     /// through the `extra` map behind `custom_address`. Pinned against a file in the shape the
@@ -1374,7 +1595,7 @@ mod tests {
         AvsContracts {
             chain_id: 11155111,
             avs_address: AVS,
-            bls_signature_checker: CHECKER,
+            bls_signature_checker: Some(CHECKER),
             registry_coordinator: COORDINATOR,
             schnorr_stake_registry: None,
             demo_target,

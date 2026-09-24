@@ -501,8 +501,9 @@ router:
     # success clears it, and a background probe re-checks every chain every 15s so the state
     # recovers on its own. Leave empty to use the router's default of 5 (RPC_FAILURE_THRESHOLD).
     rpcFailureThreshold: ""
-    # Deployed target whose avsAddress() and blsSignatureChecker() getters establish the pair
-    # published in the `contracts` block of GET /avs-metadata. Leave empty where deployTarget.enabled
+    # Deployed target whose avsAddress() and verifier getter (blsSignatureChecker() under bls,
+    # schnorrRegistry() under schnorr) establish the pair published in the `contracts` block of
+    # GET /avs-metadata. Leave empty where deployTarget.enabled
     # is true: that job records the target it provisioned at /app/.nodes/demo_target.txt on the
     # shared-data volume and the router is pointed at it (AVS_REFERENCE_TARGET_FILE), so the pair
     # follows every redeployment without anyone editing configuration. Set this only to pin a
