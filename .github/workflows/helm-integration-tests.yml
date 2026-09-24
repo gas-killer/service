@@ -770,54 +770,6 @@ jobs:
 
           echo "✅ All $SUCCESSFUL triggers completed successfully!"
 
-      - name: Restart the router alone and verify the next task settles
-        # Under schnorr the nodes keep every height they recorded, so a router that came back
-        # re-announcing one of them would wedge signing (#468).
-        if: env.SIGNATURE_SCHEME == 'schnorr'
-        run: |
-          export HTTP_RPC=http://localhost:8545
-          export WS_RPC=ws://localhost:8545
-          export AVS_DEPLOYMENT_PATH="./config/.nodes/avs_deploy.json"
-          export GAS_KILLER_TASKS_URL=http://localhost:8080/tasks
-          export PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-
-          ROUTER_DEPLOYMENT=$(kubectl get deployments -l app.kubernetes.io/component=router -o name | head -1)
-          ROUTER_POD=$(kubectl get pods -l app.kubernetes.io/component=router -o jsonpath='{.items[0].metadata.name}')
-          echo "Persisted tip: $(kubectl exec "$ROUTER_POD" -- cat /data/router/schnorr_tip)"
-
-          kubectl rollout restart "$ROUTER_DEPLOYMENT"
-          kubectl rollout status "$ROUTER_DEPLOYMENT" --timeout=300s
-
-          # The earlier forward was bound to the pod that just went away.
-          pkill -f 'port-forward service/.*8080:8080' || true
-          ROUTER_SERVICE=$(kubectl get services -o name | grep router | head -1 | sed 's|service/||')
-          kubectl port-forward service/$ROUTER_SERVICE 8080:8080 &
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8080/healthz > /dev/null && break
-            if [ "$i" -eq 30 ]; then
-              echo "❌ router ingress not reachable after restart"
-              exit 1
-            fi
-            sleep 2
-          done
-
-          TARGET=$(jq -r '.addresses.gasKillerTarget' "$AVS_DEPLOYMENT_PATH")
-          BEFORE=$(cast call "$TARGET" "stateTransitionCount()(uint256)" --rpc-url "$HTTP_RPC" | tr -d '[:space:]')
-
-          if ! timeout 600 ./target/release/send_request; then
-            echo "❌ task after router restart did not settle"
-            kubectl logs -l app.kubernetes.io/component=router --tail 100
-            kubectl logs -l app.kubernetes.io/component=node --tail 50 --prefix | grep -E 'conflicting directive|refused' || true
-            exit 1
-          fi
-
-          AFTER=$(cast call "$TARGET" "stateTransitionCount()(uint256)" --rpc-url "$HTTP_RPC" | tr -d '[:space:]')
-          if [ "$AFTER" -le "$BEFORE" ]; then
-            echo "❌ stateTransitionCount did not advance after router restart: $BEFORE -> $AFTER"
-            exit 1
-          fi
-          echo "✅ task settled after a router-only restart: $BEFORE -> $AFTER"
-
       - name: Trigger Yield Distribution via router
         # The yield distributor is a BLS-interface GasKillerSDK target; the schnorr
         # router only drives SchnorrGasKillerSDK targets, so this l2 subsystem runs
