@@ -856,13 +856,14 @@ mod tests {
         let contracts = AvsContracts {
             chain_id: 11155111,
             avs_address: address,
-            bls_signature_checker: address,
+            bls_signature_checker: Some(address),
             registry_coordinator: address,
             schnorr_stake_registry: Some(address),
             demo_target: Some(address),
             demo_factory: Some(address),
         };
         let sparse_contracts = AvsContracts {
+            bls_signature_checker: None,
             schnorr_stake_registry: None,
             demo_target: None,
             demo_factory: None,

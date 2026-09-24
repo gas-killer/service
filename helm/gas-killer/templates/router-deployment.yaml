@@ -299,7 +299,7 @@ spec:
             {{- if .Values.playground.enabled }}
             # Same volume, same reason. These paths must match what playground-job.yaml writes.
             # The playground target is also preferred as the reference target, so the published
-            # blsSignatureChecker is the one demoTarget itself verifies against.
+            # verifier is the one demoTarget itself verifies against.
             - name: DEMO_TARGET_FILE
               value: "/app/.nodes/playground_target.txt"
             - name: DEMO_FACTORY_FILE

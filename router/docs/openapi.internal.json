@@ -938,7 +938,6 @@
         "required": [
           "chainId",
           "avsAddress",
-          "blsSignatureChecker",
           "registryCoordinator"
         ],
         "properties": {
@@ -955,15 +954,15 @@
           },
           "blsSignatureChecker": {
             "$ref": "#/components/schemas/Address",
-            "description": "Signature checker a target must verify against. The verification-blocking one of the pair."
+            "description": "BLS signature checker a target must verify against. Present only when the fleet signs BLS;\nunder Schnorr `schnorrStakeRegistry` is the verifier instead."
           },
           "registryCoordinator": {
             "$ref": "#/components/schemas/Address",
-            "description": "Registry coordinator the operators are registered in. Published so an integrator can\nconfirm their own wiring independently: `blsSignatureChecker().registryCoordinator()` must\nequal this."
+            "description": "Registry coordinator the operators are registered in. Under BLS, published so an integrator\ncan confirm their own wiring independently: `blsSignatureChecker().registryCoordinator()`\nmust equal this."
           },
           "schnorrStakeRegistry": {
             "$ref": "#/components/schemas/Address",
-            "description": "`SchnorrStakeRegistry` a target verifies aggregate Schnorr signatures against.\n\nPublished so a target can be wired to both schemes at once. A fleet signs exactly one of\nthem, fixed by its own `SIGNATURE_SCHEME`, and probes only that scheme's ERC-165 ID, so a\ntarget that accepts both settles under either without redeploying across a cutover. Absent\nwhile the deployment has provisioned no registry, which is every BLS-only one."
+            "description": "`SchnorrStakeRegistry` a target verifies aggregate Schnorr signatures against.\n\nAlways present when the fleet signs Schnorr, where it is the verification-blocking address.\nUnder BLS it is published when the deployment has provisioned one, so a target can be wired\nfor it ahead of a cutover, and absent otherwise."
           },
           "demoTarget": {
             "$ref": "#/components/schemas/Address",
@@ -971,7 +970,7 @@
           },
           "demoFactory": {
             "$ref": "#/components/schemas/Address",
-            "description": "Factory that deploys a caller-owned target, for a reader who wants an instance no one else\nis advancing. It takes the AVS and checker addresses as arguments rather than wiring them\nitself, so a caller should pass the two published above. Absent when none is configured."
+            "description": "Factory that deploys a caller-owned target, for a reader who wants an instance no one else\nis advancing. It takes the AVS and verifier addresses as arguments rather than wiring them\nitself, so a caller should pass the two published above. Absent when none is configured."
           }
         }
       },
