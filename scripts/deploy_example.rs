@@ -34,8 +34,8 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy_dyn_abi::{DynSolType, DynSolValue, JsonAbiExt, Specifier};
 use alloy_json_abi::{Function, JsonAbi};
 use clap::Parser;
-use gas_killer_common::bindings::SCHNORR_GAS_KILLER_INTERFACE_ID;
-use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
+use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -713,8 +713,8 @@ async fn assert_routable(
     target: Address,
     exercise_selector: Option<FixedBytes<4>>,
 ) -> Result<(), DynError> {
-    let interface_id = SCHNORR_GAS_KILLER_INTERFACE_ID;
-    let sdk = SchnorrGasKillerSDK::new(target, provider);
+    let interface_id = GAS_KILLER_INTERFACE_ID;
+    let sdk = GasKillerSDK::new(target, provider);
 
     let supported = sdk
         .supportsInterface(interface_id)

@@ -19,7 +19,7 @@
 use alloy::primitives::{Address, U256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol_types::SolCall;
-use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_router::ingress::{GasKillerTaskRequest, GasKillerTaskRequestBody};
 use scripts::bindings::arraysummation::ArraySummation::sumCall;
 use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
@@ -43,7 +43,7 @@ async fn read_transition_count<P: Provider>(
     target: Address,
     provider: &P,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(SchnorrGasKillerSDK::new(target, provider)
+    Ok(GasKillerSDK::new(target, provider)
         .stateTransitionCount()
         .call()
         .await
@@ -316,7 +316,7 @@ async fn build_mock_request()
     // the SDK every target inherits, so this reads through the SDK binding rather than any one
     // example's.
     let provider = ProviderBuilder::new().connect_http(rpc_url.clone());
-    let current_count = SchnorrGasKillerSDK::new(target_address, provider.clone())
+    let current_count = GasKillerSDK::new(target_address, provider.clone())
         .stateTransitionCount()
         .call()
         .await

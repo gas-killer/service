@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
-use crate::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
+use crate::bindings::gaskillersdk::GasKillerSDK;
 use crate::bindings::schnorrstakeregistry::ISchnorrStakeRegistry;
 use alloy_primitives::Address;
 use alloy_provider::Provider;
@@ -484,7 +484,7 @@ async fn verified_avs_address<P: Provider>(
     target: Address,
     fleet_registry: Address,
 ) -> anyhow::Result<Address> {
-    let sdk = SchnorrGasKillerSDK::new(target, provider);
+    let sdk = GasKillerSDK::new(target, provider);
     let avs_address = sdk
         .avsAddress()
         .call()

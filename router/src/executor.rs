@@ -10,8 +10,8 @@ use anyhow::{Result, bail};
 use commonware_avs_router::executor::ExecutionResult;
 use commonware_avs_router::sequencer::{DispatchTime, take_dispatch_time};
 use gas_killer_common::ChainRole;
-use gas_killer_common::bindings::SCHNORR_GAS_KILLER_INTERFACE_ID;
-use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
+use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::bindings::schnorrstakeregistry::ISchnorrStakeRegistry;
 use gas_killer_common::{BundleProof, PayloadView, TaskBundle};
 use std::collections::HashMap;
@@ -279,18 +279,18 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// memoizing the result per address. Interface support is immutable for a
     /// deployed contract, so the first lookup is reused on every later round and
     /// the per-round `supportsInterface` RPC collapses to a hashmap read.
-    async fn supports_schnorr_interface(&self, provider: P, target_addr: Address) -> Result<bool> {
+    async fn supports_gas_killer_interface(
+        &self,
+        provider: P,
+        target_addr: Address,
+    ) -> Result<bool> {
         if let Some(supported) = self.interface_cache.read().await.get(&target_addr).copied() {
             return Ok(supported);
         }
 
-        let sdk = SchnorrGasKillerSDK::new(target_addr, provider);
+        let sdk = GasKillerSDK::new(target_addr, provider);
         let supports_interface_start = Instant::now();
-        let supported = match sdk
-            .supportsInterface(SCHNORR_GAS_KILLER_INTERFACE_ID)
-            .call()
-            .await
-        {
+        let supported = match sdk.supportsInterface(GAS_KILLER_INTERFACE_ID).call().await {
             Ok(supported) => supported,
             Err(e) => {
                 warn!("supportsInterface call failed: {}", e);
@@ -356,7 +356,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 }
                 expected_hash
             },
-            self.supports_schnorr_interface(provider.clone(), target_addr),
+            self.supports_gas_killer_interface(provider.clone(), target_addr),
         );
 
         // Confirm the locally computed payload hash matches the quorum's signed hash.
@@ -375,15 +375,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             ));
         }
 
-        // Ensure the contract implements the Schnorr GasKiller interface (ERC-165).
+        // Ensure the contract implements the Gas Killer interface (ERC-165).
         if !supports_result? {
             warn!(
-                interface_id = %SCHNORR_GAS_KILLER_INTERFACE_ID,
-                "Target contract does not support the Schnorr GasKiller interface"
+                interface_id = %GAS_KILLER_INTERFACE_ID,
+                "Target contract does not support the Gas Killer interface"
             );
             return Err(anyhow::anyhow!(
-                "Target contract does not support the Schnorr GasKiller interface ({})",
-                SCHNORR_GAS_KILLER_INTERFACE_ID
+                "Target contract does not support the Gas Killer interface ({})",
+                GAS_KILLER_INTERFACE_ID
             ));
         }
 
@@ -441,7 +441,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             ..
         } = prepared;
 
-        let sdk = SchnorrGasKillerSDK::new(target_addr, provider);
+        let sdk = GasKillerSDK::new(target_addr, provider);
 
         info!(
             non_signers = non_signers.len(),
@@ -531,13 +531,13 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     ///
     /// Both reads happen per render. The registry address looks memoizable per target the way
     /// [`Self::interface_cache`] memoizes ERC-165 support, but the two differ: a contract's
-    /// supported interfaces are immutable, whereas `SchnorrGasKillerSDK` keeps its registry in
+    /// supported interfaces are immutable, whereas `GasKillerSDK` keeps its registry in
     /// storage behind an `internal` setter, so a target is free to expose an owner-gated path that
     /// re-points it. A memoized address would survive that for the lifetime of the process and read
     /// the horizon off a registry the target no longer uses — failing open, and silently. Rendering
     /// runs once per completed round, so the second call is not on a hot path.
     async fn schnorr_mutation_horizon(&self, provider: P, target_addr: Address) -> Option<U256> {
-        let sdk = SchnorrGasKillerSDK::new(target_addr, provider.clone());
+        let sdk = GasKillerSDK::new(target_addr, provider.clone());
         let registry_addr = match sdk.schnorrRegistry().call().await {
             Ok(addr) => addr,
             Err(error) => {
@@ -608,7 +608,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         } = prepared;
 
         let value = U256::ZERO;
-        let sdk = SchnorrGasKillerSDK::new(target_addr, provider);
+        let sdk = GasKillerSDK::new(target_addr, provider);
         let call = sdk
             .verifyAndUpdate(
                 msg_hash,
@@ -820,13 +820,13 @@ mod tests {
         let target = Address::from([0x11u8; 20]);
 
         let first = handler
-            .supports_schnorr_interface(provider.clone(), target)
+            .supports_gas_killer_interface(provider.clone(), target)
             .await
             .expect("first lookup should resolve over RPC");
         assert!(first);
 
         let second = handler
-            .supports_schnorr_interface(provider.clone(), target)
+            .supports_gas_killer_interface(provider.clone(), target)
             .await
             .expect("second lookup should be served from cache");
         assert!(second);
@@ -845,13 +845,13 @@ mod tests {
         // second RPC.
         assert!(
             !handler
-                .supports_schnorr_interface(provider.clone(), target)
+                .supports_gas_killer_interface(provider.clone(), target)
                 .await
                 .unwrap()
         );
         assert!(
             !handler
-                .supports_schnorr_interface(provider.clone(), target)
+                .supports_gas_killer_interface(provider.clone(), target)
                 .await
                 .unwrap()
         );
@@ -872,26 +872,26 @@ mod tests {
 
         assert!(
             handler
-                .supports_schnorr_interface(provider.clone(), supported_addr)
+                .supports_gas_killer_interface(provider.clone(), supported_addr)
                 .await
                 .unwrap()
         );
         assert!(
             !handler
-                .supports_schnorr_interface(provider.clone(), unsupported_addr)
+                .supports_gas_killer_interface(provider.clone(), unsupported_addr)
                 .await
                 .unwrap()
         );
         // Both addresses are now cached, so neither repeat lookup issues an RPC.
         assert!(
             handler
-                .supports_schnorr_interface(provider.clone(), supported_addr)
+                .supports_gas_killer_interface(provider.clone(), supported_addr)
                 .await
                 .unwrap()
         );
         assert!(
             !handler
-                .supports_schnorr_interface(provider.clone(), unsupported_addr)
+                .supports_gas_killer_interface(provider.clone(), unsupported_addr)
                 .await
                 .unwrap()
         );
@@ -1089,7 +1089,7 @@ mod tests {
         assert_eq!(payload.valid_until_block, (current_block as u64 - 1) + 50);
 
         // The rendered calldata ABI-decodes to a verifyAndUpdate call carrying the round inputs.
-        let decoded = SchnorrGasKillerSDK::verifyAndUpdateCall::abi_decode(payload.data.as_ref())
+        let decoded = GasKillerSDK::verifyAndUpdateCall::abi_decode(payload.data.as_ref())
             .expect("payload data should decode as verifyAndUpdate");
         assert_eq!(decoded.msgHash, msg_hash);
         assert_eq!(decoded.referenceBlockNumber, current_block - 1);
