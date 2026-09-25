@@ -65,9 +65,8 @@ COPY --from=builder /usr/local/bin/setup_schnorr_operators /usr/local/bin/setup_
 # Copy configuration files
 COPY config /app/config
 
-# Set ownership. /app/data is the aggregation-engine journal directory
-# (STORAGE_DIR); creating it owned by appuser here means a named volume
-# mounted there inherits writable ownership.
+# Set ownership. /app/data is the runtime storage directory (STORAGE_DIR); creating it owned by
+# appuser here means a named volume mounted there inherits writable ownership.
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
 
 # Switch to non-root user

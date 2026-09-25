@@ -353,110 +353,6 @@ data:
           }
         },
         {
-          "id": 60,
-          "type": "text",
-          "title": "Orchestrator Internals",
-          "gridPos": { "x": 0, "y": 40, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Orchestrator Internals\n\nRound-internal metrics from the commonware orchestrator and executor registries, surfaced via the runtime context on the same `/metrics` endpoint.\n\nTime to quorum = round broadcast → signature threshold reached (isolates aggregation from EigenLayer reads). Round timeouts = aggregation windows that expired before the round completed — the primary signal for tuning `ROUND_TIMEOUT`. EigenLayer state retrieval = operator resolution + non-signer stakes/signature reads between quorum and `handle_verification`; subtract it and time-to-quorum from P2P round-trip to estimate pure transport+signing overhead." }
-        },
-        {
-          "id": 61,
-          "type": "timeseries",
-          "title": "Time to Quorum (p50 / p95)",
-          "gridPos": { "x": 0, "y": 41, "w": 6, "h": 8 },
-          "targets": [
-            {
-              "expr": "histogram_quantile(0.50, rate(orchestrator_time_to_quorum_seconds_bucket[5m]))",
-              "legendFormat": "p50"
-            },
-            {
-              "expr": "histogram_quantile(0.95, rate(orchestrator_time_to_quorum_seconds_bucket[5m]))",
-              "legendFormat": "p95"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "s" } }
-        },
-        {
-          "id": 62,
-          "type": "timeseries",
-          "title": "Signature Arrival Spread (p50 / p99)",
-          "description": "Round broadcast → each accepted signature. A wide p50→p99 gap means straggler operators are holding rounds open.",
-          "gridPos": { "x": 6, "y": 41, "w": 6, "h": 8 },
-          "targets": [
-            {
-              "expr": "histogram_quantile(0.50, rate(orchestrator_signature_arrival_seconds_bucket[5m]))",
-              "legendFormat": "p50"
-            },
-            {
-              "expr": "histogram_quantile(0.99, rate(orchestrator_signature_arrival_seconds_bucket[5m]))",
-              "legendFormat": "p99"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "s" } }
-        },
-        {
-          "id": 63,
-          "type": "timeseries",
-          "title": "Round Outcomes / min",
-          "description": "A timed-out round is abandoned and the orchestrator moves to the next queued task; sustained timeouts mean ROUND_TIMEOUT is shorter than time-to-quorum.",
-          "gridPos": { "x": 12, "y": 41, "w": 6, "h": 8 },
-          "targets": [
-            {
-              "expr": "rate(orchestrator_round_executions_total{status=\"Success\"}[2m]) * 60",
-              "legendFormat": "executed"
-            },
-            {
-              "expr": "rate(orchestrator_round_executions_total{status=\"Failure\"}[2m]) * 60",
-              "legendFormat": "execution failed"
-            },
-            {
-              "expr": "rate(orchestrator_round_timeouts_total[2m]) * 60",
-              "legendFormat": "window timeout"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "short" } }
-        },
-        {
-          "id": 64,
-          "type": "timeseries",
-          "title": "Signatures / min by Outcome",
-          "description": "Success = accepted and stored. Invalid = failed decode, validation, or BLS verification. Dropped = duplicates, unknown senders/rounds, already-executed rounds.",
-          "gridPos": { "x": 18, "y": 41, "w": 6, "h": 8 },
-          "targets": [
-            {
-              "expr": "rate(orchestrator_signatures_total{status=\"Success\"}[2m]) * 60",
-              "legendFormat": "accepted"
-            },
-            {
-              "expr": "rate(orchestrator_signatures_total{status=\"Invalid\"}[2m]) * 60",
-              "legendFormat": "invalid"
-            },
-            {
-              "expr": "rate(orchestrator_signatures_total{status=\"Dropped\"}[2m]) * 60",
-              "legendFormat": "dropped"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "short" } }
-        },
-        {
-          "id": 65,
-          "type": "timeseries",
-          "title": "EigenLayer State Retrieval (p50 / p95)",
-          "description": "Operator-address resolution + current-block query + getNonSignerStakesAndSignature, per execution. Runs between quorum and handle_verification, so it is included in the P2P Round-Trip measurement above.",
-          "gridPos": { "x": 0, "y": 49, "w": 12, "h": 8 },
-          "targets": [
-            {
-              "expr": "histogram_quantile(0.50, rate(executor_state_retrieval_seconds_bucket[5m]))",
-              "legendFormat": "p50"
-            },
-            {
-              "expr": "histogram_quantile(0.95, rate(executor_state_retrieval_seconds_bucket[5m]))",
-              "legendFormat": "p95"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "s" } }
-        },
-        {
           "id": 30,
           "type": "text",
           "title": "Ingress",
@@ -597,7 +493,7 @@ data:
           "id": 72,
           "type": "timeseries",
           "title": "Window Base vs Highest Assigned",
-          "description": "The edges of the live window against the router engine's contiguous tip. All three advancing together is healthy. Base and highest pinned while the queue is non-empty is a wedge; the engine tip falling behind the window base means heights are certifying out of order and the router can no longer observe the certificates it is waiting on.",
+          "description": "The edges of the live window against the operators' safe tip. All advancing together is healthy. Base and highest pinned while the queue is non-empty is a wedge.",
           "gridPos": { "x": 8, "y": 76, "w": 8, "h": 8 },
           "targets": [
             {
@@ -607,10 +503,6 @@ data:
             {
               "expr": "gas_killer_highest_assigned_height",
               "legendFormat": "highest assigned"
-            },
-            {
-              "expr": "engine_tip{job=~\".*gas-killer.*router.*\"}",
-              "legendFormat": "engine tip (contiguous)"
             },
             {
               "expr": "gas_killer_node_safe_tip",
@@ -671,42 +563,6 @@ data:
             {
               "expr": "sum by (message) (increase(network_spawner_messages_rate_limited_total[10m]))",
               "legendFormat": "{{ "{{" }} message {{ "}}" }}"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "short" } }
-        },
-        {
-          "id": 77,
-          "type": "timeseries",
-          "title": "Operator Certified vs Skipped / min",
-          "description": "What the operators actually signed, from their own reporters. The skip ratio against certified is the ramp gate for raising the window: hold it under 1%.",
-          "gridPos": { "x": 12, "y": 92, "w": 12, "h": 8 },
-          "targets": [
-            {
-              "expr": "sum(rate(reporter_certified_total[5m])) * 60",
-              "legendFormat": "certified"
-            },
-            {
-              "expr": "sum(rate(reporter_skipped_total[5m])) * 60",
-              "legendFormat": "skipped"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "short" } }
-        },
-        {
-          "id": 78,
-          "type": "timeseries",
-          "title": "Engine Acks and Digests / min by Status",
-          "description": "Aggregation engine internals from the runtime registry. A rising ack failure status is the direct evidence of a digest disagreement — peers stay connected through it, so nothing else reports it.",
-          "gridPos": { "x": 0, "y": 100, "w": 12, "h": 8 },
-          "targets": [
-            {
-              "expr": "sum by (status) (rate(engine_acks_total[5m])) * 60",
-              "legendFormat": "ack {{ "{{" }} status {{ "}}" }}"
-            },
-            {
-              "expr": "sum by (status) (rate(engine_digest_total[5m])) * 60",
-              "legendFormat": "digest {{ "{{" }} status {{ "}}" }}"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "short" } }

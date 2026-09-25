@@ -2,7 +2,7 @@ use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use gas_killer_common::ReadOnlyProvider;
-use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
+use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
 use reqwest::Client;
 use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
 use scripts::task_payload::{
@@ -210,7 +210,7 @@ async fn verify_on_chain(
     initial_count: u64,
     timeout: Duration,
 ) -> OnChainResult {
-    let contract = GasKillerSDK::new(target, provider.clone());
+    let contract = SchnorrGasKillerSDK::new(target, provider.clone());
     let poll_interval = Duration::from_secs(10);
     let start = Instant::now();
 
@@ -342,7 +342,7 @@ async fn send_request(
             }
         };
         match provider {
-            Some(p) => match GasKillerSDK::new(addr, p.clone())
+            Some(p) => match SchnorrGasKillerSDK::new(addr, p.clone())
                 .stateTransitionCount()
                 .call()
                 .await

@@ -228,15 +228,3 @@ it from there as a named record, so a job that finishes after the router is serv
 {{- define "gas-killer.schnorrRegistryRecord" -}}
 /app/.nodes/schnorr_stake_registry.txt
 {{- end }}
-
-{{/*
-The quorum signature scheme (SIGNATURE_SCHEME) the router and every node run with. Any value other
-than schnorr fails here rather than installing a fleet that cannot sign.
-*/}}
-{{- define "gas-killer.signatureScheme" -}}
-{{- $scheme := .Values.global.signatureScheme | default "schnorr" | trim | lower -}}
-{{- if not (has $scheme (list "" "schnorr")) -}}
-{{- fail (printf "global.signatureScheme must be \"schnorr\", got %q" .Values.global.signatureScheme) -}}
-{{- end -}}
-schnorr
-{{- end }}

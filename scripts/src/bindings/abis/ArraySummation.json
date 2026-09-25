@@ -8,7 +8,7 @@
         "internalType": "address"
       },
       {
-        "name": "_blsSigChecker",
+        "name": "_schnorrStakeRegistry",
         "type": "address",
         "internalType": "address"
       },
@@ -29,32 +29,6 @@
       }
     ],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "QUORUM_THRESHOLD",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "uint8"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "THRESHOLD_DENOMINATOR",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "uint8"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -91,19 +65,6 @@
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "blsSignatureChecker",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -197,6 +158,19 @@
   },
   {
     "type": "function",
+    "name": "inTransition",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "locked",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "maxValue",
     "inputs": [],
     "outputs": [
@@ -204,19 +178,6 @@
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "namespace",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes",
-        "internalType": "bytes"
       }
     ],
     "stateMutability": "view"
@@ -233,6 +194,19 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "schnorrRegistry",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -326,11 +300,6 @@
         "internalType": "bytes32"
       },
       {
-        "name": "quorumNumbers",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
         "name": "referenceBlockNumber",
         "type": "uint32",
         "internalType": "uint32"
@@ -351,103 +320,78 @@
         "internalType": "bytes4"
       },
       {
-        "name": "nonSignerStakesAndSignature",
-        "type": "tuple",
-        "internalType": "struct IBLSSignatureCheckerTypes.NonSignerStakesAndSignature",
+        "name": "s",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "Raddr",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "nonSigners",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "verifyAndUpdateBatch",
+    "inputs": [
+      {
+        "name": "submissions",
+        "type": "tuple[]",
+        "internalType": "struct TaskSubmission[]",
         "components": [
           {
-            "name": "nonSignerQuorumBitmapIndices",
-            "type": "uint32[]",
-            "internalType": "uint32[]"
+            "name": "msgHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
-            "name": "nonSignerPubkeys",
-            "type": "tuple[]",
-            "internalType": "struct BN254.G1Point[]",
-            "components": [
-              {
-                "name": "X",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "Y",
-                "type": "uint256",
-                "internalType": "uint256"
-              }
-            ]
+            "name": "referenceBlockNumber",
+            "type": "uint32",
+            "internalType": "uint32"
           },
           {
-            "name": "quorumApks",
-            "type": "tuple[]",
-            "internalType": "struct BN254.G1Point[]",
-            "components": [
-              {
-                "name": "X",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "Y",
-                "type": "uint256",
-                "internalType": "uint256"
-              }
-            ]
+            "name": "storageUpdates",
+            "type": "bytes",
+            "internalType": "bytes"
           },
           {
-            "name": "apkG2",
-            "type": "tuple",
-            "internalType": "struct BN254.G2Point",
-            "components": [
-              {
-                "name": "X",
-                "type": "uint256[2]",
-                "internalType": "uint256[2]"
-              },
-              {
-                "name": "Y",
-                "type": "uint256[2]",
-                "internalType": "uint256[2]"
-              }
-            ]
+            "name": "transitionIndex",
+            "type": "uint256",
+            "internalType": "uint256"
           },
           {
-            "name": "sigma",
-            "type": "tuple",
-            "internalType": "struct BN254.G1Point",
-            "components": [
-              {
-                "name": "X",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "Y",
-                "type": "uint256",
-                "internalType": "uint256"
-              }
-            ]
+            "name": "targetFunction",
+            "type": "bytes4",
+            "internalType": "bytes4"
           },
           {
-            "name": "quorumApkIndices",
-            "type": "uint32[]",
-            "internalType": "uint32[]"
+            "name": "s",
+            "type": "uint256",
+            "internalType": "uint256"
           },
           {
-            "name": "totalStakeIndices",
-            "type": "uint32[]",
-            "internalType": "uint32[]"
+            "name": "Raddr",
+            "type": "address",
+            "internalType": "address"
           },
           {
-            "name": "nonSignerStakeIndices",
-            "type": "uint32[][]",
-            "internalType": "uint32[][]"
+            "name": "nonSigners",
+            "type": "address[]",
+            "internalType": "address[]"
           }
         ]
       }
     ],
     "outputs": [],
-    "stateMutability": "nonpayable"
+    "stateMutability": "payable"
   },
   {
     "type": "event",
@@ -483,17 +427,22 @@
   },
   {
     "type": "error",
+    "name": "BlockStaleMeasureOverflow",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "DeploymentFailed",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "FutureBlockNumber",
+    "name": "EmptyBatch",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "InsufficientQuorumThreshold",
+    "name": "FutureBlockNumber",
     "inputs": []
   },
   {
@@ -508,17 +457,12 @@
   },
   {
     "type": "error",
-    "name": "InvalidOperation",
+    "name": "InvalidQuorumSignature",
     "inputs": []
   },
   {
     "type": "error",
     "name": "InvalidSignature",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "InvalidStorageUpdates",
     "inputs": []
   },
   {
@@ -529,6 +473,11 @@
   {
     "type": "error",
     "name": "MalformedLogPayload",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReentrantTransition",
     "inputs": []
   },
   {

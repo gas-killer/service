@@ -1,9 +1,7 @@
 //! Schnorr submitter: turns aggregate-signature observations into on-chain
-//! `verifyAndUpdate` calls (`SIGNATURE_SCHEME=schnorr` mode).
+//! `verifyAndUpdate` calls.
 //!
-//! Mirror of [`commonware_avs_router::submitter::Submitter`] over the schnorr
-//! coordinator's [`SchnorrCertified`] observations instead of the reporter's BLS
-//! certificates. Dispositions are identical:
+//! Consumes the schnorr coordinator's [`SchnorrCertified`] observations. Dispositions:
 //!
 //! - `skip_digest(height)`: the coordinator gave up on the height — log and
 //!   notify the sequencer ([`ResolutionKind::Skipped`]); nothing goes on-chain.
@@ -142,9 +140,8 @@ impl SchnorrSubmitter {
             return;
         }
 
-        // Expected digest: submit on-chain with bounded retries (same policy as
-        // the BLS submitter — transient RPC errors recover, deterministic
-        // rejections release the height as failed after the budget).
+        // Expected digest: submit with bounded retries — transient RPC errors recover,
+        // deterministic rejections release the height as failed after the budget.
         let mut backoff = INITIAL_RETRY_BACKOFF;
         let mut attempt = 0u32;
         loop {

@@ -138,8 +138,6 @@ spec:
               touch "$MARKER"; chmod 644 "$MARKER"
               echo "[schnorr-operators] registry ready"
           env:
-            - name: SIGNATURE_SCHEME
-              value: {{ include "gas-killer.signatureScheme" . | quote }}
             - name: AVS_DEPLOYMENT_PATH
               value: "/app/.nodes/avs_deploy.json"
             - name: HTTP_RPC

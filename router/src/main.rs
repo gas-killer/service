@@ -1,53 +1,40 @@
-//! Gas Killer router: verifier-only aggregation engine + task sequencer +
-//! on-chain submitter.
+//! Gas Killer router: task sequencer + aggregate-Schnorr coordinator + payload renderer.
 //!
-//! The router is NOT a signing participant. It runs the commonware aggregation
-//! engine with a verifier-only [`Bn254Scheme`] (`me() == None`): the engine
-//! validates the nodes' TipAcks on channel 0, assembles BN254 certificates at
-//! quorum, journals them, and reports them to the [`CertReporter`]. Task flow:
-//! HTTP ingress → sequencer (assigns aggregation heights, broadcasts
-//! `TaskDirective`s on channel 1) → nodes sign → engine certifies → submitter
-//! calls `GasKillerSDK.verifyAndUpdate` on-chain.
+//! The router is NOT a signing participant. Task flow: HTTP ingress → sequencer (assigns heights,
+//! broadcasts `TaskDirective`s on channel 1) → the Schnorr coordinator runs the two-round MuSig2
+//! session with the operators on channel 2 → the submitter renders `verifyAndUpdate` for the
+//! client to submit.
 
 use ::tokio::net::TcpListener;
 use ark_bn254::G2Affine;
 use ark_serialize::CanonicalDeserialize;
 use clap::{Arg, Command};
-use commonware_avs_core::bn254::{Bn254Scheme, G1PublicKey, PublicKey, get_signer};
-use commonware_avs_core::consensus::StaticEpochMonitor;
-use commonware_avs_router::automaton::RouterAutomaton;
-use commonware_avs_router::reporter::{CertReporter, certified_channel};
+use commonware_avs_core::bn254::{PublicKey, get_signer};
 use commonware_avs_router::sequencer::{
     DispatchTime, Sequencer, TipReports, ingest_tip_reports, resolution_channel, shared_assignments,
 };
-use commonware_consensus::aggregation::{Config as AggregationConfig, Engine};
-use commonware_consensus::types::{Epoch, EpochDelta, HeightDelta};
 use commonware_cryptography::Signer as _;
-use commonware_cryptography::certificate::{ConstantProvider, Scheme as _};
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_p2p::{Address, AddressableManager as _};
-use commonware_parallel::Sequential;
-use commonware_runtime::buffer::paged::CacheRef;
 use commonware_runtime::{
     Quota, Runner, Spawner, Supervisor,
     tokio::{self},
 };
-use commonware_utils::ordered::{Map, Quorum as _, Set};
-use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration};
+use commonware_utils::NZU32;
+use commonware_utils::ordered::{Map, Set};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::get_operator_states;
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerTaskData, GasKillerValidator,
-    IngressStalenessWindow, SignatureScheme, SpeculativePrebuildConfig, ValidatorMetrics,
-    ack_messages_per_second, agg_activity_timeout, agg_window, config_fingerprint,
+    IngressStalenessWindow, SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint,
     load_key_from_file, p2p_message_backlog, p2p_quota_period, quorum_threshold_fraction,
     rebroadcast_interval, round_timeout, schnorr_messages_per_second, schnorr_sign_stage_timeout,
-    schnorr_stage_timeout, signature_scheme, storage_directory, task_ttl,
+    schnorr_stage_timeout, storage_directory, task_ttl,
 };
 use gas_killer_router::directive_metrics::CountingSender;
 use gas_killer_router::expiry::run_expiry_sweeper;
 use gas_killer_router::factories::{
-    create_ingress, create_schnorr_submitter, create_submitter, requeue_incomplete_tasks,
+    create_ingress, create_schnorr_submitter, requeue_incomplete_tasks,
 };
 use gas_killer_router::height_metrics::{HeightObserver, SAMPLE_INTERVAL};
 use gas_killer_router::metrics::MetricsCollector;
@@ -61,22 +48,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Maximum p2p message size. `TipAck`s are tiny; `TaskDirective::Announce` is
+/// Maximum p2p message size. `TaskDirective::Announce` is
 /// bounded by the 128 KB combined calldata/storage-updates limit — 1 MB is
 /// generous headroom (`Sender::send` panics above this).
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
 
-/// P2p channel carrying the aggregation engine's `TipAck`s (engine-internal).
-const ACK_CHANNEL: u64 = 0;
 /// P2p channel on which the router broadcasts `TaskDirective`s to the nodes.
 const DIRECTIVE_CHANNEL: u64 = 1;
-/// P2p channel carrying the interactive Schnorr signing rounds
-/// (`SIGNATURE_SCHEME=schnorr` mode only; never registered in bls mode).
+/// P2p channel carrying the interactive Schnorr signing rounds. Channel 0 carried the retired BLS
+/// engine's acks and stays unused.
 const SCHNORR_CHANNEL: u64 = 2;
-
-/// Journal partition for the router's verifier-only engine (a subdirectory of
-/// the runtime storage directory).
-const JOURNAL_PARTITION: &str = "aggregation-router";
 
 /// Resolve a hostname:port with retry logic for Docker DNS readiness
 fn resolve_with_retry(
@@ -118,7 +99,7 @@ fn resolve_with_retry(
 fn main() {
     // Parse arguments (flags unchanged from the pre-migration router).
     let matches = Command::new("orchestrator")
-        .about("generate and verify BN254 Multi-Signatures")
+        .about("Gas Killer router - task sequencer and aggregate-Schnorr coordinator")
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
@@ -130,7 +111,7 @@ fn main() {
             Arg::new("key-file")
                 .long("key-file")
                 .required(true)
-                .help("Path to the JSON file containing the router BLS private key"),
+                .help("Path to the JSON file containing the router BN254 p2p identity key"),
         )
         .arg(
             Arg::new("port")
@@ -204,14 +185,8 @@ fn main() {
     println!("  g2_y1: {}", g2_point.y.c0);
     println!("  g2_y2: {}", g2_point.y.c1);
 
-    // Initialize runtime. A stable storage directory is REQUIRED: the engine's
-    // certificate journal must survive restarts (the runtime default is a
-    // random per-process temp dir, which would silently lose replay).
+    // The runtime otherwise defaults to a random per-process temp dir.
     let storage_dir = storage_directory().join("router");
-    println!(
-        "Engine journal storage directory: {}",
-        storage_dir.display()
-    );
     let runtime_cfg = tokio::Config::default()
         .with_worker_threads(4)
         .with_storage_directory(storage_dir);
@@ -338,32 +313,20 @@ fn main() {
         );
         let _ = oracle.track(0, peers);
 
-        // Build the participant set (sorted G2 keys — participant indices derive
-        // from this order on every process) and the index-aligned G1 keys.
+        // The participant set: the operators' BN254 p2p identities.
         let operators = &quorum_infos[quorum_number].operators;
         if operators.is_empty() {
             panic!("Please provide at least one contributor");
         }
-        // Build the G2->G1 map with `from_iter_dedup` (sort + first-write-wins on a
-        // duplicate G2 key) — IDENTICAL to the node's construction in
-        // gas-killer-node/src/main.rs. If node and router deduped differently (e.g.
-        // last-write-wins here), a duplicate G2 key bound to different G1 keys would
-        // silently misalign the two sides' G1 assignment at that participant index.
-        let key_map: Map<PublicKey, G1PublicKey> =
-            Map::from_iter_dedup(operators.iter().map(|operator| {
-                let keys = operator.pub_keys.as_ref().expect("operator has BLS keys");
-                tracing::info!(key = ?keys.g2_pub_key, "registered contributor");
-                (keys.g2_pub_key.clone(), keys.g1_pub_key.clone())
-            }));
-        let participants: Set<PublicKey> = Set::from_iter_dedup(key_map.iter().cloned());
-        let g1_keys: Vec<G1PublicKey> = key_map.iter_pairs().map(|(_, g1)| g1.clone()).collect();
+        let participants: Set<PublicKey> = Set::from_iter_dedup(operators.iter().map(|operator| {
+            let keys = operator.pub_keys.as_ref().expect("operator has BN254 keys");
+            tracing::info!(key = ?keys.g2_pub_key, "registered contributor");
+            keys.g2_pub_key.clone()
+        }));
 
-        // Shared channel registration (all channels must precede network.start()).
-        // The router SENDS directives on channel 1 in both modes and receives the
-        // nodes' rate-limited TipReport replies (journal-loss recovery) on the same
-        // channel. The mode-specific signing channel — 0 for the BLS engine's
-        // TipAck gossip, 2 for the interactive Schnorr rounds — is registered inside
-        // the scheme branch below, still before network.start().
+        // All channels must be registered before network.start(). The router sends directives on
+        // channel 1 and receives the nodes' rate-limited TipReport replies on the same channel;
+        // the Schnorr rounds run on channel 2, registered below.
         let p2p_backlog = p2p_message_backlog();
         let p2p_quota = Quota::with_period(p2p_quota_period())
             .expect("p2p_quota_period always returns a non-zero duration");
@@ -503,190 +466,73 @@ fn main() {
             in_flight.clone(),
         );
 
-        let scheme_mode = signature_scheme();
-        tracing::info!(?scheme_mode, "signature scheme");
+        // The Schnorr rounds are request/response, but a dropped message costs a whole retry
+        // attempt, so the quota is generous.
+        let schnorr_quota = Quota::per_second(schnorr_messages_per_second());
+        let (schnorr_sender, schnorr_receiver) =
+            network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
 
-        // Mode-specific signing path. `bls` runs the verifier-only aggregation
-        // engine + certificate reporter on channel 0; `schnorr` runs the interactive
-        // two-round MuSig2 coordinator on channel 2 (see schnorr_coordinator.rs). The
-        // sequencer is shared — only its certificate-observation source (the
-        // `CertIndex` it polls) differs.
-        match scheme_mode {
-            SignatureScheme::Bls => {
-                // Verifier-only scheme: the router validates acks and assembles
-                // certificates but never signs (its key is not in the participant
-                // set).
-                let scheme = Bn254Scheme::verifier(participants, g1_keys);
-                // The contract-derived threshold is informational only: the engine's
-                // quorum is fixed at N3f1 (n - (n-1)/3) and the authoritative stake
-                // check runs on-chain in BLSSignatureChecker.
-                tracing::info!(
-                    participants = scheme.participants().len(),
-                    engine_quorum = scheme.participants().quorum::<N3f1>(),
-                    contract_threshold = quorum_infos[quorum_number].threshold,
-                    "operator set loaded"
-                );
+        let (certified_sender, certified_receiver) = schnorr_certified_channel();
 
-                // The ack channel needs its own, much larger quota: node engines
-                // keep rebroadcasting each signed height's TipAck until it falls
-                // activity_timeout below the tip (even after certification), and the
-                // p2p limiter silently drops messages beyond the per-peer rate — an
-                // undersized quota here starves the router of fresh acks and stalls
-                // certification.
-                let ack_rate = ack_messages_per_second();
-                let ack_quota = Quota::per_second(ack_rate);
-                tracing::info!(
-                    ack_messages_per_second = ack_rate.get(),
-                    "engine channel quota"
-                );
-                let (ack_sender, ack_receiver) =
-                    network.register(ACK_CHANNEL, ack_quota, p2p_backlog);
+        // Coordinator: drives the two-round signing sessions per assigned
+        // height and doubles as the sequencer's certificate index. It needs
+        // both the p2p key and the operator address of each operator (the
+        // registry binds them at registration).
+        let operators_with_addresses: Vec<_> = operators
+            .iter()
+            .map(|operator| {
+                let keys = operator.pub_keys.as_ref().expect("operator has BN254 keys");
+                (keys.g2_pub_key.clone(), operator.address)
+            })
+            .collect();
+        let (coordinator, coordinator_mailbox) = SchnorrCoordinator::new(
+            assignments.clone(),
+            certified_sender,
+            schnorr_sender,
+            schnorr_receiver,
+            operators_with_addresses,
+            APPLICATION_NAMESPACE.to_vec(),
+            quorum_threshold_fraction(),
+            schnorr_stage_timeout(),
+            schnorr_sign_stage_timeout(),
+            round_timeout(),
+        );
+        context
+            .child("schnorr_coordinator")
+            .spawn(move |_| coordinator.run());
 
-                let (certified_sender, certified_receiver) = certified_channel();
+        // On-chain submitter: consumes aggregate signatures, resolves heights.
+        let submitter = create_schnorr_submitter(
+            assignments.clone(),
+            certified_receiver,
+            resolution_sender,
+            Arc::clone(&metrics),
+            Arc::clone(&dispatch_time),
+            APPLICATION_NAMESPACE.to_vec(),
+            ingress.store.clone(),
+            in_flight.clone(),
+        )
+        .await
+        .expect("Failed to create schnorr submitter");
+        context
+            .child("schnorr_submitter")
+            .spawn(move |_| submitter.run());
 
-                // Certificate reporter actor (the engine's Reporter).
-                let (cert_reporter, reporter_mailbox) = CertReporter::new(
-                    context.child("cert_reporter"),
-                    scheme.clone(),
-                    certified_sender,
-                );
-                context
-                    .child("cert_reporter_actor")
-                    .spawn(move |_| cert_reporter.run());
-
-                // Verifier-only aggregation engine on channel 0.
-                let engine = Engine::new(
-                    context.child("engine"),
-                    AggregationConfig {
-                        monitor: StaticEpochMonitor::new(),
-                        provider: ConstantProvider::<Bn254Scheme, Epoch>::new(scheme.clone()),
-                        automaton: RouterAutomaton::new(assignments.clone()),
-                        reporter: reporter_mailbox.clone(),
-                        blocker: oracle.clone(),
-                        priority_acks: false,
-                        rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_interval()),
-                        // Single static epoch: nothing to keep or accept beyond it.
-                        epoch_bounds: (EpochDelta::new(0), EpochDelta::new(0)),
-                        window: agg_window(),
-                        activity_timeout: HeightDelta::new(agg_activity_timeout()),
-                        journal_partition: JOURNAL_PARTITION.to_string(),
-                        journal_write_buffer: NZUsize!(4096),
-                        journal_replay_buffer: NZUsize!(4096),
-                        journal_heights_per_section: NZU64!(64),
-                        journal_compression: None,
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
-                            NZU16!(4096),
-                            NZUsize!(128),
-                        ),
-                        strategy: Sequential,
-                    },
-                );
-                engine.start((ack_sender, ack_receiver));
-
-                // On-chain submitter: consumes verified certificates, resolves heights.
-                let submitter = create_submitter(
-                    scheme,
-                    assignments.clone(),
-                    certified_receiver,
-                    resolution_sender,
-                    Arc::clone(&metrics),
-                    Arc::clone(&dispatch_time),
-                    APPLICATION_NAMESPACE.to_vec(),
-                    ingress.store.clone(),
-                    in_flight.clone(),
-                )
-                .await
-                .expect("Failed to create submitter");
-                context.child("submitter").spawn(move |_| submitter.run());
-
-                // Sequencer: assigns heights, broadcasts directives to the operator
-                // set; its certificate observations come from the engine reporter.
-                let sequencer = Sequencer::new(
-                    task_source,
-                    dispatch_time,
-                    assignments,
-                    reporter_mailbox,
-                    resolution_receiver,
-                    directive_sender,
-                    directive_recipients,
-                    tip_reports,
-                    round_timeout(),
-                    rebroadcast_interval(),
-                );
-                context.child("sequencer").spawn(move |_| sequencer.run());
-            }
-            SignatureScheme::Schnorr => {
-                // The Schnorr rounds are request/response (no steady-state
-                // rebroadcast like TipAcks), but a dropped message costs a whole
-                // retry attempt, so the quota is generous.
-                let schnorr_quota = Quota::per_second(schnorr_messages_per_second());
-                let (schnorr_sender, schnorr_receiver) =
-                    network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
-
-                let (certified_sender, certified_receiver) = schnorr_certified_channel();
-
-                // Coordinator: drives the two-round signing sessions per assigned
-                // height and doubles as the sequencer's certificate index. It needs
-                // both the p2p key and the operator address of each operator (the
-                // registry binds them at registration).
-                let operators_with_addresses: Vec<_> = operators
-                    .iter()
-                    .map(|operator| {
-                        let keys = operator.pub_keys.as_ref().expect("operator has BLS keys");
-                        (keys.g2_pub_key.clone(), operator.address)
-                    })
-                    .collect();
-                let (coordinator, coordinator_mailbox) = SchnorrCoordinator::new(
-                    assignments.clone(),
-                    certified_sender,
-                    schnorr_sender,
-                    schnorr_receiver,
-                    operators_with_addresses,
-                    APPLICATION_NAMESPACE.to_vec(),
-                    quorum_threshold_fraction(),
-                    schnorr_stage_timeout(),
-                    schnorr_sign_stage_timeout(),
-                    round_timeout(),
-                );
-                context
-                    .child("schnorr_coordinator")
-                    .spawn(move |_| coordinator.run());
-
-                // On-chain submitter: consumes aggregate signatures, resolves heights.
-                let submitter = create_schnorr_submitter(
-                    assignments.clone(),
-                    certified_receiver,
-                    resolution_sender,
-                    Arc::clone(&metrics),
-                    Arc::clone(&dispatch_time),
-                    APPLICATION_NAMESPACE.to_vec(),
-                    ingress.store.clone(),
-                    in_flight.clone(),
-                )
-                .await
-                .expect("Failed to create schnorr submitter");
-                context
-                    .child("schnorr_submitter")
-                    .spawn(move |_| submitter.run());
-
-                // Sequencer: unchanged behavior; its certificate observations come
-                // from the coordinator's mailbox instead of the engine reporter.
-                let sequencer = Sequencer::new(
-                    task_source,
-                    dispatch_time,
-                    assignments,
-                    coordinator_mailbox,
-                    resolution_receiver,
-                    directive_sender,
-                    directive_recipients,
-                    tip_reports,
-                    round_timeout(),
-                    rebroadcast_interval(),
-                );
-                context.child("sequencer").spawn(move |_| sequencer.run());
-            }
-        }
+        // Sequencer: unchanged behavior; its certificate observations come
+        // from the coordinator's mailbox instead of the engine reporter.
+        let sequencer = Sequencer::new(
+            task_source,
+            dispatch_time,
+            assignments,
+            coordinator_mailbox,
+            resolution_receiver,
+            directive_sender,
+            directive_recipients,
+            tip_reports,
+            round_timeout(),
+            rebroadcast_interval(),
+        );
+        context.child("sequencer").spawn(move |_| sequencer.run());
 
         // Readiness flag: set to true after everything is spawned and the network is starting
         let ready = Arc::new(AtomicBool::new(false));
@@ -721,8 +567,7 @@ fn main() {
             }
         });
 
-        // BLS key loaded, engine + sequencer + submitter spawned — router is
-        // ready to collect certificates.
+        // Key loaded, coordinator + sequencer + submitter spawned — router is ready to sign.
         ready.store(true, Ordering::Relaxed);
 
         // Run the network; blocks the root future (and thus the process) until

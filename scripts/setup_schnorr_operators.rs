@@ -11,22 +11,6 @@
 //! first, then `deploy_example`, which reads the registry address back out of the deployment
 //! JSON via `$deploy:schnorrStakeRegistry`.
 //!
-//! `SCHNORR_PROVISION` decides which phases run, and unset it follows `SIGNATURE_SCHEME`: the
-//! whole thing under `schnorr`, nothing under `bls`, since the BLS stack verifies against a
-//! `BLSSignatureChecker` from the EigenLayer deployment and needs none of this.
-//!
-//! | `SCHNORR_PROVISION` | Deploys and records | Registers |
-//! |---|---|---|
-//! | unset | only under `SIGNATURE_SCHEME=schnorr` | only under `SIGNATURE_SCHEME=schnorr` |
-//! | `registry` | yes | no |
-//! | `full` | yes | yes |
-//!
-//! `registry` is for a deployment that wants the address published before it has an operator set
-//! to put in it. A target's constructor takes that address, so an integrator can wire one and
-//! settle under whichever scheme the fleet is running; the registry verifies nothing until
-//! operators are registered, which its owner can do later into the same registry. Both explicit
-//! values run whatever scheme the fleet signs, which is the point of them.
-//!
 //! `SCHNORR_STAKE_REGISTRY_ADDRESS` reuses a deployed registry instead. Registering into one is
 //! only done while it holds nothing but this operator set; see [`FillPlan`].
 
@@ -36,9 +20,7 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use gas_killer_common::avs_contracts::SCHNORR_STAKE_REGISTRY_KEY;
 use gas_killer_common::schnorr::{PrivateKey, private_key_from_hex};
-use gas_killer_common::{
-    SignatureScheme, quorum_threshold_fraction, schnorr_notice_window, signature_scheme,
-};
+use gas_killer_common::{quorum_threshold_fraction, schnorr_notice_window};
 use rand::RngCore;
 use scripts::bindings::schnorrstakeregistry::SchnorrStakeRegistry;
 use serde::Deserialize;
@@ -62,17 +44,6 @@ struct OperatorKeyFile {
 async fn main() -> Result<(), DynError> {
     dotenv::dotenv().ok();
 
-    let provision = parse_provision(env::var("SCHNORR_PROVISION").ok().as_deref())?;
-    let (deploy_registry, register) = provision.phases(signature_scheme());
-    if !deploy_registry {
-        println!(
-            "⏭️  SIGNATURE_SCHEME is not 'schnorr' and SCHNORR_PROVISION is unset; nothing to do \
-             (the BLS stack verifies against a BLSSignatureChecker from the EigenLayer \
-             deployment). Set SCHNORR_PROVISION=registry to provision one anyway."
-        );
-        return Ok(());
-    }
-
     let http_rpc = env::var("HTTP_RPC").map_err(|_| "HTTP_RPC environment variable is required")?;
     let private_key =
         env::var("PRIVATE_KEY").map_err(|_| "PRIVATE_KEY environment variable is required")?;
@@ -89,21 +60,14 @@ async fn main() -> Result<(), DynError> {
     let notice_window = schnorr_notice_window();
 
     // The AVS reference comes from the eigenlayer deployment JSON — operators register with
-    // EigenLayer through the same service manager regardless of the quorum-signature scheme the
-    // target contract verifies.
+    // EigenLayer through that service manager.
     let avs_address = read_avs_address(&avs_deployment_path)?;
 
     // The operators' Schnorr keys are their existing secp256k1 keys, read from the key files the
     // eigenlayer setup container produced. Loaded before the registry exists, so a volume missing
     // them fails with the reason rather than after deploying a registry nobody is in.
-    let operator_keys = if register {
-        let keys = load_operator_keys(&avs_deployment_path)?;
-        println!("🔑 Loaded {} operator key(s)", keys.len());
-        keys
-    } else {
-        println!("📋 Deploying the registry without registering an operator set");
-        Vec::new()
-    };
+    let operator_keys = load_operator_keys(&avs_deployment_path)?;
+    println!("🔑 Loaded {} operator key(s)", operator_keys.len());
 
     // The deployer owns the registry (stand-in for the EigenLayer registration lifecycle).
     let signer: PrivateKeySigner = private_key
@@ -163,12 +127,7 @@ async fn main() -> Result<(), DynError> {
         }
     };
 
-    if !register {
-        println!(
-            "⏭️  No operator registered. The registry verifies nothing until one is, and its \
-             owner {deployer} is who can register them."
-        );
-    } else if reused {
+    if reused {
         fill_reused_registry(&provider, registry_address, deployer, &operator_keys).await?;
     } else {
         register_operator_set(&provider, registry_address, &operator_keys).await?;
@@ -443,50 +402,6 @@ fn record_registry_address(avs_deployment_path: &str, registry: Address) -> Resu
     Ok(())
 }
 
-/// Which phases `SCHNORR_PROVISION` asks for. Mirrors the chart's `schnorr.provision`, which
-/// passes its value straight through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Provision {
-    /// Unset: the phases follow `SIGNATURE_SCHEME`.
-    Scheme,
-    /// Deploy and record the registry, register nobody.
-    Registry,
-    /// Deploy, record, and register the operator set.
-    Full,
-}
-
-impl Provision {
-    /// Whether to deploy and record the registry, and whether to register the operator set.
-    fn phases(self, scheme: SignatureScheme) -> (bool, bool) {
-        match self {
-            Self::Scheme => {
-                let schnorr = scheme == SignatureScheme::Schnorr;
-                (schnorr, schnorr)
-            }
-            Self::Registry => (true, false),
-            Self::Full => (true, true),
-        }
-    }
-}
-
-/// Parses `SCHNORR_PROVISION`, treating unset and empty alike.
-///
-/// An unrecognized value is an error rather than a fallback. Falling back would either skip the
-/// registrations or run them, and both are wrong to guess at: one leaves a registry that verifies
-/// nothing, and the other submits transactions the caller did not ask for.
-fn parse_provision(raw: Option<&str>) -> Result<Provision, DynError> {
-    match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-        None | Some("") => Ok(Provision::Scheme),
-        Some("registry") => Ok(Provision::Registry),
-        Some("full") => Ok(Provision::Full),
-        Some(other) => Err(format!(
-            "SCHNORR_PROVISION must be \"registry\" or \"full\" (or unset to follow \
-             SIGNATURE_SCHEME), got {other:?}"
-        )
-        .into()),
-    }
-}
-
 fn env_address(name: &str) -> Result<Option<Address>, DynError> {
     match env::var(name).ok().filter(|s| !s.trim().is_empty()) {
         Some(raw) => {
@@ -500,9 +415,8 @@ fn env_address(name: &str) -> Result<Option<Address>, DynError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FillPlan, Provision, RegistryState, parse_provision};
+    use super::{FillPlan, RegistryState};
     use alloy::primitives::U256;
-    use gas_killer_common::SignatureScheme;
 
     fn state(missing: usize, own: u64, total: u64, pending: u64) -> RegistryState {
         RegistryState {
@@ -543,45 +457,5 @@ mod tests {
             FillPlan::Refuse,
             "a scheduled change means someone else is managing the set"
         );
-    }
-
-    #[test]
-    fn an_unset_provision_follows_the_signature_scheme() {
-        for raw in [None, Some(""), Some("  ")] {
-            let provision = parse_provision(raw).expect("unset is valid");
-            assert_eq!(provision, Provision::Scheme);
-            assert_eq!(provision.phases(SignatureScheme::Schnorr), (true, true));
-            assert_eq!(
-                provision.phases(SignatureScheme::Bls),
-                (false, false),
-                "a bls fleet that asked for nothing must not deploy a registry"
-            );
-        }
-    }
-
-    #[test]
-    fn an_explicit_provision_runs_under_either_scheme() {
-        for raw in ["registry", "REGISTRY", " Registry "] {
-            let provision = parse_provision(Some(raw)).expect("registry is valid");
-            assert_eq!(provision.phases(SignatureScheme::Bls), (true, false));
-            assert_eq!(provision.phases(SignatureScheme::Schnorr), (true, false));
-        }
-        for raw in ["full", "FULL", " Full "] {
-            let provision = parse_provision(Some(raw)).expect("full is valid");
-            assert_eq!(provision.phases(SignatureScheme::Bls), (true, true));
-            assert_eq!(provision.phases(SignatureScheme::Schnorr), (true, true));
-        }
-    }
-
-    #[test]
-    fn a_mistyped_provision_is_an_error_rather_than_a_guess() {
-        for raw in ["registry-only", "true", "1", "yes", "none", "off"] {
-            let err = parse_provision(Some(raw))
-                .expect_err("a value that is neither must not be guessed at");
-            assert!(
-                format!("{err}").contains("SCHNORR_PROVISION"),
-                "the error must name the variable, got {err}"
-            );
-        }
     }
 }

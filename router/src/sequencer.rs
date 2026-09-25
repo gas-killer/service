@@ -584,9 +584,10 @@ mod tests {
             chain_id: 31337,
             value: U256::ZERO,
             valid_until_block: 100,
-            proof: BundleProof::Bls {
-                quorum_numbers: Bytes::from(vec![0x00]),
-                non_signer_stakes_and_signature: Bytes::new(),
+            proof: BundleProof::Schnorr {
+                s: U256::ZERO,
+                r_addr: Address::ZERO,
+                non_signers: vec![],
             },
         }
     }

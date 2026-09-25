@@ -102,7 +102,7 @@ where
     ))
 }
 
-/// Configuration for loading BLS private keys from JSON files
+/// A private key stored in a JSON file (the BN254 p2p identity or the secp256k1 Schnorr key)
 #[derive(Debug, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct KeyConfig {
@@ -122,7 +122,7 @@ pub struct OrchestratorConfig {
     pub address: Option<String>,
 }
 
-/// Loads a BLS private key from a JSON file
+/// Loads a hex private key from a JSON file
 ///
 /// # Arguments
 /// * `path` - Path to the JSON file containing the key
@@ -320,19 +320,17 @@ fn parse_p2p_quota_period(value: Option<&str>) -> std::time::Duration {
         })
 }
 
-/// Default storage directory for the aggregation engine's journal.
+/// Default storage directory handed to the commonware runtime.
 ///
-/// Matches the writable data volume mounted in the container images. Journal
-/// persistence across restarts requires a stable path — the commonware tokio
-/// runtime otherwise defaults to a random per-process temp dir.
+/// Matches the writable data volume mounted in the container images; the runtime
+/// otherwise defaults to a random per-process temp dir.
 pub const DEFAULT_STORAGE_DIRECTORY: &str = "/app/data";
 
-/// Resolves the storage directory for the engine journal.
+/// Resolves the runtime storage directory.
 ///
 /// Reads `STORAGE_DIR`; when unset, uses [`DEFAULT_STORAGE_DIRECTORY`] if it is
 /// (creatable and) writable, else falls back to `$TMPDIR/gas-killer` for bare-metal
-/// dev runs. The fallback is per-boot on most systems, so journal replay across
-/// restarts is only guaranteed when `STORAGE_DIR` or the default volume exists.
+/// dev runs.
 pub fn storage_directory() -> std::path::PathBuf {
     if let Ok(dir) = env::var("STORAGE_DIR") {
         let dir = dir.trim();
@@ -365,13 +363,12 @@ fn directory_is_writable(path: &std::path::Path) -> bool {
     }
 }
 
-/// Default number of heights the aggregation engine works on concurrently above
-/// its tip (`Config::window`).
+/// Default number of heights above a node's tip it expects the router to be driving. A directive
+/// past `tip + window` is logged as evidence the node has fallen behind (`task_book::ingest`).
 pub const DEFAULT_AGG_WINDOW: u64 = 8;
 
-/// Reads the aggregation engine window from `AGG_WINDOW`, defaulting to
-/// [`DEFAULT_AGG_WINDOW`]. Zero or unparseable values fall back to the default
-/// (the engine requires a non-zero window).
+/// Reads the window from `AGG_WINDOW`, defaulting to [`DEFAULT_AGG_WINDOW`]. Zero or unparseable
+/// values fall back to the default.
 pub fn agg_window() -> std::num::NonZeroU64 {
     env::var("AGG_WINDOW")
         .ok()
@@ -380,22 +377,6 @@ pub fn agg_window() -> std::num::NonZeroU64 {
         .unwrap_or_else(|| {
             std::num::NonZeroU64::new(DEFAULT_AGG_WINDOW).expect("default window is non-zero")
         })
-}
-
-/// Default number of heights the aggregation engine keeps tracking below its tip
-/// (`Config::activity_timeout`): ack collection + prune buffer.
-///
-/// Must be generous — heights pruned past this window can never certify locally,
-/// so the router would miss their certificates (see the liveness model).
-pub const DEFAULT_AGG_ACTIVITY_TIMEOUT: u64 = 256;
-
-/// Reads the aggregation activity timeout (in heights) from `AGG_ACTIVITY_TIMEOUT`,
-/// defaulting to [`DEFAULT_AGG_ACTIVITY_TIMEOUT`].
-pub fn agg_activity_timeout() -> u64 {
-    env::var("AGG_ACTIVITY_TIMEOUT")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(DEFAULT_AGG_ACTIVITY_TIMEOUT)
 }
 
 /// Default time the router waits for a certificate on its assigned height before
@@ -413,8 +394,7 @@ pub fn round_timeout() -> std::time::Duration {
 }
 
 /// Default cadence at which the router re-broadcasts the current `TaskDirective`
-/// until the height certifies. Also reused as the engine's own TipAck
-/// `rebroadcast_timeout`.
+/// until the height certifies.
 pub const DEFAULT_REBROADCAST_INTERVAL_SECS: f64 = 5.0;
 
 /// Reads the rebroadcast interval from `REBROADCAST_INTERVAL` (seconds, fractional
@@ -425,43 +405,6 @@ pub fn rebroadcast_interval() -> std::time::Duration {
         env::var("REBROADCAST_INTERVAL").ok().as_deref(),
         DEFAULT_REBROADCAST_INTERVAL_SECS,
     )
-}
-
-/// Which quorum-signature scheme the node/router binaries run.
-///
-/// `Bls` is the engine-driven aggregation path (commonware aggregation engine,
-/// BLS-aggregated operator signatures verified on-chain). `Schnorr` is the
-/// interactive two-round MuSig2 aggregate path (coordinator/participant actors on
-/// a p2p channel, a single constant-gas signature on-chain). The two paths never
-/// mix inside one deployment: every binary in a stack must run the same scheme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureScheme {
-    Bls,
-    Schnorr,
-}
-
-/// Reads the signature scheme from `SIGNATURE_SCHEME` (case-insensitive `bls` |
-/// `schnorr`), defaulting to [`SignatureScheme::Bls`] when unset. Panics on an
-/// unrecognized value rather than silently running the wrong protocol.
-pub fn signature_scheme() -> SignatureScheme {
-    parse_signature_scheme(env::var("SIGNATURE_SCHEME").ok().as_deref())
-}
-
-/// Parses a `SIGNATURE_SCHEME` value into a [`SignatureScheme`], treating `None`
-/// (env var unset) as `bls`.
-///
-/// # Panics
-/// Panics if `value` is set to anything other than `""`, `"bls"`, or `"schnorr"`
-/// (case-insensitive).
-fn parse_signature_scheme(value: Option<&str>) -> SignatureScheme {
-    match value {
-        None => SignatureScheme::Bls,
-        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "" | "bls" => SignatureScheme::Bls,
-            "schnorr" => SignatureScheme::Schnorr,
-            _ => panic!("SIGNATURE_SCHEME must be 'bls' or 'schnorr', got: {raw}"),
-        },
-    }
 }
 
 /// Reads the storage-update encoding from `STATE_ENCODING` (case-insensitive
@@ -566,8 +509,8 @@ pub const DIRECTIVE_WIRE_VERSION: u32 = 0;
 /// A short digest of every setting that must be identical on the router and all operators.
 ///
 /// Each input either feeds the task digest (the simulation profile, the state encoding, the
-/// namespace) or determines which heights a binary will sign at all (the scheme, the window, the
-/// directive format). A fleet running two values of any of them does not fail loudly: peers stay
+/// namespace) or determines which heights a binary will sign at all (the window, the directive
+/// format). A fleet running two values of any of them does not fail loudly: peers stay
 /// connected, quorum simply never forms, and the pipeline stalls while every pod reports healthy.
 ///
 /// Exported as a label so a split is one query — more than one distinct fingerprint across the
@@ -576,7 +519,6 @@ pub fn config_fingerprint() -> String {
     fingerprint_of(
         &format!("{:?}", sim_profile()),
         &format!("{:?}", state_encoding()),
-        &format!("{:?}", signature_scheme()),
         APPLICATION_NAMESPACE,
         agg_window().get(),
         DIRECTIVE_WIRE_VERSION,
@@ -590,7 +532,6 @@ pub fn config_fingerprint() -> String {
 fn fingerprint_of(
     sim_profile: &str,
     state_encoding: &str,
-    signature_scheme: &str,
     application_namespace: &[u8],
     agg_window: u64,
     directive_wire_version: u32,
@@ -601,8 +542,7 @@ fn fingerprint_of(
         .collect();
     let canonical = format!(
         "sim_profile={sim_profile};state_encoding={state_encoding};\
-         signature_scheme={signature_scheme};application_namespace={namespace};\
-         agg_window={agg_window};directive_wire_version={directive_wire_version}"
+         application_namespace={namespace};agg_window={agg_window};directive_wire_version={directive_wire_version}"
     );
 
     let mut hasher = Sha256::new();
@@ -784,32 +724,6 @@ fn parse_schnorr_messages_per_second(value: Option<&str>) -> std::num::NonZeroU3
             std::num::NonZeroU32::new(DEFAULT_SCHNORR_MESSAGES_PER_SECOND)
                 .expect("default schnorr message rate is nonzero")
         })
-}
-
-/// Per-peer send/receive rate for the aggregation-engine TipAck channel (channel 0),
-/// in messages per second.
-///
-/// The engine keeps rebroadcasting a signed height's TipAck every
-/// `REBROADCAST_INTERVAL` until the height falls `AGG_ACTIVITY_TIMEOUT` below the
-/// tip — even after it certifies — so steady-state demand approaches
-/// `AGG_ACTIVITY_TIMEOUT / REBROADCAST_INTERVAL` messages per second per peer. The
-/// p2p send-side limiter SILENTLY DROPS messages to rate-limited peers, so an
-/// undersized quota starves fresh acks and stalls certification. The default is
-/// computed from those two knobs with 2x headroom; override with
-/// `P2P_ACK_MESSAGES_PER_SECOND` (the legacy `P2P_MESSAGES_PER_SECOND` knob only
-/// governs the task-directive channel).
-pub fn ack_messages_per_second() -> std::num::NonZeroU32 {
-    if let Some(v) = env::var("P2P_ACK_MESSAGES_PER_SECOND")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .and_then(std::num::NonZeroU32::new)
-    {
-        return v;
-    }
-    let demand =
-        (agg_activity_timeout() as f64 / rebroadcast_interval().as_secs_f64()).ceil() as u32;
-    std::num::NonZeroU32::new(demand.saturating_mul(2).saturating_add(8).max(8))
-        .expect("quota is always at least 8")
 }
 
 /// Parses a seconds value (fractional allowed) into a `Duration`, falling back to
@@ -1045,32 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn signature_scheme_defaults_to_bls() {
-        assert_eq!(parse_signature_scheme(None), SignatureScheme::Bls);
-        assert_eq!(parse_signature_scheme(Some("")), SignatureScheme::Bls);
-        assert_eq!(parse_signature_scheme(Some("bls")), SignatureScheme::Bls);
-        assert_eq!(parse_signature_scheme(Some("BLS")), SignatureScheme::Bls);
-    }
-
-    #[test]
-    fn signature_scheme_parses_schnorr_case_insensitively() {
-        assert_eq!(
-            parse_signature_scheme(Some("schnorr")),
-            SignatureScheme::Schnorr
-        );
-        assert_eq!(
-            parse_signature_scheme(Some(" Schnorr ")),
-            SignatureScheme::Schnorr
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "SIGNATURE_SCHEME must be 'bls' or 'schnorr', got: ecdsa")]
-    fn signature_scheme_panics_on_unrecognized_value() {
-        parse_signature_scheme(Some("ecdsa"));
-    }
-
-    #[test]
     fn state_encoding_parsing() {
         use gas_analyzer::StateEncoding;
         assert_eq!(parse_state_encoding(None), StateEncoding::Legacy);
@@ -1290,8 +1178,8 @@ mod tests {
 
     #[test]
     fn storage_directory_falls_back_to_writable_path() {
-        // Regardless of environment, the resolved directory must be usable for the
-        // engine journal (env override, default volume, or temp fallback).
+        // Regardless of environment, the resolved directory must be usable (env override,
+        // default volume, or temp fallback).
         let dir = storage_directory();
         assert!(!dir.as_os_str().is_empty());
     }
@@ -1299,8 +1187,6 @@ mod tests {
     #[test]
     fn agg_defaults_are_sane() {
         assert_eq!(DEFAULT_AGG_WINDOW, 8);
-        assert_eq!(DEFAULT_AGG_ACTIVITY_TIMEOUT, 256);
-        // The default window must construct the NonZeroU64 the engine config needs.
         assert_eq!(agg_window().get(), DEFAULT_AGG_WINDOW);
     }
 
@@ -1383,28 +1269,12 @@ mod tests {
     }
 
     /// The consensus-critical settings of a healthy fleet, as `fingerprint_of` arguments.
-    fn healthy_inputs() -> (
-        &'static str,
-        &'static str,
-        &'static str,
-        &'static [u8],
-        u64,
-        u32,
-    ) {
-        ("Chain", "Legacy", "Bls", b"_COMMONWARE_AGGREGATION_", 8, 0)
+    fn healthy_inputs() -> (&'static str, &'static str, &'static [u8], u64, u32) {
+        ("Chain", "Legacy", b"_COMMONWARE_AGGREGATION_", 8, 0)
     }
 
-    fn fingerprint(
-        inputs: (
-            &'static str,
-            &'static str,
-            &'static str,
-            &'static [u8],
-            u64,
-            u32,
-        ),
-    ) -> String {
-        fingerprint_of(inputs.0, inputs.1, inputs.2, inputs.3, inputs.4, inputs.5)
+    fn fingerprint(inputs: (&'static str, &'static str, &'static [u8], u64, u32)) -> String {
+        fingerprint_of(inputs.0, inputs.1, inputs.2, inputs.3, inputs.4)
     }
 
     #[test]
@@ -1432,29 +1302,25 @@ mod tests {
         assert_ne!(fingerprint(divergent), healthy, "state encoding");
 
         let mut divergent = healthy_inputs();
-        divergent.2 = "Schnorr";
-        assert_ne!(fingerprint(divergent), healthy, "signature scheme");
-
-        let mut divergent = healthy_inputs();
-        divergent.3 = b"_SOMETHING_ELSE_";
+        divergent.2 = b"_SOMETHING_ELSE_";
         assert_ne!(fingerprint(divergent), healthy, "application namespace");
 
         let mut divergent = healthy_inputs();
-        divergent.4 = 4;
+        divergent.3 = 4;
         assert_ne!(fingerprint(divergent), healthy, "agg window");
 
         let mut divergent = healthy_inputs();
-        divergent.5 = 1;
+        divergent.4 = 1;
         assert_ne!(fingerprint(divergent), healthy, "directive wire version");
     }
 
     #[test]
     fn settings_cannot_swap_values_without_changing_the_fingerprint() {
-        // Field names are hashed alongside the values, so a scheme named "Legacy" and an
-        // encoding named "Bls" is a different fleet from the reverse.
+        // Field names are hashed alongside the values, so a profile named "Legacy" and an
+        // encoding named "Chain" is a different fleet from the reverse.
         let mut swapped = healthy_inputs();
-        swapped.1 = "Bls";
-        swapped.2 = "Legacy";
+        swapped.0 = "Legacy";
+        swapped.1 = "Chain";
         assert_ne!(fingerprint(swapped), fingerprint(healthy_inputs()));
     }
 

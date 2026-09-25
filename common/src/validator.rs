@@ -577,7 +577,7 @@ impl GasKillerValidator {
         address: alloy::primitives::Address,
         chain_id: ChainRole,
     ) -> Result<u64> {
-        use crate::bindings::gaskillersdk::GasKillerSDK;
+        use crate::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
 
         let provider = match self.providers.get(&chain_id) {
             Some(p) => p.clone(),
@@ -592,7 +592,7 @@ impl GasKillerValidator {
                 anyhow::bail!("No RPC URL configured for chain {}", chain_id);
             }
         };
-        let count = GasKillerSDK::new(address, provider)
+        let count = SchnorrGasKillerSDK::new(address, provider)
             .stateTransitionCount()
             .call()
             .await
@@ -975,13 +975,6 @@ impl GasKillerValidator {
             key: cache_key.clone(),
             lock: Some(lock),
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl commonware_avs_core::validator::ValidatorTrait<GasKillerTaskData> for GasKillerValidator {
-    async fn expected_digest(&self, task: &GasKillerTaskData) -> Result<Digest> {
-        self.expected_digest_for_task(task).await
     }
 }
 

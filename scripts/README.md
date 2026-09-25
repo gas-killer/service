@@ -141,14 +141,13 @@ the tooling already looks, and writes a ready-to-run scenario file.
 
 > **Scope: dev and test only. Do not use this to deploy a value-bearing target.**
 >
-> `deploy_example` validates the signature checker by *shape* — that it has code and answers
-> `registryCoordinator()`, which the `BLSSigCheckOperatorStateRetriever` does not. That catches
-> the two documented footguns, but it does not establish that the checker soundly verifies
-> quorum signatures. A permissive or mock checker exposing that getter passes the check, and a
-> target wired to one accepts **unsigned** diffs — total compromise of the thing the AVS exists
-> to guarantee. That trade-off is fine for example contracts on a fork or testnet, which is what
-> this is for. A production target needs the checker verified against the registry coordinator
-> the AVS actually registered against, plus the usual deployment review — not this harness.
+> `deploy_example` wires whatever registry `addresses.schnorrStakeRegistry` names and does not
+> check who owns it or which operators it holds. A registry controlled by someone else lets them
+> choose the quorum, and a target wired to it accepts diffs that quorum signs — total compromise
+> of the thing the AVS exists to guarantee. That trade-off is fine for example contracts on a
+> fork or testnet, which is what this is for. A production target needs its registry verified
+> against the live deployment's `schnorrStakeRegistry`, plus the usual deployment review — not
+> this harness.
 
 One command, assuming the local stack is already up. `guardedVault` is the example to start with —
 it settles under the default encoding, whereas `onchainLife` needs `prestate-net` (see below):
@@ -256,27 +255,19 @@ checks the same ERC-165 interface the router gates on, plus `stateTransitionCoun
 `getMessageHash()` — so a mis-wired or SDK-mismatched target fails at deploy time instead of
 mid-round.
 
-### Signature checker
-
-`verifyAndUpdate` calls `checkSignatures` on whatever address the constructor received.
-`addresses.blsSigCheck` in the AVS deployment JSON is the `BLSSigCheckOperatorStateRetriever`,
-which has no such function — a target wired to it reverts with an empty `0x` at settlement.
-`deploy_example` defaults `$sigChecker` to `addresses.IncredibleSquaringTaskManager` (which
-does inherit `BLSSignatureChecker`), rejects the retriever by name, and probes for
-`registryCoordinator()` before deploying. Override with `--sig-checker` or
-`EXAMPLE_SIG_CHECKER_ADDRESS`.
-
 ### Deploying against a testnet
 
 ```bash
 export AVS_DEPLOYMENT_PATH=config/.nodes/sepolia_deploy.json   # keeps local state intact
 cargo run -p scripts --bin deploy_example -- \
   --example guardedVault \
-  --avs 0x... --sig-checker 0x... \
+  --avs 0x... \
   --router-url https://testnet.gaskiller.xyz
 ```
 
-The deployment JSON is created if absent. Both examples carry a constraint off a local fork:
+The deployment JSON is created if absent. It must record the testnet's registry under
+`addresses.schnorrStakeRegistry` (published as `schnorrStakeRegistry` on `GET /avs-metadata`),
+which `$deploy:schnorrStakeRegistry` resolves. Both examples carry a constraint off a local fork:
 
 - **`guardedVault`** — `deposit` credits `msg.sender`, so its three depositors need three funded
   accounts. Replace the manifest's `signers` list, which defaults to anvil's test keys.
@@ -292,7 +283,7 @@ The deployment JSON is created if absent. Both examples carry a constraint off a
 | `--example` | all | Example to deploy, by `name`; repeatable |
 | `--artifacts` | `$EXAMPLES_DIR/out` | Foundry `out/` tree to load artifacts from |
 | `--deploy-json` | `$AVS_DEPLOYMENT_PATH` | Deployment JSON to read wiring from and record into |
-| `--avs` / `--sig-checker` | from env, then the deployment JSON | Constructor wiring |
+| `--avs` | from env, then the deployment JSON | AVS service manager wiring |
 | `--router-url` | `$GAS_KILLER_ROUTER_URL` | Written into the generated scenario |
 | `--scenario-dir` | `scripts/scenarios/generated` | Where scenarios are written |
 | `--reuse` | off | Reuse the recorded address instead of deploying again |

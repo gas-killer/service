@@ -28,9 +28,8 @@ services:
       - ./config/.nodes:/root/.nodes
       - ./config/config.example.json:/bls-middleware/contracts/docker/eigenlayer/config.json
 
-  # Prepares the engine-journal volumes: fresh named volumes are root-owned,
-  # while the node/router images run as appuser (uid 1000). Chown once here so
-  # the aggregation engine can create its journal under STORAGE_DIR.
+  # Prepares the data volumes: fresh named volumes are root-owned, while the node/router images
+  # run as appuser (uid 1000). Chown once here so they can write under STORAGE_DIR.
   storage-init:
     image: busybox:1.36
     user: "0:0"
@@ -61,7 +60,6 @@ services:
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       - STORAGE_DIR=/app/data
-      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-schnorr}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
@@ -106,7 +104,6 @@ services:
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       - STORAGE_DIR=/app/data
-      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-schnorr}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
@@ -142,7 +139,6 @@ services:
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       - STORAGE_DIR=/app/data
-      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-schnorr}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
@@ -183,14 +179,13 @@ services:
       - HTTP_RPC=http://ethereum:8545
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
-      # Aggregation-engine journal directory (write-ahead log of acks/certificates).
+      # Runtime storage directory.
       - STORAGE_DIR=/app/data
-      # SQLite API-key store path (shares the router-data volume with the journal).
+      # SQLite API-key store path (shares the router-data volume).
       - DATA_DIR=/app/data
       # Guards the /admin/keys endpoints used to mint the API keys that authenticate POST /tasks.
       # Defaults to a fixed value for the local/e2e harness; override by exporting ADMIN_KEY.
       - ADMIN_KEY=${ADMIN_KEY:-ci-admin-key}
-      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-schnorr}
       # Blocks past the reference block for which a rendered task payload stays valid.
       - PAYLOAD_BLOCK_BUFFER=${PAYLOAD_BLOCK_BUFFER:-50}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
@@ -208,10 +203,8 @@ services:
       - "8081:8081"  # metrics / healthz
     restart: unless-stopped
 
-# Writable storage for the aggregation engine's journal (STORAGE_DIR). Named
-# volumes so certificates/acks survive container restarts; `docker compose
-# down -v` wipes them, which is also the manual recovery path for a height
-# wedged by split real/skip digests (see README "Failure modes and recovery").
+# Writable storage (STORAGE_DIR, and the router's SQLite store). `docker compose down -v` wipes
+# them.
 volumes:
   node-1-data:
   node-2-data:

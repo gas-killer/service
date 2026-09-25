@@ -1,14 +1,10 @@
 //! Digest resolution for the Schnorr participant: what digest does this node
 //! vouch for at a height?
 //!
-//! The Schnorr participant must answer this exactly as the BLS aggregation
-//! engine's automaton (`commonware_avs_node::automaton::NodeAutomaton`) does, so
-//! that a node signing under either scheme vouches for a byte-identical digest on
-//! the same task stream: wait for the TaskBook's resolution of the height, then
-//! resolve either the task's validated digest (EVMSketch, retried with backoff
-//! within ~`ROUND_TIMEOUT`) or the skip digest.
+//! Wait for the TaskBook's resolution of the height, then resolve either the task's validated
+//! digest (EVMSketch, retried with backoff within ~`ROUND_TIMEOUT`) or the skip digest.
 //!
-//! The two paths cannot drift because the digest of a resolved height is
+//! Every operator vouches for the same digest because the digest of a resolved height is
 //! deterministic: an `Announce(task)` always hashes to
 //! `GasKillerValidator::expected_digest_for_task(task)` and a `Skip` always hashes
 //! to `skip_digest(namespace, height)`. The retry budget only bounds how long a
@@ -37,7 +33,7 @@ pub(crate) struct DigestResolver {
     /// Recomputes storage updates via EVMSketch and hashes the expected payload.
     validator: Arc<GasKillerValidator>,
     /// Application namespace mixed into the skip digest; must match the value the
-    /// router and on-chain verifier use, so keep it in lockstep with the engine's
+    /// router and on-chain verifier use, so keep it in lockstep with
     /// `APPLICATION_NAMESPACE`.
     namespace: Vec<u8>,
     /// Total time budget for retrying validation errors (~`ROUND_TIMEOUT`).

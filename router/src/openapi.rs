@@ -155,7 +155,7 @@ impl Modify for SecurityAddon {
         description = "HTTP API for the Gas Killer router (the AVS aggregator).
 
 Clients submit compute tasks to `POST /tasks`; the router validates them, fans them out to \
-restaked operator nodes, and aggregates the BLS signatures into a completed round. Rather than \
+restaked operator nodes, and aggregates their signatures into one Schnorr signature for a completed round. Rather than \
 broadcasting on-chain itself, the router returns a ready-to-sign transaction, the *payload*. The \
 typical flow is:
 
@@ -856,15 +856,12 @@ mod tests {
         let contracts = AvsContracts {
             chain_id: 11155111,
             avs_address: address,
-            bls_signature_checker: Some(address),
             registry_coordinator: address,
-            schnorr_stake_registry: Some(address),
+            schnorr_stake_registry: address,
             demo_target: Some(address),
             demo_factory: Some(address),
         };
         let sparse_contracts = AvsContracts {
-            bls_signature_checker: None,
-            schnorr_stake_registry: None,
             demo_target: None,
             demo_factory: None,
             ..contracts.clone()

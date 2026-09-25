@@ -50,9 +50,9 @@ RUN useradd -m -u 1000 -s /bin/bash appuser
 # Copy the binary from builder
 COPY --from=builder /usr/local/bin/gas-killer-node /usr/local/bin/gas-killer-node
 
-# Set ownership and working directory. /app/data is the aggregation-engine
-# journal directory (STORAGE_DIR); creating it owned by appuser here means a
-# named volume mounted there inherits writable ownership.
+# Set ownership and working directory. /app/data is the runtime storage directory
+# (STORAGE_DIR); creating it owned by appuser here means a named volume mounted there inherits
+# writable ownership.
 WORKDIR /app
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
 

@@ -1,11 +1,7 @@
 {{- /*
-Deploy-target job: deploys a demo GasKillerSDK target (ArraySummation) against the
-freshly-deployed AVS and publishes its address to a ConfigMap for the local smoke test.
-Runs after setup; opt-in via deployTarget.enabled.
-
-Under global.signatureScheme=schnorr it deploys SchnorrArraySummation instead, wired to the
-registry the schnorr-operators job created. The two targets are not interchangeable: a target
-verifies one scheme's proof, so the demo target has to match the fleet's.
+Deploy-target job: deploys a demo GasKillerSDK target (ArraySummation) wired to the registry the
+schnorr-operators job created, and publishes its address to a ConfigMap for the local smoke test.
+Runs after the operator set is registered; opt-in via deployTarget.enabled.
 */ -}}
 {{- if and .Values.deployTarget.enabled (or .Release.IsInstall .Values.rerun.deployTarget) }}
 apiVersion: batch/v1

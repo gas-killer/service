@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Gas Killer Router API",
-    "description": "HTTP API for the Gas Killer router (the AVS aggregator).\n\nClients submit compute tasks to `POST /tasks`; the router validates them, fans them out to restaked operator nodes, and aggregates the BLS signatures into a completed round. Rather than broadcasting on-chain itself, the router returns a ready-to-sign transaction, the *payload*. The typical flow is:\n\n1. `POST /tasks` to submit a task and receive a `task_id`.\n2. `GET /tasks/{task_id}` to poll until `status` is `ready`, at which point the response carries a `payload` object.\n3. Sign and submit that `payload` from your own wallet before its `valid_until_block`.\n\nTask submission and polling are authenticated with an API key.",
+    "description": "HTTP API for the Gas Killer router (the AVS aggregator).\n\nClients submit compute tasks to `POST /tasks`; the router validates them, fans them out to restaked operator nodes, and aggregates their signatures into one Schnorr signature for a completed round. Rather than broadcasting on-chain itself, the router returns a ready-to-sign transaction, the *payload*. The typical flow is:\n\n1. `POST /tasks` to submit a task and receive a `task_id`.\n2. `GET /tasks/{task_id}` to poll until `status` is `ready`, at which point the response carries a `payload` object.\n3. Sign and submit that `payload` from your own wallet before its `valid_until_block`.\n\nTask submission and polling are authenticated with an API key.",
     "contact": {
       "name": "Gas Killer",
       "url": "https://gaskiller.xyz",
@@ -572,7 +572,8 @@
         "required": [
           "chainId",
           "avsAddress",
-          "registryCoordinator"
+          "registryCoordinator",
+          "schnorrStakeRegistry"
         ],
         "properties": {
           "chainId": {
@@ -586,17 +587,13 @@
             "$ref": "#/components/schemas/Address",
             "description": "AVS service manager a target names as its `avsAddress`."
           },
-          "blsSignatureChecker": {
-            "$ref": "#/components/schemas/Address",
-            "description": "BLS signature checker a target must verify against. Present only when the fleet signs BLS;\nunder Schnorr `schnorrStakeRegistry` is the verifier instead."
-          },
           "registryCoordinator": {
             "$ref": "#/components/schemas/Address",
-            "description": "Registry coordinator the operators are registered in. Under BLS, published so an integrator\ncan confirm their own wiring independently: `blsSignatureChecker().registryCoordinator()`\nmust equal this. Under Schnorr nothing on chain ties it to the verifier, so it is read from\n`avs_deploy.json` unverified and is advisory only."
+            "description": "Registry coordinator the operators are registered in. Nothing on chain ties it to the\nregistry below, so it is read from `avs_deploy.json` unverified and is advisory only."
           },
           "schnorrStakeRegistry": {
             "$ref": "#/components/schemas/Address",
-            "description": "`SchnorrStakeRegistry` a target verifies aggregate Schnorr signatures against.\n\nAlways present when the fleet signs Schnorr, where it is the verification-blocking address.\nUnder BLS it is published when the deployment has provisioned one, so a target can be wired\nfor it ahead of a cutover, and absent otherwise."
+            "description": "`SchnorrStakeRegistry` a target verifies aggregate Schnorr signatures against, and passes\nto its constructor."
           },
           "demoTarget": {
             "$ref": "#/components/schemas/Address",
