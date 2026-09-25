@@ -25,15 +25,13 @@ jobs:
         # Explicit combinations (include-only, so each entry is its own job — a bare
         # `include` added to a base axis would MERGE into the matching base combination
         # instead of creating a separate leg):
-        #   - the engine-driven BLS path (legacy encoding, array-summation example)
-        #   - the interactive aggregate-Schnorr path (legacy encoding, array-summation)
-        #   - the aggregate-Schnorr path under the CANONICAL encoding settling a task that
-        #     makes a re-entrant external call mid-transition — a green run proves
-        #     re-entrancy settles safely end-to-end.
-        #   - the BLS path under the PRESTATE-NET encoding, which signs the target's net
-        #     storage diff read from prestateTracer/callTracer rather than a struct-log
-        #     trace. `ArraySummation.sum` makes no external call at target depth, so this
-        #     leg exercises the net form itself rather than its canonical fallback.
+        #   - legacy encoding, array-summation example: the baseline round.
+        #   - the CANONICAL encoding settling a task that makes a re-entrant external call
+        #     mid-transition — a green run proves re-entrancy settles safely end-to-end.
+        #   - the PRESTATE-NET encoding, which signs the target's net storage diff read from
+        #     prestateTracer/callTracer rather than a struct-log trace. `ArraySummation.sum`
+        #     makes no external call at target depth, so this leg exercises the net form
+        #     itself rather than its canonical fallback.
         #   - the UNBOUNDED simulation profile settling an OnchainLife 3-generation step,
         #     whose direct execution costs ~49.7M gas and therefore cannot be mined in a 30M
         #     block at all. run_e2e_test.sh asserts both halves: step 7a that a direct call
@@ -41,20 +39,13 @@ jobs:
         #     receipt used a small fraction of one. Needs prestate-net (a struct-log trace of
         #     that call exhausts the container) and an anvil whose execution cap is lifted.
         include:
-          - signature_scheme: bls
-            state_encoding: legacy
+          - state_encoding: legacy
             e2e_example: array-summation
-          - signature_scheme: schnorr
-            state_encoding: legacy
-            e2e_example: array-summation
-          - signature_scheme: schnorr
-            state_encoding: canonical
+          - state_encoding: canonical
             e2e_example: reentrant
-          - signature_scheme: bls
-            state_encoding: prestate-net
+          - state_encoding: prestate-net
             e2e_example: array-summation
-          - signature_scheme: bls
-            state_encoding: prestate-net
+          - state_encoding: prestate-net
             e2e_example: onchain-life
             sim_profile: unbounded
             anvil_extra_args: --disable-block-gas-limit
@@ -106,7 +97,6 @@ jobs:
 
       - name: Run test
         env:
-          SIGNATURE_SCHEME: ${{ matrix.signature_scheme }}
           STATE_ENCODING: ${{ matrix.state_encoding }}
           E2E_EXAMPLE: ${{ matrix.e2e_example }}
           # Unset on every leg but the unbounded one, where an empty value means the default.
@@ -124,6 +114,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-output-${{ matrix.signature_scheme }}-${{ matrix.e2e_example }}
+          name: e2e-test-output-${{ matrix.state_encoding }}-${{ matrix.e2e_example }}
           path: e2e-test-output.log
           retention-days: 1

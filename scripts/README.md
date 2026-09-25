@@ -1,6 +1,6 @@
 # Local Test Scripts
 
-This directory contains scripts for running local version of the BLS signature aggregation system.
+This directory contains scripts for running a local version of the aggregate-Schnorr signing stack.
 
 ## Running the Test Locally
 
@@ -175,34 +175,28 @@ cargo run -p scripts --bin run_scenario -- scripts/scenarios/generated/guardedVa
 
 Currently available:
 
-| Example | Scheme | Required encoding | What it demonstrates |
-|---|---|---|---|
-| `guardedVault` | bls | any | An O(N) invariant re-validated on every transition. |
-| `onchainLife` | bls | **`prestate-net`** | Conway's Life: heavy compute, tiny flat diff. Routable under any encoding but only settles under `prestate-net` — see below. |
-| `arraySummation` | bls | any | The default e2e target: sums selected array elements under `trackState`. |
-| `schnorrArraySummation` | schnorr | any | The same workload verified against the `SchnorrStakeRegistry`. |
-| `reentrantCheckpoint` | schnorr | `canonical` | Two contracts — `advance()` re-enters through an observer mid-transition. |
+| Example | Required encoding | What it demonstrates |
+|---|---|---|
+| `guardedVault` | any | An O(N) invariant re-validated on every transition. |
+| `onchainLife` | **`prestate-net`** | Conway's Life: heavy compute, tiny flat diff. Routable under any encoding but only settles under `prestate-net` — see below. |
+| `arraySummation` | any | The default e2e target: sums selected array elements under `trackState`. |
+| `reentrantCheckpoint` | `canonical` | Two contracts — `advance()` re-enters through an observer mid-transition. |
 
-The last three come from the Gas Killer SDK, which the examples repo vendors as a submodule;
+The last two come from the Gas Killer SDK, which the examples repo vendors as a submodule;
 `fetch_examples.sh` builds both trees and `deploy_example` searches both `out/` directories.
 
-**Schnorr examples need the operator set registered first.** That is a separate phase, because
+**Every example needs the operator set registered first.** That is a separate phase, because
 every registration advances the registry's `effectiveBlock` watermark and verification
 fail-closes for reference blocks behind it:
 
 ```bash
-SIGNATURE_SCHEME=schnorr cargo run -p scripts --bin setup_schnorr_operators   # no-op under bls
-SIGNATURE_SCHEME=schnorr cargo run -p scripts --bin deploy_example -- --example schnorrArraySummation
+cargo run -p scripts --bin setup_schnorr_operators
+cargo run -p scripts --bin deploy_example -- --example arraySummation
 ```
 
 `setup_schnorr_operators` deploys the `SchnorrStakeRegistry` and records it as
 `addresses.schnorrStakeRegistry`, which the manifest resolves via `$deploy:schnorrStakeRegistry`.
-`SCHNORR_PROVISION` selects which phases run, independent of `SIGNATURE_SCHEME`: unset follows the
-scheme, `registry` deploys and records the registry and registers nobody, `full` also registers.
-`registry` is for a deployment that wants the address published before it has an operator set to
-put in it. The router serves it as `schnorrStakeRegistry` on `GET /avs-metadata` under either
-scheme, and a target's constructor takes it. The registry verifies nothing until operators are
-registered, which its owner can do later into the same registry.
+The router serves the same address as `schnorrStakeRegistry` on `GET /avs-metadata`.
 
 **`onchainLife` requires `STATE_ENCODING=prestate-net`.**
 
@@ -241,7 +235,7 @@ artifact's ABI at runtime, and the manifest supplies only values.
 [[examples]]
 name      = "myExample"                       # key in avs_deploy.json; also --example and the scenario filename
 artifact  = "MyExample.sol:MyExample"
-ctor_args = ["$avs", "$sigChecker", "42"]
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "42"]
 
   [[examples.setup]]                          # optional; run after deploy
   sig    = "prepare(uint256)"
@@ -253,11 +247,11 @@ ctor_args = ["$avs", "$sigChecker", "42"]
   args = ["1"]
 ```
 
-Placeholders: `$avs`, `$sigChecker`, `$deploy:<key>`, `$signer:<n>`, `$env:VAR`. Array and
+Placeholders: `$avs`, `$deploy:<key>`, `$signer:<n>`, `$env:VAR`. Array and
 tuple parameters take a TOML list.
 
 To be settleable, a contract must inherit `GasKillerSDK` and pass the AVS service manager plus
-a signature checker to its constructor. `deploy_example` asserts this after deploying — it
+the `SchnorrStakeRegistry` to its constructor. `deploy_example` asserts this after deploying — it
 checks the same ERC-165 interface the router gates on, plus `stateTransitionCount()` and
 `getMessageHash()` — so a mis-wired or SDK-mismatched target fails at deploy time instead of
 mid-round.

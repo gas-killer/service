@@ -134,13 +134,6 @@ L1 service name
 {{- end }}
 
 {{/*
-Signer service name
-*/}}
-{{- define "gas-killer.signer.fullname" -}}
-{{- printf "%s-signer" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{/*
 Router service name
 */}}
 {{- define "gas-killer.router.fullname" -}}
@@ -208,38 +201,10 @@ Key export job name
 {{- end }}
 
 {{/*
-Bridge job name
-*/}}
-{{- define "gas-killer.bridge.fullname" -}}
-{{- printf "%s-bridge" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{/*
 Deploy-target job name
 */}}
 {{- define "gas-killer.deployTarget.fullname" -}}
 {{- printf "%s-deploy-target" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{/*
-Playground job name
-*/}}
-{{- define "gas-killer.playground.fullname" -}}
-{{- printf "%s-playground" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{/*
-L2 service name
-*/}}
-{{- define "gas-killer.l2.fullname" -}}
-{{- printf "%s-l2" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{/*
-Yield distribution job name
-*/}}
-{{- define "gas-killer.yield-distribution.fullname" -}}
-{{- printf "%s-yield-distribution" (include "gas-killer.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
@@ -257,73 +222,6 @@ Schnorr operator-set job name
 {{- end }}
 
 {{/*
-Whether the deployment runs the aggregate-Schnorr quorum scheme rather than BLS. Every guard
-that gates schnorr-only chart behaviour reads this, so the default and the spelling live in one
-place. Emits the string "true" or "", so it reads as `if (include "gas-killer.isSchnorr" .)`.
-
-Rejects an unrecognized scheme here rather than letting it reach the pods: `signature_scheme()`
-panics on anything but "bls" or "schnorr", so a typo would otherwise install cleanly and then
-crash-loop the whole fleet.
-*/}}
-{{- define "gas-killer.isSchnorr" -}}
-{{- if eq (include "gas-killer.signatureScheme" .) "schnorr" -}}true{{- end }}
-{{- end }}
-
-{{/*
-What Schnorr scaffolding to provision while the fleet signs another scheme, from
-schnorr.provision: "" (nothing), "registry" (deploy the registry and publish its address), or
-"full" (also register the operator set).
-
-Ignored under signatureScheme=schnorr, where the operator-set job always runs and always
-registers: a schnorr fleet certifies nothing against an empty registry, so there is no useful
-half-provisioned state to select.
-
-Rejects an unrecognized value here rather than letting it reach the pods, matching
-gas-killer.signatureScheme: setup_schnorr_operators errors on anything else, so a typo would
-otherwise install cleanly and then fail a job.
-*/}}
-{{- define "gas-killer.schnorrProvision" -}}
-{{- $provision := .Values.schnorr.provision | default "" | trim | lower -}}
-{{- if not (has $provision (list "" "registry" "full")) -}}
-{{- fail (printf "schnorr.provision must be \"\", \"registry\" or \"full\", got %q" .Values.schnorr.provision) -}}
-{{- end -}}
-{{- $provision -}}
-{{- end }}
-
-{{/*
-Whether this deployment provisions a SchnorrStakeRegistry at all, which is what gates the
-operator-set job and the handoff of its address to the router. Emits "true" or "".
-*/}}
-{{- define "gas-killer.provisionsSchnorrRegistry" -}}
-{{- if or (include "gas-killer.isSchnorr" .) (include "gas-killer.schnorrProvision" .) -}}true{{- end }}
-{{- end }}
-
-{{/*
-Whether the operator set is registered against that registry. Emits "true" or "".
-
-Separate from provisioning because registering needs every operator's secp256k1 key on the shared
-volume, and a deployment whose keys are gone can still deploy and publish a registry for
-integrators to wire against, filling it later. The registry verifies nothing until it is filled,
-which only matters once a fleet signs schnorr.
-*/}}
-{{- define "gas-killer.registersSchnorrOperators" -}}
-{{- if or (include "gas-killer.isSchnorr" .) (eq (include "gas-killer.schnorrProvision" .) "full") -}}true{{- end }}
-{{- end }}
-
-{{/*
-The SCHNORR_PROVISION value the operator-set job runs with: "full" where the operator set is
-registered, "registry" where only the registry is deployed.
-
-Derived from the chart's own two decisions rather than passed through from schnorr.provision, so
-the binary and the templates cannot disagree. Under signatureScheme=schnorr that means "full"
-whatever schnorr.provision says, which is what the templates already gate on. Only meaningful
-where gas-killer.provisionsSchnorrRegistry holds.
-*/}}
-{{- define "gas-killer.schnorrProvisionMode" -}}
-{{- if include "gas-killer.registersSchnorrOperators" . -}}full{{- else -}}registry{{- end }}
-{{- end }}
-
-{{/*
 Path the operator-set job records its registry address at, on the shared volume. The router reads
 it from there as a named record, so a job that finishes after the router is serving still lands.
 */}}
@@ -332,23 +230,13 @@ it from there as a named record, so a job that finishes after the router is serv
 {{- end }}
 
 {{/*
-The quorum signature scheme (SIGNATURE_SCHEME) shared by the router and every node. Both
-deployments render this one helper, so they cannot be given different values. A mixed fleet
-signs with two incompatible schemes and certifies nothing.
-
-Rejects an unrecognized scheme here rather than letting it reach the pods: `signature_scheme()`
-panics on anything but "bls" or "schnorr", so a typo would otherwise install cleanly and then
-crash-loop the whole fleet.
-
-Trimmed and lowercased to match how the binaries parse it, and normalized before it is emitted.
-The chart gates whole jobs and key paths on this value, so a spelling the binaries accept but
-the templates did not would hand a schnorr fleet a bls-shaped deployment.
+The quorum signature scheme (SIGNATURE_SCHEME) the router and every node run with. Any value other
+than schnorr fails here rather than installing a fleet that cannot sign.
 */}}
 {{- define "gas-killer.signatureScheme" -}}
-{{- $scheme := .Values.global.signatureScheme | default "bls" | trim | lower -}}
-{{- if eq $scheme "" -}}{{- $scheme = "bls" -}}{{- end -}}
-{{- if not (has $scheme (list "bls" "schnorr")) -}}
-{{- fail (printf "global.signatureScheme must be \"bls\" or \"schnorr\", got %q" .Values.global.signatureScheme) -}}
+{{- $scheme := .Values.global.signatureScheme | default "schnorr" | trim | lower -}}
+{{- if not (has $scheme (list "" "schnorr")) -}}
+{{- fail (printf "global.signatureScheme must be \"schnorr\", got %q" .Values.global.signatureScheme) -}}
 {{- end -}}
-{{- $scheme -}}
+schnorr
 {{- end }}

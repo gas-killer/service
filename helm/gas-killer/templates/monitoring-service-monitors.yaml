@@ -36,23 +36,4 @@ spec:
       path: /metrics
       interval: {{ dig "serviceMonitor" "node" "interval" "15s" .Values.monitoring }}
 {{- end }}
----
-{{- if (dig "serviceMonitor" "signer" "enabled" true .Values.monitoring) }}
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: {{ include "gas-killer.fullname" . }}-signer
-  labels:
-    {{- include "gas-killer.labels" . | nindent 4 }}
-    release: {{ .Release.Name }}
-spec:
-  selector:
-    matchLabels:
-      {{- include "gas-killer.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: signer
-  endpoints:
-    - port: metrics
-      path: /metrics
-      interval: {{ dig "serviceMonitor" "signer" "interval" "15s" .Values.monitoring }}
-{{- end }}
 {{- end }}

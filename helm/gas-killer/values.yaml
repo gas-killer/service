@@ -20,21 +20,6 @@ global:
   #          AVS contracts are deployed to real L1
   environment: LOCAL
 
-  # Quorum signature scheme: "bls" (default) or "schnorr". Every binary in the deployment must
-  # agree, so the chart renders one value into both the router and the nodes. An unrecognized
-  # value fails the template rather than reaching the pods, which panic on it.
-  #
-  # "schnorr" replaces the aggregation engine's BLS certificates with a two-round MuSig2
-  # coordinator on p2p channel 2, producing one constant-gas signature verified against a
-  # SchnorrStakeRegistry. It changes three things:
-  #   - each node also loads a secp256k1 signing key, separate from its BN254 p2p identity;
-  #   - the schnorr-operators job deploys the registry and registers the operator set on install,
-  #     before any target deploys (see the `schnorr` block below);
-  #   - targets must be SchnorrGasKillerSDK consumers wired to that registry.
-  #
-  # Switching an existing deployment strands every BLS target already deployed against it, so it
-  # is a reinstall of the operator set and a redeploy of every target, not a rolling change.
-  signatureScheme: "bls"
 
   # Storage-update encoding: "legacy" (default), "canonical", or "prestate-net".
   # Selects the signed representation of a task's storage mutations, so like
@@ -90,7 +75,7 @@ global:
   initTimeout: 300
 
 # GCP Secret Manager configuration for TESTNET deployments
-# When enabled, operator BLS keys and avs_deploy.json are read from GCP Secret Manager
+# When enabled, operator keys and avs_deploy.json are read from GCP Secret Manager
 # rather than the shared PVC. This makes keys durable across cluster recreations.
 #
 # Setup:
@@ -128,27 +113,19 @@ secretManager:
 # long-running operations.
 #
 # Usage:
-#   helm upgrade gas-killer ./helm/gas-killer --set rerun.bridge=true
+#   helm upgrade gas-killer ./helm/gas-killer --set rerun.keyExport=true
 rerun:
   setup: false
-  bridge: false
   keyExport: false
-  # Re-run the deploy-target job to deploy a fresh demo target + checker against the current AVS.
+  # Re-run the deploy-target job to deploy a fresh demo target against the current registry.
   deployTarget: false
-  # Re-run the playground job. Only set this deliberately: it deploys a fresh public target and
-  # factory, which strands the addresses /avs-metadata is currently serving and resets a counter a
-  # reader may be part-way through advancing. The job is otherwise install-only, and skips any
-  # contract it already recorded that still has code on chain.
-  playground: false
-  # Re-run the schnorr operator-set job. Also what renders it for the first time on a release
-  # that newly sets schnorr.provision, since the job is otherwise install-only. Only set this
-  # deliberately: without schnorr.stakeRegistryAddress the job deploys a FRESH
+  # Re-run the schnorr operator-set job. Only set this deliberately: without schnorr.stakeRegistryAddress the job deploys a FRESH
   # SchnorrStakeRegistry and re-registers every operator, which orphans every target already
   # wired to the old one. It skips when avs_deploy.json already records a registry address, so
   # that record is the guard.
   schnorrOperators: false
   # Re-run the generate-router-key job (TESTNET+secretManager only).
-  # Only set this if you intentionally want to rotate the router BLS keypair —
+  # Only set this if you intentionally want to rotate the router's BN254 p2p keypair —
   # doing so requires all nodes to restart and pick up the new public key from GCP.
   # Also triggers key-export so the new public key is uploaded to Secret Manager.
   generateRouterKey: false
@@ -176,16 +153,6 @@ secrets:
   # Override with: --set secrets.httpRpc=<your-rpc-url>
   # Example: --set secrets.httpRpc=https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
   httpRpc: ""
-
-  # L2 Fork URL for local L2 Anvil (only used in LOCAL mode with l2.enabled=true)
-  # Override with: --set secrets.l2ForkUrl=<your-l2-rpc-url>
-  # Example: --set secrets.l2ForkUrl=https://rpc.gnosischain.com
-  l2ForkUrl: ""
-
-  # Direct RPC URL for L2 in TESTNET mode (contains API key - sensitive!)
-  # Override with: --set secrets.l2HttpRpc=<your-l2-rpc-url>
-  # Example: --set secrets.l2HttpRpc=https://rpc.gnosischain.com
-  l2HttpRpc: ""
 
   # Shared secret guarding the /admin/keys endpoints, used to mint and revoke per-client API
   # keys via Authorization: Bearer <adminKey>. Clients then authenticate POST /tasks with their
@@ -320,25 +287,6 @@ eigenlayer:
     limits:
       memory: "2Gi"
       cpu: "1000m"
-
-# Signer (Cerberus) configuration
-signer:
-  enabled: true
-  image:
-    repository: ghcr.io/layr-labs/cerberus
-    tag: "0.0.2"
-    pullPolicy: IfNotPresent
-  service:
-    type: ClusterIP
-    grpcPort: 50051
-    metricsPort: 9081
-  resources:
-    requests:
-      memory: "128Mi"
-      cpu: "100m"
-    limits:
-      memory: "256Mi"
-      cpu: "200m"
 
 # Gas Killer Node configuration
 node:
@@ -506,8 +454,7 @@ router:
     # success clears it, and a background probe re-checks every chain every 15s so the state
     # recovers on its own. Leave empty to use the router's default of 5 (RPC_FAILURE_THRESHOLD).
     rpcFailureThreshold: ""
-    # Deployed target whose avsAddress() and verifier getter (blsSignatureChecker() under bls,
-    # schnorrRegistry() under schnorr) establish the pair published in the `contracts` block of
+    # Deployed target whose avsAddress() and schnorrRegistry() establish the pair published in the `contracts` block of
     # GET /avs-metadata. Leave empty where deployTarget.enabled
     # is true: that job records the target it provisioned at /app/.nodes/demo_target.txt on the
     # shared-data volume and the router is pointed at it (AVS_REFERENCE_TARGET_FILE), so the pair
@@ -523,11 +470,6 @@ router:
     # are omitted from the response when empty, and each is checked for code on the chain the block
     # publishes before it is served, so an address on another network — or one that is simply wrong —
     # is omitted rather than published (DEMO_TARGET_ADDRESS / DEMO_FACTORY_ADDRESS).
-    #
-    # Leave both empty where playground.enabled is true: that job records what it deployed on the
-    # shared-data volume and the router is pointed at those records (DEMO_TARGET_FILE /
-    # DEMO_FACTORY_FILE), so the served addresses follow a redeployment. Set these only to point
-    # readers at something other than what the job deployed.
     demoTarget: ""
     demoFactory: ""
     # Seconds a task may sit without reaching a terminal state before a background sweep (every
@@ -567,9 +509,9 @@ router:
     operatorSet:
       name: "Gas Analysis Quorum"
       id: "0"
-      description: "BLS-aggregated operator set for verifiable gas analysis tasks"
+      description: "Aggregate-Schnorr operator set for verifiable gas analysis tasks"
       softwareName: "gas-killer-node"
-      softwareDescription: "Receives tasks, runs EVM gas analysis, returns a BLS-signed result"
+      softwareDescription: "Receives tasks, runs EVM gas analysis, returns an aggregate-Schnorr-signed result"
       softwareUrl: "https://github.com/gas-killer/service"
       slashingConditions: "Signing a conflicting result for the same task ID"
   service:
@@ -626,7 +568,7 @@ orchestrator:
     g2_y1: "4380068110839997539835821427545270098552639074995346826656804866303457881635"
     g2_y2: "479676018937294309080674601592141614301396550682703157902264620243097107417"
     port: "3000"
-  # Router BLS private key — two mutually exclusive paths:
+  # Router BN254 private key (its p2p identity) — two mutually exclusive paths:
   #   1. secretManager.enabled=true (TESTNET): auto-generated by the generate-router-key
   #      job and fetched from GCP Secret Manager at pod start. Do NOT set routerPrivateKey.
   #   2. routerPrivateKey set explicitly: valid for LOCAL mode and for TESTNET deployments
@@ -634,66 +576,13 @@ orchestrator:
   #      if secretManager is disabled — the chart will fail install if neither is set.
   routerPrivateKey: ""
 
-# L2 (Anvil fork) configuration - only used in LOCAL mode
-# Defaults to disabled; enable explicitly via --set l2.enabled=true (e.g. in CI)
-l2:
-  enabled: false
-  image:
-    repository: ghcr.io/breadchaincoop/ethereum
-    tag: latest
-    pullPolicy: IfNotPresent
-  service:
-    type: ClusterIP
-    port: 8546
-  resources:
-    requests:
-      memory: "1Gi"
-      cpu: "500m"
-    limits:
-      memory: "6Gi"
-      cpu: "1000m"
-
-# Bridge configuration - bridges EigenLayer operator state from L1 to L2
-bridge:
-  enabled: true
-  # Wait for bridge job to complete before starting nodes/router
-  waitForBridge: true
-  image:
-    repository: ghcr.io/breadchaincoop/target-contracts/bridge
-    tag: latest
-    pullPolicy: IfNotPresent
-  resources:
-    requests:
-      memory: "512Mi"
-      cpu: "250m"
-    limits:
-      memory: "1Gi"
-      cpu: "500m"
-
-# Deploy-target job: deploys a demo GasKillerSDK target (ArraySummation) wired to a real
-# BLSSignatureChecker against the freshly-deployed AVS, then publishes its address to a
+# Deploy-target job: deploys a demo GasKillerSDK target (ArraySummation) wired to the fleet's
+# SchnorrStakeRegistry once the operator set is registered, then publishes its address to a
 # ConfigMap for the local smoke test. Opt-in (off by default; enable on testnet).
-# Aggregate-Schnorr settings. Every field here is inert under global.signatureScheme=bls.
+# Aggregate-Schnorr settings.
 # The registry and the operator-set registration come from the schnorr-operators job, which runs
 # on install between setup and deploy-target.
 schnorr:
-  # Provision the Schnorr scaffolding while the fleet signs another scheme, so a target can be
-  # wired for both before a cutover. Ignored under global.signatureScheme=schnorr, where the
-  # operator-set job always runs and always registers.
-  #
-  #   ""          nothing
-  #   "registry"  deploy the registry and publish its address; register nobody
-  #   "full"      also register the operator set
-  #
-  # "registry" is what a deployment whose operator secp256k1 keys are gone can still do: the
-  # address is what a target's constructor takes, and the registry verifies nothing until it is
-  # filled, which only matters once a fleet signs schnorr. Its owner can fill it later, so the
-  # published address does not have to change and no integrator redeploys twice.
-  #
-  # "full" needs every operator's secp256k1 key on the shared volume, and makes the restore of
-  # those keys fatal in the setup job.
-  provision: ""
-
   # Secret key (in the app secret) holding the funded key that deploys the registry and submits
   # the registrations: PRIVATE_KEY or FUNDED_KEY. The deployer becomes the registry's owner.
   deployerSecretKey: PRIVATE_KEY
@@ -705,8 +594,7 @@ schnorr:
   #
   # 0 applies changes as soon as they are committed, correct only when the whole operator set is
   # registered before any target deploys. A deployment that will fill or mutate its set while
-  # rounds are in flight must exceed the round duration plus eigenlayer.sdk.blockStaleMeasure,
-  # which includes anything provisioned with provision="registry" and registered later.
+  # rounds are in flight must exceed the round duration plus eigenlayer.sdk.blockStaleMeasure.
   noticeWindow: 0
 
   # The SchnorrStakeRegistry this deployment uses, read by two things:
@@ -714,9 +602,7 @@ schnorr:
   #   - the schnorr-operators job reuses it instead of deploying a fresh one. Where the job
   #     registers operators, it registers whichever of this set are missing, but only while the
   #     registry holds nothing else and has no change scheduled. Leave empty to deploy one.
-  #   - the router publishes it as `schnorrStakeRegistry` on GET /avs-metadata, in either scheme.
-  #     Under bls the router never verifies against it; publishing is what lets an integrator wire
-  #     a target that accepts both schemes before the fleet switches. Left empty, the router reads
+  #   - the router publishes it as `schnorrStakeRegistry` on GET /avs-metadata. Left empty, it reads
   #     the registry the operator-set job recorded in avs_deploy.json, which needs that job's
   #     record to have reached the router's copy of the file.
   stakeRegistryAddress: ""
@@ -776,58 +662,6 @@ deployTarget:
     limits:
       memory: "512Mi"
       cpu: "250m"
-
-# Playground job: deploys the contracts the public documentation points readers at — a shared
-# ArraySummation target for a first settlement with no Solidity written, and an
-# ArraySummationFactory for a reader who wants an instance nobody else is advancing. Both addresses
-# are served in the `contracts` block of GET /avs-metadata, so no document has to name them.
-#
-# Deliberately separate from deployTarget: that target is the deployment's own smoke test, whose
-# transition counter public traffic would advance, and it is reminted on every reinstall. Opt-in
-# (off by default; enable on testnet). Reuses deployTarget.image, since both run forge scripts from
-# the solidity-sdk image.
-playground:
-  enabled: false
-  # Secret key (in the app secret) holding the funded deployer key: PRIVATE_KEY or FUNDED_KEY.
-  deployerSecretKey: PRIVATE_KEY
-  # ArraySummation constructor params for the shared target. Larger than the smoke target's so a
-  # reader has room to submit repeatedly before exhausting anything interesting.
-  arraySize: 16
-  maxValue: 10000
-  arraySeed: 1
-  resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "512Mi"
-      cpu: "250m"
-
-# Yield Distribution test configuration - only used in LOCAL mode with l2.enabled
-# Defaults to disabled; enable explicitly via --set yieldDistribution.enabled=true (e.g. in CI)
-yieldDistribution:
-  enabled: false
-  # YieldDistributor contract address on L2
-  contractAddress: "0x37A9CC16412CDA9b4f9B1ABdedd3e10BAD8A06da"
-  # Owner of the YieldDistributor on the fork (used for anvil impersonation)
-  ownerAddress: "0x5DD2e7db868e33c03daB85d0C623048A7980634E"
-  # BLSSigCheckOperatorStateRetriever address on the L2 fork
-  # In LOCAL mode this is the address present on the forked L2 chain
-  blsSigCheckAddress: "0x056A41125bB62168B464ddDECd995e8494448913"
-  # Test-friendly overrides applied via contract setters
-  cycleLength: 1
-  # Set to a large number to disable block staleness detection
-  blockStaleMeasure: "100000000"
-  # Fallback block number used if eth_blockNumber RPC call fails during setup
-  # "Recent" Gnosis mainnet block number, but blockstaleness detection is disabled on fallback
-  fallbackBlockNumber: "44000000"
-  resources:
-    requests:
-      memory: "2Gi"
-      cpu: "500m"
-    limits:
-      memory: "6Gi"
-      cpu: "1000m"
 
 # Shared data volume for keys and deployment configs
 sharedData:
@@ -923,9 +757,6 @@ monitoring:
       enabled: true
       interval: 15s
     node:
-      enabled: true
-      interval: 15s
-    signer:
       enabled: true
       interval: 15s
 

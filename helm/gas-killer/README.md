@@ -53,7 +53,7 @@ Kubernetes DNS labels are limited to 63 characters. If your release name is long
 
 The current node readiness probe checks if the `gas-killer` process is running. For production deployments, consider implementing a proper health/readiness endpoint in the node application that verifies:
 - Connection to Ethereum RPC
-- BLS key loaded
+- BN254 and secp256k1 keys loaded
 - P2P network connectivity
 
 ### Init Container Timeouts
@@ -106,27 +106,23 @@ See `values.yaml` for all available configuration options.
 | `secrets.privateKey` | Deployer private key | `""` |
 | `secrets.fundedKey` | Funded account private key | `""` |
 | `secrets.adminKey` | Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke per-client API keys via `Authorization: Bearer <value>`. Clients then authenticate `POST /tasks` with their minted key. **Required** when `global.environment=TESTNET` and `router.ingress.enabled=true`. | `""` |
-| `global.signatureScheme` | Quorum signature scheme (`bls` or `schnorr`), shared by the router and every node. See "Schnorr signatures" below: switching is a reinstall, not a rolling change. | `bls` |
 
 ## Schnorr signatures
 
-`global.signatureScheme=schnorr` replaces the aggregation engine's BLS certificates with a
-two-round MuSig2 coordinator on p2p channel 2, producing one constant-gas aggregate signature
-verified against a `SchnorrStakeRegistry` rather than a `BLSSignatureChecker`.
+The fleet signs with a two-round MuSig2 coordinator on p2p channel 2, producing one constant-gas
+aggregate signature verified against a `SchnorrStakeRegistry`. Three things follow from it:
 
-Setting it changes three things about the deployment:
-
-- **Each node loads a second key.** Its secp256k1 operator key becomes the Schnorr signing key,
-  separate from the BN254 identity the p2p transport uses in both modes. The eigenlayer setup
-  container writes these next to the BLS keys; with `secretManager.enabled` they are exported to
-  and restored from Secret Manager as `<keyPrefix>-node-<n>-ecdsa-key`.
-- **An extra install-time job runs.** `schnorr-operators` deploys the registry and registers every
-  operator against it with a proof of possession, then records the address under
-  `addresses.schnorrStakeRegistry` in `avs_deploy.json`. It runs between `setup` and
-  `deploy-target`, and `deploy-target` blocks on its marker.
-- **Targets change type.** A Schnorr fleet settles only against `SchnorrGasKillerSDK` consumers
-  wired to that registry. `deploy-target` deploys `SchnorrArraySummation` in place of
-  `ArraySummation`.
+- **Each node loads two keys.** Its secp256k1 operator key is the Schnorr signing key, separate
+  from the BN254 identity the p2p transport uses. The eigenlayer setup container writes both; with
+  `secretManager.enabled` they are exported to and restored from Secret Manager as
+  `<keyPrefix>-node-<n>-ecdsa-key` and `<keyPrefix>-node-<n>-bls-key`.
+- **An install-time job fills the registry.** `schnorr-operators` deploys the registry (or reuses
+  `schnorr.stakeRegistryAddress`) and registers every operator against it with a proof of
+  possession, then records the address under `addresses.schnorrStakeRegistry` in
+  `avs_deploy.json`. It runs between `setup` and `deploy-target`, and `deploy-target` blocks on its
+  marker.
+- **Targets are `GasKillerSDK` consumers wired to that registry.** `deploy-target` deploys
+  `ArraySummation` from the solidity-sdk image.
 
 ### Ordering is load-bearing
 
@@ -135,78 +131,44 @@ fail-closes for reference blocks behind it. The whole operator set must therefor
 before any target deploys, which is what the marker between the two jobs enforces. A target
 deployed early is not repairable: its registry is immutable.
 
-### Publishing the registry before a cutover
+### Publishing the registry
 
-The router serves the registry address as `schnorrStakeRegistry` on `GET /avs-metadata` under
-**either** scheme. It never verifies against that address itself, it only publishes it, and a
-target's constructor is what consumes it. So publishing it while the fleet still signs BLS is what
-lets an integrator deploy a target that accepts both schemes and then needs no action from them
-when the fleet switches.
-
-The address comes from `schnorr.stakeRegistryAddress`, or failing that from what the
-`schnorr-operators` job recorded in `avs_deploy.json`. It publishes only once
-`nextPossibleMutationBlock()` answers at it, so a checker or a coordinator set here is omitted
-rather than served.
-
-`schnorr.provision` renders the `schnorr-operators` job under any scheme, so the cluster
-provisions the registry itself:
-
-```bash
-helm upgrade gas-killer ./helm/gas-killer --reuse-values \
-  --set schnorr.provision=registry \
-  --set schnorr.noticeWindow=<blocks> \
-  --set rerun.schnorrOperators=true
-```
-
-`rerun.schnorrOperators` is needed on an existing release because the job is otherwise
-install-only. On a release that has never provisioned there is no Job object to collide with, so
-this is a first run despite the flag's name. A later run needs the existing Job deleted first,
-since it is kept by resource policy and its spec is immutable:
-
-```bash
-kubectl delete job <release>-schnorr-operators
-```
-
-That includes a run that only *corrects* something else in the same upgrade. Helm will try to
-update the existing Job, Kubernetes rejects the template change, and the whole upgrade fails with
-`spec.template: Invalid value` while leaving the rest of the release unapplied.
-
-Two things about the router bump in that command:
-
-- **The image tag carries the full 40-character commit SHA**, not an abbreviated one. The publish
-  workflow tags `router-${{ github.sha }}`, so an abbreviated SHA is simply `not found` and the
-  pod lands in `ErrImagePull`. Read the tag off the workflow run rather than composing it.
-- **The router's deployment strategy is `Recreate` with a 30s termination grace**, so any image
-  or env change drops the ingress rather than rolling it. Budget that grace plus the router's
-  startup for each router-affecting upgrade. The grace is short because the binary runs as PID 1
-  and registers no SIGTERM handler: Linux discards unhandled signals at PID 1, so SIGKILL is what
-  stops the router either way and a longer window is idle time rather than a drain. Reset
-  `rerun.schnorrOperators` to `false` afterwards so a later unrelated upgrade does not trip over
-  the kept Job.
-
-| `schnorr.provision` | Deploys and publishes | Registers the operator set |
-|---|---|---|
-| `""` (default) | no | no |
-| `registry` | yes | no |
-| `full` | yes | yes |
-
-`registry` is what a deployment whose operator secp256k1 keys are gone can still do. `full` needs
-every operator's key on the shared volume, and makes the restore of those keys fatal in the setup
-job. Under `global.signatureScheme=schnorr` the value is ignored: the job always runs and always
-registers, since a Schnorr fleet certifies nothing against an empty registry.
-
-Nothing about the running fleet changes either way. It keeps signing BLS, `deploy-target` keeps
-deploying a BLS target, and the job's only effect on the deployment is the address it publishes.
+The router serves the registry address as `schnorrStakeRegistry` on `GET /avs-metadata`, which is
+what an integrator's target constructor takes. The address comes from
+`schnorr.stakeRegistryAddress`, or failing that from what the `schnorr-operators` job recorded. It
+publishes only once `nextPossibleMutationBlock()` answers at it, so a non-registry address set
+here is omitted rather than served.
 
 The job writes the address to `/app/.nodes/schnorr_stake_registry.txt`, and the router reads it
 from there as a named record rather than from `avs_deploy.json`, because under Secret Manager the
 router's copy of that file comes from a secrets volume the job never writes to. Being a record
 also means it is retried while unwritten, so a job that finishes after the router is serving still
-lands without a restart. `schnorr.stakeRegistryAddress` overrides it, for a registry provisioned
-outside the chart entirely.
+lands without a restart.
 
-Three of the registry's parameters are **fixed at deployment and cannot be changed afterwards**,
-so they have to be right on the run that deploys it:
+### Re-running the operator-set job
+
+`rerun.schnorrOperators=true` renders the job on an upgrade; it is otherwise install-only. A later
+run needs the existing Job deleted first, since it is kept by resource policy and its spec is
+immutable:
+
+```bash
+kubectl delete job <release>-schnorr-operators
+```
+
+Otherwise Helm tries to update the existing Job, Kubernetes rejects the template change, and the
+whole upgrade fails with `spec.template: Invalid value` while leaving the rest of the release
+unapplied. Reset `rerun.schnorrOperators` to `false` afterwards so a later unrelated upgrade does
+not trip over the kept Job.
+
+The one-way door is the registry. `rerun.schnorrOperators=true` without
+`schnorr.stakeRegistryAddress` deploys a *fresh* registry and re-registers everyone, which
+orphans every target wired to the previous one. The job skips when `avs_deploy.json` already
+records an address.
+
+### Fixed at deployment
+
+Three of the registry's parameters **cannot be changed afterwards**, so they have to be right on
+the run that deploys it:
 
 | Fixed at deployment | Comes from | Getting it wrong means |
 |---|---|---|
@@ -215,36 +177,22 @@ so they have to be right on the run that deploys it:
 | Owner | `schnorr.deployerSecretKey` | Nobody can register or deregister an operator |
 
 The `schnorr.noticeWindow` default of `0` is correct only when the whole operator set is registered
-before any target deploys, which is the e2e stack's order and **not** `provision=registry`'s. A
-registry that will be filled or mutated while rounds are in flight needs a window longer than a
-round plus `eigenlayer.sdk.blockStaleMeasure`, or an operator-set change can land between a round
-assembling its signature and that signature settling.
+before any target deploys, which is the install order. A registry that will be mutated while
+rounds are in flight needs a window longer than a round plus `eigenlayer.sdk.blockStaleMeasure`,
+or an operator-set change can land between a round assembling its signature and that signature
+settling.
 
 The operator set itself is *not* fixed: its owner registers and deregisters through
-`announceRegister` / `announceDeregister` / `commitNextChange`. That is what makes publishing an
-empty registry safe. Every target wired to it keeps working when the set is filled later, so the
-address does not have to be republished and no integrator has to redeploy twice.
-
-### Switching an existing deployment
-
-There is no rolling path from `bls` to `schnorr`. A mixed fleet certifies nothing, and every
-target already deployed verifies the other scheme's proof, so it is stranded rather than
-degraded. Switching means reinstalling the operator set and redeploying every target, including
-any an integrator owns. Prove the change on a separate release first.
-
-The one-way door is the registry. `rerun.schnorrOperators=true` without
-`schnorr.stakeRegistryAddress` deploys a *fresh* registry and re-registers everyone, which
-orphans every target wired to the previous one. The job is otherwise install-only and skips when
-`avs_deploy.json` already records an address.
+`announceRegister` / `announceDeregister` / `commitNextChange`, and every target wired to the
+registry keeps working across those changes.
 
 ### Values
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `schnorr.deployerSecretKey` | Secret key holding the funded key that deploys the registry and submits the registrations. The deployer becomes the registry owner. | `PRIVATE_KEY` |
-| `schnorr.provision` | Provision the Schnorr scaffolding while the fleet signs another scheme: `""`, `registry` or `full`. Ignored under `signatureScheme=schnorr`. | `""` |
 | `schnorr.noticeWindow` | Blocks an operator-set change must be announced ahead of taking effect, fixed at registry deployment. `0` applies changes immediately, correct only when the set is registered before any target deploys. | `0` |
-| `schnorr.stakeRegistryAddress` | The registry this deployment uses. The operator-set job reuses it instead of deploying one, registering whichever of the operator set it lacks, and failing if it holds any other operator or has a change scheduled; the router publishes it as `schnorrStakeRegistry` on `GET /avs-metadata` in either scheme. | `""` |
+| `schnorr.stakeRegistryAddress` | The registry this deployment uses. The operator-set job reuses it instead of deploying one, registering whichever of the operator set it lacks, and failing if it holds any other operator or has a change scheduled; the router publishes it as `schnorrStakeRegistry` on `GET /avs-metadata`. | `""` |
 | `schnorr.stageTimeoutSecs` | Nonce-collection timeout for the coordinator's rounds. Round 1 is message-independent, so this is a bare p2p round trip. Empty uses `min(5, ROUND_TIMEOUT/6)`. | `""` |
 | `schnorr.signStageTimeoutSecs` | Partial-signature collection timeout. This stage holds the signer's EVMSketch, so it must cover a full cold trace rather than a round trip. Empty uses `roundTimeout/2`. | `""` |
 | `schnorr.messagesPerSecond` | Per-peer rate on the schnorr channel, rendered into both the router and the nodes. The p2p sender silently drops over-rate messages, and a dropped round message costs a whole retry. Empty uses `64`. | `""` |
@@ -255,7 +203,7 @@ participation floor, so the off-chain and on-chain checks stay in lockstep.
 
 ## Operator key durability
 
-The shared-data volume holds the operators' BLS and secp256k1 key files. The eigenlayer setup
+The shared-data volume holds the operators' BN254 and secp256k1 key files. The eigenlayer setup
 container generates them once with a live RNG, and until the key-export job copies them to Secret
 Manager they exist nowhere else. A lost operator key cannot be recovered, only replaced, and
 replacing one means re-registering the operator set on chain.
@@ -291,10 +239,9 @@ says so.
 The chart deploys the following components:
 
 1. **Ethereum (Anvil)** - Local blockchain with forked Sepolia state
-2. **Signer (Cerberus)** - BLS signature service
-3. **Setup Job** - EigenLayer contract deployment and operator registration
-4. **Gas Killer Nodes** - Operator nodes (configurable count)
-5. **Router** - Request routing and aggregation
+2. **Setup Job** - EigenLayer contract deployment and operator registration
+3. **Gas Killer Nodes** - Operator nodes (configurable count)
+4. **Router** - Request routing and aggregation
 
 ### Startup Order
 
@@ -302,12 +249,10 @@ Components start in a specific order enforced by init containers:
 
 1. Ethereum pod starts first
 2. Setup job waits for Ethereum, then deploys contracts and registers operators
-3. Signer waits for setup completion (needs operator keys)
-4. Nodes wait for setup completion and Ethereum availability
-5. Router waits for setup, Ethereum, and all nodes
+3. Nodes wait for setup completion and Ethereum availability
+4. Router waits for setup, Ethereum, and all nodes
 
-Under `global.signatureScheme=schnorr` the schnorr-operators job also waits for setup, and the
-deploy-target job waits for both. See "Schnorr signatures" above.
+The schnorr-operators job also waits for setup, and the deploy-target job waits for both. See "Schnorr signatures" above.
 
 ## HTTPS / TLS Ingress
 
@@ -436,7 +381,6 @@ helm upgrade --install gas-killer ./helm/gas-killer \
   --set secrets.privateKey=0x... \
   --set secrets.fundedKey=0x... \
   --set secrets.httpRpc=https://... \
-  --set secrets.l2HttpRpc=https://... \
   --set router.image.tag=router-<sha> \
   --set node.image.tag=node-<sha> \
   --set kube-prometheus-stack.grafana.adminPassword=<password> \

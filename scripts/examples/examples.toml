@@ -10,9 +10,9 @@
 # string; an array or tuple parameter takes a list. Placeholders:
 #
 #   $avs           the AVS service manager (addresses.avsServiceManagerWrapper, or --avs)
-#   $sigChecker    a real BLSSignatureChecker (addresses.IncredibleSquaringTaskManager, or
-#                  --sig-checker). NOT addresses.blsSigCheck — see example.env.
-#   $deploy:<key>  any key under `addresses` in the AVS deployment JSON
+#   $deploy:<key>  any key under `addresses` in the AVS deployment JSON. Every target here takes
+#                  $deploy:schnorrStakeRegistry, which setup_schnorr_operators records and must
+#                  therefore run first.
 #   $signer:<n>    the address of signers[n] below
 #   $env:VAR       an environment variable
 #
@@ -49,7 +49,7 @@ artifact  = "OnchainLife.sol:OnchainLife"
 # cells (1,0) (2,1) (0,2) (1,2) (2,2), i.e. the sum of 1 << (y * 64 + x).
 ctor_args = [
   "$avs",
-  "$sigChecker",
+  "$deploy:schnorrStakeRegistry",
   [
     "2381976568446569244317409228317215686658",
     "0", "0", "0", "0", "0", "0", "0",
@@ -104,7 +104,7 @@ ctor_args = [
 name      = "guardedVault"
 artifact  = "GuardedVault.sol:GuardedVault"
 # maxConcentrationBps: no depositor may hold more than 50% of total shares.
-ctor_args = ["$avs", "$sigChecker", "5000"]
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "5000"]
 
   # `settle` reverts with NotDepositor for an address that never deposited, and `deposit`
   # credits msg.sender — so each depositor has to come from a different signer.
@@ -153,7 +153,7 @@ ctor_args = ["$avs", "$sigChecker", "5000"]
 [[examples]]
 name      = "sortedOracle"
 artifact  = "SortedOracle.sol:SortedOracle"
-ctor_args = ["$avs", "$sigChecker"]
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry"]
 
   # 128 unordered observations, seeded in a prior transaction so the commit reads them cold —
   # which is how a real oracle pays for them. Past the ~30-observation crossover where the
@@ -198,34 +198,19 @@ ctor_args = ["$avs", "$sigChecker"]
 # Each declares `alias = "gasKillerTarget"` — see the alias note in the header above.
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 
-# ── ArraySummation (BLS) ─────────────────────────────────────────────────────────────────
+# ── ArraySummation ───────────────────────────────────────────────────────────────────────
 # The default e2e target. Sums selected elements of an on-chain array under `trackState`.
 [[examples]]
 name      = "arraySummation"
 alias     = "gasKillerTarget"
 artifact  = "ArraySummation.sol:ArraySummation"
-# (avs, blsSigChecker, arraySize, maxValue, seed)
-ctor_args = ["$avs", "$sigChecker", "100", "1000", "42"]
+# (avs, schnorrStakeRegistry, arraySize, maxValue, seed)
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "100", "1000", "42"]
 
   # send_request builds sum([base, base+1, base+2]) with a rotating base; a fixed triple is
   # equivalent for a single round and keeps the manifest declarative.
   [[examples.exercise]]
   label = "array_summation_sum"
-  sig   = "sum(uint256[])"
-  args  = [["0", "1", "2"]]
-
-# ── SchnorrArraySummation ────────────────────────────────────────────────────────────────
-# The same workload verified against the SchnorrStakeRegistry rather than a BLS checker.
-# Requires SIGNATURE_SCHEME=schnorr and `setup_schnorr_operators` to have run first — it
-# deploys the registry and registers the operator set, writing addresses.schnorrStakeRegistry.
-[[examples]]
-name      = "schnorrArraySummation"
-alias     = "gasKillerTarget"
-artifact  = "SchnorrArraySummation.sol:SchnorrArraySummation"
-ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "100", "1000", "42"]
-
-  [[examples.exercise]]
-  label = "schnorr_array_summation_sum"
   sig   = "sum(uint256[])"
   args  = [["0", "1", "2"]]
 
