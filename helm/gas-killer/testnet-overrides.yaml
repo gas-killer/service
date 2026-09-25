@@ -143,8 +143,8 @@ router:
     # router.roundTimeout, which a queued task has to outlive to be reached at all.
     taskTtlSeconds: "3000"
     # The shared ArraySummation the docs' Quickstart points at (16 elements, wired to
-    # schnorr.stakeRegistryAddress), published as demoTarget so the docs read it live. Deployed by
-    # hand on 2026-09-24; #472 tracks a playground job that deploys it instead.
+    # schnorr.stakeRegistryAddress), published as demoTarget so the docs read it live. Set by hand:
+    # no chart job deploys the shared demo target.
     demoTarget: "0xCAcD6fd494cde74A84e7e5F6816ca7C87aa88aaD"
 
 # Deploy the smoke-test target (ArraySummation, wired to schnorr.stakeRegistryAddress)
@@ -153,9 +153,7 @@ router:
 deployTarget:
   enabled: true
   image:
-    # Pinned rather than `latest` so a rerun.deployTarget upgrade deploys a known contract. The
-    # current smoke target came from sha-e82dce3 as SchnorrArraySummation, which this build
-    # renames to ArraySummation with the same ABI.
+    # Pinned rather than `latest` so a rerun.deployTarget upgrade deploys a known contract.
     tag: sha-8b57a74
   configMapName: gas-killer-smoke-target
   # ArraySummation params (smoke test sums indexes [1,2,3], so arraySize must be >= 4).

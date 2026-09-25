@@ -230,9 +230,8 @@ it from there as a named record, so a job that finishes after the router is serv
 {{- end }}
 
 {{/*
-The quorum signature scheme (SIGNATURE_SCHEME) the router and every node run with. Schnorr is the
-only scheme; a leftover global.signatureScheme=bls from an old release fails here rather than
-installing a fleet that cannot sign.
+The quorum signature scheme (SIGNATURE_SCHEME) the router and every node run with. Any value other
+than schnorr fails here rather than installing a fleet that cannot sign.
 */}}
 {{- define "gas-killer.signatureScheme" -}}
 {{- $scheme := .Values.global.signatureScheme | default "schnorr" | trim | lower -}}
