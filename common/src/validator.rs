@@ -577,7 +577,7 @@ impl GasKillerValidator {
         address: alloy::primitives::Address,
         chain_id: ChainRole,
     ) -> Result<u64> {
-        use crate::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
+        use crate::bindings::gaskillersdk::GasKillerSDK;
 
         let provider = match self.providers.get(&chain_id) {
             Some(p) => p.clone(),
@@ -592,7 +592,7 @@ impl GasKillerValidator {
                 anyhow::bail!("No RPC URL configured for chain {}", chain_id);
             }
         };
-        let count = SchnorrGasKillerSDK::new(address, provider)
+        let count = GasKillerSDK::new(address, provider)
             .stateTransitionCount()
             .call()
             .await

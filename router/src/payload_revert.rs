@@ -13,7 +13,7 @@
 use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::sol_types::{GenericContractError, SolError, SolInterface};
 use alloy_primitives::{Bytes, FixedBytes, hex};
-use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use std::fmt;
 
 /// JSON-RPC error code a node returns for a call that executed and reverted. Every standard
@@ -60,56 +60,56 @@ macro_rules! known_revert {
 /// the failure path.
 const KNOWN_REVERTS: &[KnownRevert] = &[
     known_revert!(
-        SchnorrGasKillerSDK::InvalidQuorumSignature,
+        GasKillerSDK::InvalidQuorumSignature,
         "the aggregate Schnorr signature does not verify against the target's schnorrRegistry at \
          the reference block; check the target's avsAddress and schnorrRegistry against the live \
          deployment"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::FutureBlockNumber,
+        GasKillerSDK::FutureBlockNumber,
         "the reference block is not yet mined from the target's view; the target may be on a \
          different chain than the one this task was analysed against"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::StaleBlockNumber,
+        GasKillerSDK::StaleBlockNumber,
         "the reference block is older than the target's blockStaleMeasure allows; request a fresh \
          payload"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::InvalidTransitionIndex,
+        GasKillerSDK::InvalidTransitionIndex,
         "the target's stateTransitionCount has moved past this payload; request a fresh payload"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::InvalidSignature,
+        GasKillerSDK::InvalidSignature,
         "the signed digest does not match the one the target recomputes from its own address, the \
          target function, and the storage updates"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::MalformedLogPayload,
+        GasKillerSDK::MalformedLogPayload,
         "an encoded LOG update is not shaped as the target's state-change handler expects"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::InvalidArguments,
+        GasKillerSDK::InvalidArguments,
         "the target rejected the call arguments"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::RevertingContext,
+        GasKillerSDK::RevertingContext,
         "a CALL replayed from the storage updates reverted inside the target"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::DeploymentFailed,
+        GasKillerSDK::DeploymentFailed,
         "a CREATE or CREATE2 replayed from the storage updates failed"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::ReentrantTransition,
+        GasKillerSDK::ReentrantTransition,
         "the target is already inside a tracked transition, so verifyAndUpdate cannot be entered"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::EmptyBatch,
+        GasKillerSDK::EmptyBatch,
         "the round produced no state updates to apply"
     ),
     known_revert!(
-        SchnorrGasKillerSDK::BlockStaleMeasureOverflow,
+        GasKillerSDK::BlockStaleMeasureOverflow,
         "the target's configured blockStaleMeasure overflows when added to the reference block"
     ),
 ];
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn every_error_the_sdk_declares_has_a_cause() {
         let declared = serde_json::from_str::<alloy_json_abi::ContractObject>(
-            gas_killer_common::bindings::SCHNORR_GAS_KILLER_SDK_ABI,
+            gas_killer_common::bindings::GAS_KILLER_SDK_ABI,
         )
         .expect("the committed ABI should parse")
         .abi

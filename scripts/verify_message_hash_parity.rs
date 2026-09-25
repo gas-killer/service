@@ -10,7 +10,7 @@
 use alloy::primitives::{Address, Bytes, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use gas_killer_common::GasKillerTaskData;
-use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
+use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
 use std::env;
 use std::fs;
@@ -37,7 +37,7 @@ async fn main() -> Result<(), BoxError> {
         return Err(format!("target address {target_address} has no code deployed").into());
     }
 
-    let contract = SchnorrGasKillerSDK::new(target_address, provider);
+    let contract = GasKillerSDK::new(target_address, provider);
 
     let mut checked = 0usize;
     let mut mismatches = 0usize;
