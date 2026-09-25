@@ -44,7 +44,6 @@ This will automatically pull the latest pre-built images from the GitHub Contain
 - EigenLayer contract deployment
 - 3 operator nodes
 - Router/orchestrator
-- Signer service (Cerberus)
 
 3. **Monitor services:**
 ```bash
@@ -244,7 +243,7 @@ Optional environment variables:
   | `AVS_REFERENCE_TARGET` | Target whose `avsAddress()` and verifier getter (`blsSignatureChecker()` or `schnorrRegistry()`) establish the published pair |
   | `AVS_REFERENCE_TARGET_FILE` | File holding that address — the chart points this at the deploy job's record |
   | `DEMO_TARGET_ADDRESS` / `DEMO_FACTORY_ADDRESS` | `demoTarget` / `demoFactory` |
-  | `DEMO_TARGET_FILE` / `DEMO_FACTORY_FILE` | Files holding those — the chart points these at the playground job's records |
+  | `DEMO_TARGET_FILE` / `DEMO_FACTORY_FILE` | Files holding those |
   | `SCHNORR_STAKE_REGISTRY_ADDRESS` | `schnorrStakeRegistry`, overriding both sources below |
   | `SCHNORR_STAKE_REGISTRY_FILE` | File holding it, which the chart points at the operator-set job's record |
 

@@ -18,17 +18,13 @@ LOG_DIR="$PROJECT_ROOT/logs"
 # reads the same default for the router so the two stay in sync.
 export ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 
-# Capture the caller's signature scheme (default: bls) before `cp example.env .env`
-# and `source ../.env` can let the example default win. Re-exported after the
-# source below so it reaches the deploy binary; docker-compose reads it directly
-# from the environment for the node/router containers.
-SIGNATURE_SCHEME_CHOICE="${SIGNATURE_SCHEME:-bls}"
-export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
-echo "Signature scheme: $SIGNATURE_SCHEME_CHOICE"
+# Schnorr is the only scheme. Exported for docker-compose and the deploy binaries, and again
+# after `source ../.env` below so a stale value there cannot win.
+export SIGNATURE_SCHEME=schnorr
 
 # STATE_ENCODING (legacy|canonical|prestate-net), E2E_EXAMPLE
 # (array-summation|reentrant|onchain-life) and GK_SIM_PROFILE (chain|unbounded) follow the
-# same capture-then-re-export discipline as SIGNATURE_SCHEME so the containers AND the
+# a capture-then-re-export discipline so the containers AND the
 # host-side deploy/send binaries agree. `reentrant` deploys a ReentrantCheckpoint whose
 # task re-enters mid-transition; pair it with `canonical` to prove re-entrancy is safe.
 # `onchain-life` deploys an OnchainLife and settles the multi-generation step declared in the
@@ -183,7 +179,7 @@ cd "$PROJECT_ROOT/scripts"
 source ../.env
 # `source ../.env` may reset these to the example defaults; restore the caller's choices so the
 # deploy and trigger binaries pick the right stack, encoding, and example target.
-export SIGNATURE_SCHEME="$SIGNATURE_SCHEME_CHOICE"
+export SIGNATURE_SCHEME=schnorr
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
 export GK_SIM_PROFILE="$GK_SIM_PROFILE_CHOICE"
@@ -194,14 +190,11 @@ if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
     exit 1
 fi
 
-# Map the E2E_EXAMPLE selector onto a manifest entry. Under schnorr, array-summation means the
-# SchnorrArraySummation variant, which verifies against the stake registry rather than a BLS
-# checker; `reentrant` is schnorr-only by construction.
-case "$E2E_EXAMPLE:$SIGNATURE_SCHEME" in
-    array-summation:schnorr)          MANIFEST_EXAMPLE="schnorrArraySummation" ;;
-    array-summation:*)                MANIFEST_EXAMPLE="arraySummation" ;;
-    reentrant:*|reentrant-checkpoint:*) MANIFEST_EXAMPLE="reentrantCheckpoint" ;;
-    onchain-life:*|onchainlife:*)     MANIFEST_EXAMPLE="onchainLife" ;;
+# Map the E2E_EXAMPLE selector onto a manifest entry.
+case "$E2E_EXAMPLE" in
+    array-summation)                  MANIFEST_EXAMPLE="arraySummation" ;;
+    reentrant|reentrant-checkpoint)   MANIFEST_EXAMPLE="reentrantCheckpoint" ;;
+    onchain-life|onchainlife)         MANIFEST_EXAMPLE="onchainLife" ;;
     *)
         echo -e "${RED}Unknown E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
         exit 1
@@ -228,8 +221,8 @@ run_from_root() {
 
 # The Schnorr operator set must be registered before any target deploys: every registration
 # advances the registry's `effectiveBlock` watermark, and verification fail-closes for reference
-# blocks behind it. A no-op under SIGNATURE_SCHEME=bls, so it runs unconditionally.
-echo "Setting up the Schnorr operator set (no-op unless SIGNATURE_SCHEME=schnorr)..."
+# blocks behind it.
+echo "Setting up the Schnorr operator set..."
 run_from_root --bin setup_schnorr_operators \
     || deploy_failed "Schnorr operator setup failed"
 

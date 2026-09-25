@@ -144,38 +144,27 @@ router:
     taskTtlSeconds: "3000"
     # The shared ArraySummation the docs' Quickstart points at (16 elements, wired to
     # schnorr.stakeRegistryAddress), published as demoTarget so the docs read it live. Deployed by
-    # hand on 2026-09-24 because the playground job only deploys BLS targets.
+    # hand on 2026-09-24; #472 tracks a playground job that deploys it instead.
     demoTarget: "0xCAcD6fd494cde74A84e7e5F6816ca7C87aa88aaD"
 
-# The bridge mirrors EigenLayer operator state from L1 to L2, so it has nothing to do
-# on an L1-only testnet: bridge-to-l2.sh exits non-zero without an L2 RPC. Both keys
-# must move together — waitForBridge is read independently of enabled, so disabling
-# only the job leaves every node and the router waiting 300s for a .bridge_complete
-# marker that nothing writes, then failing their init container. It also stays off under
-# schnorr: the bridge and yield distributor are BLS-interface targets.
-bridge:
-  enabled: false
-  waitForBridge: false
-
-# Deploy the smoke-test target (SchnorrArraySummation, wired to schnorr.stakeRegistryAddress)
+# Deploy the smoke-test target (ArraySummation, wired to schnorr.stakeRegistryAddress)
 # after the operator set is registered, then publish its address to a ConfigMap:
 #   kubectl get configmap gas-killer-smoke-target -o jsonpath='{.data.target}'
 deployTarget:
   enabled: true
   image:
-    # The build the current smoke target was deployed from. Pinned rather than `latest` so a
-    # rerun.deployTarget upgrade deploys the same contract, and because the deploy job calls
-    # DeploySchnorrArraySummation, which later SDK builds rename.
-    tag: sha-e82dce3
+    # Pinned rather than `latest` so a rerun.deployTarget upgrade deploys a known contract. The
+    # current smoke target came from sha-e82dce3 as SchnorrArraySummation, which this build
+    # renames to ArraySummation with the same ABI.
+    tag: sha-8b57a74
   configMapName: gas-killer-smoke-target
-  # SchnorrArraySummation params (smoke test sums indexes [1,2,3], so arraySize must be >= 4).
+  # ArraySummation params (smoke test sums indexes [1,2,3], so arraySize must be >= 4).
   arraySize: 10
   maxValue: 10000
   arraySeed: 1
 
-# The fleet's SchnorrStakeRegistry. schnorr.provision is ignored under signatureScheme=schnorr,
-# where the operator-set job always registers: into the pinned registry below, which it fills
-# while it holds nothing but this operator set.
+# The fleet's SchnorrStakeRegistry. The operator-set job registers into the pinned registry below,
+# which it fills while it holds nothing but this operator set.
 schnorr:
   # Fixed at registry deployment, immutable afterwards. Sized against the longest window a
   # settlement can span: eigenlayer.sdk.blockStaleMeasure (300 blocks) plus router.roundTimeout
@@ -188,7 +177,7 @@ schnorr:
   # against a live schnorr fleet.
   noticeWindow: 600
 
-  # Deployed 2026-09-10 while the fleet signed bls, owner
+  # Deployed 2026-09-10, owner
   # 0x5DD2e7db868e33c03daB85d0C623048A7980634E, threshold 2/3, filled by the schnorr install.
   # Pinning it here is what makes the address durable: a PVC rebuilt and restored without
   # addresses.schnorrStakeRegistry in avs_deploy.json would otherwise let rerun.schnorrOperators

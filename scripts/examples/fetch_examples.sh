@@ -19,7 +19,7 @@
 set -euo pipefail
 
 EXAMPLES_REPO="${EXAMPLES_REPO:-https://github.com/gas-killer/example-contracts}"
-EXAMPLES_REF="${EXAMPLES_REF:-5827d9a3df69255aa07000165a9a5628b8408523}"
+EXAMPLES_REF="${EXAMPLES_REF:-4159838a67b4e3bda0c7e4183def2f34f1551a24}"
 EXAMPLES_DIR="${EXAMPLES_DIR:-.examples/example-contracts}"
 
 # The Gas Killer SDK is a submodule of the examples repo, and it carries its own examples
@@ -36,7 +36,6 @@ EXPECTED_ARTIFACTS=(
 )
 EXPECTED_SDK_ARTIFACTS=(
   "ArraySummation.sol/ArraySummation.json"
-  "SchnorrArraySummation.sol/SchnorrArraySummation.json"
   "ReentrantCheckpoint.sol/ReentrantCheckpoint.json"
   "ReentrantObserver.sol/ReentrantObserver.json"
 )

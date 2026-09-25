@@ -28,21 +28,6 @@ services:
       - ./config/.nodes:/root/.nodes
       - ./config/config.example.json:/bls-middleware/contracts/docker/eigenlayer/config.json
 
-  signer:
-    image: ghcr.io/layr-labs/cerberus:0.0.2
-    platform: linux/amd64
-    depends_on:
-      eigenlayer:
-        condition: service_completed_successfully
-    ports:
-      - "${CERBERUS_METRICS_PORT:-9081}:${CERBERUS_METRICS_PORT:-9081}"
-      - "${CERBERUS_GRPC_PORT:-50051}:${CERBERUS_GRPC_PORT:-50051}"
-    environment:
-      - "METRICS_PORT=${CERBERUS_METRICS_PORT:-9081}"
-    env_file:
-      - .env
-    restart: unless-stopped
-
   # Prepares the engine-journal volumes: fresh named volumes are root-owned,
   # while the node/router images run as appuser (uid 1000). Chown once here so
   # the aggregation engine can create its journal under STORAGE_DIR.
@@ -76,13 +61,12 @@ services:
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       - STORAGE_DIR=/app/data
-      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
+      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-schnorr}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
       - ./config/.nodes/operator_keys/testacc1.private.bls.key.json:/app/key.json:ro
-      # secp256k1 Schnorr signing key (used only in SIGNATURE_SCHEME=schnorr; the
-      # --schnorr-key-file arg is ignored in bls mode).
+      # secp256k1 Schnorr signing key, separate from the BN254 p2p identity above.
       - ./config/.nodes/operator_keys/testacc1.private.ecdsa.key.json:/app/schnorr_key.json:ro
       - ./config/.nodes:/app/.nodes:ro
       - ./config/public_orchestrator.dev.json:/app/public_orchestrator.json:ro
@@ -122,7 +106,7 @@ services:
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       - STORAGE_DIR=/app/data
-      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
+      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-schnorr}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
@@ -158,7 +142,7 @@ services:
       - WS_RPC=ws://ethereum:8545
       - AVS_DEPLOYMENT_PATH=/app/.nodes/avs_deploy.json
       - STORAGE_DIR=/app/data
-      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
+      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-schnorr}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
     volumes:
@@ -206,7 +190,7 @@ services:
       # Guards the /admin/keys endpoints used to mint the API keys that authenticate POST /tasks.
       # Defaults to a fixed value for the local/e2e harness; override by exporting ADMIN_KEY.
       - ADMIN_KEY=${ADMIN_KEY:-ci-admin-key}
-      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-bls}
+      - SIGNATURE_SCHEME=${SIGNATURE_SCHEME:-schnorr}
       # Blocks past the reference block for which a rendered task payload stays valid.
       - PAYLOAD_BLOCK_BUFFER=${PAYLOAD_BLOCK_BUFFER:-50}
       - STATE_ENCODING=${STATE_ENCODING:-legacy}

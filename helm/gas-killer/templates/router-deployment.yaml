@@ -105,34 +105,6 @@ spec:
               readOnly: true
         {{- end }}
 
-        {{- if .Values.bridge.waitForBridge }}
-        # Wait for bridge job to complete before starting the router
-        # The bridge creates a .bridge_complete marker when done
-        - name: wait-for-bridge
-          image: busybox:1.36
-          command:
-            - sh
-            - -c
-            - |
-              echo "Waiting for bridge to complete (timeout: {{ .Values.global.initTimeout }}s)..."
-              TIMEOUT={{ .Values.global.initTimeout }}
-              ELAPSED=0
-              until [ -f /app/.nodes/.bridge_complete ]; do
-                if [ $ELAPSED -ge $TIMEOUT ]; then
-                  echo "ERROR: Timeout waiting for bridge to complete after ${TIMEOUT}s"
-                  exit 1
-                fi
-                echo "Bridge not complete, waiting for .bridge_complete marker... (${ELAPSED}s elapsed)"
-                sleep 10
-                ELAPSED=$((ELAPSED + 10))
-              done
-              echo "Bridge complete!"
-          volumeMounts:
-            - name: shared-data
-              mountPath: /app/.nodes
-              readOnly: true
-        {{- end }}
-
         {{- if eq .Values.global.environment "LOCAL" }}
         # Wait for L1 RPC to be accessible (LOCAL mode only)
         - name: wait-for-l1
@@ -271,18 +243,6 @@ spec:
             - name: SIM_HTTP_RPC
               value: {{ . | quote }}
             {{- end }}
-            {{- if .Values.l2.enabled }}
-            {{- if eq .Values.global.environment "LOCAL" }}
-            - name: L2_HTTP_RPC
-              value: "http://{{ include "gas-killer.l2.fullname" . }}:{{ .Values.l2.service.port }}"
-            {{- else if eq .Values.global.environment "TESTNET" }}
-            - name: L2_HTTP_RPC
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "gas-killer.secret.fullname" . }}
-                  key: L2_HTTP_RPC
-            {{- end }}
-            {{- end }}
             - name: AVS_DEPLOYMENT_PATH
               {{- if and (eq .Values.global.environment "TESTNET") .Values.secretManager.enabled }}
               value: "/app/secrets/avs_deploy.json"
@@ -295,15 +255,6 @@ spec:
             # is told where the record is rather than looking beside the deployment file.
             - name: AVS_REFERENCE_TARGET_FILE
               value: "/app/.nodes/demo_target.txt"
-            {{- end }}
-            {{- if .Values.playground.enabled }}
-            # Same volume, same reason. These paths must match what playground-job.yaml writes.
-            # The playground target is also preferred as the reference target, so the published
-            # verifier is the one demoTarget itself verifies against.
-            - name: DEMO_TARGET_FILE
-              value: "/app/.nodes/playground_target.txt"
-            - name: DEMO_FACTORY_FILE
-              value: "/app/.nodes/playground_factory.txt"
             {{- end }}
             - name: INGRESS
               value: {{ .Values.router.ingress.enabled | quote }}
@@ -403,27 +354,17 @@ spec:
             # SQLite store (DATA_DIR), so it points at the same mount path.
             - name: STORAGE_DIR
               value: {{ .Values.router.persistence.mountPath | quote }}
-            # Quorum signature scheme (bls | schnorr); must match the nodes'.
             - name: SIGNATURE_SCHEME
               value: {{ include "gas-killer.signatureScheme" . | quote }}
             {{- with .Values.schnorr.stakeRegistryAddress }}
-            # Published as `schnorrStakeRegistry` on GET /avs-metadata. Set under either scheme,
-            # not just schnorr: the router never verifies against this address, it only publishes
-            # it, and under bls that is what lets an integrator wire a target for both schemes
-            # before the fleet switches.
+            # Published as `schnorrStakeRegistry` on GET /avs-metadata.
             - name: SCHNORR_STAKE_REGISTRY_ADDRESS
               value: {{ . | quote }}
             {{- end }}
-            {{- if include "gas-killer.provisionsSchnorrRegistry" . }}
             # Where the operator-set job records what it deployed, read as a named record so a job
-            # that finishes after the router is serving still lands. Set only when a job is
-            # expected to write it: an unwritten record keeps the resolver retrying, and a
-            # deployment provisioning no registry must not retry forever over one it will never
-            # have.
+            # that finishes after the router is serving still lands.
             - name: SCHNORR_STAKE_REGISTRY_FILE
               value: {{ include "gas-killer.schnorrRegistryRecord" . | quote }}
-            {{- end }}
-            {{- if include "gas-killer.isSchnorr" . }}
             # The coordinator's participation floor. Same values the schnorr-operators job
             # fixes into the registry's on-chain threshold, keeping the two in lockstep.
             - name: QUORUM_THRESHOLD
@@ -441,7 +382,6 @@ spec:
             {{- with .Values.schnorr.messagesPerSecond }}
             - name: P2P_SCHNORR_MESSAGES_PER_SECOND
               value: {{ . | quote }}
-            {{- end }}
             {{- end }}
             # Storage-update encoding (legacy | canonical | prestate-net); must match
             # the nodes' — it changes the task digest.
