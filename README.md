@@ -3,16 +3,16 @@
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io/gas--killer/service-blue.svg)](https://github.com/gas-killer/service/pkgs/container/service)
 
-Gas Killer service implementation built on EigenLayer with BLS signature aggregation for optimized transaction execution.
+Gas Killer service implementation built on EigenLayer with aggregate Schnorr signatures for optimized transaction execution.
 
 ## Overview
 
-The service coordinates multiple operator nodes to sign task digests, assembles their BN254 signatures into quorum certificates via the commonware-consensus aggregation engine, and executes the result onchain via `verifyAndUpdate`.
+The service coordinates multiple operator nodes to sign task digests with a two-round MuSig2 protocol, producing one constant-size aggregate Schnorr signature per task, and renders the result as a `verifyAndUpdate` payload that the client submits onchain.
 
 ## Repository Structure
 
-- **`router/`** — Router service: sequences tasks, assembles certificates (verifier-only engine), and executes onchain
-- **`node/`** — Operator node: validates and signs tasks
+- **`router/`** — Router service: sequences tasks, coordinates the Schnorr signing rounds, and renders the onchain payload
+- **`node/`** — Operator node: validates tasks and signs them as a Schnorr participant
 - **`common/`** — Shared types, validation logic, and EVM gas analysis
 - **`config/`** — Operator and orchestrator key/config files
 - **`scripts/`** — Helper binaries for deployment and end-to-end testing
@@ -81,14 +81,12 @@ docker compose up -d
 
 ## Architecture
 
-Aggregation is built on the `commonware-consensus` **aggregation engine** with a custom
-**BN254 attributable multisig scheme** (signer bitmap + one aggregated G1 signature per
-certificate). The previous hand-rolled star-topology aggregator and all
-`commonware-avs-*` / `commonware-restaking` git dependencies were dropped; the pieces
-still required (BN254 key/curve handling, the EigenLayer staking client, the
-`BLSApkRegistry`/`BLSSigCheckOperatorStateRetriever` bindings, and the
-`NonSignerStakesAndSignature` retrieval flow) are vendored into `common/`. The on-chain
-verification path (`GasKillerSDK.verifyAndUpdate` + `BLSSignatureChecker`) is unchanged.
+Signing is an interactive two-round MuSig2 protocol over secp256k1: the router coordinates,
+the operator nodes participate, and each task yields one aggregate Schnorr signature whose
+on-chain verification cost does not grow with the signer count. Target contracts inherit the
+solidity-sdk's `GasKillerSDK` and verify that signature against a `SchnorrStakeRegistry`.
+Operator discovery goes through EigenLayer (`RegistryCoordinator`/`BLSApkRegistry`, read via
+`avs_deploy.json`); an operator's registered BN254 key is its p2p transport identity only.
 
 ```
                          POST /tasks
@@ -98,117 +96,108 @@ verification path (`GasKillerSDK.verifyAndUpdate` + `BLSSignatureChecker`) is un
                      router: sequencer
         assigns the task the next height H and broadcasts
         TaskDirective::Announce{H, task} on p2p channel 1
-        (rebroadcast until certified; Skip{H} after ROUND_TIMEOUT)
+        (rebroadcast until resolved; Skip{H} after ROUND_TIMEOUT)
                              │
   ┌──────────────────────────┼───────────────────────────┐
-  │ node 1..N (signing participants)                     │ router (verifier-only)
-  │  aggregation engine, p2p channel 0:                  │  aggregation engine:
-  │   propose(H): wait for the directive for H,          │  validates acks, assembles a
-  │   validate the task via EVMSketch, sign the          │  BN254 certificate at quorum
-  │   expected digest (or the skip digest) with          │            │
-  │   the node's BN254 key, gossip TipAcks               │  submitter: bitmap → operators,
-  └──────────────────────────────────────────────────────┘  getNonSignerStakesAndSignature,
-                                                            GasKillerSDK.verifyAndUpdate
+  │ node 1..N (Schnorr participants)                     │ router: Schnorr coordinator
+  │  TaskBook: records the directive for H               │  p2p channel 2, per attempt:
+  │  channel 2:                                          │   NonceRequest  → all operators
+  │   NonceCommit: fresh nonce pair, no validation       │   NonceCommit   ← responders
+  │   PartialSig: validate the task via EVMSketch,       │   SignRequest   → signer subset
+  │   sign only if the local digest matches              │   PartialSig    ← subset
+  └──────────────────────────────────────────────────────┘            │
+                                                            submitter: renders
+                                                            verifyAndUpdate(s, rAddr,
+                                                            nonSigners) for the client
 ```
 
-- **Sequencer** (router): dequeues ingress tasks, computes the expected storage updates
-  via EVMSketch, and assigns each task the next aggregation height. Exactly one height
-  is outstanding at a time; the next task is assigned only after the current height
-  certifies (and, for real digests, on-chain execution finishes).
+- **Sequencer** (router, `commonware_avs_router::sequencer`): dequeues ingress tasks,
+  computes the expected storage updates via EVMSketch, and assigns each task the next
+  height. Exactly one height is outstanding at a time; the next task is assigned only after
+  the current height resolves (and, for a signed digest, its payload is rendered).
 - **Task-directive channel** (p2p channel 1): the router broadcasts
   `TaskDirective::Announce { height, task }` and, after `ROUND_TIMEOUT`,
-  `TaskDirective::Skip { height }`. Nodes only receive on this channel. Engine `TipAck`
-  gossip runs on channel 0.
-- **Aggregation engine**: every process runs
-  `commonware_consensus::aggregation::Engine`. Nodes run it as signing participants;
-  the router runs it verifier-only (it holds no share of any signing key) — it
-  validates the nodes' acks, assembles certificates at quorum, journals them, and
-  hands them to the submitter.
-- **BN254 multisig scheme**: nodes sign the raw 32-byte task digest with EigenLayer's
-  `map_to_curve` hashing and **no namespace** — byte-identical to the pre-migration
-  signatures — so certificates verify on-chain against the operators' registered BN254
-  keys. The certificate binds only the digest, not the height; the digest itself binds
-  `(transitionIndex, target, selector, storageUpdates)` and the contract enforces
-  transition-index ordering, so replaying an identical digest across heights is
-  harmless.
-- **Submitter** (router): maps the certificate's signer bitmap to operator G1 keys,
-  fetches `NonSignerStakesAndSignature` from `BLSSigCheckOperatorStateRetriever`, and
-  calls `GasKillerSDK.verifyAndUpdate`.
+  `TaskDirective::Skip { height }`. Nodes record directives in their TaskBook and reply on
+  this channel only with rate-limited `TipReport`s to directives below their own tip.
+- **Schnorr coordinator** (router, p2p channel 2): per assigned height, runs attempts of
+  `NonceRequest`/`NonceCommit` then `SignRequest`/`PartialSig`, with fresh nonces each
+  attempt. A `NonceCommit` is accepted only if its public key maps to the sender's registered
+  operator address; each partial is verified against the signer's own nonce commitment, and
+  the assembled signature is self-verified. It also serves as the sequencer's certificate
+  index. The certified log lives in memory only.
+- **Schnorr participant** (node, p2p channel 2): answers `NonceRequest` from a fresh nonce
+  pair without touching the task. On `SignRequest` it derives the height's digest locally
+  (TaskBook + EVMSketch via `DigestResolver`), refuses unless it equals the requested message,
+  checks that every signer point maps to a known operator address, and only then produces a
+  partial. A secret nonce signs at most one context; sessions live in memory only.
+- **Digest**: nodes sign the 32-byte task digest, which binds
+  `(transitionIndex, target, selector, storageUpdates)`. The signature does not bind the
+  height, and the contract enforces transition-index ordering, so an identical digest at a
+  different height is harmless.
+- **Submitter** (router): takes the aggregate signature `(s, rAddr)` and the strictly
+  ascending non-signer address list and renders `verifyAndUpdate` calldata, checked with
+  `eth_estimateGas` as the requesting account. The task settles `ready` with that payload;
+  `SchnorrStakeRegistry` subtracts the non-signers' stake when the client submits it.
 - **Validator** (`common/`): EVM gas analysis (EVMSketch) computing the storage
   updates and the expected task digest on both router and nodes.
 
 ### Quorum model
 
-The consensus engine fixes the certificate quorum at `n - floor((n - 1) / 3)` of the
-`n` registered operators (Byzantine fault model, f = floor((n-1)/3)):
+The coordinator only runs round 2 when at least `min_signers = ceil(N · num / den)` of the
+`N` registered operators returned a nonce commitment, where `num/den` is
+`QUORUM_THRESHOLD`/`THRESHOLD_DENOMINATOR` (default 2/3). Operator weights are uniform, so
+this count approximates the stake fraction that the `SchnorrStakeRegistry` enforces on chain
+with the same threshold:
 
-| n | quorum | tolerates |
-|---|--------|-----------|
-| 3 | 3-of-3 | 0 faulty  |
-| 4 | 3-of-4 | 1 faulty  |
-| 7 | 5-of-7 | 2 faulty  |
+| N | min_signers | tolerates |
+|---|-------------|-----------|
+| 3 | 2           | 1 offline |
+| 4 | 3           | 1 offline |
+| 7 | 5           | 2 offline |
 
-This is stricter than the old `ceil(2n/3)` threshold for n=3: **with 3 operators every
-node must sign every certificate, so a single offline or divergent node halts
-certification until it recovers.** Run **n ≥ 4 operators in production**. The old
-`THRESHOLD` override is gone; the on-chain stake-fraction check
-(`QUORUM_THRESHOLD`/`THRESHOLD_DENOMINATOR`) still runs in the contract at submission.
+### Runtime storage
 
-### Journal storage
-
-Each process needs a writable directory (`STORAGE_DIR`) for the engine's journal — a
-write-ahead log of acks and certificates replayed on restart. docker-compose mounts a
-named volume per service at `/app/data`; the Helm chart mounts an `emptyDir`. A node
-that loses its journal forgets what it acked (safe: it re-signs the same digests); the
-router's journal only caches certificates and is likewise safe to lose. Without any
-writable directory the binaries fall back to `$TMPDIR/gas-killer`, which is for
-bare-metal dev runs only.
+`STORAGE_DIR` is the commonware runtime's storage directory. Neither binary keeps protocol
+state on disk: the coordinator's certified log, the node's TaskBook, and its signing sessions
+are all in memory. docker-compose mounts a named volume per service at `/app/data`; the Helm chart
+mounts a dedicated volume. Without any writable directory the binaries fall back to
+`$TMPDIR/gas-killer`, which is for bare-metal dev runs only.
 
 ### Failure modes and recovery
 
-The engine's tip advances only when heights certify contiguously — **every height the
-router assigns must eventually resolve to a certificate**, either the task digest or
-the skip digest. The router rebroadcasts `Announce` every `REBROADCAST_INTERVAL`,
-switches to `Skip` after `ROUND_TIMEOUT`, and keeps rebroadcasting until the height
-certifies. Nodes sign the skip digest only when told to (`Skip` directive) or when the
-router has demonstrably moved past the height (a directive for a later height exists
-while this one has none) — never on a bare timer.
+Every height the router assigns resolves one of two ways: an aggregate signature over the
+task digest, or a skip once `ROUND_TIMEOUT` passes from the coordinator's first sight of the
+assignment. The router rebroadcasts `Announce` every `REBROADCAST_INTERVAL` and switches to
+`Skip` after `ROUND_TIMEOUT`. A skip runs no signing session and puts nothing on chain; the
+submitter resolves the height as `skipped` and the task fails.
 
-- **Offline node (n=3)**: quorum is 3-of-3, so certification stalls until the node
-  returns; acks are re-gossiped and the pipeline resumes on its own.
-- **Split-digest stall**: if signers split between the task digest and the skip digest
-  at the same height such that neither reaches quorum (with n=3 any single divergent
-  signer is fatal; with n=4, two), the pipeline wedges at that height and **does not
-  recover automatically**. Manual recovery: stop all node processes, wipe each node's
-  engine journal — `docker compose down` + `docker volume rm <project>_node-{1,2,3}-data`,
-  or delete the node pods in Kubernetes (journals are `emptyDir`) — and restart. Nodes
-  then re-propose the height with no memory of their previous acks and follow the
-  router's current directive. Running n ≥ 4 makes a single divergent signer non-fatal.
-- **Router restart**: the engine replays its certificate journal, the sequencer waits
-  a short settle delay, then resumes from the observed tip. A certificate whose digest
-  matches neither the expected digest nor the skip digest (a node resolved the height
-  from a directive issued by a previous router life) consumes the height and the
-  in-flight task is re-assigned to the next one. Tasks still `queued` or `processing`
-  are re-queued, except one whose `transition_index` the contract has already consumed.
-  That settles `expired`, counted in `gas_killer_tasks_expired_at_requeue_total`.
-- **Router journal loss**: if the router's journal is wiped while the nodes keep
-  theirs (e.g. only the router pod is rescheduled), the sequencer would restart at
-  height 0 — below heights the nodes will ever propose again. Nodes detect directives
-  below their own tip and reply with a rate-limited `TipReport`; the router takes the
-  `(f+1)`-th highest reported tip (the same trust rule as the engine's safe-tip) and
-  fast-forwards its next assignment, re-assigning the in-flight task there.
-- **Router restart under Schnorr**: there is no engine journal, and TipReports cannot
-  recover the height: a node reports only directives below the highest height it has
-  seen, while a router restarting from 0 would re-announce exactly that height, which
-  the node drops as a conflict. Each router life instead starts its heights at the wall
-  clock in milliseconds, above anything a previous life announced. Heights never reach
-  the chain, and nodes resolve the skipped range as skips. A clock stepped back by more
-  than the previous life's uptime would bring the wedge back; restart the nodes to clear it.
-- **Operator-set changes**: the participant set (and therefore every participant
-  index) is frozen per process at startup from the on-chain registry. Registering or
-  deregistering an operator requires restarting the router and all nodes together —
-  processes with different participant sets reject (and eventually disconnect) each
-  other's acks.
+- **Offline or unresponsive node**: it misses the nonce stage (`SCHNORR_STAGE_TIMEOUT_SECS`)
+  and the round proceeds without it, listed as a non-signer, as long as `min_signers`
+  responded.
+- **Divergent node**: a node whose locally derived digest differs from the requested message
+  refuses to sign. A signer that sends no partial by the sign-stage deadline
+  (`SCHNORR_SIGN_STAGE_TIMEOUT_SECS`) or sends an invalid one becomes a suspect, and the next
+  attempt runs with fresh nonces on a subset that excludes suspects. An invalid partial ends
+  the attempt at once. Suspects are re-admitted only if the rest cannot reach `min_signers`.
+- **Too few signers**: if fewer than `min_signers` honest operators respond, every attempt
+  fails, the height is skipped at `ROUND_TIMEOUT`, and the sequencer moves on to the next
+  task. There is no wedge to clear by hand.
+- **Node restart**: secret nonces and sessions are in memory only, so a restarted node
+  refuses the sessions it forgot; it becomes a non-signer and the coordinator retries with
+  fresh nonces. Its TaskBook refills from the router's rebroadcast directives.
+- **Router restart**: tasks still `queued` or `processing` are re-queued, except one whose
+  `transition_index` the contract has already consumed. That settles `expired`, counted in
+  `gas_killer_tasks_expired_at_requeue_total`. There is no persisted height, and TipReports
+  cannot recover one: a node reports only directives below the highest height it has seen,
+  while a router restarting from 0 would re-announce exactly that height, which the node drops
+  as a conflict. Each router life instead starts its heights at the wall clock in
+  milliseconds, above anything a previous life announced. Heights never reach the chain, and
+  nodes resolve the skipped range as skips. A clock stepped back by more than the previous
+  life's uptime would bring the wedge back; restart the nodes to clear it.
+- **Operator-set changes**: the participant set is frozen per process at startup from the
+  on-chain registry. Registering or deregistering an operator requires restarting the router
+  and all nodes together. `SchnorrStakeRegistry` changes are also subject to
+  `SCHNORR_NOTICE_WINDOW` (see `example.env`).
 
 ## Configuration
 
@@ -226,39 +215,41 @@ LOCAL-mode-only:
 - `FORK_URL`: Sepolia RPC URL to fork from (Anvil uses this)
 
 Optional environment variables:
-- `STORAGE_DIR`: Writable directory for the aggregation engine's journal (default: `/app/data` if writable, else `$TMPDIR/gas-killer`). docker-compose and Helm mount a dedicated volume here — see "Journal storage" above.
-- `AGG_WINDOW`: Heights the aggregation engine works on concurrently above its tip (default: 8).
-- `AGG_ACTIVITY_TIMEOUT`: Heights below the tip the engine keeps tracking before pruning (default: 256). Keep generous — heights pruned past this window can never certify locally.
-- `ROUND_TIMEOUT`: Max seconds the router waits for a certificate on its assigned height before switching from `Announce` to `Skip` broadcasts (accepts fractional seconds). Also the nodes' retry budget for transient validation errors. The engine certifies as soon as quorum signs, so this only affects heights that stall. Library default: 30; the chart sets 300 and a heavy-trace deployment raises it in its own overrides. Must exceed worst-case node compute + sign time. It is also the base for the Schnorr coordinator's partial-collection deadline (`SCHNORR_SIGN_STAGE_TIMEOUT_SECS`, default `ROUND_TIMEOUT/2`), so a fleet running multi-minute EVMSketch traces raises this one value and the stage that holds that compute grows with it.
-- `REBROADCAST_INTERVAL`: How often (in seconds) the router re-sends the in-flight `TaskDirective` until the height certifies (accepts fractional seconds); also the engine's internal `TipAck` rebroadcast timeout. Library default: 5; Helm deployments set 15. Must stay well below `ROUND_TIMEOUT`: a node that misses every `Announce` can only resolve the height as a skip.
+- `STORAGE_DIR`: Writable directory handed to the commonware runtime (default: `/app/data` if writable, else `$TMPDIR/gas-killer`). docker-compose and Helm mount a dedicated volume here — see "Runtime storage" above.
+- `AGG_WINDOW`: Heights above a node's tip it expects the router to be driving (default: 8). A directive past `tip + window` is logged as evidence the node has fallen behind. Part of the config fingerprint.
+- `ROUND_TIMEOUT`: Max seconds the Schnorr coordinator keeps retrying signing attempts on an assigned height before resolving it as a skip, and the point at which the sequencer switches from `Announce` to `Skip` broadcasts (accepts fractional seconds). Also the nodes' retry budget for transient validation errors. A height resolves as soon as an attempt assembles a signature, so this only affects heights that stall. Library default: 30; the chart sets 300 and a heavy-trace deployment raises it in its own overrides. Must exceed worst-case node compute + sign time. It is also the base for the Schnorr coordinator's partial-collection deadline (`SCHNORR_SIGN_STAGE_TIMEOUT_SECS`, default `ROUND_TIMEOUT/2`), so a fleet running multi-minute EVMSketch traces raises this one value and the stage that holds that compute grows with it.
+- `REBROADCAST_INTERVAL`: How often (in seconds) the router re-sends the in-flight `TaskDirective` until the height resolves (accepts fractional seconds); also the minimum interval between a node's `TipReport`s. Library default: 5; Helm deployments set 15. Must stay well below `ROUND_TIMEOUT`: a node that misses every `Announce` can only resolve the height as a skip.
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
 - `INGRESS_TIMEOUT_MS`: Timeout for waiting on ingress tasks in milliseconds (default: 0, no timeout)
 - `ADMIN_KEY`: Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke the per-client API keys that authenticate `POST /tasks`. Omit or leave empty to disable the admin API.
 - `RATE_LIMIT_RPM`: Default per-API-key request rate on `POST /tasks`, in requests per minute (default: 60). Applies to every key without a per-key override (set at creation via the `rpm_limit` field of `POST /admin/keys`). Over-limit requests get `429 Too Many Requests` with a `Retry-After` header. Counters are in-memory per router process and reset on restart.
-- `AVS_REFERENCE_TARGET`, `AVS_REFERENCE_TARGET_FILE`, `DEMO_TARGET_ADDRESS`, `DEMO_TARGET_FILE`, `DEMO_FACTORY_ADDRESS`, `DEMO_FACTORY_FILE`, `SCHNORR_STAKE_REGISTRY_ADDRESS`, `SCHNORR_STAKE_REGISTRY_FILE`: feed the `contracts` block on `GET /avs-metadata` — `chainId`, `avsAddress`, `registryCoordinator`, the fleet's verifier (`blsSignatureChecker` under BLS, `schnorrStakeRegistry` under Schnorr, where the checker is omitted), plus the demo contracts the docs point at. Publishing the live pair is what stops a target being wired to a superseded verifier, which passes every router-side check and then reverts on chain.
+- `AVS_REFERENCE_TARGET`, `AVS_REFERENCE_TARGET_FILE`, `DEMO_TARGET_ADDRESS`, `DEMO_TARGET_FILE`, `DEMO_FACTORY_ADDRESS`, `DEMO_FACTORY_FILE`, `SCHNORR_STAKE_REGISTRY_ADDRESS`, `SCHNORR_STAKE_REGISTRY_FILE`: feed the `contracts` block on `GET /avs-metadata` — `chainId`, `avsAddress`, `schnorrStakeRegistry`, an advisory `registryCoordinator`, plus the demo contracts the docs point at. Publishing the live pair is what stops a target being wired to a superseded registry, which passes every router-side check and then reverts on chain.
 
   | Variable | Sets |
   |---|---|
-  | `AVS_REFERENCE_TARGET` | Target whose `avsAddress()` and verifier getter (`blsSignatureChecker()` or `schnorrRegistry()`) establish the published pair |
+  | `AVS_REFERENCE_TARGET` | Target whose `avsAddress()` and `schnorrRegistry()` establish the published pair |
   | `AVS_REFERENCE_TARGET_FILE` | File holding that address — the chart points this at the deploy job's record |
   | `DEMO_TARGET_ADDRESS` / `DEMO_FACTORY_ADDRESS` | `demoTarget` / `demoFactory` |
   | `DEMO_TARGET_FILE` / `DEMO_FACTORY_FILE` | Files holding those |
   | `SCHNORR_STAKE_REGISTRY_ADDRESS` | `schnorrStakeRegistry`, overriding both sources below |
   | `SCHNORR_STAKE_REGISTRY_FILE` | File holding it, which the chart points at the operator-set job's record |
 
-  Reference-target precedence: pin → playground record → deploy-job record → `demo_target.txt` beside `avs_deploy.json`; the playground record wins so the published verifier is the one `demoTarget` itself returns. Under BLS, `registryCoordinator` comes from `avs_deploy.json` and is cross-checked against the checker's own; under Schnorr, the target's `schnorrRegistry()` is cross-checked against the fleet's registry (`SCHNORR_STAKE_REGISTRY_ADDRESS`, the operator-set job's record, or `avs_deploy.json`) — on mismatch the block is omitted. Addresses publish EIP-55 checksummed so they paste into Solidity; a demo address with no code on the published chain is dropped. `example.env` covers resolution and retry behaviour.
+  Reference-target precedence: pin → playground record → deploy-job record → `demo_target.txt` beside `avs_deploy.json`; the playground record wins so the published registry is the one `demoTarget` itself returns. The target's `schnorrRegistry()` is cross-checked against the fleet's registry — on mismatch the block is omitted. `registryCoordinator` comes from `avs_deploy.json`; nothing on chain ties it to the registry, so it is advisory only. Addresses publish EIP-55 checksummed so they paste into Solidity; a demo address with no code on the published chain is dropped. `example.env` covers resolution and retry behaviour.
 
-  `schnorrStakeRegistry` is published under either signature scheme, because the router only serves it and never verifies against it: publishing it while the fleet signs BLS is what lets an integrator deploy a target that accepts both, so a scheme cutover needs no action from them. Precedence: `SCHNORR_STAKE_REGISTRY_ADDRESS` → the operator-set job's record (`SCHNORR_STAKE_REGISTRY_FILE`) → `avs_deploy.json`. The record exists because the job and the router do not always read the same copy of that JSON: under Secret Manager the router's comes from a secrets volume the job never writes to. Whichever source answers, the address publishes only once `nextPossibleMutationBlock()` answers at it — the call that tells a registry apart from a checker pasted in its place. Provisioning one ahead of the operator set is `schnorr.provision`, in the chart's [Schnorr section](helm/gas-killer/README.md#publishing-the-registry-before-a-cutover).
-- `RPC_FAILURE_THRESHOLD`: consecutive RPC failures against one chain before that chain is marked unavailable (default: 5). A down provider breaks the whole task lifecycle — validation, analysis, and submission all read the chain — so on reaching the threshold the router sets `gas_killer_rpc_healthy{chain="l1|l2"}` to 0, logs the transition at `WARN` with the chain, failure count, and timestamp, and refuses new submissions with `503 RPC_UNAVAILABLE` rather than queueing work that cannot complete. Only L1 sheds traffic: every round's certificate is anchored to an L1 reference block, so an L1 outage blocks submissions whichever chain the target runs on, while a degraded L2 is alerted but leaves L1 targets alone. The count is a run, not a total — a single success clears it. Every chain read on the submission and freshness paths reports its outcome, and a background probe (`eth_blockNumber`, every 15s) checks each chain independently, so the gauge reflects reality on an idle router and a recovered provider clears the breaker without waiting for traffic.
+  `schnorrStakeRegistry` precedence: `SCHNORR_STAKE_REGISTRY_ADDRESS` → the operator-set job's record (`SCHNORR_STAKE_REGISTRY_FILE`) → `avs_deploy.json`. The record exists because the job and the router do not always read the same copy of that JSON: under Secret Manager the router's comes from a secrets volume the job never writes to. Whichever source answers, the address publishes only once `nextPossibleMutationBlock()` answers at it — the call that tells a registry apart from some other contract pasted in its place. See the chart's [Schnorr section](helm/gas-killer/README.md#publishing-the-registry).
+- `RPC_FAILURE_THRESHOLD`: consecutive RPC failures against one chain before that chain is marked unavailable (default: 5). A down provider breaks the whole task lifecycle — validation, analysis, and submission all read the chain — so on reaching the threshold the router sets `gas_killer_rpc_healthy{chain="l1|l2"}` to 0, logs the transition at `WARN` with the chain, failure count, and timestamp, and refuses new submissions with `503 RPC_UNAVAILABLE` rather than queueing work that cannot complete. Only L1 sheds traffic: every round's signature is anchored to an L1 reference block, so an L1 outage blocks submissions whichever chain the target runs on, while a degraded L2 is alerted but leaves L1 targets alone. The count is a run, not a total — a single success clears it. Every chain read on the submission and freshness paths reports its outcome, and a background probe (`eth_blockNumber`, every 15s) checks each chain independently, so the gauge reflects reality on an idle router and a recovered provider clears the breaker without waiting for traffic.
 - `TASK_TTL_SECONDS`: How long a task may sit without reaching a terminal state before a background sweep settles it as `expired` (default: 600, the wall-clock life of a rendered payload on L1 — `PAYLOAD_BLOCK_BUFFER` blocks at a 12s slot time — so the sweep never withdraws a payload the chain would still accept; a target chain with faster blocks has a proportionally shorter payload window and can run a shorter TTL). A `queued` task past its TTL is expired with `QUEUE_TTL_EXCEEDED` — its pinned `block_height` has gone stale, so aggregating it would only produce a payload the contract rejects — and a `ready` payload nobody collected is expired with `READY_TTL_EXCEEDED` on the same TTL, counted from when aggregation recorded it, which frees the deduplication slot for its transition index. A `processing` task is never cancelled mid-round: its height is already assigned and must resolve either way. The sweep runs every 60 seconds and counts what it settles in `gas_killer_tasks_expired_total`.
 - `INGRESS_STALENESS_WINDOW_BLOCKS`: How far behind the target chain's head a submitted `block_height` may be and still be admitted; past it `POST /tasks` returns `400 STALE_BLOCK`. Defaults to `BLOCK_STALE_MEASURE - PAYLOAD_BLOCK_BUFFER` (250 at the stock 300/50), floored at 1 block — a task's analysis is anchored at its `block_height`, and both the aggregation round and the rendered payload's validity window have to fit in what is left of the contract's staleness window, so admission holds the payload buffer back instead of accepting work that can only just finish simulating. An explicit value above `BLOCK_STALE_MEASURE` is clamped to it (and warned about at startup); `0` disables the check entirely. The effective window is logged at startup.
-- `SIGNATURE_SCHEME`: `bls` (default) or `schnorr`. Selects the quorum-signature scheme, and every binary in a deployment must agree: a mixed fleet certifies nothing. Under `bls` the aggregation engine produces BN254-aggregated operator signatures verified on chain by a `BLSSignatureChecker`. Under `schnorr` the router coordinates a two-round MuSig2 protocol on p2p channel 2 and submits one constant-gas aggregate signature verified against a `SchnorrStakeRegistry`; each node additionally loads a secp256k1 signing key (`--schnorr-key-file`), while the p2p transport identity stays BN254 in both modes. An unrecognized value panics at startup. Targets are scheme-specific, so switching a running deployment also means redeploying every target: see `SCHNORR_STAGE_TIMEOUT_SECS`, `SCHNORR_SIGN_STAGE_TIMEOUT_SECS`, `P2P_SCHNORR_MESSAGES_PER_SECOND`, and `SCHNORR_NOTICE_WINDOW` in `example.env`, and the Schnorr section of `helm/gas-killer/README.md`.
 - `QUORUM_NUMBER`: Quorum number to use (default: 0)
-- `P2P_ACK_MESSAGES_PER_SECOND`: Per-peer rate for the engine's TipAck channel. Defaults to `2 * AGG_ACTIVITY_TIMEOUT / REBROADCAST_INTERVAL + 8`, sized so steady-state ack rebroadcast never hits the p2p limiter (which silently drops over-rate messages). Only override to constrain bandwidth. The legacy `P2P_MESSAGES_PER_SECOND` knob now only governs the task-directive channel.
+- `QUORUM_THRESHOLD` / `THRESHOLD_DENOMINATOR`: Signing threshold `num/den` (default: 2/3). Sets the coordinator's `min_signers` floor and the `SchnorrStakeRegistry`'s on-chain threshold, so the two checks stay in lockstep (see "Quorum model" above).
+- `SCHNORR_STAGE_TIMEOUT_SECS`: Nonce-collection deadline per attempt (default: `min(5, ROUND_TIMEOUT/6)`).
+- `SCHNORR_SIGN_STAGE_TIMEOUT_SECS`: Partial-signature collection deadline per attempt (default: `ROUND_TIMEOUT/2`). This stage holds the node's EVMSketch, so it must cover a full cold trace.
+- `P2P_MESSAGES_PER_SECOND`: Per-peer rate for the task-directive channel, channel 1 (default: 1.0).
+- `P2P_SCHNORR_MESSAGES_PER_SECOND`: Per-peer rate for the Schnorr channel, channel 2 (default: 64). The p2p sender silently drops over-rate messages, and a dropped signing-round message costs a whole attempt.
+- `SCHNORR_NOTICE_WINDOW`: Blocks a `SchnorrStakeRegistry` operator-set change must be announced ahead of taking effect (default: 0). `example.env` covers when to raise it.
 
-Removed after the aggregation migration:
-- `THRESHOLD`: the minimum-signature override no longer exists — the quorum is fixed by the consensus engine at `n - floor((n-1)/3)` (see "Quorum model" above).
+Each node also takes `--schnorr-key-file`, its secp256k1 signing key; `--key-file` is the BN254 p2p transport identity. See the Schnorr section of `helm/gas-killer/README.md`.
 
 Operator (node) key files are generated automatically by the Docker setup and do not need to be set manually.
 
@@ -269,9 +260,7 @@ the commonware runtime's own registries, then the process's custom metrics, then
 configuration fingerprint. The Helm chart scrapes both at 15s and dashboards them.
 
 Metrics from the runtime registries are named after the subsystem that registered them —
-`engine_*` for the aggregation engine (both binaries), `reporter_*` for an operator's
-certificate reporter, `network_*` for p2p. The router's own metrics are all prefixed
-`gas_killer_`.
+`network_*` for p2p. The router's own metrics are all prefixed `gas_killer_`.
 
 The pipeline's shape, as opposed to the cost of one round:
 
@@ -285,9 +274,7 @@ The pipeline's shape, as opposed to the cost of one round:
 | `gas_killer_directive_sends_total{result}` | Per-recipient directive delivery: `delivered`, `rate_limited`, `rejected` |
 | `gas_killer_settlement_conflicts_total` | Terminal-state transitions the store refused. Must be 0 |
 | `gas_killer_config_fingerprint{fingerprint}` | Always 1, labelled with this process's consensus-critical config |
-| `engine_tip` | The engine's contiguous tip: the lowest height without a certificate |
-| `reporter_certified_total`, `reporter_skipped_total` | What the operators actually signed |
-| `network_spawner_messages_rate_limited_total{peer,message}` | Messages the *receiving* peer throttled, by channel (`data_0` acks, `data_1` directives, `data_2` Schnorr) |
+| `network_spawner_messages_rate_limited_total{peer,message}` | Messages the *receiving* peer throttled, by channel (`data_1` directives, `data_2` Schnorr) |
 
 Where the time inside one gas analysis goes. Both the router and the operators publish these,
 separated by the scrape target:
@@ -321,13 +308,13 @@ Three of these need reading together rather than alone.
 ends of the same channel and neither substitutes for the other. The send-side counter exists
 because the p2p sender returns the peers it will attempt and silently omits the ones over quota,
 so a partial drop and a full delivery are indistinguishable at the call site — and a dropped
-`Announce` is how an operator ends up voting to skip a height everyone else signed. The
+`Announce` is how an operator ends up refusing to sign a height everyone else signed. The
 receive-side counter is the peer's own view, where a throttled message is not dropped but sleeps
 the entire connection, blocking every channel on it.
 
 `gas_killer_config_fingerprint` is a hash of the settings that must match across the router and
-every operator: `GK_SIM_PROFILE`, `STATE_ENCODING`, `SIGNATURE_SCHEME`, the application
-namespace, `AGG_WINDOW`, and the directive wire version. A fleet that disagrees on any of them
+every operator: `GK_SIM_PROFILE`, `STATE_ENCODING`, the application namespace,
+`AGG_WINDOW`, and the directive wire version. A fleet that disagrees on any of them
 does not fail loudly — peers stay connected, quorum never forms, and every pod reports healthy —
 so `count(count by (fingerprint) (gas_killer_config_fingerprint))` must be exactly 1. It is also
 the pre-flight check for a rolling upgrade: none of these may be changed on a live fleet.
@@ -425,16 +412,11 @@ GAS_KILLER_TASKS_URL=https://<host>/tasks GAS_KILLER_API_KEY=gk_... cargo run -p
 
 ### Dependencies
 - `alloy`: Ethereum interaction
-- `commonware-consensus`: Aggregation engine (certificate assembly over heights)
-- `commonware-cryptography`: Cryptographic primitives and the certificate `Scheme` trait implemented by our BN254 multisig scheme
-- `commonware-p2p`: P2P networking
-- `commonware-runtime`: Runtime utilities and journal-backed storage
+- `commonware-avs-*` (git, `commonware-restaking`): the upstream sequencer, node TaskBook, BN254 p2p identity, EigenLayer operator discovery, and contract bindings
+- `commonware-p2p`, `commonware-runtime`, `commonware-cryptography`, `commonware-codec`: P2P networking, runtime, and primitives
+- `k256`: secp256k1 arithmetic for the MuSig2 implementation in `common/src/schnorr/`
 - `gas-analyzer-evmsketch`: EVM gas analysis and storage update computation
-- `eigen-*` / `ark-*`: EigenLayer SDK and BN254 curve arithmetic
-
-The former `commonware-avs-*` (`commonware-restaking`) git dependencies were dropped in
-the aggregation migration; the parts still needed are vendored under `common/src/`
-(`bn254/`, `eigenlayer.rs`, `bindings/`).
+- `eigen-*` / `ark-*`: EigenLayer SDK and BN254 curve arithmetic for the p2p identity
 
 ### Code Quality
 ```bash

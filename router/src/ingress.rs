@@ -19,7 +19,7 @@ use axum::{
 use gas_killer_common::ChainRole;
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::avs_contracts::ResolvedContracts;
-use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
+use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
 use gas_killer_common::{PayloadView, TaskBundle};
@@ -546,7 +546,7 @@ async fn validate_onchain<P: Provider + Clone>(
     // Only validate the transition index if explicitly provided.
     // None means "auto" — the server resolves the index at dequeue time.
     if let Some(provided) = body.transition_index {
-        let contract = GasKillerSDK::new(body.target_address, provider.clone());
+        let contract = SchnorrGasKillerSDK::new(body.target_address, provider.clone());
         let count = record_rpc(
             health,
             chain_id,
@@ -1334,7 +1334,7 @@ async fn render_or_reject_payload<P: Provider + Clone>(
     let current_count = match freshness.cached_transition_count(role, bundle.target_address) {
         Some(count) => count,
         None => {
-            let contract = GasKillerSDK::new(bundle.target_address, provider.clone());
+            let contract = SchnorrGasKillerSDK::new(bundle.target_address, provider.clone());
             let count = record_rpc(health, role, contract.stateTransitionCount().call().await)
                 .map_err(|e| ApiError::from(OnchainValidationError::RpcError(e.to_string())))?;
             let count: u64 = count.try_into().map_err(|_| {
@@ -2810,9 +2810,8 @@ mod tests {
             contracts.publish(gas_killer_common::avs_contracts::AvsContracts {
                 chain_id: 11155111,
                 avs_address: address!("dCec8ce0a03848B55989Bcc711e424Ca31d9eeD9"),
-                bls_signature_checker: Some(address!("6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9")),
                 registry_coordinator: address!("0a032D62dde46670Ae40Ce532C97f6CE9Af72Dc4"),
-                schnorr_stake_registry: Some(address!("00000000000000000000000000000000000000ee")),
+                schnorr_stake_registry: address!("6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9"),
                 demo_target: Some(address!("00000000000000000000000000000000000000aa")),
                 demo_factory: None,
             });
@@ -2848,7 +2847,7 @@ mod tests {
                 "0xdCec8ce0a03848B55989Bcc711e424Ca31d9eeD9"
             );
             assert_eq!(
-                contracts["blsSignatureChecker"],
+                contracts["schnorrStakeRegistry"],
                 "0x6953fc47FC8b7568801f3fdc327bc0d9aD12E5b9"
             );
             assert_eq!(
@@ -3879,9 +3878,10 @@ mod tests {
                 chain_id: 31337,
                 value: U256::ZERO,
                 valid_until_block,
-                proof: gas_killer_common::BundleProof::Bls {
-                    quorum_numbers: alloy_primitives::Bytes::new(),
-                    non_signer_stakes_and_signature: alloy_primitives::Bytes::new(),
+                proof: gas_killer_common::BundleProof::Schnorr {
+                    s: U256::ZERO,
+                    r_addr: Address::ZERO,
+                    non_signers: vec![],
                 },
             }
         }

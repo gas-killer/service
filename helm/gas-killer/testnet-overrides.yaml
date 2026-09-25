@@ -38,10 +38,6 @@
 global:
   environment: TESTNET
 
-  # Aggregate Schnorr against schnorr.stakeRegistryAddress. Not a rolling change: the operator set
-  # and every target are scheme-specific, so switching back is another fresh install.
-  signatureScheme: schnorr
-
   # Heavy-compute tracked functions are only extractable from the net diff; a struct-log
   # trace of a call that expensive does not complete. The fleet shares one RPC serving
   # prestateTracer (diffMode) and callTracer (withLog), meeting the single-client

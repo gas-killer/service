@@ -4,26 +4,21 @@ use crate::sequencer::{InFlightTask, in_flight_task, set_task_failed, set_task_r
 use crate::store::SqliteStore;
 use crate::task_data::GasKillerTaskData;
 use alloy::network::Ethereum;
-use alloy::sol_types::SolValue;
 use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
 use anyhow::{Result, bail};
-use commonware_avs_router::executor::{BlsSignatureVerificationHandler, ExecutionResult};
+use commonware_avs_router::executor::ExecutionResult;
 use commonware_avs_router::sequencer::{DispatchTime, take_dispatch_time};
 use gas_killer_common::ChainRole;
-use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::IBLSSignatureCheckerTypes as RetrieverIBLSTypes;
-use gas_killer_common::bindings::gaskillersdk::{
-    BN254, GasKillerSDK, IBLSSignatureCheckerTypes as GasKillerIBLSTypes,
-};
+use gas_killer_common::bindings::SCHNORR_GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
 use gas_killer_common::bindings::schnorrstakeregistry::ISchnorrStakeRegistry;
-use gas_killer_common::bindings::{GAS_KILLER_INTERFACE_ID, SCHNORR_GAS_KILLER_INTERFACE_ID};
 use gas_killer_common::{BundleProof, PayloadView, TaskBundle};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Default receipt-wait timeout on L1. At ~12s/block this covers several blocks
 /// plus mempool-replacement headroom before the round is abandoned.
@@ -43,38 +38,6 @@ const DEFAULT_RECEIPT_TIMEOUT_L2_SECS: u64 = 30;
 /// payload carrying this estimate is one whose landability is unknown, not one known to fail.
 const PAYLOAD_GAS_ESTIMATE_FALLBACK: u64 = 10_000_000;
 
-/// Rebuilds the operator-state-retriever `NonSignerStakesAndSignature` into the distinct
-/// `GasKillerSDK` binding type. Each `sol!` invocation mints its own Rust type, so the fields
-/// are copied across even though the ABI layout is identical.
-fn reshape_non_signer(
-    data: RetrieverIBLSTypes::NonSignerStakesAndSignature,
-) -> GasKillerIBLSTypes::NonSignerStakesAndSignature {
-    GasKillerIBLSTypes::NonSignerStakesAndSignature {
-        nonSignerQuorumBitmapIndices: data.nonSignerQuorumBitmapIndices,
-        nonSignerPubkeys: data
-            .nonSignerPubkeys
-            .into_iter()
-            .map(|p| BN254::G1Point { X: p.X, Y: p.Y })
-            .collect(),
-        quorumApks: data
-            .quorumApks
-            .into_iter()
-            .map(|p| BN254::G1Point { X: p.X, Y: p.Y })
-            .collect(),
-        apkG2: BN254::G2Point {
-            X: data.apkG2.X,
-            Y: data.apkG2.Y,
-        },
-        sigma: BN254::G1Point {
-            X: data.sigma.X,
-            Y: data.sigma.Y,
-        },
-        quorumApkIndices: data.quorumApkIndices,
-        totalStakeIndices: data.totalStakeIndices,
-        nonSignerStakeIndices: data.nonSignerStakeIndices,
-    }
-}
-
 /// The [`ExecutionResult`] a completion handler returns for a rendered (non-broadcast) round.
 ///
 /// A rendered round persists the payload/bundle and submits no transaction, so there is no
@@ -89,28 +52,9 @@ fn rendered_execution_result() -> ExecutionResult {
     }
 }
 
-/// Resolved inputs for a BLS `verifyAndUpdate` call, assembled once by
-/// [`GasKillerHandler::prepare_bls`] and consumed by either the render path
-/// ([`GasKillerHandler::render_bls_payload`]) or the retained broadcast path
-/// ([`GasKillerHandler::execute_verification`]).
-struct PreparedBls<P> {
-    provider: P,
-    chain_id: u64,
-    target_addr: Address,
-    from_address: Address,
-    msg_hash: FixedBytes<32>,
-    quorum_numbers: Bytes,
-    /// `current_block_number - 1`; see [`GasKillerHandler::prepare_bls`].
-    reference_block_number: u32,
-    storage_updates: Bytes,
-    transition_index: u64,
-    target_function: FixedBytes<4>,
-    non_signer: GasKillerIBLSTypes::NonSignerStakesAndSignature,
-}
-
-/// Resolved inputs for a Schnorr `verifyAndUpdate` call; the Schnorr twin of [`PreparedBls`],
-/// swapping the BN254 non-signer struct for the aggregate `(s, Raddr)` and the ascending
-/// `non_signers`.
+/// Resolved inputs for a `verifyAndUpdate` call, assembled once by
+/// [`GasKillerHandler::prepare_schnorr`] and consumed by either the render path or the retained
+/// broadcast path.
 struct PreparedSchnorr<P> {
     provider: P,
     chain_id: u64,
@@ -283,266 +227,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Duration::from_secs(secs)
     }
 
-    /// Resolves whether `target_addr` implements the GasKiller ERC-165 interface,
-    /// memoizing the result per address. Interface support is immutable for a
-    /// deployed contract, so the first lookup is reused on every later round and
-    /// the per-round `supportsInterface` RPC collapses to a hashmap read.
-    async fn supports_gas_killer_interface(
-        &self,
-        provider: P,
-        target_addr: Address,
-    ) -> Result<bool> {
-        if let Some(supported) = self.interface_cache.read().await.get(&target_addr).copied() {
-            return Ok(supported);
-        }
-
-        let gas_killer_sdk = GasKillerSDK::new(target_addr, provider);
-        let supports_interface_start = Instant::now();
-        let supported = match gas_killer_sdk
-            .supportsInterface(GAS_KILLER_INTERFACE_ID)
-            .call()
-            .await
-        {
-            Ok(supported) => supported,
-            Err(e) => {
-                warn!("supportsInterface call failed: {}", e);
-                return Err(anyhow::anyhow!("supportsInterface call failed: {}", e));
-            }
-        };
-        if let Some(m) = &self.metrics {
-            m.executor_supports_interface_seconds
-                .observe(supports_interface_start.elapsed().as_secs_f64());
-        }
-        self.interface_cache
-            .write()
-            .await
-            .insert(target_addr, supported);
-        Ok(supported)
-    }
-
-    /// Runs the shared preflight for a BLS round and resolves every `verifyAndUpdate` input.
-    ///
-    /// Reshapes the non-signer struct into the SDK binding type, resolves the chain provider,
-    /// confirms the locally recomputed payload hash matches the quorum-signed hash, and gates on
-    /// the target's ERC-165 GasKiller interface. `reference_block_number = current_block_number
-    /// - 1` so that a simulation at the current block satisfies the on-chain
-    /// `require(referenceBlockNumber < block.number)`; without the decrement a simulation at
-    /// block N would see `referenceBlockNumber == N` and revert with `FutureBlockNumber`.
-    async fn prepare_bls(
-        &self,
-        msg_hash: FixedBytes<32>,
-        quorum_numbers: Bytes,
-        current_block_number: u32,
-        non_signer_data: RetrieverIBLSTypes::NonSignerStakesAndSignature,
-        task_data: Option<&GasKillerTaskData>,
-    ) -> Result<PreparedBls<P>> {
-        let non_signer = reshape_non_signer(non_signer_data);
-
-        let task_data = task_data
-            .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
-
-        let chain_id: u64 = task_data.chain_id;
-
-        let provider = self
-            .get_provider(chain_id)
-            .ok_or_else(|| anyhow::anyhow!("No provider configured for chain: {}", chain_id))?
-            .clone();
-
-        info!(
-            storage_updates_len = task_data.storage_updates.len(),
-            chain = %chain_id,
-            "Using storage updates from task data on detected chain"
-        );
-
-        let storage_updates = task_data.storage_updates.clone();
-        let transition_index = task_data.transition_index;
-        let target_function = task_data.function_selector();
-        let target_addr = task_data.target_address;
-        let from_address = task_data.from_address;
-
-        debug!(
-            transition_index,
-            target_address = %target_addr,
-            target_function = %target_function,
-            storage_updates_len = storage_updates.len(),
-            storage_updates_first_32 = %hex::encode(&task_data.storage_updates[..std::cmp::min(32, task_data.storage_updates.len())]),
-            detected_chain = %chain_id,
-            "Executor payload hash inputs"
-        );
-
-        // The payload-hash preflight and the ERC-165 interface check are independent,
-        // so run them concurrently. Once the interface result is cached the second
-        // future collapses to a hashmap read, making the join effectively free.
-        let metrics = self.metrics.clone();
-        let (expected_hash, supports_result) = tokio::join!(
-            async {
-                let hash_preflight_start = Instant::now();
-                let expected_hash = FixedBytes::<32>::from(
-                    task_data.build_payload_hash(storage_updates.as_ref()).0,
-                );
-                if let Some(m) = &metrics {
-                    m.executor_hash_preflight_seconds
-                        .observe(hash_preflight_start.elapsed().as_secs_f64());
-                }
-                expected_hash
-            },
-            self.supports_gas_killer_interface(provider.clone(), target_addr),
-        );
-
-        // Confirm the locally computed payload hash matches the quorum's signed hash.
-        if expected_hash != msg_hash {
-            warn!(
-                offchain_msg_hash = %msg_hash,
-                local_expected_hash = %expected_hash,
-                transition_index,
-                target_address = %target_addr,
-                target_function = %target_function,
-                storage_updates_len = storage_updates.len(),
-                "Message hash mismatch between aggregation and local computation"
-            );
-            return Err(anyhow::anyhow!(
-                "Message hash mismatch: aggregation {} != local {}",
-                msg_hash,
-                expected_hash
-            ));
-        }
-        info!("Message hash match confirmed");
-
-        // Ensure the contract implements the GasKiller interface via the ERC-165 check.
-        if !supports_result? {
-            warn!(
-                interface_id = %GAS_KILLER_INTERFACE_ID,
-                "Target contract does not support GasKiller interface"
-            );
-            return Err(anyhow::anyhow!(
-                "Target contract does not support GasKiller interface ({})",
-                GAS_KILLER_INTERFACE_ID
-            ));
-        }
-
-        Ok(PreparedBls {
-            provider,
-            chain_id,
-            target_addr,
-            from_address,
-            msg_hash,
-            quorum_numbers,
-            reference_block_number: current_block_number.saturating_sub(1),
-            storage_updates,
-            transition_index,
-            target_function,
-            non_signer,
-        })
-    }
-
-    /// Broadcasts a BLS `verifyAndUpdate` on-chain from the router's funded wallet and waits for
-    /// the receipt.
-    ///
-    /// This is the **auto-execute** path: the entry point for the per-API-key auto-execute /
-    /// account-abstraction tier that submits the round on the user's behalf. The completion
-    /// handler renders a user-signed payload via [`Self::render_bls_payload`]; both share
-    /// [`Self::prepare_bls`], so a per-key branch between rendering and broadcasting stays
-    /// localized.
-    pub async fn execute_verification(
-        &mut self,
-        msg_hash: FixedBytes<32>,
-        quorum_numbers: Bytes,
-        current_block_number: u32,
-        non_signer_data: RetrieverIBLSTypes::NonSignerStakesAndSignature,
-        task_data: Option<&GasKillerTaskData>,
-    ) -> Result<ExecutionResult> {
-        let prepared = self
-            .prepare_bls(
-                msg_hash,
-                quorum_numbers,
-                current_block_number,
-                non_signer_data,
-                task_data,
-            )
-            .await?;
-        let PreparedBls {
-            provider,
-            chain_id,
-            target_addr,
-            msg_hash,
-            quorum_numbers,
-            reference_block_number,
-            storage_updates,
-            transition_index,
-            target_function,
-            non_signer,
-            ..
-        } = prepared;
-
-        let gas_killer_sdk = GasKillerSDK::new(target_addr, provider);
-
-        info!("Sending verifyAndUpdate transaction");
-        let tx_send_start = Instant::now();
-        let send_result = gas_killer_sdk
-            .verifyAndUpdate(
-                msg_hash,
-                quorum_numbers,
-                reference_block_number,
-                storage_updates,
-                U256::from(transition_index),
-                target_function,
-                non_signer,
-            )
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send verifyAndUpdate transaction: {}", e));
-        if let Some(m) = &self.metrics {
-            m.executor_tx_send_seconds
-                .observe(tx_send_start.elapsed().as_secs_f64());
-        }
-        let call_return = send_result?;
-
-        // Bound the receipt wait so L1 mempool congestion, RPC degradation, or a
-        // dropped transaction can't stall the executor indefinitely. On timeout we
-        // return an error so the submitter counts the height as failed and moves on.
-        // Unknown chain IDs fall back to the L1 (longer) timeout.
-        let chain_role = self.chain_roles.get(&chain_id).copied().unwrap_or_default();
-        let receipt_timeout = self.receipt_timeout(chain_role);
-        let receipt_start = Instant::now();
-        let receipt = match tokio::time::timeout(receipt_timeout, call_return.get_receipt()).await {
-            Ok(receipt_result) => {
-                if let Some(m) = &self.metrics {
-                    m.executor_receipt_confirmation_seconds
-                        .observe(receipt_start.elapsed().as_secs_f64());
-                }
-                receipt_result
-                    .map_err(|e| anyhow::anyhow!("Failed to get transaction receipt: {}", e))?
-            }
-            Err(_) => {
-                warn!(
-                    chain = %chain_id,
-                    timeout_secs = receipt_timeout.as_secs(),
-                    "get_receipt timed out waiting for transaction inclusion"
-                );
-                return Err(anyhow::anyhow!(
-                    "get_receipt timed out after {}s on chain {}",
-                    receipt_timeout.as_secs(),
-                    chain_id
-                ));
-            }
-        };
-        info!(
-            tx = %receipt.transaction_hash,
-            block = receipt.block_number,
-            status = ?receipt.status(),
-            gas_used = ?receipt.gas_used,
-            "verifyAndUpdate receipt"
-        );
-
-        Ok(ExecutionResult {
-            transaction_hash: format!("{:?}", receipt.transaction_hash),
-            block_number: receipt.block_number,
-            gas_used: Some(receipt.gas_used),
-            status: Some(receipt.status()),
-            contract_address: receipt.contract_address.map(|a| a.to_string()),
-        })
-    }
-
     /// Resolves the advisory `estimated_gas` for a rendered payload from the outcome of
     /// `eth_estimateGas`, or fails the round when that call proved the payload cannot land.
     ///
@@ -591,99 +275,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         }
     }
 
-    /// Renders a completed BLS round into a user-signable transaction request and the durable
-    /// [`TaskBundle`] it derives from, without broadcasting.
-    ///
-    /// `data` is the full `verifyAndUpdate` calldata; `estimated_gas` comes from
-    /// `eth_estimateGas` simulated as the requesting account, via
-    /// [`Self::resolve_payload_gas`] — which also fails the round if that call reverts. `value` is
-    /// fixed at zero: `verifyAndUpdate` is not payable in beta and the value is kept
-    /// server-controlled so a future on-chain fee is a server change, not an integrator client-code
-    /// change.
-    async fn render_bls_payload(
-        &self,
-        msg_hash: FixedBytes<32>,
-        quorum_numbers: Bytes,
-        current_block_number: u32,
-        non_signer_data: RetrieverIBLSTypes::NonSignerStakesAndSignature,
-        task_data: Option<&GasKillerTaskData>,
-    ) -> Result<RenderedRound> {
-        let prepared = self
-            .prepare_bls(
-                msg_hash,
-                quorum_numbers,
-                current_block_number,
-                non_signer_data,
-                task_data,
-            )
-            .await?;
-        let PreparedBls {
-            provider,
-            chain_id,
-            target_addr,
-            from_address,
-            msg_hash,
-            quorum_numbers,
-            reference_block_number,
-            storage_updates,
-            transition_index,
-            target_function,
-            non_signer,
-        } = prepared;
-
-        // Capture the ABI-encoded proof for the bundle before the struct is moved into the call.
-        let non_signer_abi = Bytes::from(non_signer.abi_encode());
-        let value = U256::ZERO;
-
-        let sdk = GasKillerSDK::new(target_addr, provider);
-        let call = sdk
-            .verifyAndUpdate(
-                msg_hash,
-                quorum_numbers.clone(),
-                reference_block_number,
-                storage_updates.clone(),
-                U256::from(transition_index),
-                target_function,
-                non_signer,
-            )
-            .from(from_address)
-            .value(value);
-
-        let data = call.calldata().clone();
-        let estimated_gas = self.resolve_payload_gas(call.estimate_gas().await, target_addr)?;
-
-        let valid_until_block = reference_block_number as u64 + self.payload_block_buffer;
-
-        let payload = PayloadView {
-            to: target_addr,
-            data,
-            value,
-            chain_id,
-            estimated_gas,
-            valid_until_block,
-        };
-        let bundle = TaskBundle {
-            msg_hash,
-            reference_block_number,
-            transition_index,
-            target_address: target_addr,
-            target_function,
-            storage_updates,
-            chain_id,
-            value,
-            valid_until_block,
-            proof: BundleProof::Bls {
-                quorum_numbers,
-                non_signer_stakes_and_signature: non_signer_abi,
-            },
-        };
-        Ok(RenderedRound { payload, bundle })
-    }
-
-    /// Schnorr twin of [`Self::supports_gas_killer_interface`], checking the
-    /// `ISchnorrGasKillerSDK` interface ID instead. Shares the same memo cache: a
-    /// process runs exactly one signature scheme, so a given target address is
-    /// only ever probed for one of the two interface IDs.
+    /// Resolves whether `target_addr` implements the Gas Killer ERC-165 interface,
+    /// memoizing the result per address. Interface support is immutable for a
+    /// deployed contract, so the first lookup is reused on every later round and
+    /// the per-round `supportsInterface` RPC collapses to a hashmap read.
     async fn supports_schnorr_interface(&self, provider: P, target_addr: Address) -> Result<bool> {
         if let Some(supported) = self.interface_cache.read().await.get(&target_addr).copied() {
             return Ok(supported);
@@ -713,9 +308,14 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Ok(supported)
     }
 
-    /// Schnorr twin of [`Self::prepare_bls`]: identical preflights (payload-hash match, ERC-165
-    /// gate, `reference_block_number = head − 1`), resolving the aggregate `(s, Raddr)` and the
-    /// strictly ascending `non_signers` instead of the BN254 non-signer struct.
+    /// Runs the shared preflight for a round and resolves every `verifyAndUpdate` input.
+    ///
+    /// Resolves the chain provider, confirms the locally recomputed payload hash matches the
+    /// quorum-signed hash, and gates on the target's ERC-165 Gas Killer interface.
+    /// `reference_block_number = current_block_number - 1` so that a simulation at the current
+    /// block satisfies the on-chain `require(referenceBlockNumber < block.number)`; without the
+    /// decrement a simulation at block N would see `referenceBlockNumber == N` and revert with
+    /// `FutureBlockNumber`.
     async fn prepare_schnorr(
         &self,
         msg_hash: FixedBytes<32>,
@@ -803,8 +403,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         })
     }
 
-    /// Schnorr twin of [`Self::execute_verification`] — the **auto-execute** broadcast path for
-    /// the per-API-key auto-execute / account-abstraction tier. The completion handler renders a
+    /// The **auto-execute** broadcast path, retained for the per-API-key auto-execute /
+    /// account-abstraction tier. The completion handler renders a
     /// user-signed payload via [`Self::render_schnorr_payload`]; both share
     /// [`Self::prepare_schnorr`].
     pub async fn execute_schnorr_verification(
@@ -964,10 +564,14 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         }
     }
 
-    /// Schnorr twin of [`Self::render_bls_payload`]: renders a completed Schnorr round into a
-    /// user-signable transaction request and its durable [`TaskBundle`] without broadcasting.
-    /// The outer payload is scheme-agnostic — only the encoded `data` and the bundle's proof
-    /// differ from the BLS rendering.
+    /// Renders a completed round into a user-signable transaction request and the durable
+    /// [`TaskBundle`] it derives from, without broadcasting.
+    ///
+    /// `data` is the full `verifyAndUpdate` calldata; `estimated_gas` comes from
+    /// `eth_estimateGas` simulated as the requesting account, via
+    /// [`Self::resolve_payload_gas`] — which also fails the round if that call reverts. `value` is
+    /// fixed at zero and kept server-controlled, so a future on-chain fee is a server change, not
+    /// an integrator client-code change.
     #[allow(clippy::too_many_arguments)]
     async fn render_schnorr_payload(
         &self,
@@ -1064,10 +668,8 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Ok(RenderedRound { payload, bundle })
     }
 
-    /// Schnorr twin of [`BlsSignatureVerificationHandler::handle_verification`]:
-    /// same metrics envelope and task settlement, the proof arguments swap the
-    /// BN254 non-signer struct for the aggregate `(s, Raddr)` and the strictly
-    /// ascending `non_signers`. Called by
+    /// Renders `verifyAndUpdate` for a certified height and settles its task, recording
+    /// round-trip and execution metrics keyed by `height`. Called by
     /// [`crate::schnorr_submitter::SchnorrSubmitter`].
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_schnorr_verification(
@@ -1107,104 +709,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             match &result {
                 Ok(_) => {
                     m.aggregation_rounds_completed.inc();
-                    if let Some(start) = dispatch_start {
-                        m.round_latency_seconds
-                            .observe(start.elapsed().as_secs_f64());
-                    }
-                }
-                Err(_) => {
-                    m.aggregation_rounds_failed.inc();
-                }
-            }
-        }
-
-        // Settle the task this height was executing. `GasKillerTaskSource::next_task`
-        // set the in-flight slot when it dispatched this task; taking it here both
-        // records the outcome and clears the slot so a later skipped height is not
-        // mistaken for this one. A successful round persists the rendered payload and its
-        // bundle; the on-chain submission is left to the user (or the future auto-execute tier).
-        if let Some(store) = &self.store
-            && let Some(task_id) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
-        {
-            let metrics = self.metrics.as_deref();
-            match &result {
-                Ok(rendered) => {
-                    set_task_ready(
-                        store,
-                        metrics,
-                        &task_id,
-                        &rendered.payload,
-                        &rendered.bundle,
-                    )
-                    .await
-                }
-                Err(e) => {
-                    set_task_failed(
-                        store,
-                        metrics,
-                        &task_id,
-                        &format!("verification failed: {e}"),
-                    )
-                    .await
-                }
-            }
-        }
-
-        result.map(|_| rendered_execution_result())
-    }
-}
-
-#[async_trait::async_trait]
-impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> BlsSignatureVerificationHandler
-    for GasKillerHandler<P>
-{
-    type TaskData = GasKillerTaskData;
-
-    /// Submits `verifyAndUpdate` for a certified height, recording round-trip
-    /// and execution metrics. Called by [`commonware_avs_router::submitter::Submitter`]
-    /// with the aggregation height as the metric key.
-    async fn handle_verification(
-        &mut self,
-        height: u64,
-        msg_hash: FixedBytes<32>,
-        quorum_numbers: Bytes,
-        current_block_number: u32,
-        non_signer_data: RetrieverIBLSTypes::NonSignerStakesAndSignature,
-        task_data: Option<&GasKillerTaskData>,
-    ) -> Result<ExecutionResult> {
-        // Record P2P round-trip: time from this height's sequencer dispatch to a
-        // certificate reaching the submitter. Consume the entry keyed by `height`
-        // so a failed earlier height (which never reaches here) cannot contribute
-        // a stale, inflated sample. The dispatch instant is kept so the
-        // end-to-end latency can be observed once execution completes.
-        let dispatch_start = take_dispatch_time(&self.dispatch_time, height);
-        if let Some(start) = dispatch_start
-            && let Some(m) = &self.metrics
-        {
-            m.p2p_round_trip_seconds
-                .observe(start.elapsed().as_secs_f64());
-        }
-
-        let exec_start = Instant::now();
-
-        let result = self
-            .render_bls_payload(
-                msg_hash,
-                quorum_numbers,
-                current_block_number,
-                non_signer_data,
-                task_data,
-            )
-            .await;
-
-        if let Some(m) = &self.metrics {
-            m.execution_duration_seconds
-                .observe(exec_start.elapsed().as_secs_f64());
-            match &result {
-                Ok(_) => {
-                    m.aggregation_rounds_completed.inc();
-                    // End-to-end latency: sequencer dispatch through round completion.
-                    // Failed heights are skipped — a failure sample would distort the percentiles.
                     if let Some(start) = dispatch_start {
                         m.round_latency_seconds
                             .observe(start.elapsed().as_secs_f64());
@@ -1316,13 +820,13 @@ mod tests {
         let target = Address::from([0x11u8; 20]);
 
         let first = handler
-            .supports_gas_killer_interface(provider.clone(), target)
+            .supports_schnorr_interface(provider.clone(), target)
             .await
             .expect("first lookup should resolve over RPC");
         assert!(first);
 
         let second = handler
-            .supports_gas_killer_interface(provider.clone(), target)
+            .supports_schnorr_interface(provider.clone(), target)
             .await
             .expect("second lookup should be served from cache");
         assert!(second);
@@ -1341,13 +845,13 @@ mod tests {
         // second RPC.
         assert!(
             !handler
-                .supports_gas_killer_interface(provider.clone(), target)
+                .supports_schnorr_interface(provider.clone(), target)
                 .await
                 .unwrap()
         );
         assert!(
             !handler
-                .supports_gas_killer_interface(provider.clone(), target)
+                .supports_schnorr_interface(provider.clone(), target)
                 .await
                 .unwrap()
         );
@@ -1368,26 +872,26 @@ mod tests {
 
         assert!(
             handler
-                .supports_gas_killer_interface(provider.clone(), supported_addr)
+                .supports_schnorr_interface(provider.clone(), supported_addr)
                 .await
                 .unwrap()
         );
         assert!(
             !handler
-                .supports_gas_killer_interface(provider.clone(), unsupported_addr)
+                .supports_schnorr_interface(provider.clone(), unsupported_addr)
                 .await
                 .unwrap()
         );
         // Both addresses are now cached, so neither repeat lookup issues an RPC.
         assert!(
             handler
-                .supports_gas_killer_interface(provider.clone(), supported_addr)
+                .supports_schnorr_interface(provider.clone(), supported_addr)
                 .await
                 .unwrap()
         );
         assert!(
             !handler
-                .supports_gas_killer_interface(provider.clone(), unsupported_addr)
+                .supports_schnorr_interface(provider.clone(), unsupported_addr)
                 .await
                 .unwrap()
         );
@@ -1428,26 +932,6 @@ mod tests {
     // -- task lifecycle settlement --
 
     use crate::store::TaskStatus;
-    use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BN254 as RetrieverBN254;
-
-    fn empty_non_signer_data() -> RetrieverIBLSTypes::NonSignerStakesAndSignature {
-        RetrieverIBLSTypes::NonSignerStakesAndSignature {
-            nonSignerQuorumBitmapIndices: vec![],
-            nonSignerPubkeys: vec![],
-            quorumApks: vec![],
-            apkG2: RetrieverBN254::G2Point {
-                X: [U256::ZERO, U256::ZERO],
-                Y: [U256::ZERO, U256::ZERO],
-            },
-            sigma: RetrieverBN254::G1Point {
-                X: U256::ZERO,
-                Y: U256::ZERO,
-            },
-            quorumApkIndices: vec![],
-            totalStakeIndices: vec![],
-            nonSignerStakeIndices: vec![],
-        }
-    }
 
     async fn store() -> SqliteStore {
         SqliteStore::connect_in_memory()
@@ -1472,174 +956,6 @@ mod tests {
             value: U256::ZERO,
             block_height: 1,
         }
-    }
-
-    #[tokio::test]
-    async fn handle_verification_settles_task_failed_when_task_data_missing() {
-        let store = store().await;
-        let key = key_id(&store).await;
-        let task = store
-            .create_task(&key, &request_body())
-            .await
-            .expect("task creation should succeed");
-
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
-        let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(task.id.clone());
-
-        let mut handler = GasKillerHandler::new(1, provider)
-            .with_store(store.clone())
-            .with_in_flight_task(in_flight.clone());
-
-        // `task_data: None` makes `render_bls_payload` fail immediately in `prepare_bls`
-        // (before any provider call), exercising the settlement wiring without needing a real
-        // chain, ABI-encoded certificate, or registered operator set.
-        let result = handler
-            .handle_verification(
-                0,
-                FixedBytes::<32>::ZERO,
-                Bytes::new(),
-                0,
-                empty_non_signer_data(),
-                None,
-            )
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            in_flight.lock().unwrap().is_none(),
-            "the slot must be cleared once the task settles"
-        );
-        let settled = store
-            .get_task(&task.id)
-            .await
-            .unwrap()
-            .expect("task should still exist");
-        assert_eq!(settled.status, TaskStatus::Failed);
-        assert!(
-            settled
-                .error
-                .as_deref()
-                .is_some_and(|e| e.contains("verification failed"))
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_verification_settles_ready_with_rendered_payload_and_bundle() {
-        use alloy::sol_types::SolCall;
-        use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
-
-        let store = store().await;
-        let key = key_id(&store).await;
-        let task = store
-            .create_task(&key, &request_body())
-            .await
-            .expect("task creation should succeed");
-
-        // Task data whose signed hash matches its own storage updates, so the render preflight
-        // passes and a payload is produced.
-        let storage_updates = Bytes::from(vec![0xaa, 0xbb, 0xcc, 0xdd]);
-        let task_data = GasKillerTaskData {
-            storage_updates: storage_updates.clone(),
-            transition_index: 0,
-            target_address: Address::from([0x11; 20]),
-            call_data: vec![0x12, 0x34, 0x56, 0x78],
-            from_address: Address::from([0x22; 20]),
-            value: U256::ZERO,
-            block_height: 1,
-            chain_id: 1,
-        };
-        let msg_hash =
-            FixedBytes::<32>::from(task_data.build_payload_hash(storage_updates.as_ref()).0);
-
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
-        // The only queued RPC answers the ERC-165 interface probe. The subsequent
-        // eth_estimateGas drains the now-empty asserter and errors, exercising the fallback
-        // estimate — the round still renders a payload rather than failing.
-        push_supports_interface(&asserter, true);
-
-        let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(task.id.clone());
-        let mut handler = GasKillerHandler::new(1, provider)
-            .with_store(store.clone())
-            .with_in_flight_task(in_flight.clone())
-            .with_payload_block_buffer(50);
-
-        let current_block = 100u32;
-        let quorum_numbers = Bytes::from(vec![0x00]);
-        let result = handler
-            .handle_verification(
-                0,
-                msg_hash,
-                quorum_numbers.clone(),
-                current_block,
-                empty_non_signer_data(),
-                Some(&task_data),
-            )
-            .await;
-
-        assert!(result.is_ok());
-        assert!(
-            in_flight.lock().unwrap().is_none(),
-            "the slot must be cleared once the task settles"
-        );
-
-        let settled = store.get_task(&task.id).await.unwrap().unwrap();
-        assert_eq!(settled.status, TaskStatus::Ready);
-
-        let payload: PayloadView =
-            serde_json::from_str(settled.payload.as_deref().expect("payload persisted")).unwrap();
-        assert_eq!(payload.to, task_data.target_address);
-        assert_eq!(payload.value, U256::ZERO);
-        assert_eq!(payload.chain_id, 1);
-        assert_eq!(payload.estimated_gas, PAYLOAD_GAS_ESTIMATE_FALLBACK);
-        // reference_block_number = current_block - 1; valid_until = reference + buffer.
-        assert_eq!(payload.valid_until_block, (current_block as u64 - 1) + 50);
-
-        // The rendered calldata ABI-decodes to a verifyAndUpdate call carrying the round inputs.
-        let decoded = GasKillerSDK::verifyAndUpdateCall::abi_decode(payload.data.as_ref())
-            .expect("payload data should decode as verifyAndUpdate");
-        assert_eq!(decoded.msgHash, msg_hash);
-        assert_eq!(decoded.quorumNumbers, quorum_numbers);
-        assert_eq!(decoded.referenceBlockNumber, current_block - 1);
-        assert_eq!(decoded.storageUpdates, storage_updates);
-        assert_eq!(decoded.transitionIndex, U256::ZERO);
-        assert_eq!(decoded.targetFunction, task_data.function_selector());
-
-        // The structured bundle persists alongside the payload and round-trips.
-        let bundle: TaskBundle =
-            serde_json::from_str(settled.bundle.as_deref().expect("bundle persisted")).unwrap();
-        assert_eq!(bundle.msg_hash, msg_hash);
-        assert_eq!(bundle.reference_block_number, current_block - 1);
-        assert_eq!(bundle.transition_index, 0);
-        assert_eq!(bundle.chain_id, 1);
-        assert!(matches!(bundle.proof, BundleProof::Bls { .. }));
-    }
-
-    #[tokio::test]
-    async fn handle_verification_is_noop_on_store_when_slot_empty() {
-        let store = store().await;
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
-
-        let mut handler = GasKillerHandler::new(1, provider).with_store(store);
-
-        // No task was recorded as in flight (e.g. a certificate for an unassigned
-        // height); settlement must not panic when there is nothing to settle.
-        let result = handler
-            .handle_verification(
-                0,
-                FixedBytes::<32>::ZERO,
-                Bytes::new(),
-                0,
-                empty_non_signer_data(),
-                None,
-            )
-            .await;
-
-        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -1694,6 +1010,110 @@ mod tests {
         );
     }
 
+    /// Task data whose signed hash matches its own storage updates, so the render preflight passes.
+    fn matching_task_data() -> (GasKillerTaskData, FixedBytes<32>) {
+        let storage_updates = Bytes::from(vec![0xaa, 0xbb, 0xcc, 0xdd]);
+        let task_data = GasKillerTaskData {
+            storage_updates: storage_updates.clone(),
+            transition_index: 0,
+            target_address: Address::from([0x11; 20]),
+            call_data: vec![0x12, 0x34, 0x56, 0x78],
+            from_address: Address::from([0x22; 20]),
+            value: U256::ZERO,
+            block_height: 1,
+            chain_id: 1,
+        };
+        let msg_hash =
+            FixedBytes::<32>::from(task_data.build_payload_hash(storage_updates.as_ref()).0);
+        (task_data, msg_hash)
+    }
+
+    #[tokio::test]
+    async fn handle_schnorr_verification_settles_ready_with_rendered_payload_and_bundle() {
+        use alloy::sol_types::SolCall;
+
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store
+            .create_task(&key, &request_body())
+            .await
+            .expect("task creation should succeed");
+        let (task_data, msg_hash) = matching_task_data();
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        // The only queued RPC answers the ERC-165 interface probe. The eth_estimateGas after it
+        // drains the now-empty asserter and errors, exercising the fallback estimate, and so does
+        // the mutation-horizon read, leaving validity unclamped — the round still renders.
+        push_supports_interface(&asserter, true);
+
+        let in_flight = in_flight_task();
+        *in_flight.lock().unwrap() = Some(task.id.clone());
+        let mut handler = GasKillerHandler::new(1, provider)
+            .with_store(store.clone())
+            .with_in_flight_task(in_flight.clone())
+            .with_payload_block_buffer(50);
+
+        let current_block = 100u32;
+        let s = U256::from(42u64);
+        let r_addr = Address::from([0x44; 20]);
+        let non_signers = vec![Address::from([0x55; 20])];
+        let result = handler
+            .handle_schnorr_verification(
+                0,
+                msg_hash,
+                current_block,
+                s,
+                r_addr,
+                non_signers.clone(),
+                Some(&task_data),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        assert!(
+            in_flight.lock().unwrap().is_none(),
+            "the slot must be cleared once the task settles"
+        );
+
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Ready);
+
+        let payload: PayloadView =
+            serde_json::from_str(settled.payload.as_deref().expect("payload persisted")).unwrap();
+        assert_eq!(payload.to, task_data.target_address);
+        assert_eq!(payload.value, U256::ZERO);
+        assert_eq!(payload.chain_id, 1);
+        assert_eq!(payload.estimated_gas, PAYLOAD_GAS_ESTIMATE_FALLBACK);
+        // reference_block_number = current_block - 1; valid_until = reference + buffer.
+        assert_eq!(payload.valid_until_block, (current_block as u64 - 1) + 50);
+
+        // The rendered calldata ABI-decodes to a verifyAndUpdate call carrying the round inputs.
+        let decoded = SchnorrGasKillerSDK::verifyAndUpdateCall::abi_decode(payload.data.as_ref())
+            .expect("payload data should decode as verifyAndUpdate");
+        assert_eq!(decoded.msgHash, msg_hash);
+        assert_eq!(decoded.referenceBlockNumber, current_block - 1);
+        assert_eq!(decoded.storageUpdates, task_data.storage_updates);
+        assert_eq!(decoded.transitionIndex, U256::ZERO);
+        assert_eq!(decoded.targetFunction, task_data.function_selector());
+
+        // The structured bundle persists alongside the payload and round-trips.
+        let bundle: TaskBundle =
+            serde_json::from_str(settled.bundle.as_deref().expect("bundle persisted")).unwrap();
+        assert_eq!(bundle.msg_hash, msg_hash);
+        assert_eq!(bundle.reference_block_number, current_block - 1);
+        assert_eq!(bundle.transition_index, 0);
+        assert_eq!(bundle.chain_id, 1);
+        assert_eq!(
+            bundle.proof,
+            BundleProof::Schnorr {
+                s,
+                r_addr,
+                non_signers
+            }
+        );
+    }
+
     #[tokio::test]
     async fn handle_schnorr_verification_is_noop_on_store_when_slot_empty() {
         let store = store().await;
@@ -1731,7 +1151,7 @@ mod tests {
 
     // Queues the JSON-RPC error response a node returns for a call that executed and reverted, so
     // the provider fails the next RPC the way `eth_estimateGas` does against a target whose
-    // signature checker cannot verify the round.
+    // registry cannot verify the round.
     fn push_execution_revert(asserter: &Asserter, data: &str) {
         asserter.push(alloy::rpc::json_rpc::ResponsePayload::Failure(
             alloy::rpc::json_rpc::ErrorPayload {
@@ -1774,11 +1194,11 @@ mod tests {
     fn resolve_payload_gas_fails_the_round_when_the_call_reverts() {
         let handler = handler_for_estimation();
         let error = handler
-            .resolve_payload_gas(Err(execution_reverted(Some("0xe1310aed"))), Address::ZERO)
+            .resolve_payload_gas(Err(execution_reverted(Some("0x68477238"))), Address::ZERO)
             .expect_err("a reverting estimate must not yield a payload");
         let message = error.to_string();
-        assert!(message.contains("InvalidQuorumApkHash()"), "{message}");
-        assert!(message.contains("blsSignatureChecker"), "{message}");
+        assert!(message.contains("InvalidQuorumSignature()"), "{message}");
+        assert!(message.contains("schnorrRegistry"), "{message}");
     }
 
     #[test]
@@ -1790,7 +1210,7 @@ mod tests {
 
         assert!(
             handler
-                .resolve_payload_gas(Err(execution_reverted(Some("0xe1310aed"))), Address::ZERO)
+                .resolve_payload_gas(Err(execution_reverted(Some("0x68477238"))), Address::ZERO)
                 .is_err()
         );
         assert!(
@@ -1806,34 +1226,21 @@ mod tests {
     // and the estimate proves it cannot land. The task must settle failed with the cause instead
     // of ready with calldata that burns the client's gas.
     #[tokio::test]
-    async fn handle_verification_settles_failed_when_the_rendered_payload_reverts() {
+    async fn handle_schnorr_verification_settles_failed_when_the_rendered_payload_reverts() {
         let store = store().await;
         let key = key_id(&store).await;
         let task = store
             .create_task(&key, &request_body())
             .await
             .expect("task creation should succeed");
-
-        let storage_updates = Bytes::from(vec![0xaa, 0xbb, 0xcc, 0xdd]);
-        let task_data = GasKillerTaskData {
-            storage_updates: storage_updates.clone(),
-            transition_index: 0,
-            target_address: Address::from([0x11; 20]),
-            call_data: vec![0x12, 0x34, 0x56, 0x78],
-            from_address: Address::from([0x22; 20]),
-            value: U256::ZERO,
-            block_height: 1,
-            chain_id: 1,
-        };
-        let msg_hash =
-            FixedBytes::<32>::from(task_data.build_payload_hash(storage_updates.as_ref()).0);
+        let (task_data, msg_hash) = matching_task_data();
 
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
-        // The ERC-165 probe passes, then eth_estimateGas reverts with the signature-checker
-        // mismatch selector.
+        // The ERC-165 probe passes, then eth_estimateGas reverts with the registry-mismatch
+        // selector.
         push_supports_interface(&asserter, true);
-        push_execution_revert(&asserter, "0xe1310aed");
+        push_execution_revert(&asserter, "0x68477238");
 
         let in_flight = in_flight_task();
         *in_flight.lock().unwrap() = Some(task.id.clone());
@@ -1843,12 +1250,13 @@ mod tests {
             .with_payload_block_buffer(50);
 
         let result = handler
-            .handle_verification(
+            .handle_schnorr_verification(
                 0,
                 msg_hash,
-                Bytes::from(vec![0x00]),
                 100,
-                empty_non_signer_data(),
+                U256::from(42u64),
+                Address::from([0x44; 20]),
+                vec![],
                 Some(&task_data),
             )
             .await;
@@ -1861,7 +1269,7 @@ mod tests {
             "a payload proven to revert must not be persisted"
         );
         let error = settled.error.expect("a failure reason should be recorded");
-        assert!(error.contains("InvalidQuorumApkHash()"), "{error}");
-        assert!(error.contains("blsSignatureChecker"), "{error}");
+        assert!(error.contains("InvalidQuorumSignature()"), "{error}");
+        assert!(error.contains("schnorrRegistry"), "{error}");
     }
 }

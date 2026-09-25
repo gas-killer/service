@@ -17,7 +17,7 @@ use crate::sequencer::{
 };
 use crate::store::{SqliteStore, TaskCursor};
 use alloy::network::{Ethereum, EthereumWallet};
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::Address;
 use alloy_provider::{
     Identity, Provider, ProviderBuilder, RootProvider,
     fillers::{
@@ -27,16 +27,11 @@ use alloy_provider::{
 };
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
-use commonware_avs_core::bn254::Bn254Scheme;
 use commonware_avs_eigenlayer::AvsDeployment;
-use commonware_avs_router::reporter::CertifiedReceiver;
 use commonware_avs_router::sequencer::{DispatchTime, ResolutionSender, SharedAssignments};
-use commonware_avs_router::submitter::Submitter;
 use gas_killer_common::avs_contracts::{
     self, ContractsConfig, ResolvedContracts, SCHNORR_STAKE_REGISTRY_KEY,
 };
-use gas_killer_common::bindings::bls_apk_registry::BLSApkRegistry;
-use gas_killer_common::bindings::bls_sig_check_operator_state_retriever::BLSSigCheckOperatorStateRetriever;
 use gas_killer_common::task_data::GasKillerTaskData;
 use gas_killer_common::{ChainRole, GasKillerValidator};
 use std::collections::HashMap;
@@ -44,9 +39,6 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use std::{env, str::FromStr, sync::Arc};
 use tracing::{debug, error, info, warn};
-
-/// Quorum 0 — the only quorum this deployment operates on.
-const QUORUM_NUMBERS: &[u8] = &[0x00];
 
 /// How often the background loop re-checks SQLite store liveness for the `gas_killer_db_up`
 /// metric. Aligned with a typical Prometheus scrape interval so the gauge stays fresh.
@@ -541,7 +533,6 @@ fn spawn_contracts_resolver(
     };
     avs_contracts::spawn_resolver(
         provider.clone(),
-        gas_killer_common::signature_scheme(),
         registry_coordinator,
         schnorr_stake_registry,
         deployment_path,
@@ -598,9 +589,8 @@ async fn create_wallet_provider_for_chain(
     Ok(provider)
 }
 
-/// Builds the pieces every submitter shares: the L1 read-side provider (for
-/// block-number / operator-state reads) and the multi-chain [`GasKillerHandler`]
-/// that executes `verifyAndUpdate` on the write side.
+/// Builds the submitter's pieces: the L1 read-side provider (for block-number reads) and the
+/// multi-chain [`GasKillerHandler`] that renders `verifyAndUpdate` on the write side.
 ///
 /// The read side always points at L1 via `HTTP_RPC`. `L2_HTTP_RPC` is used
 /// exclusively for the write side: submitting `verifyAndUpdate` transactions on L2
@@ -708,68 +698,8 @@ async fn create_handler_parts(
     Ok((view_only_provider, gas_killer_handler))
 }
 
-/// Creates the BLS [`Submitter`] with multi-chain support (`bls` mode).
-///
-/// The read side (view_only_provider, BLS contracts) always points at L1 via
-/// `HTTP_RPC` and `AVS_DEPLOYMENT_PATH`. Operator state lives on L1 and is not
-/// available on the L2 mimic contract.
-#[allow(clippy::too_many_arguments)]
-pub async fn create_submitter(
-    scheme: Bn254Scheme,
-    assignments: SharedAssignments<GasKillerTaskData>,
-    certified: CertifiedReceiver<Bn254Scheme>,
-    resolutions: ResolutionSender,
-    metrics: Arc<MetricsCollector>,
-    dispatch_time: DispatchTime,
-    namespace: Vec<u8>,
-    store: Option<SqliteStore>,
-    in_flight: InFlightTask,
-) -> Result<Submitter<GasKillerTaskData, GasKillerHandler<SimpleWalletProvider>>> {
-    let (view_only_provider, gas_killer_handler) =
-        create_handler_parts(metrics, dispatch_time, store, in_flight).await?;
-
-    let deployment =
-        AvsDeployment::load().map_err(|e| anyhow::anyhow!("Failed to load deployment: {}", e))?;
-    info!("Submitter reads operator state from L1 (HTTP_RPC)");
-
-    let bls_apk_registry_address = deployment
-        .bls_apk_registry_address()
-        .map_err(|e| anyhow::anyhow!("Failed to get BLS APK registry address: {}", e))?;
-    let registry_coordinator_address = deployment
-        .registry_coordinator_address()
-        .map_err(|e| anyhow::anyhow!("Failed to get registry coordinator address: {}", e))?;
-    let bls_operator_state_retriever_address = deployment
-        .bls_sig_check_operator_state_retriever_address()
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to get BLS operator state retriever address: {}", e)
-        })?;
-
-    let bls_apk_registry =
-        BLSApkRegistry::new(bls_apk_registry_address, view_only_provider.clone());
-    let bls_operator_state_retriever = BLSSigCheckOperatorStateRetriever::new(
-        bls_operator_state_retriever_address,
-        view_only_provider.clone(),
-    );
-
-    Ok(Submitter::new(
-        scheme,
-        view_only_provider,
-        bls_apk_registry,
-        bls_operator_state_retriever,
-        registry_coordinator_address,
-        gas_killer_handler,
-        assignments,
-        certified,
-        resolutions,
-        namespace,
-        Bytes::from_static(QUORUM_NUMBERS),
-    ))
-}
-
-/// Creates the [`SchnorrSubmitter`] (`schnorr` mode). Same environment surface as
-/// [`create_submitter`]; only the certified-observation source and the on-chain
-/// calling convention differ (no BLS registry — the Schnorr registry is read
-/// on-chain by the target contract itself).
+/// Creates the [`SchnorrSubmitter`]. The registry is read on chain by the target contract
+/// itself, so the submitter needs no operator-state contracts.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_schnorr_submitter(
     assignments: SharedAssignments<GasKillerTaskData>,

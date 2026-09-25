@@ -69,7 +69,7 @@ pub async fn healthz_handler() -> StatusCode {
     tag = "Health",
     operation_id = "getReadyz",
     summary = "Readiness probe",
-    description = "Answers `200` once the aggregation engine, sequencer and submitter are spawned \
+    description = "Answers `200` once the Schnorr coordinator, sequencer and submitter are spawned \
                    and the p2p network is starting, and `503` before that. This is the probe that \
                    decides whether the pod should receive traffic; `/healthz` only reports that \
                    the process exists.",

@@ -6,36 +6,15 @@
 //! the revert data into something the client can act on: the Solidity error name plus the
 //! condition it implies about the target's configuration or the round's inputs.
 //!
-//! A reverting `verifyAndUpdate` can originate in two places. The SDK's own preflight checks and
-//! state-change handler are taken from the generated bindings, so their selectors and signatures
-//! track the committed ABIs and a rename or a changed argument list upstream is a compile error
-//! here rather than an entry that silently stops matching. The EigenLayer `BLSSignatureChecker`
-//! the target calls into is the exception: its errors do not appear in the target's ABI — the
-//! target only calls the checker, so solc does not surface them — so those are declared locally.
+//! The SDK's errors are taken from the generated bindings, so their selectors and signatures track
+//! the committed ABI and a rename or a changed argument list upstream is a compile error here
+//! rather than an entry that silently stops matching.
 
 use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::sol_types::{GenericContractError, SolError, SolInterface};
 use alloy_primitives::{Bytes, FixedBytes, hex};
-use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
 use std::fmt;
-
-// EigenLayer's `IBLSSignatureCheckerErrors`, raised inside the `checkSignatures` call the target
-// makes. Declared here because no ABI committed to this repo carries them, and only so the
-// selector table can take each selector and signature from a compile-time constant rather than a
-// transcribed hex literal; no instance of these types is ever built.
-mod checker_errors {
-    alloy::sol! {
-        error InputEmptyQuorumNumbers();
-        error InputArrayLengthMismatch();
-        error InputNonSignerLengthMismatch();
-        error InvalidReferenceBlocknumber();
-        error NonSignerPubkeysNotSorted();
-        error InvalidQuorumApkHash();
-        error InvalidBLSPairingKey();
-        error InvalidBLSSignature();
-    }
-}
 
 /// JSON-RPC error code a node returns for a call that executed and reverted. Every standard
 /// client uses it, so it is the primary signal.
@@ -59,7 +38,7 @@ const MAX_RENDERED_REVERT_BYTES: usize = 32;
 /// A revert selector the router recognises, paired with the condition that raises it.
 struct KnownRevert {
     selector: FixedBytes<4>,
-    /// Solidity error signature, e.g. `InvalidQuorumApkHash()`.
+    /// Solidity error signature, e.g. `InvalidQuorumSignature()`.
     signature: &'static str,
     /// One line on what the revert means for whoever has to act on it.
     cause: &'static str,
@@ -81,93 +60,45 @@ macro_rules! known_revert {
 /// the failure path.
 const KNOWN_REVERTS: &[KnownRevert] = &[
     known_revert!(
-        checker_errors::InvalidQuorumApkHash,
-        "the target's blsSignatureChecker resolves a different operator set than the one that \
-         signed this task; check the target's avsAddress and blsSignatureChecker against the live \
+        SchnorrGasKillerSDK::InvalidQuorumSignature,
+        "the aggregate Schnorr signature does not verify against the target's schnorrRegistry at \
+         the reference block; check the target's avsAddress and schnorrRegistry against the live \
          deployment"
     ),
     known_revert!(
-        checker_errors::InvalidBLSSignature,
-        "the aggregate signature does not verify against the quorum aggregate public key at the \
-         reference block"
-    ),
-    known_revert!(
-        checker_errors::InvalidBLSPairingKey,
-        "the BN254 pairing precompile rejected the proof; a supplied public key is not a valid \
-         curve point"
-    ),
-    known_revert!(
-        checker_errors::InvalidReferenceBlocknumber,
-        "the reference block is outside the window the signature checker accepts"
-    ),
-    known_revert!(
-        checker_errors::InputEmptyQuorumNumbers,
-        "the round carried no quorum numbers for the signature checker to verify against"
-    ),
-    known_revert!(
-        checker_errors::InputArrayLengthMismatch,
-        "the non-signer proof assembled for this round has inconsistent array lengths"
-    ),
-    known_revert!(
-        checker_errors::InputNonSignerLengthMismatch,
-        "the non-signer public keys and their quorum bitmap indices differ in length"
-    ),
-    known_revert!(
-        checker_errors::NonSignerPubkeysNotSorted,
-        "the non-signer public keys are not in the ascending order the signature checker requires"
-    ),
-    known_revert!(
-        GasKillerSDK::FutureBlockNumber,
+        SchnorrGasKillerSDK::FutureBlockNumber,
         "the reference block is not yet mined from the target's view; the target may be on a \
          different chain than the one this task was analysed against"
     ),
     known_revert!(
-        GasKillerSDK::StaleBlockNumber,
+        SchnorrGasKillerSDK::StaleBlockNumber,
         "the reference block is older than the target's blockStaleMeasure allows; request a fresh \
          payload"
     ),
     known_revert!(
-        GasKillerSDK::InvalidTransitionIndex,
+        SchnorrGasKillerSDK::InvalidTransitionIndex,
         "the target's stateTransitionCount has moved past this payload; request a fresh payload"
     ),
     known_revert!(
-        GasKillerSDK::InvalidSignature,
+        SchnorrGasKillerSDK::InvalidSignature,
         "the signed digest does not match the one the target recomputes from its own address, the \
          target function, and the storage updates"
     ),
     known_revert!(
-        GasKillerSDK::InsufficientQuorumThreshold,
-        "the operators that signed hold less than QUORUM_THRESHOLD of the quorum's stake"
-    ),
-    known_revert!(
-        GasKillerSDK::InvalidStorageUpdates,
-        "the target's state-change handler could not decode the encoded storage updates"
-    ),
-    known_revert!(
-        GasKillerSDK::MalformedLogPayload,
+        SchnorrGasKillerSDK::MalformedLogPayload,
         "an encoded LOG update is not shaped as the target's state-change handler expects"
     ),
     known_revert!(
-        GasKillerSDK::InvalidOperation,
-        "the storage updates contain an operation the target's state-change handler does not \
-         implement"
-    ),
-    known_revert!(
-        GasKillerSDK::InvalidArguments,
+        SchnorrGasKillerSDK::InvalidArguments,
         "the target rejected the call arguments"
     ),
     known_revert!(
-        GasKillerSDK::RevertingContext,
+        SchnorrGasKillerSDK::RevertingContext,
         "a CALL replayed from the storage updates reverted inside the target"
     ),
     known_revert!(
-        GasKillerSDK::DeploymentFailed,
+        SchnorrGasKillerSDK::DeploymentFailed,
         "a CREATE or CREATE2 replayed from the storage updates failed"
-    ),
-    known_revert!(
-        SchnorrGasKillerSDK::InvalidQuorumSignature,
-        "the aggregate Schnorr signature does not verify against the registry's aggregate key at \
-         the reference block"
     ),
     known_revert!(
         SchnorrGasKillerSDK::ReentrantTransition,
@@ -369,37 +300,28 @@ mod tests {
         ))
     }
 
-    // Every error the committed SDK ABIs declare must have a cause. The generated bindings make a
+    // Every error the committed SDK ABI declares must have a cause. The generated bindings make a
     // renamed, removed, or retyped error a compile failure, but an error *added* upstream would
     // otherwise pass unnoticed and reach clients as raw revert data — which is the outcome this
-    // module exists to avoid. Reading the ABIs directly is the only check that sees additions.
+    // module exists to avoid. Reading the ABI directly is the only check that sees additions.
     #[test]
-    fn every_error_the_sdks_declare_has_a_cause() {
-        for (contract, abi) in [
-            (
-                "GasKillerSDK",
-                gas_killer_common::bindings::GAS_KILLER_SDK_ABI,
-            ),
-            (
-                "SchnorrGasKillerSDK",
-                gas_killer_common::bindings::SCHNORR_GAS_KILLER_SDK_ABI,
-            ),
-        ] {
-            let declared = serde_json::from_str::<alloy_json_abi::ContractObject>(abi)
-                .expect("the committed ABI should parse")
-                .abi
-                .expect("the committed ABI should carry an abi section");
+    fn every_error_the_sdk_declares_has_a_cause() {
+        let declared = serde_json::from_str::<alloy_json_abi::ContractObject>(
+            gas_killer_common::bindings::SCHNORR_GAS_KILLER_SDK_ABI,
+        )
+        .expect("the committed ABI should parse")
+        .abi
+        .expect("the committed ABI should carry an abi section");
 
-            for error in declared.errors.values().flatten() {
-                let selector = FixedBytes::new(error.selector().0);
-                assert!(
-                    KNOWN_REVERTS.iter().any(|known| known.selector == selector),
-                    "{contract}.{} ({selector}) is declared in the committed ABI but has no cause \
-                     in KNOWN_REVERTS; add an entry so a client sees the reason instead of raw \
-                     revert data",
-                    error.signature(),
-                );
-            }
+        for error in declared.errors.values().flatten() {
+            let selector = FixedBytes::new(error.selector().0);
+            assert!(
+                KNOWN_REVERTS.iter().any(|known| known.selector == selector),
+                "{} ({selector}) is declared in the committed ABI but has no cause in \
+                 KNOWN_REVERTS; add an entry so a client sees the reason instead of raw revert \
+                 data",
+                error.signature(),
+            );
         }
     }
 
@@ -421,25 +343,25 @@ mod tests {
         }
     }
 
-    // The selector the mis-wired integrator target produced. It must name the error and point at
-    // the configuration that causes it, since the selector alone told them nothing.
+    // The selector a mis-wired integrator target produces. It must name the error and point at
+    // the configuration that causes it, since the selector alone tells them nothing.
     #[test]
-    fn misconfigured_signature_checker_is_named_and_explained() {
-        let rendered = revert("0xe1310aed").to_string();
-        assert!(rendered.contains("InvalidQuorumApkHash()"), "{rendered}");
-        assert!(rendered.contains("0xe1310aed"), "{rendered}");
-        assert!(rendered.contains("blsSignatureChecker"), "{rendered}");
+    fn misconfigured_registry_is_named_and_explained() {
+        let rendered = revert("0x68477238").to_string();
+        assert!(rendered.contains("InvalidQuorumSignature()"), "{rendered}");
+        assert!(rendered.contains("0x68477238"), "{rendered}");
+        assert!(rendered.contains("schnorrRegistry"), "{rendered}");
     }
 
     // Selectors are derived from the `sol!` declarations, so this pins the derivation itself
     // against an independently computed value rather than re-asserting the table.
     #[test]
     fn table_selectors_match_the_solidity_signatures() {
-        let entry = revert("0xe1310aed")
+        let entry = revert("0x68477238")
             .known()
-            .expect("InvalidQuorumApkHash should be a known selector");
-        assert_eq!(entry.signature, "InvalidQuorumApkHash()");
-        assert_eq!(entry.selector, FixedBytes::new([0xe1, 0x31, 0x0a, 0xed]));
+            .expect("InvalidQuorumSignature should be a known selector");
+        assert_eq!(entry.signature, "InvalidQuorumSignature()");
+        assert_eq!(entry.selector, FixedBytes::new([0x68, 0x47, 0x72, 0x38]));
     }
 
     #[test]
@@ -503,9 +425,9 @@ mod tests {
 
     #[test]
     fn a_revert_response_carries_its_data_through() {
-        let revert = PayloadRevert::from_call_error(&execution_reverted(Some("0xe1310aed")))
+        let revert = PayloadRevert::from_call_error(&execution_reverted(Some("0x68477238")))
             .expect("an execution revert should be classified as a revert");
-        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+        assert_eq!(revert.data().as_ref(), [0x68, 0x47, 0x72, 0x38]);
     }
 
     // A bare `revert()` returns no data, but the call still executed and still failed, so the
@@ -551,12 +473,12 @@ mod tests {
         let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
             EXECUTION_REVERTED_CODE,
             "Reverted",
-            Some("\"0xe1310aed\"".to_string()),
+            Some("\"0x68477238\"".to_string()),
         ))
         .expect("a capitalised revert message should still classify as a revert");
-        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+        assert_eq!(revert.data().as_ref(), [0x68, 0x47, 0x72, 0x38]);
         assert!(
-            revert.to_string().contains("InvalidQuorumApkHash()"),
+            revert.to_string().contains("InvalidQuorumSignature()"),
             "the recovered selector should still be named: {revert}"
         );
     }
@@ -568,10 +490,10 @@ mod tests {
         let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
             EXECUTION_REVERTED_CODE,
             "Reverted",
-            Some(r#"{"message":"execution reverted","data":"0xe1310aed"}"#.to_string()),
+            Some(r#"{"message":"execution reverted","data":"0x68477238"}"#.to_string()),
         ))
         .expect("a nested revert payload should still classify as a revert");
-        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+        assert_eq!(revert.data().as_ref(), [0x68, 0x47, 0x72, 0x38]);
     }
 
     // Sibling fields are not reliably unparseable: a stringified number is valid hex, so a scan
@@ -581,10 +503,10 @@ mod tests {
         let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
             EXECUTION_REVERTED_CODE,
             "Reverted",
-            Some(r#"{"gasUsed":"1234","data":"0xe1310aed"}"#.to_string()),
+            Some(r#"{"gasUsed":"1234","data":"0x68477238"}"#.to_string()),
         ))
         .expect("a keyed revert payload should classify as a revert");
-        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+        assert_eq!(revert.data().as_ref(), [0x68, 0x47, 0x72, 0x38]);
     }
 
     // An empty string decodes to empty bytes, so a scan would stop on one and report a revert with
@@ -594,12 +516,12 @@ mod tests {
         let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
             EXECUTION_REVERTED_CODE,
             "Reverted",
-            Some(r#"{"cause":"","data":"0xe1310aed"}"#.to_string()),
+            Some(r#"{"cause":"","data":"0x68477238"}"#.to_string()),
         ))
         .expect("an empty sibling should not stop the lookup");
-        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+        assert_eq!(revert.data().as_ref(), [0x68, 0x47, 0x72, 0x38]);
         assert!(
-            revert.to_string().contains("InvalidQuorumApkHash()"),
+            revert.to_string().contains("InvalidQuorumSignature()"),
             "{revert}"
         );
     }
@@ -611,10 +533,10 @@ mod tests {
         let revert = PayloadRevert::from_call_error(&rpc_error_with_data(
             EXECUTION_REVERTED_CODE,
             "Reverted",
-            Some(r#"{"originalError":{"revertData":"0xe1310aed"}}"#.to_string()),
+            Some(r#"{"originalError":{"revertData":"0x68477238"}}"#.to_string()),
         ))
         .expect("an unconventionally named payload should still be found");
-        assert_eq!(revert.data().as_ref(), [0xe1, 0x31, 0x0a, 0xed]);
+        assert_eq!(revert.data().as_ref(), [0x68, 0x47, 0x72, 0x38]);
     }
 
     // A client that reports a revert without data must still be classified as a revert; there is

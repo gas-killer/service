@@ -36,20 +36,10 @@ pub struct PayloadView {
     pub valid_until_block: u64,
 }
 
-/// Scheme-specific quorum proof carried by a [`TaskBundle`].
-///
-/// The outer transaction request is scheme-agnostic; only the encoded proof — and therefore the
-/// `verifyAndUpdate` calldata — differs between BLS and Schnorr.
+/// Quorum proof carried by a [`TaskBundle`], tagged by the scheme that produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scheme", rename_all = "snake_case")]
 pub enum BundleProof {
-    /// BLS aggregate proof.
-    Bls {
-        /// Quorum numbers the certificate covers.
-        quorum_numbers: Bytes,
-        /// ABI-encoded `GasKillerSDK` `NonSignerStakesAndSignature` struct.
-        non_signer_stakes_and_signature: Bytes,
-    },
     /// Aggregate-Schnorr proof.
     Schnorr {
         /// Aggregate signature scalar.
@@ -59,6 +49,10 @@ pub enum BundleProof {
         /// Non-signing operator addresses, strictly ascending.
         non_signers: Vec<Address>,
     },
+    /// A proof tagged with any other scheme, such as a stored BLS bundle. Read so the stored task
+    /// still parses and expires on its passed validity window; never produced.
+    #[serde(other)]
+    Retired,
 }
 
 /// A completed aggregation round, persisted keyed by task id.
@@ -127,27 +121,28 @@ mod tests {
     }
 
     #[test]
-    fn bundle_bls_round_trips_and_tags_scheme() {
-        let bundle = TaskBundle {
-            msg_hash: B256::from([0xab; 32]),
-            reference_block_number: 100,
-            transition_index: 7,
-            target_address: Address::from([0x22; 20]),
-            target_function: FixedBytes::<4>::from([0xde, 0xad, 0xbe, 0xef]),
-            storage_updates: Bytes::from(vec![0x01, 0x02, 0x03]),
-            chain_id: 31337,
-            value: U256::ZERO,
-            valid_until_block: 150,
-            proof: BundleProof::Bls {
-                quorum_numbers: Bytes::from(vec![0x00]),
-                non_signer_stakes_and_signature: Bytes::from(vec![0xff, 0xee]),
-            },
-        };
-        let json = serde_json::to_value(&bundle).unwrap();
-        assert_eq!(json["proof"]["scheme"], "bls");
+    fn a_stored_bls_bundle_still_parses_as_retired() {
+        // A stored BLS bundle must reach its freshness check rather than fail to parse.
+        let stored = r#"{
+            "msg_hash": "0xabababababababababababababababababababababababababababababababab",
+            "reference_block_number": 100,
+            "transition_index": 7,
+            "target_address": "0x2222222222222222222222222222222222222222",
+            "target_function": "0xdeadbeef",
+            "storage_updates": "0x010203",
+            "chain_id": 31337,
+            "value": "0x0",
+            "valid_until_block": 150,
+            "proof": {
+                "scheme": "bls",
+                "quorum_numbers": "0x00",
+                "non_signer_stakes_and_signature": "0xffee"
+            }
+        }"#;
 
-        let decoded: TaskBundle = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded, bundle);
+        let decoded: TaskBundle = serde_json::from_str(stored).unwrap();
+        assert_eq!(decoded.proof, BundleProof::Retired);
+        assert_eq!(decoded.valid_until_block, 150);
     }
 
     #[test]

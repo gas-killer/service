@@ -1,8 +1,7 @@
 //! Schnorr coordinator actor: the router's side of the two-round MuSig2 aggregate
-//! signing protocol (`SIGNATURE_SCHEME=schnorr` mode, p2p channel 2).
+//! signing protocol (p2p channel 2).
 //!
-//! Replaces the aggregation engine + RouterAutomaton + CertReporter of BLS mode.
-//! The sequencer is unchanged: it still assigns one height at a time into
+//! The upstream sequencer assigns one height at a time into
 //! [`SharedAssignments`], polls its [`CertIndex`] for a certificate, and waits for
 //! the submitter's resolution. This actor supplies both ends: it watches the
 //! assignments map, drives signing sessions over channel 2, and emits
@@ -40,10 +39,9 @@
 //!
 //! The certified log lives in memory only (no journal), and each router life starts
 //! its heights at the wall clock in milliseconds ([`clock_tip`]). Node TipReports
-//! cannot recover the height the way they recover a lost BLS journal: a Schnorr node
-//! reports only directives below the highest height it has seen, and a router
-//! restarting from 0 re-announces exactly that height, which the node's TaskBook
-//! drops as a conflict.
+//! cannot recover the height here: a node reports only directives below the highest
+//! height it has seen, and a router restarting from 0 re-announces exactly that
+//! height, which the node's TaskBook drops as a conflict.
 
 use alloy_primitives::Address;
 use commonware_avs_core::bn254::PublicKey;

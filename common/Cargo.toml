@@ -16,7 +16,6 @@ alloy-signer-local = { workspace = true }
 anyhow = { workspace = true }
 
 # Async
-async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 
@@ -25,7 +24,6 @@ commonware-avs-bindings = { workspace = true }
 commonware-avs-core = { workspace = true }
 commonware-avs-eigenlayer = { workspace = true }
 commonware-codec = { workspace = true }
-commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }

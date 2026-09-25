@@ -226,8 +226,6 @@ spec:
               value: {{ $root.Values.router.rebroadcastInterval | quote }}
             - name: STORAGE_DIR
               value: {{ $root.Values.node.storageDir | quote }}
-            - name: SIGNATURE_SCHEME
-              value: {{ include "gas-killer.signatureScheme" $root | quote }}
             {{- with $root.Values.schnorr.messagesPerSecond }}
             # Per-peer rate on the schnorr protocol channel. Both ends register their own quota,
             # so this must match the router's or one side drops what the other may send.
@@ -287,9 +285,8 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: {{ include "gas-killer.shareddata.fullname" $root }}
-        # Writable storage for the aggregation engine's journal (STORAGE_DIR).
-        # emptyDir survives container restarts but not pod deletion — wiping it
-        # (delete the node pods) is the manual recovery for a wedged height.
+        # Writable runtime storage (STORAGE_DIR). Nothing the node needs across restarts lives
+        # here, so an emptyDir is enough.
         - name: engine-journal
           emptyDir: {}
         {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}

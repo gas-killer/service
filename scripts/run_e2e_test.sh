@@ -18,14 +18,10 @@ LOG_DIR="$PROJECT_ROOT/logs"
 # reads the same default for the router so the two stay in sync.
 export ADMIN_KEY="${ADMIN_KEY:-ci-admin-key}"
 
-# Schnorr is the only scheme. Exported for docker-compose and the deploy binaries, and again
-# after `source ../.env` below so a stale value there cannot win.
-export SIGNATURE_SCHEME=schnorr
-
 # STATE_ENCODING (legacy|canonical|prestate-net), E2E_EXAMPLE
-# (array-summation|reentrant|onchain-life) and GK_SIM_PROFILE (chain|unbounded) follow the
-# a capture-then-re-export discipline so the containers AND the
-# host-side deploy/send binaries agree. `reentrant` deploys a ReentrantCheckpoint whose
+# (array-summation|reentrant|onchain-life) and GK_SIM_PROFILE (chain|unbounded) are captured
+# and re-exported after `source ../.env` so the containers AND the host-side deploy/send
+# binaries agree. `reentrant` deploys a ReentrantCheckpoint whose
 # task re-enters mid-transition; pair it with `canonical` to prove re-entrancy is safe.
 # `onchain-life` deploys an OnchainLife and settles the multi-generation step declared in the
 # examples manifest, whose direct execution exceeds a 30M block; it requires
@@ -179,7 +175,6 @@ cd "$PROJECT_ROOT/scripts"
 source ../.env
 # `source ../.env` may reset these to the example defaults; restore the caller's choices so the
 # deploy and trigger binaries pick the right stack, encoding, and example target.
-export SIGNATURE_SCHEME=schnorr
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
 export GK_SIM_PROFILE="$GK_SIM_PROFILE_CHOICE"

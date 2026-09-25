@@ -147,8 +147,6 @@ jobs:
     timeout-minutes: 60
     env:
       CI_ADMIN_KEY: ci-admin-key
-      # Read by deploy_example and setup_schnorr_operators.
-      SIGNATURE_SCHEME: schnorr
 
     steps:
       - name: Checkout repository

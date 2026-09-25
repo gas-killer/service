@@ -6,14 +6,12 @@
 //! `gas-killer/example-contracts` library and from the Gas Killer SDK it vendors as a
 //! submodule; fetch and build both with `scripts/examples/fetch_examples.sh`.
 //!
-//! Deploying a Schnorr target additionally requires `setup_schnorr_operators` to have run,
-//! since it supplies the stake registry this resolves as `$deploy:schnorrStakeRegistry`.
+//! Deploying a target requires `setup_schnorr_operators` to have run, since it supplies the
+//! stake registry this resolves as `$deploy:schnorrStakeRegistry`.
 //!
 //! Each example goes through the same sequence:
 //!
-//! 1. Resolve the AVS service manager and the BLS signature checker the target's constructor
-//!    needs, and *validate the checker* — see [`validate_sig_checker`] for why this matters
-//!    more than it looks.
+//! 1. Resolve the AVS service manager the target's constructor needs.
 //! 2. Deploy, by appending ABI-encoded constructor args to the artifact's creation bytecode.
 //! 3. Assert the deployed target is actually routable: it must pass the same ERC-165 gate the
 //!    router applies before submitting `verifyAndUpdate`, and expose the state-tracking and
@@ -29,16 +27,15 @@
 //! component needs to learn about the new contract.
 
 use alloy::network::{EthereumWallet, TransactionBuilder};
-use alloy::primitives::{Address, Bytes, FixedBytes, U256, keccak256};
+use alloy::primitives::{Address, Bytes, FixedBytes, U256};
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy_dyn_abi::{DynSolType, DynSolValue, JsonAbiExt, Specifier};
 use alloy_json_abi::{Function, JsonAbi};
 use clap::Parser;
-use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
-use gas_killer_common::bindings::{GAS_KILLER_INTERFACE_ID, SCHNORR_GAS_KILLER_INTERFACE_ID};
-use gas_killer_common::{SignatureScheme, signature_scheme};
+use gas_killer_common::bindings::SCHNORR_GAS_KILLER_INTERFACE_ID;
+use gas_killer_common::bindings::schnorrgaskillersdk::SchnorrGasKillerSDK;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -49,18 +46,7 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 /// Key in the AVS deployment JSON holding the service manager the target registers against.
 const AVS_ADDRESS_KEY: &str = "avsServiceManagerWrapper";
 
-/// Key in the AVS deployment JSON holding a contract that really implements
-/// `BLSSignatureChecker.checkSignatures`. The local EigenLayer stack's task manager inherits
-/// `BLSSignatureChecker`, which is why it — and not `blsSigCheck` — is the default.
-const SIG_CHECKER_ADDRESS_KEY: &str = "IncredibleSquaringTaskManager";
-
-/// Key in the AVS deployment JSON holding the `BLSSigCheckOperatorStateRetriever`. It is the
-/// router's off-chain helper for assembling non-signer stakes, *not* a signature checker: it
-/// has no `checkSignatures`, so a target constructed with it reverts with an empty `0x` the
-/// first time a quorum tries to settle. Rejected by name rather than diagnosed later.
-const RETRIEVER_ADDRESS_KEY: &str = "blsSigCheck";
-
-/// Address substituted for an unresolvable `$avs`/`$sigChecker` under `--dry-run`, where the
+/// Address substituted for an unresolvable `$avs` under `--dry-run`, where the
 /// point is to validate manifest encoding rather than on-chain wiring.
 const DRY_RUN_PLACEHOLDER: Address = Address::repeat_byte(0xee);
 
@@ -91,10 +77,6 @@ struct Cli {
     /// AVS service manager address, overriding env and the deployment JSON.
     #[arg(long)]
     avs: Option<Address>,
-
-    /// BLS signature checker address, overriding env and the deployment JSON.
-    #[arg(long)]
-    sig_checker: Option<Address>,
 
     /// Router URL written into the generated scenario files.
     #[arg(long)]
@@ -262,7 +244,6 @@ enum ArgValue {
 #[derive(Debug, Default, Clone)]
 struct Resolver {
     avs: Option<Address>,
-    sig_checker: Option<Address>,
     /// `addresses` from the AVS deployment JSON.
     deploy_addresses: BTreeMap<String, String>,
     signers: Vec<Address>,
@@ -279,7 +260,7 @@ struct Resolver {
 impl Resolver {
     /// Expands a single scalar. Values not starting with `$` pass through untouched.
     ///
-    /// - `$avs` / `$sigChecker` — the resolved constructor wiring
+    /// - `$avs` — the resolved AVS service manager
     /// - `$deploy:<key>` — any key under `addresses` in the deployment JSON
     /// - `$deployed:<label>` — a contract deployed earlier in this same example
     /// - `$signer:<n>` — the address of the nth manifest signer
@@ -351,16 +332,8 @@ impl Resolver {
                 .avs
                 .map(|a| format!("{a:?}"))
                 .ok_or_else(|| avs_unresolved_message(AVS_ADDRESS_KEY, "--avs", "EXAMPLE_AVS_ADDRESS").into()),
-            "sigChecker" => self.sig_checker.map(|a| format!("{a:?}")).ok_or_else(|| {
-                avs_unresolved_message(
-                    SIG_CHECKER_ADDRESS_KEY,
-                    "--sig-checker",
-                    "EXAMPLE_SIG_CHECKER_ADDRESS",
-                )
-                .into()
-            }),
             other => Err(format!(
-                "unknown placeholder `${other}`; supported: $avs, $sigChecker, $deploy:<key>, $signer:<n>, $env:VAR"
+                "unknown placeholder `${other}`; supported: $avs, $deploy:<key>, $signer:<n>, $env:VAR"
             )
             .into()),
         }
@@ -729,48 +702,6 @@ fn toml_string(value: &str) -> String {
 // On-chain steps
 // ---------------------------------------------------------------------------------------
 
-/// Rejects a signature checker that is *demonstrably* not one.
-///
-/// `GasKillerSDK.verifyAndUpdate` calls `checkSignatures` on whatever address the constructor
-/// was given. The `BLSSigCheckOperatorStateRetriever` recorded as `blsSigCheck` in the AVS
-/// deployment JSON has no such function, so a target wired to it reverts with an empty `0x`
-/// at settlement time — long after deployment, with nothing pointing at the cause. A real
-/// checker exposes `registryCoordinator()`; the retriever does not, which makes that getter a
-/// cheap discriminator.
-///
-/// This is a **shape** check, not an authenticity one, and the distinction matters: it
-/// establishes "has code and answers `registryCoordinator()`", not "soundly verifies quorum
-/// signatures". A permissive or mock checker that happens to expose that getter passes, and a
-/// target wired to one accepts *unsigned* diffs. Adequate for deploying example contracts to a
-/// fork or testnet, which is all this binary is for — see the scope note in `scripts/README.md`.
-/// Anything value-bearing needs the checker verified against the registry coordinator the AVS
-/// actually registered against, not merely asked whether it has the getter.
-async fn validate_sig_checker(provider: &DynProvider, checker: Address) -> Result<(), DynError> {
-    let code = provider
-        .get_code_at(checker)
-        .await
-        .map_err(|e| format!("failed to read code at signature checker {checker:?}: {e}"))?;
-    if code.is_empty() {
-        return Err(format!("signature checker {checker:?} has no code deployed").into());
-    }
-
-    let selector = &keccak256("registryCoordinator()")[..4];
-    let probe = TransactionRequest::default()
-        .with_to(checker)
-        .with_input(Bytes::copy_from_slice(selector));
-
-    match provider.call(probe).await {
-        Ok(ret) if ret.len() >= 32 => Ok(()),
-        _ => Err(format!(
-            "{checker:?} does not expose registryCoordinator(), so it is not a BLSSignatureChecker \
-             — a target wired to it reverts with an empty 0x during verifyAndUpdate. Did you pass \
-             the `{RETRIEVER_ADDRESS_KEY}` operator-state retriever? Set \
-             EXAMPLE_SIG_CHECKER_ADDRESS to a real checker."
-        )
-        .into()),
-    }
-}
-
 /// Confirms the freshly deployed target is one the router will actually settle against.
 ///
 /// The ERC-165 check is the same gate `router::executor` applies before submitting
@@ -782,11 +713,8 @@ async fn assert_routable(
     target: Address,
     exercise_selector: Option<FixedBytes<4>>,
 ) -> Result<(), DynError> {
-    let (interface_id, scheme) = match signature_scheme() {
-        SignatureScheme::Bls => (GAS_KILLER_INTERFACE_ID, "bls"),
-        SignatureScheme::Schnorr => (SCHNORR_GAS_KILLER_INTERFACE_ID, "schnorr"),
-    };
-    let sdk = GasKillerSDK::new(target, provider);
+    let interface_id = SCHNORR_GAS_KILLER_INTERFACE_ID;
+    let sdk = SchnorrGasKillerSDK::new(target, provider);
 
     let supported = sdk
         .supportsInterface(interface_id)
@@ -795,14 +723,10 @@ async fn assert_routable(
         .map_err(|e| format!("supportsInterface({interface_id}) call failed on {target:?}: {e}"))?;
     if !supported {
         return Err(format!(
-            "{target:?} does not report support for the {scheme} interface {interface_id}, so the \
-             router will refuse to settle against it. The contract must inherit the \
-             {} base contract, and its solidity-sdk revision must match the one this service \
-             was built against.",
-            match scheme {
-                "schnorr" => "SchnorrGasKillerSDK",
-                _ => "GasKillerSDK",
-            }
+            "{target:?} does not report support for the Gas Killer interface {interface_id}, so \
+             the router will refuse to settle against it. The contract must inherit the \
+             GasKillerSDK base contract, and its solidity-sdk revision must match the one this \
+             service was built against."
         )
         .into());
     }
@@ -923,17 +847,8 @@ async fn main() -> Result<(), DynError> {
         AVS_ADDRESS_KEY,
         &deploy_addresses,
     )?;
-    let sig_checker = resolve_wiring_address(
-        cli.sig_checker,
-        "EXAMPLE_SIG_CHECKER_ADDRESS",
-        SIG_CHECKER_ADDRESS_KEY,
-        &deploy_addresses,
-    )?;
-    reject_retriever_as_checker(sig_checker, &deploy_addresses)?;
-
     let mut resolver = Resolver {
         avs,
-        sig_checker,
         deploy_addresses: deploy_addresses.clone(),
         signers: signers.iter().map(|s| s.address()).collect(),
         // Filled in per-example by `deploy_one` as its contract sequence progresses.
@@ -946,13 +861,12 @@ async fn main() -> Result<(), DynError> {
         // A dry run validates the manifest against the artifacts, which does not require real
         // wiring — substitute a sentinel so a machine with no deployment JSON can still check
         // that every argument encodes.
-        if resolver.avs.is_none() || resolver.sig_checker.is_none() {
+        if resolver.avs.is_none() {
             println!(
                 "⚠️  AVS wiring unresolved; substituting {DRY_RUN_PLACEHOLDER:?} so encoding can \
                  still be validated"
             );
-            resolver.avs = resolver.avs.or(Some(DRY_RUN_PLACEHOLDER));
-            resolver.sig_checker = resolver.sig_checker.or(Some(DRY_RUN_PLACEHOLDER));
+            resolver.avs = Some(DRY_RUN_PLACEHOLDER);
         }
     }
     let resolver = resolver;
@@ -987,11 +901,6 @@ async fn main() -> Result<(), DynError> {
             })
             .collect()
     };
-
-    if let (Some(provider), Some(checker)) = (signer_providers.first(), sig_checker) {
-        validate_sig_checker(provider, checker).await?;
-        println!("🔐 signature checker: {checker:?}");
-    }
 
     for example in selected {
         println!("\n═══ {} ═══", example.name);
@@ -1276,31 +1185,6 @@ fn resolve_wiring_address(
     }
 }
 
-/// Fails fast when the resolved checker is the operator-state retriever, which cannot verify
-/// signatures. See [`validate_sig_checker`].
-fn reject_retriever_as_checker(
-    sig_checker: Option<Address>,
-    deploy_addresses: &BTreeMap<String, String>,
-) -> Result<(), DynError> {
-    let (Some(checker), Some(retriever)) =
-        (sig_checker, deploy_addresses.get(RETRIEVER_ADDRESS_KEY))
-    else {
-        return Ok(());
-    };
-    let Ok(retriever) = retriever.parse::<Address>() else {
-        return Ok(());
-    };
-    if checker == retriever {
-        return Err(format!(
-            "the resolved signature checker {checker:?} is `addresses.{RETRIEVER_ADDRESS_KEY}`, the \
-             BLSSigCheckOperatorStateRetriever. It has no checkSignatures, so verifyAndUpdate would \
-             revert with an empty 0x. Point EXAMPLE_SIG_CHECKER_ADDRESS at a real BLSSignatureChecker."
-        )
-        .into());
-    }
-    Ok(())
-}
-
 /// Directory the SDK submodule's own examples build into, relative to the examples checkout.
 /// Kept in step with `SDK_SUBDIR` in `scripts/examples/fetch_examples.sh`.
 const SDK_OUT_SUBDIR: &str = "lib/solidity-sdk/out";
@@ -1336,6 +1220,7 @@ fn resolve_deploy_json(flag: Option<PathBuf>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::keccak256;
 
     const ADDR_A: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
     const ADDR_B: &str = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
@@ -1343,7 +1228,6 @@ mod tests {
     fn resolver() -> Resolver {
         Resolver {
             avs: Some(ADDR_A.parse().unwrap()),
-            sig_checker: Some(ADDR_B.parse().unwrap()),
             deploy_addresses: BTreeMap::from([(
                 "registryCoordinator".to_string(),
                 ADDR_A.to_string(),
@@ -1365,7 +1249,7 @@ mod tests {
             [[examples]]
             name = "guardedVault"
             artifact = "GuardedVault.sol:GuardedVault"
-            ctor_args = ["$avs", "$sigChecker", "5000"]
+            ctor_args = ["$avs", "$deploy:registryCoordinator", "5000"]
 
               [[examples.setup]]
               sig = "deposit(uint256)"
@@ -1401,7 +1285,7 @@ mod tests {
             [[examples]]
             name = "guardedVault"
             artifact = "GuardedVault.sol:GuardedVault"
-            ctor_args = ["$avs", "$sigChecker", "5000"]
+            ctor_args = ["$avs", "$deploy:registryCoordinator", "5000"]
             "#,
         )
         .unwrap();
@@ -1562,10 +1446,6 @@ mod tests {
         assert_eq!(
             r.resolve("$avs").unwrap(),
             format!("{:?}", ADDR_A.parse::<Address>().unwrap())
-        );
-        assert_eq!(
-            r.resolve("$sigChecker").unwrap(),
-            format!("{:?}", ADDR_B.parse::<Address>().unwrap())
         );
         assert_eq!(r.resolve("$deploy:registryCoordinator").unwrap(), ADDR_A);
         assert_eq!(
@@ -1966,18 +1846,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolved, None);
-    }
-
-    #[test]
-    fn the_operator_state_retriever_is_refused_as_a_checker() {
-        let json = BTreeMap::from([(RETRIEVER_ADDRESS_KEY.to_string(), ADDR_A.to_string())]);
-        let err = reject_retriever_as_checker(Some(ADDR_A.parse().unwrap()), &json)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("checkSignatures"), "{err}");
-
-        // A different checker is fine.
-        reject_retriever_as_checker(Some(ADDR_B.parse().unwrap()), &json).unwrap();
     }
 
     // ---- misc ----

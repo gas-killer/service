@@ -159,7 +159,7 @@ pub struct MetricsCollector {
     /// Full handle_verification duration including contract calls and tx submission (seconds).
     pub execution_duration_seconds: Histogram,
     /// Time from creator dispatching a task to the executor receiving threshold signatures (seconds).
-    /// Captures P2P transit + node EVMSketch + BLS signing + aggregation.
+    /// Captures P2P transit + node EVMSketch + Schnorr signing + aggregation.
     pub p2p_round_trip_seconds: Histogram,
     /// End-to-end round latency from creator dispatch to verifyAndUpdate receipt confirmation
     /// (seconds). Observed only for rounds that complete successfully, so failed rounds — which
@@ -328,7 +328,7 @@ impl MetricsCollector {
             Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]);
         registry.register(
             "gas_killer_p2p_round_trip_seconds",
-            "Time from creator dispatching a task to executor receiving threshold signatures (P2P transit + node EVMSketch + BLS signing + aggregation)",
+            "Time from creator dispatching a task to executor receiving threshold signatures (P2P transit + node EVMSketch + Schnorr signing + aggregation)",
             p2p_round_trip_seconds.clone(),
         );
 

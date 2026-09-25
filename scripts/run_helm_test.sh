@@ -309,7 +309,6 @@ export HTTP_RPC=http://localhost:8545
 export WS_RPC=ws://localhost:8545
 export AVS_DEPLOYMENT_PATH="config/.nodes/avs_deploy.json"
 export PRIVATE_KEY="$PRIVATE_KEY"
-export SIGNATURE_SCHEME=schnorr
 
 # The chart's schnorr-operators job already deployed the registry and registered the operator
 # set in-cluster. Pointing the binary at that address makes this a verification pass rather than

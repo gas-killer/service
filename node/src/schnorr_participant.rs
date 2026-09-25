@@ -1,15 +1,13 @@
 //! Schnorr participant actor: the node's side of the two-round MuSig2 aggregate
-//! signing protocol (`SIGNATURE_SCHEME=schnorr` mode, p2p channel 2).
+//! signing protocol (p2p channel 2).
 //!
-//! Replaces the aggregation engine + reporter of BLS mode. Task discovery is
-//! unchanged — the router still announces tasks on channel 1 and the TaskBook
-//! resolves heights — but instead of unilaterally signing TipAcks, the node
+//! The router announces tasks on channel 1 and the TaskBook resolves heights; the node then
 //! answers the router coordinator's session messages:
 //!
 //! 1. `NonceRequest{h, a}`: generate (or re-send) a fresh nonce pair for the
 //!    session. Nonces are message-independent, so this needs no task validation.
 //! 2. `SignRequest{h, a, …}`: derive the digest for `h` LOCALLY (TaskBook +
-//!    EVMSketch, same [`DigestResolver`] the BLS automaton mirrors), refuse unless
+//!    EVMSketch, via [`DigestResolver`]), refuse unless
 //!    it equals the request's message, authenticate the signer set (every point
 //!    must map to a known operator address — the identity the on-chain registry
 //!    binds with a proof of possession), recompute `X_agg`, then produce the
