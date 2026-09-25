@@ -43,8 +43,7 @@ use crate::digest::DigestResolver;
 /// receive; the sender half is registered but never used).
 const TASK_DIRECTIVE_CHANNEL: u64 = 1;
 
-/// P2P channel carrying the interactive Schnorr signing rounds. Channel 0 carried the retired BLS
-/// engine's acks and stays unused.
+/// P2P channel carrying the interactive Schnorr signing rounds.
 const SCHNORR_CHANNEL: u64 = 2;
 
 #[derive(Clone)]

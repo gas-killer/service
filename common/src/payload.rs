@@ -49,9 +49,8 @@ pub enum BundleProof {
         /// Non-signing operator addresses, strictly ascending.
         non_signers: Vec<Address>,
     },
-    /// A proof from a scheme this build no longer signs, such as a BLS bundle stored before the
-    /// fleet moved to Schnorr. Read so the stored task still parses and expires on its long-passed
-    /// validity window; never produced.
+    /// A proof tagged with any other scheme, such as a stored BLS bundle. Read so the stored task
+    /// still parses and expires on its passed validity window; never produced.
     #[serde(other)]
     Retired,
 }
@@ -123,8 +122,7 @@ mod tests {
 
     #[test]
     fn a_stored_bls_bundle_still_parses_as_retired() {
-        // The exact shape a BLS-era router persisted, so a task stored before the move to Schnorr
-        // reaches its freshness check rather than failing to parse.
+        // A stored BLS bundle must reach its freshness check rather than fail to parse.
         let stored = r#"{
             "msg_hash": "0xabababababababababababababababababababababababababababababababab",
             "reference_block_number": 100,

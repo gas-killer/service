@@ -55,8 +55,7 @@ const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
 
 /// P2p channel on which the router broadcasts `TaskDirective`s to the nodes.
 const DIRECTIVE_CHANNEL: u64 = 1;
-/// P2p channel carrying the interactive Schnorr signing rounds. Channel 0 carried the retired BLS
-/// engine's acks and stays unused.
+/// P2p channel carrying the interactive Schnorr signing rounds.
 const SCHNORR_CHANNEL: u64 = 2;
 
 /// Resolve a hostname:port with retry logic for Docker DNS readiness
