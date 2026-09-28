@@ -96,12 +96,11 @@ fn agreed_digest<'a>(
 ///
 /// Heights only name sessions (neither the task digest nor the chain sees them), so a start far
 /// above the last height costs nothing. What matters is never reusing one: a node keys its
-/// nonce sessions by `(height, attempt)` and never signs twice for the same key. A previous life
-/// started at its own boot time and advanced one height per session, and no session finishes
-/// within a millisecond (two p2p signing rounds), so it never reached the current clock: the
-/// margin is that life's whole uptime. The wall clock is not monotonic, so a backward step
-/// larger than that uptime would reuse recorded heights and the nodes would refuse those
-/// sessions until restarted.
+/// nonce sessions by `(height, attempt)` and never signs twice for the same key. The scheduler
+/// never hands out a height above the clock, so a previous life's heights are all below the
+/// clock when the next life starts. The wall clock is not monotonic, so a backward step across
+/// a restart would reuse recorded heights and the nodes would refuse those sessions until
+/// restarted.
 pub fn clock_tip() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_millis() as u64,
