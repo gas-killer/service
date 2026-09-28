@@ -58,6 +58,11 @@ impl DigestResolver {
         }
     }
 
+    /// The digest a skipped `height` resolves to.
+    pub fn skip_digest(&self, height: u64) -> Digest {
+        skip_digest(&self.namespace, height)
+    }
+
     /// Waits for the TaskBook's resolution of `height` and returns the digest this
     /// node vouches for. `None` means the TaskBook actor is gone (shutdown).
     pub async fn resolve(&self, height: u64) -> Option<Digest> {

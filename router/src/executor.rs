@@ -1,6 +1,8 @@
 use crate::metrics::MetricsCollector;
 use crate::payload_revert::PayloadRevert;
-use crate::sequencer::{InFlightTask, in_flight_task, set_task_failed, set_task_ready};
+use crate::sequencer::{
+    InFlightTask, in_flight_task, in_flight_trace, set_task_failed, set_task_ready,
+};
 use crate::store::SqliteStore;
 use crate::task_data::GasKillerTaskData;
 use alloy::network::Ethereum;
@@ -668,6 +670,29 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Ok(RenderedRound { payload, bundle })
     }
 
+    /// The certified task with the router's own storage updates, from the trace that started
+    /// when the task was announced. The payload hash preflight then checks them against the
+    /// digest the quorum signed, so the quorum's digest is never rendered unchecked.
+    async fn traced_task(
+        &self,
+        task_data: Option<&GasKillerTaskData>,
+    ) -> Result<GasKillerTaskData> {
+        let task = task_data
+            .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
+        let trace = in_flight_trace(&self.in_flight, task)
+            .ok_or_else(|| anyhow::anyhow!("No router trace for the certified task"))?;
+        let storage_updates = trace
+            .wait()
+            .await
+            .map_err(|e| anyhow::anyhow!("task enrichment failed: {e}"))?;
+        let traced = GasKillerTaskData {
+            storage_updates,
+            ..task.clone()
+        };
+        traced.validate()?;
+        Ok(traced)
+    }
+
     /// Renders `verifyAndUpdate` for a certified height and settles its task, recording
     /// round-trip and execution metrics keyed by `height`. Called by
     /// [`crate::schnorr_submitter::SchnorrSubmitter`].
@@ -692,16 +717,20 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 
         let exec_start = Instant::now();
 
-        let result = self
-            .render_schnorr_payload(
-                msg_hash,
-                current_block_number,
-                s,
-                r_addr,
-                non_signers,
-                task_data,
-            )
-            .await;
+        let result = match self.traced_task(task_data).await {
+            Ok(traced) => {
+                self.render_schnorr_payload(
+                    msg_hash,
+                    current_block_number,
+                    s,
+                    r_addr,
+                    non_signers,
+                    Some(&traced),
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        };
 
         if let Some(m) = &self.metrics {
             m.execution_duration_seconds
@@ -726,8 +755,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         // mistaken for this one. A successful round persists the rendered payload and its
         // bundle; the on-chain submission is left to the user (or the future auto-execute tier).
         if let Some(store) = &self.store
-            && let Some(task_id) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
+            && let Some(flight) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
         {
+            let task_id = flight.task_id;
             let metrics = self.metrics.as_deref();
             match &result {
                 Ok(rendered) => {
@@ -759,6 +789,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequencer::{InFlight, RouterTrace};
     use alloy::sol_types::SolValue;
     use alloy_provider::{ProviderBuilder, mock::Asserter};
 
@@ -970,7 +1001,7 @@ mod tests {
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new().connect_mocked_client(asserter);
         let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(task.id.clone());
+        *in_flight.lock().unwrap() = Some(flight(&task.id, &GasKillerTaskData::default()));
 
         let mut handler = GasKillerHandler::new(1, provider)
             .with_store(store.clone())
@@ -1008,6 +1039,22 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("verification failed"))
         );
+    }
+
+    /// The slot for `task_id` whose router trace produced `task_data`'s storage updates.
+    fn flight(task_id: &str, task_data: &GasKillerTaskData) -> InFlight {
+        InFlight {
+            task_id: task_id.to_owned(),
+            trace: RouterTrace::finished(task_data.clone(), Ok(task_data.storage_updates.clone())),
+        }
+    }
+
+    /// The certified task as the assignment carries it: announced, so without storage updates.
+    fn announced(task_data: &GasKillerTaskData) -> GasKillerTaskData {
+        GasKillerTaskData {
+            storage_updates: Bytes::new(),
+            ..task_data.clone()
+        }
     }
 
     /// Task data whose signed hash matches its own storage updates, so the render preflight passes.
@@ -1048,7 +1095,7 @@ mod tests {
         push_supports_interface(&asserter, true);
 
         let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(task.id.clone());
+        *in_flight.lock().unwrap() = Some(flight(&task.id, &task_data));
         let mut handler = GasKillerHandler::new(1, provider)
             .with_store(store.clone())
             .with_in_flight_task(in_flight.clone())
@@ -1066,7 +1113,7 @@ mod tests {
                 s,
                 r_addr,
                 non_signers.clone(),
-                Some(&task_data),
+                Some(&announced(&task_data)),
             )
             .await;
 
@@ -1111,6 +1158,59 @@ mod tests {
                 r_addr,
                 non_signers
             }
+        );
+    }
+
+    /// Settles a certified round whose router trace ended in `trace`, returning the failure the
+    /// task recorded. No RPC is queued: both cases must fail before the chain is touched.
+    async fn settle_with_trace(trace: Result<Bytes, String>) -> String {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request_body()).await.unwrap();
+        let (task_data, msg_hash) = matching_task_data();
+
+        let provider = ProviderBuilder::new().connect_mocked_client(Asserter::new());
+        let in_flight = in_flight_task();
+        *in_flight.lock().unwrap() = Some(InFlight {
+            task_id: task.id.clone(),
+            trace: RouterTrace::finished(task_data.clone(), trace),
+        });
+        let mut handler = GasKillerHandler::new(1, provider)
+            .with_store(store.clone())
+            .with_in_flight_task(in_flight.clone());
+
+        let result = handler
+            .handle_schnorr_verification(
+                0,
+                msg_hash,
+                100,
+                U256::from(42u64),
+                Address::from([0x44; 20]),
+                vec![],
+                Some(&announced(&task_data)),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(in_flight.lock().unwrap().is_none());
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Failed);
+        assert!(settled.payload.is_none());
+        settled.error.expect("a failure reason should be recorded")
+    }
+
+    #[tokio::test]
+    async fn a_quorum_digest_the_router_trace_disagrees_with_is_not_rendered() {
+        let error = settle_with_trace(Ok(Bytes::from(vec![0x01]))).await;
+        assert!(error.contains("Message hash mismatch"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_router_trace_fails_the_task_with_its_cause() {
+        let error = settle_with_trace(Err("call reverted".to_owned())).await;
+        assert!(
+            error.contains("task enrichment failed: call reverted"),
+            "{error}"
         );
     }
 
@@ -1243,7 +1343,7 @@ mod tests {
         push_execution_revert(&asserter, "0x68477238");
 
         let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(task.id.clone());
+        *in_flight.lock().unwrap() = Some(flight(&task.id, &task_data));
         let mut handler = GasKillerHandler::new(1, provider)
             .with_store(store.clone())
             .with_in_flight_task(in_flight.clone())
@@ -1257,7 +1357,7 @@ mod tests {
                 U256::from(42u64),
                 Address::from([0x44; 20]),
                 vec![],
-                Some(&task_data),
+                Some(&announced(&task_data)),
             )
             .await;
 

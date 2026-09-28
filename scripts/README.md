@@ -206,8 +206,8 @@ trace drives the process from 8 MB to 2.2 GB of RSS in 20s and still has not ret
 `ready`:
 
 ```
-ERROR gas_killer_router::sequencer: failed to enrich task, dropping request
-  error=Gas analysis failed: debug_trace_call failed: error sending request
+WARN gas_killer_router::schnorr_coordinator: router trace failed, skipping height
+  reason=Failed to compute storage updates: Gas analysis failed: debug_trace_call failed: error sending request
 ```
 
 `generations` is already at its floor of 1, so no manifest setting avoids this — the limit is the

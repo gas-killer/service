@@ -340,12 +340,12 @@ node:
   # attempt with fresh nonces from the remaining quorum. Raise this only alongside a
   # SIGTERM handler that drains something.
   #
-  # The retry is correct but not free. A node that committed a nonce and then died
-  # sends nothing back, and the coordinator cannot tell that apart from one still
-  # tracing, so it waits out the whole partial stage (schnorr.signStageTimeoutSecs,
-  # roundTimeout/2 by default) before starting over. Drain a node pool between
-  # rounds: one deletion mid-round costs half the round, and two overlapping ones
-  # lose the height to a skip.
+  # The retry is correct but not free. A node that died mid-trace sends no nonce
+  # commit, and the coordinator cannot tell that apart from one still tracing, so
+  # when the quorum needs that node it waits out the whole trace stage
+  # (schnorr.traceTimeoutSecs, roundTimeout/2 by default) before starting over. Drain
+  # a node pool between rounds: one deletion mid-round can cost half the round, and
+  # two overlapping ones lose the height to a skip.
   terminationGracePeriodSeconds: 30
   # Stagger EigenSDK eth_getLogs backfill sweeps across nodes so at most one runs at a time.
   # node-1 starts immediately; node-N waits (N-1) * startupDelaySecsPerNode before launching.
@@ -407,8 +407,8 @@ router:
   # (production transactions can take several minutes of EVMSketch compute); the cost
   # of a larger value is that a round that never reaches quorum blocks the task queue
   # for the full window. In schnorr mode it is also the base for the coordinator's
-  # partial-collection deadline (schnorr.signStageTimeoutSecs, default roundTimeout/2),
-  # so the stage that holds node compute scales with this value. Keep it below
+  # nonce-commit deadline (schnorr.traceTimeoutSecs, default roundTimeout/2), so the
+  # stage that holds node compute scales with this value. Keep it below
   # ingress.taskTtlSeconds, which bounds how long a task queued behind this round
   # survives. Tune against gas_killer_p2p_round_trip_seconds and the round-timeout
   # panel in the Grafana dashboard.
@@ -602,22 +602,21 @@ schnorr:
   #     record to have reached the router's copy of the file.
   stakeRegistryAddress: ""
 
-  # Nonce-collection timeout for the coordinator's rounds, in seconds. Empty uses the binary's
-  # default of min(5, ROUND_TIMEOUT/6), so several attempts fit inside one round-timeout window.
-  # Round 1 is message-independent — a node answers from a fresh nonce pair without touching the
-  # task — so this is a bare p2p round trip, and a short deadline is what lets the coordinator
-  # drop an unresponsive operator quickly.
+  # Round-trip timeout for the coordinator's stages that hold no node compute, in seconds:
+  # partial-signature collection, and the wait for the remaining nonce commits once enough
+  # operators agree on a digest to sign. Empty uses the binary's default of
+  # min(5, ROUND_TIMEOUT/6), so several attempts fit inside one round-timeout window, and a short
+  # deadline is what lets the coordinator drop an unresponsive operator quickly.
   stageTimeoutSecs: ""
 
-  # Partial-signature collection timeout for the coordinator's rounds, in seconds. Empty uses the
-  # binary's default of roundTimeout/2. This stage holds the node's EVMSketch — a signer resolves
-  # the announced task's digest locally before it will produce a partial — so it has to cover a
-  # full cold trace rather than a p2p round trip. Half a round rather than the whole one keeps a
-  # retry in budget, but the two retry cases differ: a retry after a dropped signing-round message
-  # resolves from the node's digest cache and is cheap, while a retry after the stage ran to its
-  # deadline leaves the first attempt's trace still running and uncached, so the node carries two
-  # concurrent EVMSketches for one task and both get slower.
-  signStageTimeoutSecs: ""
+  # How long the coordinator waits for nonce commits, in seconds. Empty uses the binary's default
+  # of roundTimeout/2. A node commits only once it has traced the announced task with EVMSketch
+  # and derived its digest, so this has to cover a full cold trace rather than a p2p round trip.
+  # Half a round rather than the whole one keeps a retry in budget, but the two retry cases
+  # differ: a retry after a dropped message resolves from the node's digest cache and is cheap,
+  # while a retry after the stage ran to its deadline queues behind the first attempt's trace,
+  # which is still running.
+  traceTimeoutSecs: ""
 
   # Per-peer message rate for the schnorr protocol channel. Empty uses the binary's default of
   # 64. Size it generously: the p2p sender SILENTLY DROPS messages beyond the rate, and a dropped

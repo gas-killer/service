@@ -373,8 +373,8 @@ spec:
             - name: SCHNORR_STAGE_TIMEOUT_SECS
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.schnorr.signStageTimeoutSecs }}
-            - name: SCHNORR_SIGN_STAGE_TIMEOUT_SECS
+            {{- with .Values.schnorr.traceTimeoutSecs }}
+            - name: SCHNORR_TRACE_TIMEOUT_SECS
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.schnorr.messagesPerSecond }}

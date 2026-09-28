@@ -737,7 +737,7 @@ data:
           "id": 96,
           "type": "timeseries",
           "title": "Analysis Cost: Router vs Operators (p95)",
-          "description": "The same metric on both sides. The router pays this on the height-assignment path, so it is serial with the round; the operators pay it in parallel with each other. A router figure comparable to the operators' is the argument for moving enrichment off the assignment path.",
+          "description": "The same metric on both sides. The router's trace runs alongside the operators' and gates the rendered payload, so a router figure well above the operators' is time a certified round waits before it renders.",
           "gridPos": { "x": 12, "y": 126, "w": 12, "h": 8 },
           "targets": [
             {

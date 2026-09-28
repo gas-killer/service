@@ -10,9 +10,11 @@
 //!
 //! ```text
 //! router --NonceRequest{h,a}-->  all operators
-//! node   --NonceCommit{h,a,pubkey,nonce}--> router      (idempotent re-send of the
-//!                                                        SAME pubnonce on duplicates)
-//! router --SignRequest{h,a,message,signers,agg_nonces,r_addr}--> subset S
+//! node   --NonceCommit{h,a,pubkey,nonce,digest}--> router  (sent once the node has derived
+//!                                                         the digest; duplicates re-send the
+//!                                                         SAME pubnonce)
+//! router --SignRequest{h,a,message,signers,agg_nonces,r_addr}--> subset S   (message = the
+//!                                                         digest a quorum of commits carried)
 //! node   --PartialSig{h,a,partial}--> router
 //! ```
 //!
@@ -90,12 +92,15 @@ pub enum SchnorrMsg {
     /// Router → operators: open session `(height, attempt)`, request a fresh nonce.
     NonceRequest { height: u64, attempt: u32 },
     /// Node → router: the node's public nonce pair (and its public key, so the
-    /// router learns the point behind the p2p address).
+    /// router learns the point behind the p2p address), plus the task digest the node
+    /// derived for the height. The coordinator signs the digest a quorum agrees on, so
+    /// it never waits on its own trace.
     NonceCommit {
         height: u64,
         attempt: u32,
         pubkey: PublicKey,
         nonce: PubNonce,
+        digest: [u8; MESSAGE_LEN],
     },
     /// Router → subset: the signing context (round 2 open).
     SignRequest(SignRequest),
@@ -176,12 +181,14 @@ impl Write for SchnorrMsg {
                 attempt,
                 pubkey,
                 nonce,
+                digest,
             } => {
                 TAG_NONCE_COMMIT.write(buf);
                 UInt(*height).write(buf);
                 attempt.write(buf);
                 buf.put_slice(&pubkey.to_compressed());
                 buf.put_slice(&nonce.to_bytes());
+                buf.put_slice(digest);
             }
             SchnorrMsg::SignRequest(r) => {
                 TAG_SIGN_REQUEST.write(buf);
@@ -221,11 +228,13 @@ impl Read for SchnorrMsg {
             TAG_NONCE_COMMIT => {
                 let pubkey = read_pubkey(buf)?;
                 let nonce = read_pubnonce(buf)?;
+                let digest: [u8; MESSAGE_LEN] = read_array(buf)?;
                 Ok(SchnorrMsg::NonceCommit {
                     height,
                     attempt,
                     pubkey,
                     nonce,
+                    digest,
                 })
             }
             TAG_SIGN_REQUEST => {
@@ -272,7 +281,7 @@ impl EncodeSize for SchnorrMsg {
         let header = 1 + UInt(self.height()).encode_size() + self.attempt().encode_size();
         match self {
             SchnorrMsg::NonceRequest { .. } => header,
-            SchnorrMsg::NonceCommit { .. } => header + 33 + 66,
+            SchnorrMsg::NonceCommit { .. } => header + 33 + 66 + MESSAGE_LEN,
             SchnorrMsg::SignRequest(r) => header + MESSAGE_LEN + 4 + r.signers.len() * 33 + 66 + 20,
             SchnorrMsg::PartialSig { .. } => header + 32,
         }
@@ -314,6 +323,7 @@ mod tests {
             attempt: 1,
             pubkey: key.public_key(),
             nonce: pubnonce,
+            digest: [0xab; MESSAGE_LEN],
         };
         let encoded = original.encode();
         assert_eq!(encoded.len(), original.encode_size());
@@ -393,6 +403,7 @@ mod tests {
             attempt: 1,
             pubkey: key.public_key(),
             nonce: pubnonce,
+            digest: [0; MESSAGE_LEN],
         }
         .encode();
         let truncated = encoded.slice(0..encoded.len() - 1);
@@ -409,10 +420,11 @@ mod tests {
             attempt: 1,
             pubkey: key.public_key(),
             nonce: pubnonce,
+            digest: [0; MESSAGE_LEN],
         }
         .encode_mut();
         // Corrupt the compressed pubkey's prefix byte (valid prefixes are 0x02/0x03).
-        let pk_offset = bytes.len() - 33 - 66;
+        let pk_offset = bytes.len() - 33 - 66 - MESSAGE_LEN;
         bytes[pk_offset] = 0xff;
         assert!(SchnorrMsg::decode(bytes.freeze()).is_err());
     }

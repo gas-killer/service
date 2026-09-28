@@ -1,5 +1,5 @@
-//! Task source: pulls tasks off the ingress queue and enriches them (EVMSketch)
-//! into [`GasKillerTaskData`] ready for aggregation.
+//! Task source: pulls tasks off the ingress queue, resolves them into [`GasKillerTaskData`]
+//! ready for aggregation, and starts the router's own EVMSketch trace alongside the round.
 //!
 //! Height assignment, directive broadcast/rebroadcast, and resolution tracking are
 //! generic and live in [`commonware_avs_router::sequencer`]; this module supplies
@@ -16,12 +16,15 @@ use gas_killer_common::{PayloadView, TaskBundle};
 
 use alloy_primitives::Bytes;
 use anyhow::Result;
+use commonware_cryptography::sha256::Digest;
 use commonware_cryptography::{Hasher, Sha256};
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tracing::{debug, error, info};
+use tokio::sync::watch;
+use tracing::{error, info};
 
 /// A task queued for the sequencer, carrying the persisted task id alongside the
 /// request so status transitions can be attributed back to the right store row.
@@ -45,26 +48,108 @@ pub fn task_queue_depth() -> TaskQueueDepth {
     Arc::new(AtomicUsize::new(0))
 }
 
-/// Id of the task currently dispatched through the sequencer (dequeued but not yet
-/// settled), shared between [`GasKillerTaskSource`] and [`crate::executor::GasKillerHandler`]
-/// so a certified height's execution result can be attributed back to its task.
+/// The router's own EVMSketch trace for a dispatched task, running alongside the signing
+/// round rather than ahead of it.
+///
+/// Nodes supply the digest the quorum signs, so the round never waits on this trace. It
+/// still gates the outcome: the payload is rendered only from these storage updates, and only
+/// when they hash to the digest the quorum signed, so the router keeps its independent check
+/// of the quorum. The trace runs in its own task, so it outlives whatever future awaited it.
+#[derive(Clone)]
+pub struct RouterTrace {
+    /// The task as announced (empty `storage_updates`); ties the trace to its assignment.
+    task: GasKillerTaskData,
+    result: watch::Receiver<Option<Result<Bytes, String>>>,
+}
+
+impl RouterTrace {
+    /// Spawns `trace` and returns a handle every consumer can await.
+    pub fn spawn<F>(task: GasKillerTaskData, trace: F) -> Self
+    where
+        F: Future<Output = Result<Bytes>> + Send + 'static,
+    {
+        let (tx, result) = watch::channel(None);
+        tokio::spawn(async move {
+            let outcome = trace.await.map_err(|e| e.to_string());
+            let _ = tx.send(Some(outcome));
+        });
+        Self {
+            task: announced(&task),
+            result,
+        }
+    }
+
+    /// A trace that has already finished, for callers that hold the result up front.
+    pub fn finished(task: GasKillerTaskData, outcome: Result<Bytes, String>) -> Self {
+        let (_, result) = watch::channel(Some(outcome));
+        Self {
+            task: announced(&task),
+            result,
+        }
+    }
+
+    /// Whether this trace belongs to `task`, whatever storage updates `task` carries.
+    pub fn is_for(&self, task: &GasKillerTaskData) -> bool {
+        self.task == announced(task)
+    }
+
+    /// Waits for the trace: the storage updates, or why they could not be computed.
+    pub async fn wait(&self) -> Result<Bytes, String> {
+        let mut result = self.result.clone();
+        match result.wait_for(Option::is_some).await {
+            Ok(outcome) => outcome.clone().expect("waited for a result"),
+            Err(_) => Err("router trace ended without a result".to_owned()),
+        }
+    }
+
+    /// The failure, if the trace has already failed.
+    fn failure(&self) -> Option<String> {
+        match &*self.result.borrow() {
+            Some(Err(reason)) => Some(reason.clone()),
+            _ => None,
+        }
+    }
+}
+
+fn announced(task: &GasKillerTaskData) -> GasKillerTaskData {
+    GasKillerTaskData {
+        storage_updates: Bytes::new(),
+        ..task.clone()
+    }
+}
+
+/// The task currently dispatched through the sequencer (dequeued but not yet settled) and its
+/// router trace.
+#[derive(Clone)]
+pub struct InFlight {
+    pub task_id: String,
+    pub trace: RouterTrace,
+}
+
+/// The in-flight task, shared between [`GasKillerTaskSource`], the Schnorr coordinator and
+/// [`crate::executor::GasKillerHandler`] so a certified height can be attributed back to its task.
 ///
 /// Exactly one task is ever in flight: the upstream [`commonware_avs_router::sequencer::Sequencer`]
 /// drives one height at a time and only calls [`TaskSource::next_task`] again once the
 /// current task resolves, so a single slot suffices — no keying by height or round
 /// is needed.
 ///
-/// `next_task` sets the slot when a task starts. `GasKillerHandler::handle_verification`
-/// takes it when execution settles (ready or failed) — the only path that calls
-/// `handle_verification` is a certificate carrying the task's own expected digest, so
-/// a settling execution always belongs to the task presently in the slot. If the slot
-/// is still occupied the next time `next_task` runs, the previous task's height was
-/// skipped by the quorum instead — the one path that resolves a height without ever
-/// calling `handle_verification` — and `next_task` settles it as failed.
-pub type InFlightTask = Arc<Mutex<Option<String>>>;
+/// `next_task` sets the slot when a task starts. `GasKillerHandler::handle_schnorr_verification`
+/// takes it when execution settles (ready or failed). If the slot is still occupied the next
+/// time `next_task` runs, the previous task's height was skipped instead — the one path that
+/// resolves a height without reaching the handler — and `next_task` settles it as failed.
+pub type InFlightTask = Arc<Mutex<Option<InFlight>>>;
 
 pub fn in_flight_task() -> InFlightTask {
     Arc::new(Mutex::new(None))
+}
+
+/// The in-flight trace for `task`, if the slot holds one for it.
+pub fn in_flight_trace(in_flight: &InFlightTask, task: &GasKillerTaskData) -> Option<RouterTrace> {
+    let slot = in_flight.lock().ok()?;
+    slot.as_ref()
+        .filter(|flight| flight.trace.is_for(task))
+        .map(|flight| flight.trace.clone())
 }
 
 /// Claims a dequeued task for this round, moving it to `processing`, and reports whether the
@@ -143,33 +228,34 @@ fn observe_task_e2e(metrics: Option<&MetricsCollector>, elapsed_secs: Option<i64
     }
 }
 
-/// Enriched task data that includes computed storage updates and block height.
-struct EnrichedTask {
+/// A dequeued task with everything the announce needs; the storage updates come later from
+/// its [`RouterTrace`].
+struct ResolvedTask {
     task: GasKillerTaskRequest,
-    storage_updates: Bytes,
-    block_height: u64,
     /// Resolved transition index (sentinel `None` → concrete count from chain).
     transition_index: u64,
     /// Actual EVM chain ID (e.g. 1 = Ethereum mainnet, 100 = Gnosis, 31337 = Anvil).
     chain_id: u64,
+    /// Simulation RPC the trace runs against.
+    sim_rpc_url: String,
 }
 
-impl EnrichedTask {
-    fn into_task_data(self) -> GasKillerTaskData {
+impl ResolvedTask {
+    fn task_data(&self) -> GasKillerTaskData {
         GasKillerTaskData {
-            storage_updates: self.storage_updates,
+            storage_updates: Bytes::new(),
             transition_index: self.transition_index,
             target_address: self.task.body.target_address,
-            call_data: self.task.body.call_data,
+            call_data: self.task.body.call_data.clone(),
             from_address: self.task.body.from_address,
             value: self.task.body.value,
-            block_height: self.block_height,
+            block_height: self.task.body.block_height,
             chain_id: self.chain_id,
         }
     }
 }
 
-/// Pulls tasks from the ingress queue and enriches them into [`GasKillerTaskData`]
+/// Pulls tasks from the ingress queue and resolves them into [`GasKillerTaskData`]
 /// for the aggregation [`commonware_avs_router::sequencer::Sequencer`].
 pub struct GasKillerTaskSource {
     receiver: TaskReceiver,
@@ -220,9 +306,10 @@ impl GasKillerTaskSource {
         Some(task)
     }
 
-    /// Computes storage updates (EVMSketch) and resolves the transition index for a
-    /// dequeued task. Lifted nearly verbatim from the old creator.
-    async fn enrich(&self, task: GasKillerTaskRequest) -> Result<EnrichedTask> {
+    /// Resolves what the announce needs for a dequeued task: its chain, its transition index
+    /// and its chain id. Cheap RPC reads only, so a task that cannot be routed never reaches a
+    /// height.
+    async fn resolve(&self, task: GasKillerTaskRequest) -> Result<ResolvedTask> {
         info!(
             target = format!("{:?}", task.body.target_address),
             from = format!("{:?}", task.body.from_address),
@@ -235,152 +322,120 @@ impl GasKillerTaskSource {
             m.tasks_created.inc();
         }
 
-        debug!(
-            "Computing storage updates for target {}",
-            task.body.target_address
+        let chain_role = self
+            .validator
+            .detect_chain_for_address(task.body.target_address)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to detect chain: {}", e))?;
+        let sim_rpc_url = self
+            .validator
+            .sim_rpc_url_for_chain(chain_role)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_role))?
+            .to_owned();
+
+        // Read the chain ID from the chain RPC rather than the simulation one: a fork reports its
+        // upstream's ID, but it is the settling chain the commitment is bound to.
+        let chain_id_fut = self.validator.get_chain_id_for(chain_role);
+        let count_fut = async {
+            match task.body.transition_index {
+                Some(index) => Ok(index),
+                None => {
+                    self.validator
+                        .get_state_transition_count_on_chain(task.body.target_address, chain_role)
+                        .await
+                }
+            }
+        };
+        let (chain_id, transition_index) = tokio::try_join!(chain_id_fut, count_fut)?;
+
+        info!(
+            target_address = %task.body.target_address,
+            chain = %chain_role,
+            transition_index,
+            chain_id,
+            "Resolved task for announce"
         );
 
-        // For explicit indices, run storage computation alone (count not needed).
-        // For auto mode, run stateTransitionCount() concurrently with EVMSketch: the
-        // count RPC call (~200ms) is fully hidden behind EVMSketch (seconds), so the
-        // auto path adds zero observable latency compared to the explicit-index path.
-        let (
-            storage_updates,
-            block_height,
-            numeric_chain_id,
-            resolved_transition_index,
-            storage_elapsed,
-        ) = if let Some(idx) = task.body.transition_index {
+        Ok(ResolvedTask {
+            task,
+            transition_index,
+            chain_id,
+            sim_rpc_url,
+        })
+    }
+
+    /// Starts the router's EVMSketch trace for a resolved task.
+    fn spawn_trace(&self, resolved: &ResolvedTask) -> RouterTrace {
+        let validator = Arc::clone(&self.validator);
+        let metrics = self.metrics.clone();
+        let task_data = resolved.task_data();
+        let rpc_url = resolved.sim_rpc_url.clone();
+        let traced = task_data.clone();
+        RouterTrace::spawn(task_data, async move {
             let start = Instant::now();
-            // compute_storage_updates_for_tx detects the chain, runs EVMSketch, and also
-            // calls eth_chainId on the same RPC — returns the numeric chain ID directly.
-            let (updates, height, chain_id) = self
-                .validator
-                .compute_storage_updates_for_tx(
-                    task.body.target_address,
-                    &task.body.call_data,
-                    Some(task.body.from_address),
-                    Some(task.body.value),
-                    task.body.block_height,
+            let analysis = validator
+                .analyze_transaction(
+                    &rpc_url,
+                    traced.target_address,
+                    &traced.call_data,
+                    Some(traced.from_address),
+                    Some(traced.value),
+                    traced.block_height,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
-            (updates, height, chain_id, idx, start.elapsed())
-        } else {
-            // Timed from here, before chain detection, so both branches report the same span:
-            // everything the sequencer does to turn a request into storage updates. The
-            // explicit-index branch detects the chain inside
-            // `compute_storage_updates_for_tx`, so starting the clock after detection here
-            // would report a shorter interval for the same work.
-            let start = Instant::now();
-            // Detect chain once so all concurrent futures skip redundant eth_getCode probes.
-            let chain_role = self
-                .validator
-                .detect_chain_for_address(task.body.target_address)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to detect chain: {}", e))?;
-            let rpc_url = self
-                .validator
-                .sim_rpc_url_for_chain(chain_role)
-                .ok_or_else(|| anyhow::anyhow!("No RPC URL for chain {}", chain_role))?
-                .to_owned();
+            if let Some(m) = &metrics {
+                m.storage_computation_seconds
+                    .observe(start.elapsed().as_secs_f64());
+            }
+            let storage_updates = analysis.storage_updates;
 
+            let mut storage_hasher = Sha256::new();
+            storage_hasher.update(&storage_updates);
+            let storage_hash = storage_hasher.finalize();
             info!(
-                target_address = %task.body.target_address,
-                chain = %chain_role,
-                "Resolving auto transition_index concurrently with EVMSketch"
+                storage_updates_len = storage_updates.len(),
+                storage_updates_hash = %hex::encode(&storage_hash[..8]),
+                block_height = traced.block_height,
+                transition_index = traced.transition_index,
+                target_address = %traced.target_address,
+                target_function = %traced.call_data.get(..4).map(hex::encode).unwrap_or_default(),
+                chain_id = traced.chain_id,
+                "Sequencer computed storage updates"
             );
-
-            let count_validator = Arc::clone(&self.validator);
-            let chain_id_validator = Arc::clone(&self.validator);
-            let target = task.body.target_address;
-            let count_fut = async move {
-                count_validator
-                    .get_state_transition_count_on_chain(target, chain_role)
-                    .await
-            };
-            let storage_fut = async {
-                self.validator
-                    .analyze_transaction(
-                        &rpc_url,
-                        task.body.target_address,
-                        &task.body.call_data,
-                        Some(task.body.from_address),
-                        Some(task.body.value),
-                        task.body.block_height,
-                    )
-                    .await
-                    .map(|r| (r.storage_updates, r.block_height))
-            };
-            // eth_chainId runs concurrently — completes in ~50ms, well before EVMSketch.
-            let chain_id_fut = async move { chain_id_validator.get_chain_id_for(chain_role).await };
-            let (count, (updates, height), chain_id) =
-                tokio::try_join!(count_fut, storage_fut, chain_id_fut)?;
-
-            info!(
-                target_address = %task.body.target_address,
-                chain = %chain_role,
-                count,
-                "Resolved auto transition_index from chain"
-            );
-            (updates, height, chain_id, count, start.elapsed())
-        };
-
-        if let Some(m) = &self.metrics {
-            m.storage_computation_seconds
-                .observe(storage_elapsed.as_secs_f64());
-        }
-
-        // Debug: Log hash of full storage_updates to detect differences vs validators
-        let mut storage_hasher = Sha256::new();
-        storage_hasher.update(&storage_updates);
-        let storage_hash = storage_hasher.finalize();
-        let storage_hash_hex = hex::encode(&storage_hash[..8]);
-        info!(
-            storage_updates_len = storage_updates.len(),
-            storage_updates_hash = %storage_hash_hex,
-            block_height = block_height,
-            transition_index = resolved_transition_index,
-            target_address = %task.body.target_address,
-            target_function = %task.body.call_data.get(..4).map(hex::encode).unwrap_or_default(),
-            chain_id = numeric_chain_id,
-            "Sequencer computed storage updates"
-        );
-
-        Ok(EnrichedTask {
-            task,
-            storage_updates: storage_updates.into(),
-            block_height,
-            transition_index: resolved_transition_index,
-            chain_id: numeric_chain_id,
+            Ok(storage_updates.into())
         })
     }
 }
 
 impl GasKillerTaskSource {
     /// Settles the previous in-flight task as `failed` if the slot is still
-    /// occupied — the quorum skipped that task's height without ever reaching
-    /// `GasKillerHandler::handle_verification`. A no-op when the slot is already
+    /// occupied — its height was skipped without ever reaching
+    /// `GasKillerHandler::handle_schnorr_verification`. A no-op when the slot is already
     /// empty (the common case: the previous task settled normally).
     async fn settle_orphaned_task(&self) {
         if let Some(store) = &self.store
-            && let Some(task_id) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
+            && let Some(flight) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
         {
-            set_task_failed(
-                store,
-                self.metrics.as_deref(),
-                &task_id,
-                "aggregation height skipped by quorum",
-            )
-            .await;
+            let reason = match flight.trace.failure() {
+                Some(reason) => format!("task enrichment failed: {reason}"),
+                None => "aggregation height skipped by quorum".to_owned(),
+            };
+            set_task_failed(store, self.metrics.as_deref(), &flight.task_id, &reason).await;
         }
     }
 }
 
+/// The digest [`SequencedTask`] carries for a task whose digest is not known at assignment.
+///
+/// The quorum's commits supply the digest the coordinator signs, and the render gate checks it
+/// against the router trace, so nothing reads this value; the upstream sequencer only logs it.
+pub const DEFERRED_DIGEST: Digest = Digest([0; 32]);
+
 #[async_trait::async_trait]
 impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
-    /// Dequeues the next ingress task and enriches it. Enrichment failures are
-    /// logged, settled as `failed`, and dropped; the loop keeps waiting for the
+    /// Dequeues the next ingress task, resolves it and starts its trace. Resolution
+    /// failures are logged, settled as `failed`, and dropped; the loop keeps waiting for the
     /// next task rather than shutting the sequencer down.
     async fn next_task(&mut self) -> Option<SequencedTask<GasKillerTaskData>> {
         loop {
@@ -398,8 +453,8 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
                 continue;
             }
 
-            let enriched = match self.enrich(request).await {
-                Ok(enriched) => enriched,
+            let resolved = match self.resolve(request).await {
+                Ok(resolved) => resolved,
                 Err(e) => {
                     error!(error = %e, task_id, "failed to enrich task, dropping request");
                     if let Some(store) = &self.store {
@@ -414,60 +469,21 @@ impl TaskSource<GasKillerTaskData> for GasKillerTaskSource {
                     continue;
                 }
             };
-            let task_data = enriched.into_task_data();
 
-            // The wire codec asserts the combined calldata + storage-updates size
-            // (ingress only bounds the calldata; EVMSketch produces the updates),
-            // so reject gracefully here instead of panicking mid-broadcast.
-            if let Err(e) = task_data.validate() {
-                error!(
-                    error = %e,
-                    task_id,
-                    target = %task_data.target_address,
-                    "enriched task exceeds wire limits, dropping request"
-                );
-                if let Some(store) = &self.store {
-                    set_task_failed(
-                        store,
-                        self.metrics.as_deref(),
-                        &task_id,
-                        &format!("task exceeds wire limits: {e}"),
-                    )
-                    .await;
-                }
-                continue;
-            }
-
-            // Prime the validator's digest cache so the router automaton (and any
-            // digest re-derivation) skips EVMSketch: this source already ran it.
-            self.validator
-                .prime_cache(&task_data, &task_data.storage_updates)
-                .await;
-            let digest = task_data.build_payload_hash(&task_data.storage_updates);
-
-            // Announce WITHOUT the router's computed storage_updates: nodes
-            // independently recompute them with EVMSketch (that is the whole trust
-            // model — see GasKillerValidator::expected_digest_for_task), so shipping
-            // them is both a validation-bypass smell and dead weight. Dropping the
-            // ~700-byte diff shrinks the Announce ~4x, which is the difference between
-            // it reliably fitting a single unreliable p2p frame and being dropped in
-            // favor of the tiny Skip. The digest is unaffected (the node builds it
-            // from its own recomputed updates).
-            let announce = GasKillerTaskData {
-                storage_updates: Bytes::new(),
-                ..task_data.clone()
-            };
-
-            // Record this task as in flight so `GasKillerHandler::handle_verification`
-            // can settle it once its height executes.
+            // Announce WITHOUT storage_updates: nodes independently recompute them with
+            // EVMSketch (that is the whole trust model — see
+            // GasKillerValidator::expected_digest_for_task), and the router's own come from
+            // the trace started here, after the announce is already out.
+            let task_data = resolved.task_data();
+            let trace = self.spawn_trace(&resolved);
             if let Ok(mut slot) = self.in_flight.lock() {
-                *slot = Some(task_id);
+                *slot = Some(InFlight { task_id, trace });
             }
 
             return Some(SequencedTask {
+                announce: task_data.clone(),
                 task: task_data,
-                announce,
-                digest,
+                digest: DEFERRED_DIGEST,
             });
         }
     }
@@ -509,30 +525,61 @@ mod tests {
     }
 
     #[test]
-    fn test_task_data_from_request() {
-        let task = GasKillerTaskRequest {
-            body: crate::ingress::GasKillerTaskRequestBody {
-                target_address: Address::from([1u8; 20]),
-                call_data: vec![0x12, 0x34, 0x56, 0x78],
-                transition_index: Some(42),
-                from_address: Address::from([2u8; 20]),
-                value: U256::from(1000),
-                block_height: 12345,
-            },
-        };
-
-        let enriched = EnrichedTask {
-            task,
-            storage_updates: vec![0x01, 0x02, 0x03, 0x04].into(), // computed by GasAnalyzer
-            block_height: 12345,
+    fn resolved_task_announces_without_storage_updates() {
+        let resolved = ResolvedTask {
+            task: sample_request(Some(42)),
             transition_index: 42,
             chain_id: 1u64,
+            sim_rpc_url: "http://localhost:8545".to_owned(),
         };
-        let task_data = enriched.into_task_data();
+        let task_data = resolved.task_data();
 
         assert_eq!(task_data.transition_index, 42);
         assert_eq!(task_data.target_address, Address::from([1u8; 20]));
+        assert_eq!(task_data.block_height, 12345);
         assert_eq!(task_data.chain_id, 1);
+        assert!(task_data.storage_updates.is_empty());
+    }
+
+    fn flight(task_id: &str, trace: Result<Bytes, String>) -> InFlight {
+        InFlight {
+            task_id: task_id.to_owned(),
+            trace: RouterTrace::finished(GasKillerTaskData::default(), trace),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_spawned_trace_outlives_the_future_that_started_it() {
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let trace = RouterTrace::spawn(GasKillerTaskData::default(), async move {
+            released.await.ok();
+            Ok(Bytes::from(vec![7u8]))
+        });
+
+        let first_wait = tokio::time::timeout(std::time::Duration::from_millis(20), trace.wait());
+        assert!(first_wait.await.is_err(), "the trace is still running");
+
+        release.send(()).unwrap();
+        assert_eq!(trace.wait().await.unwrap(), Bytes::from(vec![7u8]));
+    }
+
+    #[test]
+    fn a_trace_matches_its_task_whatever_the_storage_updates() {
+        let task = GasKillerTaskData {
+            transition_index: 3,
+            ..Default::default()
+        };
+        let trace = RouterTrace::finished(task.clone(), Ok(Bytes::new()));
+
+        let rendered = GasKillerTaskData {
+            storage_updates: vec![1, 2, 3].into(),
+            ..task.clone()
+        };
+        assert!(trace.is_for(&rendered));
+        assert!(!trace.is_for(&GasKillerTaskData {
+            transition_index: 4,
+            ..task
+        }));
     }
 
     // -- task lifecycle transitions --
@@ -594,7 +641,7 @@ mod tests {
 
     fn unreachable_validator() -> Arc<GasKillerValidator> {
         // Nothing listens on this port; RPC calls fail fast with connection refused
-        // rather than hanging, so `enrich` errors quickly and deterministically.
+        // rather than hanging, so `resolve` errors quickly and deterministically.
         Arc::new(GasKillerValidator::with_rpc_url("http://localhost:8545"))
     }
 
@@ -669,7 +716,7 @@ mod tests {
         let task = store.create_task(&key, &request_body()).await.unwrap();
 
         let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(task.id.clone());
+        *in_flight.lock().unwrap() = Some(flight(&task.id, Ok(Bytes::new())));
 
         let (_sender, receiver) = task_channel();
         let source = GasKillerTaskSource::new(
@@ -689,6 +736,35 @@ mod tests {
         assert_eq!(
             settled.error.as_deref(),
             Some("aggregation height skipped by quorum")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_orphaned_task_whose_trace_failed_settles_with_the_trace_error() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request_body()).await.unwrap();
+
+        let in_flight = in_flight_task();
+        *in_flight.lock().unwrap() = Some(flight(&task.id, Err("call reverted".to_owned())));
+
+        let (_sender, receiver) = task_channel();
+        let source = GasKillerTaskSource::new(
+            receiver,
+            task_queue_depth(),
+            unreachable_validator(),
+            None,
+            Some(store.clone()),
+            in_flight,
+        );
+
+        source.settle_orphaned_task().await;
+
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Failed);
+        assert_eq!(
+            settled.error.as_deref(),
+            Some("task enrichment failed: call reverted")
         );
     }
 
@@ -734,7 +810,7 @@ mod tests {
             })
             .unwrap();
         // Closing the sender lets `next_task` observe a closed channel (and return
-        // `None`) once the one queued task's enrichment fails and it loops back
+        // `None`) once the one queued task's resolution fails and it loops back
         // for the next task, instead of blocking forever.
         drop(sender);
 
@@ -808,7 +884,7 @@ mod tests {
 
         assert!(source.next_task().await.is_none());
 
-        // Untouched: not re-dispatched (which enrichment would have settled as `failed` against
+        // Untouched: not re-dispatched (which resolution would have settled as `failed` against
         // the unreachable validator) and still carrying the sweep's reason.
         let settled = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(settled.status, TaskStatus::Expired);

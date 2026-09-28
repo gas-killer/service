@@ -12,20 +12,28 @@
 //! ```text
 //! attempt = 1, 2, … (fresh nonces each — a nonce is bound to one session):
 //!   NonceRequest{h,a}  → all operators
-//!   collect NonceCommit until all reply or the nonce stage timeout; verify each
-//!     commit's pubkey point maps to the sender's operator address
-//!   participation ≥ ceil(N·num/den)?  else next attempt
-//!   build_context → SignRequest{h,a, digest, signer points, R aggregates} → subset
+//!   collect NonceCommit{…, digest} (each node commits once it has traced the task) until
+//!     all reply or the trace timeout, cut to one stage timeout once some digest has
+//!     ceil(N·num/den) commits; verify each commit's pubkey point maps to the sender's
+//!     operator address
+//!   the largest digest group reaches ceil(N·num/den)?  else next attempt
+//!   build_context → SignRequest{h,a, digest, signer points, R aggregates} → subset of that group
 //!   collect PartialSig from exactly the subset until the sign stage timeout; each
 //!     partial is verified against the signer's own nonce commitment (bad partials
 //!     are attributed and the signer is excluded from the next attempt, and the
 //!     attempt is abandoned at once rather than waiting out a stage it cannot win)
 //!   all partials → assemble (self-verifies) → Certified{h, digest, sig, nonSigners}
-//! deadline (ROUND_TIMEOUT from first sight of the assignment) →
+//! deadline (ROUND_TIMEOUT from first sight of the assignment), or the router's own trace
+//! of the task failing →
 //!   Certified{h, skip_digest(h), no signature} — the sequencer's own deadline is
 //!   broadcasting Skip{h} on channel 1 by then; nothing downstream consumes skip
 //!   proofs, so no skip signing session is run.
 //! ```
+//!
+//! The router never waits on its own trace to sign: the digest comes from the nodes'
+//! commits, and the render gate checks it against the router trace before anything is
+//! handed out. A router trace that fails ends the height at once, so a task every node
+//! would also fail to trace does not hold the pipeline for a whole round.
 //!
 //! # p2p identity vs signing identity
 //!
@@ -43,6 +51,7 @@
 //! height it has seen, and a router restarting from 0 re-announces exactly that
 //! height, which the node's TaskBook drops as a conflict.
 
+use crate::sequencer::{InFlightTask, in_flight_trace};
 use alloy_primitives::Address;
 use commonware_avs_core::bn254::PublicKey;
 use commonware_avs_core::consensus::PRUNE_SLACK;
@@ -85,6 +94,25 @@ fn silent_signers<T>(
         .filter(|addr| !partials.iter().any(|(seen, _)| seen == *addr))
         .copied()
         .collect()
+}
+
+/// The digest to sign: the one the most commits agree on, if at least `min_signers` do.
+///
+/// A digest is signable only when a quorum derived it independently, so a minority that
+/// traced differently cannot steer the round. Ties break toward the lower digest so repeated
+/// runs over the same commits pick the same group.
+fn agreed_digest<'a>(
+    digests: impl Iterator<Item = &'a [u8; 32]>,
+    min_signers: usize,
+) -> Option<[u8; 32]> {
+    let mut counts: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+    for digest in digests {
+        *counts.entry(*digest).or_default() += 1;
+    }
+    let (digest, count) = counts
+        .into_iter()
+        .max_by(|(a, x), (b, y)| x.cmp(y).then_with(|| b.cmp(a)))?;
+    (count >= min_signers).then_some(digest)
 }
 
 /// The height a router life starts at: Unix time in milliseconds.
@@ -205,13 +233,15 @@ where
     /// Local participation floor `num/den` before a signing round is attempted
     /// (the authoritative stake check is the on-chain registry threshold).
     threshold: (u64, u64),
-    /// Round-1 (nonce collection) deadline: a bare p2p round trip.
+    /// The round-trip deadline: partial collection, and the wait for the remaining commits
+    /// once a digest has enough to sign.
     stage_timeout: Duration,
-    /// Round-2 (partial collection) deadline. Longer than `stage_timeout` because a
-    /// signer resolves the task digest with EVMSketch before it will produce a
-    /// partial, so this stage has to cover a full cold trace.
-    sign_stage_timeout: Duration,
+    /// Nonce-commit deadline. A node commits only once it has traced the task, so this
+    /// has to cover a full cold trace.
+    trace_timeout: Duration,
     round_timeout: Duration,
+    /// The router's own trace of the in-flight task.
+    in_flight: InFlightTask,
 }
 
 impl<S, R> SchnorrCoordinator<S, R>
@@ -229,8 +259,9 @@ where
         namespace: Vec<u8>,
         threshold: (u64, u64),
         stage_timeout: Duration,
-        sign_stage_timeout: Duration,
+        trace_timeout: Duration,
         round_timeout: Duration,
+        in_flight: InFlightTask,
     ) -> (Self, SchnorrCoordinatorMailbox) {
         let tip = clock_tip();
         info!(tip, "schnorr heights start at the clock");
@@ -254,8 +285,9 @@ where
                 namespace,
                 threshold,
                 stage_timeout,
-                sign_stage_timeout,
+                trace_timeout,
                 round_timeout,
+                in_flight,
             },
             mailbox,
         )
@@ -276,7 +308,7 @@ where
             operators = self.operator_keys.len(),
             min_signers = self.min_signers(),
             stage_timeout_secs = self.stage_timeout.as_secs_f64(),
-            sign_stage_timeout_secs = self.sign_stage_timeout.as_secs_f64(),
+            trace_timeout_secs = self.trace_timeout.as_secs_f64(),
             "schnorr coordinator running"
         );
         loop {
@@ -302,16 +334,22 @@ where
         }
     }
 
-    /// Runs signing attempts for a height until success or the round deadline,
-    /// then records the outcome (task certificate or skip) and notifies the
-    /// submitter.
+    /// Runs signing attempts for a height until success, the round deadline, or the router's
+    /// own trace failing, then records the outcome (task certificate or skip) and notifies
+    /// the submitter.
     async fn drive_height(&mut self, height: u64, assignment: Assignment<GasKillerTaskData>) {
         let deadline = Instant::now() + self.round_timeout;
-        let message: [u8; 32] = assignment
-            .digest
-            .as_ref()
-            .try_into()
-            .expect("sha256 digest is 32 bytes");
+        let trace = in_flight_trace(&self.in_flight, &assignment.task);
+        let trace_failed = async move {
+            match trace {
+                Some(trace) => match trace.wait().await {
+                    Err(reason) => reason,
+                    Ok(_) => std::future::pending().await,
+                },
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(trace_failed);
 
         // Partial-stage offenders (no partial, or an invalid one) are excluded
         // from later attempts' subsets — a node that commits nonces but never
@@ -322,41 +360,50 @@ where
         let mut attempt: u32 = 0;
         while Instant::now() < deadline {
             attempt += 1;
-            match self
-                .run_attempt(height, attempt, &message, &mut suspects, deadline)
-                .await
-            {
-                Some((signature, non_signers)) => {
+            tokio::select! {
+                outcome = self.run_attempt(height, attempt, &mut suspects, deadline) => {
+                    let Some((signature, non_signers, message)) = outcome else {
+                        debug!(height, attempt, "signing attempt failed; retrying");
+                        continue;
+                    };
                     info!(
                         height,
                         attempt,
                         non_signers = non_signers.len(),
                         "aggregate schnorr signature assembled"
                     );
-                    self.mailbox.record(height, assignment.digest);
+                    let digest = Digest::from(message);
+                    self.mailbox.record(height, digest);
                     let _ = self.certified_out.send(SchnorrCertified {
                         height,
-                        digest: assignment.digest,
+                        digest,
                         signature: Some(signature),
                         non_signers,
                     });
                     return;
                 }
-                None => {
-                    debug!(height, attempt, "signing attempt failed; retrying");
+                reason = &mut trace_failed => {
+                    warn!(height, %reason, "router trace failed, skipping height");
+                    self.skip(height);
+                    return;
                 }
             }
         }
 
-        // Round deadline: resolve the height as skipped so the pipeline advances
-        // (the sequencer is broadcasting Skip{h} on channel 1 by now). No skip
-        // signature is assembled — nothing downstream consumes skip proofs.
         warn!(
             height,
             attempts = attempt,
             timeout_secs = self.round_timeout.as_secs_f64(),
             "no aggregate signature before round timeout, skipping height"
         );
+        self.skip(height);
+    }
+
+    /// Resolves the height as skipped so the pipeline advances (the sequencer is
+    /// broadcasting Skip{h} on channel 1 by then, or stops driving the height once the
+    /// submitter reports the skip). No skip signature is assembled — nothing downstream
+    /// consumes skip proofs.
+    fn skip(&self, height: u64) {
         let skip = skip_digest(&self.namespace, height);
         self.mailbox.record(height, skip);
         let _ = self.certified_out.send(SchnorrCertified {
@@ -367,16 +414,15 @@ where
         });
     }
 
-    /// One full two-round attempt. Returns the verified signature and the sorted
-    /// non-signer list, or `None` (reasons logged; `suspects` updated).
+    /// One full two-round attempt. Returns the verified signature, the sorted non-signer
+    /// list and the digest signed, or `None` (reasons logged; `suspects` updated).
     async fn run_attempt(
         &mut self,
         height: u64,
         attempt: u32,
-        message: &[u8; 32],
         suspects: &mut HashSet<Address>,
         deadline: Instant,
-    ) -> Option<(AggregateSignature, Vec<Address>)> {
+    ) -> Option<(AggregateSignature, Vec<Address>, [u8; 32])> {
         // Round 1: fresh nonces from everyone (suspects included — flapping nodes
         // recover here; they are filtered at subset selection below).
         let request = SchnorrMsg::NonceRequest { height, attempt }.encode();
@@ -384,8 +430,11 @@ where
             .sender
             .send(Recipients::Some(self.operator_keys.clone()), request, true);
 
-        let stage_deadline = (Instant::now() + self.stage_timeout).min(deadline);
-        let mut commits: HashMap<Address, (schnorr::PublicKey, PubNonce)> = HashMap::new();
+        let min_signers = self.min_signers();
+        let trace_deadline = (Instant::now() + self.trace_timeout).min(deadline);
+        let mut stage_deadline = trace_deadline;
+        let mut commits: HashMap<Address, (schnorr::PublicKey, PubNonce, [u8; 32])> =
+            HashMap::new();
         while commits.len() < self.operator_keys.len() {
             let Some(msg) = self.recv_until(stage_deadline).await else {
                 break;
@@ -396,6 +445,7 @@ where
                 attempt: a,
                 pubkey,
                 nonce,
+                digest,
             } = msg
             {
                 if h != height || a != attempt {
@@ -410,14 +460,44 @@ where
                     warn!(height, attempt, peer = %peer, "nonce commit pubkey does not match sender; ignored");
                     continue;
                 }
-                commits.insert(peer_addr, (pubkey, nonce));
+                commits.insert(peer_addr, (pubkey, nonce, digest));
+                // Once a digest can be signed, the operators still tracing get one round trip
+                // to catch up rather than the rest of the trace budget.
+                if stage_deadline == trace_deadline
+                    && agreed_digest(commits.values().map(|(_, _, d)| d), min_signers).is_some()
+                {
+                    stage_deadline = (Instant::now() + self.stage_timeout).min(trace_deadline);
+                }
             }
         }
 
-        // Subset selection: nonce responders minus suspects — unless that
-        // undershoots the floor, in which case re-admit everyone who responded
+        let Some(message) = agreed_digest(commits.values().map(|(_, _, d)| d), min_signers) else {
+            debug!(
+                height,
+                attempt,
+                responders = commits.len(),
+                min_signers,
+                "no digest has enough nonce commits for a quorum"
+            );
+            return None;
+        };
+        for (addr, (_, _, digest)) in &commits {
+            if *digest != message {
+                warn!(
+                    height,
+                    attempt,
+                    operator = %addr,
+                    theirs = %alloy_primitives::hex::encode(digest),
+                    agreed = %alloy_primitives::hex::encode(message),
+                    "operator committed to a different digest than the quorum"
+                );
+            }
+        }
+        commits.retain(|_, (_, _, digest)| *digest == message);
+
+        // Subset selection: agreeing responders minus suspects — unless that
+        // undershoots the floor, in which case re-admit everyone who agreed
         // (better a possibly-stalling attempt than none).
-        let min_signers = self.min_signers();
         let mut subset: Vec<Address> = commits
             .keys()
             .filter(|addr| !suspects.contains(*addr))
@@ -426,26 +506,21 @@ where
         if subset.len() < min_signers {
             subset = commits.keys().copied().collect();
         }
-        if subset.len() < min_signers {
-            debug!(
-                height,
-                attempt,
-                responders = commits.len(),
-                min_signers,
-                "not enough nonce responders for a quorum"
-            );
-            return None;
-        }
 
-        let contributions: Vec<(schnorr::PublicKey, PubNonce)> =
-            subset.iter().map(|addr| commits[addr]).collect();
-        let ctx = Coordinator::build_context(&contributions, message)?;
+        let contributions: Vec<(schnorr::PublicKey, PubNonce)> = subset
+            .iter()
+            .map(|addr| {
+                let (pk, nonce, _) = commits[addr];
+                (pk, nonce)
+            })
+            .collect();
+        let ctx = Coordinator::build_context(&contributions, &message)?;
 
         // Round 2: the signing context goes to exactly the subset.
         let sign_request = SchnorrMsg::SignRequest(SignRequest {
             height,
             attempt,
-            message: *message,
+            message,
             signers: contributions.iter().map(|(pk, _)| *pk).collect(),
             agg_nonces: ctx.agg_nonces(),
             r_addr: ctx.r_addr,
@@ -459,7 +534,7 @@ where
             .sender
             .send(Recipients::Some(recipients), sign_request, true);
 
-        let stage_deadline = (Instant::now() + self.sign_stage_timeout).min(deadline);
+        let stage_deadline = (Instant::now() + self.stage_timeout).min(deadline);
         // (address, partial scalar) pairs; the scalar type is inferred so the
         // router crate does not need a direct k256 dependency.
         let mut partials = Vec::new();
@@ -484,7 +559,7 @@ where
                 let Some(addr) = self.peer_to_address.get(&peer).copied() else {
                     continue; // not a known operator
                 };
-                let Some((pk, nonce)) = commits.get(&addr) else {
+                let Some((pk, nonce, _)) = commits.get(&addr) else {
                     continue; // not a nonce responder for this session
                 };
                 if !subset.contains(&addr) || partials.iter().any(|(a, _)| *a == addr) {
@@ -521,7 +596,7 @@ where
             .copied()
             .collect();
         non_signers.sort();
-        Some((signature, non_signers))
+        Some((signature, non_signers, message))
     }
 
     /// Receives the next channel-2 message before `deadline`, or `None` on
@@ -592,6 +667,28 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         assert!(clock_tip() > in_flight);
+    }
+
+    #[test]
+    fn the_digest_a_quorum_committed_to_is_signed() {
+        let commits = [[1; 32], [1; 32], [2; 32]];
+        assert_eq!(agreed_digest(commits.iter(), 2), Some([1; 32]));
+    }
+
+    /// A minority that traced differently cannot steer the round, and neither can a plurality
+    /// short of the floor.
+    #[test]
+    fn no_digest_is_signed_without_a_quorum_behind_it() {
+        let commits = [[1; 32], [2; 32], [3; 32]];
+        assert_eq!(agreed_digest(commits.iter(), 2), None);
+        assert_eq!(agreed_digest(std::iter::empty(), 1), None);
+    }
+
+    #[test]
+    fn tied_digests_resolve_the_same_way_every_time() {
+        let commits = [[2; 32], [1; 32], [2; 32], [1; 32]];
+        assert_eq!(agreed_digest(commits.iter(), 2), Some([1; 32]));
+        assert_eq!(agreed_digest(commits.iter().rev(), 2), Some([1; 32]));
     }
 
     #[test]

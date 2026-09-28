@@ -28,8 +28,8 @@ use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerTaskData, GasKillerValidator,
     IngressStalenessWindow, SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint,
     load_key_from_file, p2p_message_backlog, p2p_quota_period, quorum_threshold_fraction,
-    rebroadcast_interval, round_timeout, schnorr_messages_per_second, schnorr_sign_stage_timeout,
-    schnorr_stage_timeout, storage_directory, task_ttl,
+    rebroadcast_interval, round_timeout, schnorr_messages_per_second, schnorr_stage_timeout,
+    schnorr_trace_timeout, storage_directory, task_ttl,
 };
 use gas_killer_router::directive_metrics::CountingSender;
 use gas_killer_router::expiry::run_expiry_sweeper;
@@ -339,12 +339,12 @@ fn main() {
         // reached nobody; wrapping the sender is what makes a partial drop visible.
         let directive_sender = CountingSender::new(directive_sender, Arc::clone(&metrics));
 
-        // Shared validator: the sequencer uses it for EVMSketch enrichment; its
+        // Shared validator: the task source uses it for the router's own EVMSketch trace; its
         // speculative pre-build loop warms the executor cache off the hot path.
         //
         // The router's own analysis is instrumented with the same metrics the operators use, so
-        // the enrichment on the assignment path is comparable with the validation the operators
-        // run — and so a slow round can be attributed to whichever side actually paid for it.
+        // its trace is comparable with the validation the operators run — and so a slow round
+        // can be attributed to whichever side actually paid for it.
         let validator_metrics = Arc::new(ValidatorMetrics::new());
         let validator = Arc::new(
             GasKillerValidator::new()
@@ -454,8 +454,8 @@ fn main() {
         // Directive recipients: the explicit operator keys (see Sequencer::broadcast).
         let directive_recipients: Vec<PublicKey> = participants.iter().cloned().collect();
 
-        // Task source: dequeues ingress tasks and enriches them (EVMSketch) for
-        // the sequencer.
+        // Task source: dequeues ingress tasks, resolves them for the sequencer, and starts
+        // the router's own trace of each.
         let task_source = GasKillerTaskSource::new(
             ingress.receiver,
             ingress.queue_depth,
@@ -493,8 +493,9 @@ fn main() {
             APPLICATION_NAMESPACE.to_vec(),
             quorum_threshold_fraction(),
             schnorr_stage_timeout(),
-            schnorr_sign_stage_timeout(),
+            schnorr_trace_timeout(),
             round_timeout(),
+            in_flight.clone(),
         );
         context
             .child("schnorr_coordinator")
