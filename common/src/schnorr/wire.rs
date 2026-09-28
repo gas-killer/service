@@ -36,10 +36,15 @@ use k256::elliptic_curve::PrimeField;
 use super::musig::PubNonce;
 use super::{MESSAGE_LEN, PublicKey};
 
+/// Tags of the first-round messages before a commit carried the node's digest. Retired
+/// rather than reused, so a peer on the older protocol is rejected by name instead of
+/// misparsed; the two sides cannot sign together.
+const TAG_RETIRED_NONCE_REQUEST: u8 = 0;
+const TAG_RETIRED_NONCE_COMMIT: u8 = 1;
 /// Wire tag for [`SchnorrMsg::CommitRequest`].
-const TAG_COMMIT_REQUEST: u8 = 0;
+const TAG_COMMIT_REQUEST: u8 = 4;
 /// Wire tag for [`SchnorrMsg::Commit`].
-const TAG_COMMIT: u8 = 1;
+const TAG_COMMIT: u8 = 5;
 /// Wire tag for [`SchnorrMsg::SignRequest`].
 const TAG_SIGN_REQUEST: u8 = 2;
 /// Wire tag for [`SchnorrMsg::PartialSig`].
@@ -225,6 +230,10 @@ impl Read for SchnorrMsg {
         let height: u64 = UInt::read(buf)?.into();
         let attempt = u32::read(buf)?;
         match tag {
+            TAG_RETIRED_NONCE_REQUEST | TAG_RETIRED_NONCE_COMMIT => Err(Error::Invalid(
+                "SchnorrMsg",
+                "retired first-round tag: the peer runs an older schnorr protocol; upgrade the router and nodes together",
+            )),
             TAG_COMMIT_REQUEST => Ok(SchnorrMsg::CommitRequest { height, attempt }),
             TAG_COMMIT => {
                 let pubkey = read_pubkey(buf)?;
@@ -378,6 +387,25 @@ mod tests {
             SchnorrMsg::decode(msg.encode()),
             Err(Error::InvalidLength(0))
         ));
+    }
+
+    /// A peer still on the older first round must be refused by name, not misparsed: both
+    /// retired tags carry the same header, so only the tag tells the versions apart.
+    #[test]
+    fn retired_first_round_tags_are_refused_as_an_older_protocol() {
+        for retired in [TAG_RETIRED_NONCE_REQUEST, TAG_RETIRED_NONCE_COMMIT] {
+            let mut bytes = SchnorrMsg::CommitRequest {
+                height: 1,
+                attempt: 1,
+            }
+            .encode_mut();
+            bytes[0] = retired;
+            let error = SchnorrMsg::decode(bytes.freeze()).expect_err("retired tag decoded");
+            assert!(
+                error.to_string().contains("older schnorr protocol"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

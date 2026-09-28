@@ -373,6 +373,9 @@ spec:
             - name: SCHNORR_STAGE_TIMEOUT_SECS
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.schnorr.signStageTimeoutSecs }}
+            {{- fail "schnorr.signStageTimeoutSecs was replaced by schnorr.traceTimeoutSecs, which now bounds the commit round; move the value there" }}
+            {{- end }}
             {{- with .Values.schnorr.traceTimeoutSecs }}
             - name: SCHNORR_TRACE_TIMEOUT_SECS
               value: {{ . | quote }}

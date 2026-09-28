@@ -674,11 +674,21 @@ const SCHNORR_TRACE_ROUND_FRACTION: u32 = 2;
 /// lock. It costs the remainder of that trace, not a second one — unless the trace fails, in
 /// which case the retry traces again from the start.
 pub fn schnorr_trace_timeout() -> std::time::Duration {
+    if env::var_os(RENAMED_SIGN_STAGE_TIMEOUT_VAR).is_some() {
+        tracing::warn!(
+            "{RENAMED_SIGN_STAGE_TIMEOUT_VAR} is ignored: the trace budget moved to the commit \
+             round, set SCHNORR_TRACE_TIMEOUT_SECS instead"
+        );
+    }
     schnorr_trace_timeout_from(
         round_timeout(),
         env::var("SCHNORR_TRACE_TIMEOUT_SECS").ok().as_deref(),
     )
 }
+
+/// The variable [`schnorr_trace_timeout`] replaced. Still read so a deployment that sets it
+/// learns it no longer applies rather than silently losing the setting.
+const RENAMED_SIGN_STAGE_TIMEOUT_VAR: &str = "SCHNORR_SIGN_STAGE_TIMEOUT_SECS";
 
 /// Computes the Schnorr trace timeout given the current round timeout and an optional
 /// `SCHNORR_TRACE_TIMEOUT_SECS` override.
