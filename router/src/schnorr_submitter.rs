@@ -131,7 +131,8 @@ impl SchnorrSubmitter {
             return;
         };
         // Submit with bounded retries — transient RPC errors recover,
-        // deterministic rejections release the height as failed after the budget.
+        // deterministic rejections release the height as failed after the budget. Only the
+        // last failure settles the task, so every retry still has the task's router trace.
         let mut backoff = INITIAL_RETRY_BACKOFF;
         let mut attempt = 0u32;
         loop {
@@ -171,6 +172,7 @@ impl SchnorrSubmitter {
                         %error,
                         "submission failed after retries; releasing height"
                     );
+                    self.handler.settle_failed(height, &error).await;
                     self.notify(height, ResolutionKind::Executed { success: false });
                     return;
                 }

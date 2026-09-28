@@ -135,9 +135,11 @@ pub struct InFlight {
 /// is needed.
 ///
 /// `next_task` sets the slot when a task starts. `GasKillerHandler::handle_schnorr_verification`
-/// takes it when execution settles (ready or failed). If the slot is still occupied the next
-/// time `next_task` runs, the previous task's height was skipped instead — the one path that
-/// resolves a height without reaching the handler — and `next_task` settles it as failed.
+/// takes it when a round renders, and `GasKillerHandler::settle_failed` when the submitter
+/// gives up on one; a failed attempt the submitter will retry leaves it in place. If the slot
+/// is still occupied the next time `next_task` runs, the previous task's height was skipped
+/// instead — the one path that resolves a height without reaching the handler — and
+/// `next_task` settles it as failed.
 pub type InFlightTask = Arc<Mutex<Option<InFlight>>>;
 
 pub fn in_flight_task() -> InFlightTask {
