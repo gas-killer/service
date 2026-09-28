@@ -101,9 +101,10 @@ pub struct MetricsCollector {
     /// analysis call — the difference between them is the chain-resolution overhead on the
     /// assignment path.
     pub storage_computation_seconds: Histogram,
-    /// Aggregation rounds that ended in a successful verifyAndUpdate transaction.
+    /// Signed sessions whose verifyAndUpdate payload rendered.
     pub aggregation_rounds_completed: Counter<u64, AtomicU64>,
-    /// Aggregation rounds that failed (hash mismatch, tx error, etc.).
+    /// Signed sessions whose payload could not be rendered (hash mismatch, proven revert, etc.).
+    /// Timeouts and trace failures never reach rendering; `height_outcomes` counts those.
     pub aggregation_rounds_failed: Counter<u64, AtomicU64>,
     /// Rounds abandoned because the rendered payload's `verifyAndUpdate` reverted when estimated,
     /// which is almost always a misconfigured target (wrong AVS or signature checker) rather than
@@ -112,7 +113,7 @@ pub struct MetricsCollector {
     pub payloads_rejected_reverting: Counter<u64, AtomicU64>,
     /// Full handle_verification duration including contract calls and tx submission (seconds).
     pub execution_duration_seconds: Histogram,
-    /// Time from creator dispatching a task to the executor receiving threshold signatures (seconds).
+    /// Time from a session's start to its aggregate signature (seconds), signed sessions only.
     /// Captures P2P transit + node EVMSketch + Schnorr signing + aggregation.
     pub p2p_round_trip_seconds: Histogram,
     /// End-to-end round latency from creator dispatch to verifyAndUpdate receipt confirmation
@@ -244,14 +245,14 @@ impl MetricsCollector {
         let aggregation_rounds_completed = Counter::default();
         registry.register(
             "gas_killer_aggregation_rounds_completed",
-            "Total aggregation rounds completed with a successful verifyAndUpdate transaction",
+            "Total signed sessions whose verifyAndUpdate payload rendered",
             aggregation_rounds_completed.clone(),
         );
 
         let aggregation_rounds_failed = Counter::default();
         registry.register(
             "gas_killer_aggregation_rounds_failed",
-            "Total aggregation rounds that failed (hash mismatch, tx error, interface check, etc.)",
+            "Total signed sessions whose payload could not be rendered (hash mismatch, proven revert, interface check, etc.); timeouts and trace failures are in gas_killer_height_outcomes_total",
             aggregation_rounds_failed.clone(),
         );
 
@@ -276,7 +277,7 @@ impl MetricsCollector {
             Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]);
         registry.register(
             "gas_killer_p2p_round_trip_seconds",
-            "Time from creator dispatching a task to executor receiving threshold signatures (P2P transit + node EVMSketch + Schnorr signing + aggregation)",
+            "Time from a session's start to its aggregate signature, signed sessions only (P2P transit + node EVMSketch + Schnorr signing + aggregation)",
             p2p_round_trip_seconds.clone(),
         );
 

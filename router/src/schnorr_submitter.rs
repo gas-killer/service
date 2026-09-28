@@ -138,7 +138,7 @@ impl SchnorrSubmitter {
                         "submission failed after retries; failing task"
                     );
                     self.handler
-                        .settle_failed(dispatched, &format!("verification failed: {error}"))
+                        .settle_render_failed(dispatched, &format!("verification failed: {error}"))
                         .await;
                     return HeightOutcome::Failed;
                 }

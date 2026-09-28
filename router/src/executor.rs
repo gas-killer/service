@@ -723,11 +723,16 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Ok(rendered_execution_result())
     }
 
-    /// Settles a session's task `failed` with `reason` once nothing more will be tried for it.
-    pub async fn settle_failed(&mut self, dispatched: &DispatchedTask, reason: &str) {
+    /// Settles a signed session's task `failed` once its render attempts are exhausted.
+    pub async fn settle_render_failed(&mut self, dispatched: &DispatchedTask, reason: &str) {
         if let Some(m) = &self.metrics {
             m.aggregation_rounds_failed.inc();
         }
+        self.settle_failed(dispatched, reason).await;
+    }
+
+    /// Settles a session's task `failed` with `reason` once nothing more will be tried for it.
+    pub async fn settle_failed(&mut self, dispatched: &DispatchedTask, reason: &str) {
         if let Some(store) = &self.store {
             set_task_failed(store, self.metrics.as_deref(), &dispatched.task_id, reason).await;
         }
@@ -1007,7 +1012,7 @@ mod tests {
         );
 
         handler
-            .settle_failed(&session, &format!("verification failed: {error}"))
+            .settle_render_failed(&session, &format!("verification failed: {error}"))
             .await;
         let settled = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(settled.status, TaskStatus::Failed);
@@ -1017,6 +1022,38 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("verification failed"))
         );
+    }
+
+    /// Only a signed session whose render failed counts as a failed round; a session that never
+    /// reached rendering is counted by its height outcome instead.
+    #[tokio::test]
+    async fn only_a_failed_render_counts_as_a_failed_round() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let timed_out = store.create_task(&key, &request_body()).await.unwrap();
+        let unrendered = store.create_task(&key, &request_body()).await.unwrap();
+        let (task_data, _) = matching_task_data();
+
+        let metrics = Arc::new(MetricsCollector::new());
+        let provider = ProviderBuilder::new().connect_mocked_client(Asserter::new());
+        let mut handler = GasKillerHandler::new(1, provider)
+            .with_store(store.clone())
+            .with_metrics(Arc::clone(&metrics));
+
+        handler
+            .settle_failed(&traced(&timed_out.id, &task_data), "timed out")
+            .await;
+        assert_eq!(metrics.aggregation_rounds_failed.get(), 0);
+
+        handler
+            .settle_render_failed(&traced(&unrendered.id, &task_data), "hash mismatch")
+            .await;
+        assert_eq!(metrics.aggregation_rounds_failed.get(), 1);
+
+        for id in [&timed_out.id, &unrendered.id] {
+            let settled = store.get_task(id).await.unwrap().unwrap();
+            assert_eq!(settled.status, TaskStatus::Failed);
+        }
     }
 
     #[tokio::test]
@@ -1168,7 +1205,7 @@ mod tests {
 
         let error = result.expect_err("the round must not render");
         handler
-            .settle_failed(&session, &format!("verification failed: {error}"))
+            .settle_render_failed(&session, &format!("verification failed: {error}"))
             .await;
         let settled = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(settled.status, TaskStatus::Failed);
@@ -1313,7 +1350,7 @@ mod tests {
 
         let error = result.expect_err("a payload proven to revert must fail the attempt");
         handler
-            .settle_failed(&session, &format!("verification failed: {error}"))
+            .settle_render_failed(&session, &format!("verification failed: {error}"))
             .await;
         let settled = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(settled.status, TaskStatus::Failed);
