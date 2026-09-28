@@ -532,7 +532,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
     use commonware_actor::{Feedback, Unreliable};
     use commonware_avs_core::bn254::Bn254;
@@ -542,13 +542,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn addr(n: u8) -> Address {
-        Address::from([n; 20])
-    }
-
     /// A channel-2 receiver whose network has already shut down.
     #[derive(Debug)]
-    struct ClosedReceiver;
+    pub(crate) struct ClosedReceiver;
 
     impl Receiver for ClosedReceiver {
         type Error = std::io::Error;
@@ -561,11 +557,11 @@ mod tests {
 
     /// A channel-2 sender that delivers to every recipient and counts its sends.
     #[derive(Clone, Default)]
-    struct CountingSender {
-        sends: Arc<AtomicUsize>,
+    pub(crate) struct CountingSender {
+        pub(crate) sends: Arc<AtomicUsize>,
     }
 
-    struct CountingChecked {
+    pub(crate) struct CountingChecked {
         recipients: Vec<PublicKey>,
         sends: Arc<AtomicUsize>,
     }
@@ -607,11 +603,16 @@ mod tests {
     }
 
     /// A coordinator over three operators whose channel-2 receiver is already closed.
-    fn closed_coordinator(
+    pub(crate) fn closed_coordinator(
         sender: CountingSender,
     ) -> SchnorrCoordinator<CountingSender, ClosedReceiver> {
         let operators = (0..3u8)
-            .map(|i| (Bn254::from_seed(u64::from(i)).public_key(), addr(i + 1)))
+            .map(|i| {
+                (
+                    Bn254::from_seed(u64::from(i)).public_key(),
+                    Address::from([i + 1; 20]),
+                )
+            })
             .collect();
         SchnorrCoordinator::new(
             sender,
@@ -623,6 +624,17 @@ mod tests {
             Duration::from_secs(120),
             Duration::from_millis(10),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{CountingSender, closed_coordinator};
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn addr(n: u8) -> Address {
+        Address::from([n; 20])
     }
 
     /// A closed channel ends the session at once instead of re-sending in a hot loop until the
