@@ -360,7 +360,16 @@ where
         let mut attempt: u32 = 0;
         while Instant::now() < deadline {
             attempt += 1;
+            // Biased toward the trace: a height whose router trace has failed cannot render, so
+            // when both are ready it resolves as a skip rather than as a certified round that
+            // fails at the render gate.
             tokio::select! {
+                biased;
+                reason = &mut trace_failed => {
+                    warn!(height, %reason, "router trace failed, skipping height");
+                    self.skip(height);
+                    return;
+                }
                 outcome = self.run_attempt(height, attempt, &mut suspects, deadline) => {
                     let Some((signature, non_signers, message)) = outcome else {
                         debug!(height, attempt, "signing attempt failed; retrying");
@@ -380,11 +389,6 @@ where
                         signature: Some(signature),
                         non_signers,
                     });
-                    return;
-                }
-                reason = &mut trace_failed => {
-                    warn!(height, %reason, "router trace failed, skipping height");
-                    self.skip(height);
                     return;
                 }
             }
