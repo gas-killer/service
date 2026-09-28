@@ -626,7 +626,7 @@ pub const DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS: f64 = 5.0;
 /// inside one round-timeout window.
 ///
 /// It bounds the two stages that contain no node compute: partial collection (a signer
-/// answers from the digest its nonce commit already carried) and, once enough commits agree
+/// answers from the digest its commit already carried) and, once enough commits agree
 /// on a digest to sign, the wait for the remaining operators' commits. The stage that holds
 /// the node's trace is [`schnorr_trace_timeout`].
 pub fn schnorr_stage_timeout() -> std::time::Duration {
@@ -657,7 +657,7 @@ fn schnorr_stage_timeout_from(
 /// [`schnorr_trace_timeout`] for what that attempt costs.
 const SCHNORR_TRACE_ROUND_FRACTION: u32 = 2;
 
-/// Reads how long the Schnorr coordinator waits for nonce commits from
+/// Reads how long the Schnorr coordinator waits for commits from
 /// `SCHNORR_TRACE_TIMEOUT_SECS` (seconds, fractional allowed), defaulting to
 /// `round_timeout() / SCHNORR_TRACE_ROUND_FRACTION`.
 ///

@@ -101,8 +101,8 @@ Operator discovery goes through EigenLayer (`RegistryCoordinator`/`BLSApkRegistr
   ┌──────────────────────────┼───────────────────────────┐
   │ node 1..N (Schnorr participants)                     │ router: Schnorr coordinator
   │  TaskBook: records the directive for H               │  p2p channel 2, per attempt:
-  │  channel 2:                                          │   NonceRequest  → all operators
-  │   NonceCommit: validate the task via EVMSketch,      │   NonceCommit   ← responders
+  │  channel 2:                                          │   CommitRequest → all operators
+  │   Commit: validate the task via EVMSketch,           │   Commit        ← responders
   │   commit a fresh nonce with the local digest         │   SignRequest   → agreeing subset
   │   PartialSig: sign only that digest                  │   PartialSig    ← subset
   └──────────────────────────────────────────────────────┘            │
@@ -121,13 +121,13 @@ Operator discovery goes through EigenLayer (`RegistryCoordinator`/`BLSApkRegistr
   `TaskDirective::Skip { height }`. Nodes record directives in their TaskBook and reply on
   this channel only with rate-limited `TipReport`s to directives below their own tip.
 - **Schnorr coordinator** (router, p2p channel 2): per assigned height, runs attempts of
-  `NonceRequest`/`NonceCommit` then `SignRequest`/`PartialSig`, with fresh nonces each
-  attempt, and signs the digest at least `min_signers` commits carry. A `NonceCommit` is
+  `CommitRequest`/`Commit` then `SignRequest`/`PartialSig`, with fresh nonces each
+  attempt, and signs the digest at least `min_signers` commits carry. A `Commit` is
   accepted only if its public key maps to the sender's registered operator address; each
   partial is verified against the signer's own nonce commitment, and the assembled signature
   is self-verified. It also serves as the sequencer's certificate
   index. The certified log lives in memory only.
-- **Schnorr participant** (node, p2p channel 2): on `NonceRequest` it derives the height's
+- **Schnorr participant** (node, p2p channel 2): on `CommitRequest` it derives the height's
   digest locally (TaskBook + EVMSketch via `DigestResolver`) and commits a fresh nonce pair
   with it; a skipped height gets no commit. On `SignRequest` it refuses unless the message is
   the digest it committed to, checks that every signer point maps to a known operator
@@ -227,7 +227,7 @@ LOCAL-mode-only:
 Optional environment variables:
 - `STORAGE_DIR`: Writable directory handed to the commonware runtime (default: `/app/data` if writable, else `$TMPDIR/gas-killer`). docker-compose and Helm mount a dedicated volume here — see "Runtime storage" above.
 - `AGG_WINDOW`: Heights above a node's tip it expects the router to be driving (default: 8). A directive past `tip + window` is logged as evidence the node has fallen behind. Part of the config fingerprint.
-- `ROUND_TIMEOUT`: Max seconds the Schnorr coordinator keeps retrying signing attempts on an assigned height before resolving it as a skip, and the point at which the sequencer switches from `Announce` to `Skip` broadcasts (accepts fractional seconds). Also the nodes' retry budget for transient validation errors. A height resolves as soon as an attempt assembles a signature, so this only affects heights that stall. Library default: 30; the chart sets 300 and a heavy-trace deployment raises it in its own overrides. Must exceed worst-case node compute + sign time. It is also the base for the Schnorr coordinator's nonce-commit deadline (`SCHNORR_TRACE_TIMEOUT_SECS`, default `ROUND_TIMEOUT/2`), so a fleet running multi-minute EVMSketch traces raises this one value and the stage that holds that compute grows with it.
+- `ROUND_TIMEOUT`: Max seconds the Schnorr coordinator keeps retrying signing attempts on an assigned height before resolving it as a skip, and the point at which the sequencer switches from `Announce` to `Skip` broadcasts (accepts fractional seconds). Also the nodes' retry budget for transient validation errors. A height resolves as soon as an attempt assembles a signature, so this only affects heights that stall. Library default: 30; the chart sets 300 and a heavy-trace deployment raises it in its own overrides. Must exceed worst-case node compute + sign time. It is also the base for the Schnorr coordinator's commit deadline (`SCHNORR_TRACE_TIMEOUT_SECS`, default `ROUND_TIMEOUT/2`), so a fleet running multi-minute EVMSketch traces raises this one value and the stage that holds that compute grows with it.
 - `REBROADCAST_INTERVAL`: How often (in seconds) the router re-sends the in-flight `TaskDirective` until the height resolves (accepts fractional seconds); also the minimum interval between a node's `TipReport`s. Library default: 5; Helm deployments set 15. Must stay well below `ROUND_TIMEOUT`: a node that misses every `Announce` can only resolve the height as a skip.
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
@@ -253,8 +253,8 @@ Optional environment variables:
 - `INGRESS_STALENESS_WINDOW_BLOCKS`: How far behind the target chain's head a submitted `block_height` may be and still be admitted; past it `POST /tasks` returns `400 STALE_BLOCK`. Defaults to `BLOCK_STALE_MEASURE - PAYLOAD_BLOCK_BUFFER` (250 at the stock 300/50), floored at 1 block — a task's analysis is anchored at its `block_height`, and both the aggregation round and the rendered payload's validity window have to fit in what is left of the contract's staleness window, so admission holds the payload buffer back instead of accepting work that can only just finish simulating. An explicit value above `BLOCK_STALE_MEASURE` is clamped to it (and warned about at startup); `0` disables the check entirely. The effective window is logged at startup.
 - `QUORUM_NUMBER`: Quorum number to use (default: 0)
 - `QUORUM_THRESHOLD` / `THRESHOLD_DENOMINATOR`: Signing threshold `num/den` (default: 2/3). Sets the coordinator's `min_signers` floor and the `SchnorrStakeRegistry`'s on-chain threshold, so the two checks stay in lockstep (see "Quorum model" above).
-- `SCHNORR_STAGE_TIMEOUT_SECS`: Round-trip deadline per attempt for partial collection, and for the remaining nonce commits once enough agree on a digest (default: `min(5, ROUND_TIMEOUT/6)`).
-- `SCHNORR_TRACE_TIMEOUT_SECS`: Nonce-commit deadline per attempt (default: `ROUND_TIMEOUT/2`). A node commits only after tracing the task, so this must cover a full cold trace.
+- `SCHNORR_STAGE_TIMEOUT_SECS`: Round-trip deadline per attempt for partial collection, and for the remaining commits once enough agree on a digest (default: `min(5, ROUND_TIMEOUT/6)`).
+- `SCHNORR_TRACE_TIMEOUT_SECS`: Commit deadline per attempt (default: `ROUND_TIMEOUT/2`). A node commits only after tracing the task, so this must cover a full cold trace.
 - `P2P_MESSAGES_PER_SECOND`: Per-peer rate for the task-directive channel, channel 1 (default: 1.0).
 - `P2P_SCHNORR_MESSAGES_PER_SECOND`: Per-peer rate for the Schnorr channel, channel 2 (default: 64). The p2p sender silently drops over-rate messages, and a dropped signing-round message costs a whole attempt.
 - `SCHNORR_NOTICE_WINDOW`: Blocks a `SchnorrStakeRegistry` operator-set change must be announced ahead of taking effect (default: 0). `example.env` covers when to raise it.

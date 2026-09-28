@@ -9,8 +9,8 @@
 //! Flow (router = coordinator, nodes = participants):
 //!
 //! ```text
-//! router --NonceRequest{h,a}-->  all operators
-//! node   --NonceCommit{h,a,pubkey,nonce,digest}--> router  (sent once the node has derived
+//! router --CommitRequest{h,a}-->  all operators
+//! node   --Commit{h,a,pubkey,nonce,digest}--> router  (sent once the node has derived
 //!                                                         the digest; duplicates re-send the
 //!                                                         SAME pubnonce)
 //! router --SignRequest{h,a,message,signers,agg_nonces,r_addr}--> subset S   (message = the
@@ -20,7 +20,7 @@
 //!
 //! Authentication model: the p2p layer authenticates peers (a node only accepts channel-2
 //! traffic from the router; the router only from tracked operators). Key material inside
-//! the messages is bound to those identities by address: `NonceCommit.pubkey` must satisfy
+//! the messages is bound to those identities by address: `Commit.pubkey` must satisfy
 //! `eth_address(pubkey) == sender`, and every `SignRequest.signers` entry must map to a
 //! known operator address — the same `keccak256(x ‖ y)[12..]` identity the on-chain
 //! `SchnorrStakeRegistry` registers keys under (with a proof of possession), so a
@@ -36,10 +36,10 @@ use k256::elliptic_curve::PrimeField;
 use super::musig::PubNonce;
 use super::{MESSAGE_LEN, PublicKey};
 
-/// Wire tag for [`SchnorrMsg::NonceRequest`].
-const TAG_NONCE_REQUEST: u8 = 0;
-/// Wire tag for [`SchnorrMsg::NonceCommit`].
-const TAG_NONCE_COMMIT: u8 = 1;
+/// Wire tag for [`SchnorrMsg::CommitRequest`].
+const TAG_COMMIT_REQUEST: u8 = 0;
+/// Wire tag for [`SchnorrMsg::Commit`].
+const TAG_COMMIT: u8 = 1;
 /// Wire tag for [`SchnorrMsg::SignRequest`].
 const TAG_SIGN_REQUEST: u8 = 2;
 /// Wire tag for [`SchnorrMsg::PartialSig`].
@@ -60,7 +60,7 @@ pub struct SignRequest {
     /// equals the digest they derived themselves from their own TaskBook/validator.
     pub message: [u8; MESSAGE_LEN],
     /// The signer subset `S` as compressed public-key points (the coordinator's
-    /// nonce-round responders). Participants recompute `X_agg = Σ signers` after
+    /// commit-round responders). Participants recompute `X_agg = Σ signers` after
     /// validating each point against the known operator set.
     pub signers: Vec<PublicKey>,
     /// Aggregate nonce pair `(R1_agg, R2_agg)` over the subset.
@@ -89,13 +89,14 @@ impl SignRequest {
 /// A message on the Schnorr protocol channel.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SchnorrMsg {
-    /// Router → operators: open session `(height, attempt)`, request a fresh nonce.
-    NonceRequest { height: u64, attempt: u32 },
-    /// Node → router: the node's public nonce pair (and its public key, so the
-    /// router learns the point behind the p2p address), plus the task digest the node
-    /// derived for the height. The coordinator signs the digest a quorum agrees on, so
+    /// Router → operators: open session `(height, attempt)`; each node traces the task and
+    /// answers with a [`SchnorrMsg::Commit`].
+    CommitRequest { height: u64, attempt: u32 },
+    /// Node → router: a fresh public nonce pair bound to the task digest the node derived
+    /// for the height, plus its public key so the router learns the point behind the p2p
+    /// address. The coordinator signs the digest a quorum agrees on, so
     /// it never waits on its own trace.
-    NonceCommit {
+    Commit {
         height: u64,
         attempt: u32,
         pubkey: PublicKey,
@@ -116,8 +117,8 @@ impl SchnorrMsg {
     /// The session height this message addresses.
     pub fn height(&self) -> u64 {
         match self {
-            SchnorrMsg::NonceRequest { height, .. } => *height,
-            SchnorrMsg::NonceCommit { height, .. } => *height,
+            SchnorrMsg::CommitRequest { height, .. } => *height,
+            SchnorrMsg::Commit { height, .. } => *height,
             SchnorrMsg::SignRequest(r) => r.height,
             SchnorrMsg::PartialSig { height, .. } => *height,
         }
@@ -126,8 +127,8 @@ impl SchnorrMsg {
     /// The session attempt this message addresses.
     pub fn attempt(&self) -> u32 {
         match self {
-            SchnorrMsg::NonceRequest { attempt, .. } => *attempt,
-            SchnorrMsg::NonceCommit { attempt, .. } => *attempt,
+            SchnorrMsg::CommitRequest { attempt, .. } => *attempt,
+            SchnorrMsg::Commit { attempt, .. } => *attempt,
             SchnorrMsg::SignRequest(r) => r.attempt,
             SchnorrMsg::PartialSig { attempt, .. } => *attempt,
         }
@@ -171,19 +172,19 @@ fn read_pubnonce(buf: &mut impl Buf) -> Result<PubNonce, Error> {
 impl Write for SchnorrMsg {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            SchnorrMsg::NonceRequest { height, attempt } => {
-                TAG_NONCE_REQUEST.write(buf);
+            SchnorrMsg::CommitRequest { height, attempt } => {
+                TAG_COMMIT_REQUEST.write(buf);
                 UInt(*height).write(buf);
                 attempt.write(buf);
             }
-            SchnorrMsg::NonceCommit {
+            SchnorrMsg::Commit {
                 height,
                 attempt,
                 pubkey,
                 nonce,
                 digest,
             } => {
-                TAG_NONCE_COMMIT.write(buf);
+                TAG_COMMIT.write(buf);
                 UInt(*height).write(buf);
                 attempt.write(buf);
                 buf.put_slice(&pubkey.to_compressed());
@@ -224,12 +225,12 @@ impl Read for SchnorrMsg {
         let height: u64 = UInt::read(buf)?.into();
         let attempt = u32::read(buf)?;
         match tag {
-            TAG_NONCE_REQUEST => Ok(SchnorrMsg::NonceRequest { height, attempt }),
-            TAG_NONCE_COMMIT => {
+            TAG_COMMIT_REQUEST => Ok(SchnorrMsg::CommitRequest { height, attempt }),
+            TAG_COMMIT => {
                 let pubkey = read_pubkey(buf)?;
                 let nonce = read_pubnonce(buf)?;
                 let digest: [u8; MESSAGE_LEN] = read_array(buf)?;
-                Ok(SchnorrMsg::NonceCommit {
+                Ok(SchnorrMsg::Commit {
                     height,
                     attempt,
                     pubkey,
@@ -280,8 +281,8 @@ impl EncodeSize for SchnorrMsg {
     fn encode_size(&self) -> usize {
         let header = 1 + UInt(self.height()).encode_size() + self.attempt().encode_size();
         match self {
-            SchnorrMsg::NonceRequest { .. } => header,
-            SchnorrMsg::NonceCommit { .. } => header + 33 + 66 + MESSAGE_LEN,
+            SchnorrMsg::CommitRequest { .. } => header,
+            SchnorrMsg::Commit { .. } => header + 33 + 66 + MESSAGE_LEN,
             SchnorrMsg::SignRequest(r) => header + MESSAGE_LEN + 4 + r.signers.len() * 33 + 66 + 20,
             SchnorrMsg::PartialSig { .. } => header + 32,
         }
@@ -303,8 +304,8 @@ mod tests {
     }
 
     #[test]
-    fn nonce_request_roundtrip() {
-        let original = SchnorrMsg::NonceRequest {
+    fn commit_request_roundtrip() {
+        let original = SchnorrMsg::CommitRequest {
             height: u64::MAX,
             attempt: 7,
         };
@@ -314,11 +315,11 @@ mod tests {
     }
 
     #[test]
-    fn nonce_commit_roundtrip() {
+    fn commit_roundtrip() {
         let mut fill = seeded(1);
         let key = PrivateKey::from_seed(42);
         let (_, pubnonce) = gen_nonce(&mut fill);
-        let original = SchnorrMsg::NonceCommit {
+        let original = SchnorrMsg::Commit {
             height: 9,
             attempt: 1,
             pubkey: key.public_key(),
@@ -381,7 +382,7 @@ mod tests {
 
     #[test]
     fn unknown_tag_rejected() {
-        let mut bytes = SchnorrMsg::NonceRequest {
+        let mut bytes = SchnorrMsg::CommitRequest {
             height: 1,
             attempt: 1,
         }
@@ -398,7 +399,7 @@ mod tests {
         let mut fill = seeded(4);
         let key = PrivateKey::from_seed(6);
         let (_, pubnonce) = gen_nonce(&mut fill);
-        let encoded = SchnorrMsg::NonceCommit {
+        let encoded = SchnorrMsg::Commit {
             height: 1,
             attempt: 1,
             pubkey: key.public_key(),
@@ -415,7 +416,7 @@ mod tests {
         let key = PrivateKey::from_seed(7);
         let mut fill = seeded(5);
         let (_, pubnonce) = gen_nonce(&mut fill);
-        let mut bytes = SchnorrMsg::NonceCommit {
+        let mut bytes = SchnorrMsg::Commit {
             height: 1,
             attempt: 1,
             pubkey: key.public_key(),

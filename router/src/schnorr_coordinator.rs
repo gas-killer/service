@@ -11,8 +11,8 @@
 //!
 //! ```text
 //! attempt = 1, 2, … (fresh nonces each — a nonce is bound to one session):
-//!   NonceRequest{h,a}  → all operators
-//!   collect NonceCommit{…, digest} (each node commits once it has traced the task) until
+//!   CommitRequest{h,a}  → all operators
+//!   collect Commit{…, digest} (each node commits once it has traced the task) until
 //!     all reply or the trace timeout, cut to one stage timeout once some digest has
 //!     ceil(N·num/den) commits; verify each commit's pubkey point maps to the sender's
 //!     operator address
@@ -40,7 +40,7 @@
 //! The p2p transport key is BN254 (the network's operator identity), but a
 //! Schnorr signer is a secp256k1 point whose Ethereum address is the operator's
 //! registry identity. The two are bound at registration; here the coordinator
-//! carries both directions of the map so it can (a) authenticate a `NonceCommit`
+//! carries both directions of the map so it can (a) authenticate a `Commit`
 //! (the committed point's address must equal the sender's registered address) and
 //! (b) address round-2 `SignRequest`s to the p2p keys of a subset chosen by
 //! address.
@@ -217,7 +217,7 @@ where
     certified_out: SchnorrCertifiedSender,
     sender: S,
     receiver: R,
-    /// Operator p2p keys, the round-1 `NonceRequest` recipients.
+    /// Operator p2p keys, the round-1 `CommitRequest` recipients.
     operator_keys: Vec<PublicKey>,
     /// p2p key → operator address: authenticates an incoming commit/partial by the
     /// sender's registered identity.
@@ -236,7 +236,7 @@ where
     /// The round-trip deadline: partial collection, and the wait for the remaining commits
     /// once a digest has enough to sign.
     stage_timeout: Duration,
-    /// Nonce-commit deadline. A node commits only once it has traced the task, so this
+    /// Commit deadline. A node commits only once it has traced the task, so this
     /// has to cover a full cold trace.
     trace_timeout: Duration,
     round_timeout: Duration,
@@ -425,7 +425,7 @@ where
     ) -> Option<(AggregateSignature, Vec<Address>, [u8; 32])> {
         // Round 1: fresh nonces from everyone (suspects included — flapping nodes
         // recover here; they are filtered at subset selection below).
-        let request = SchnorrMsg::NonceRequest { height, attempt }.encode();
+        let request = SchnorrMsg::CommitRequest { height, attempt }.encode();
         let _ = self
             .sender
             .send(Recipients::Some(self.operator_keys.clone()), request, true);
@@ -440,7 +440,7 @@ where
                 break;
             };
             let (peer, msg) = msg;
-            if let SchnorrMsg::NonceCommit {
+            if let SchnorrMsg::Commit {
                 height: h,
                 attempt: a,
                 pubkey,
@@ -457,7 +457,7 @@ where
                     continue; // not a known operator
                 };
                 if pubkey.eth_address() != peer_addr {
-                    warn!(height, attempt, peer = %peer, "nonce commit pubkey does not match sender; ignored");
+                    warn!(height, attempt, peer = %peer, "commit pubkey does not match sender; ignored");
                     continue;
                 }
                 commits.insert(peer_addr, (pubkey, nonce, digest));
@@ -477,7 +477,7 @@ where
                 attempt,
                 responders = commits.len(),
                 min_signers,
-                "no digest has enough nonce commits for a quorum"
+                "no digest has enough commits for a quorum"
             );
             return None;
         };

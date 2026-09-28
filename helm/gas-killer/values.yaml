@@ -407,7 +407,7 @@ router:
   # (production transactions can take several minutes of EVMSketch compute); the cost
   # of a larger value is that a round that never reaches quorum blocks the task queue
   # for the full window. In schnorr mode it is also the base for the coordinator's
-  # nonce-commit deadline (schnorr.traceTimeoutSecs, default roundTimeout/2), so the
+  # commit deadline (schnorr.traceTimeoutSecs, default roundTimeout/2), so the
   # stage that holds node compute scales with this value. Keep it below
   # ingress.taskTtlSeconds, which bounds how long a task queued behind this round
   # survives. Tune against gas_killer_p2p_round_trip_seconds and the round-timeout
@@ -603,13 +603,13 @@ schnorr:
   stakeRegistryAddress: ""
 
   # Round-trip timeout for the coordinator's stages that hold no node compute, in seconds:
-  # partial-signature collection, and the wait for the remaining nonce commits once enough
+  # partial-signature collection, and the wait for the remaining commits once enough
   # operators agree on a digest to sign. Empty uses the binary's default of
   # min(5, ROUND_TIMEOUT/6), so several attempts fit inside one round-timeout window, and a short
   # deadline is what lets the coordinator drop an unresponsive operator quickly.
   stageTimeoutSecs: ""
 
-  # How long the coordinator waits for nonce commits, in seconds. Empty uses the binary's default
+  # How long the coordinator waits for commits, in seconds. Empty uses the binary's default
   # of roundTimeout/2. A node commits only once it has traced the announced task with EVMSketch
   # and derived its digest, so this has to cover a full cold trace rather than a p2p round trip.
   # Half a round rather than the whole one keeps a retry in budget, but the two retry cases

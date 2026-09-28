@@ -4,7 +4,7 @@
 //! The router announces tasks on channel 1 and the TaskBook resolves heights; the node then
 //! answers the router coordinator's session messages:
 //!
-//! 1. `NonceRequest{h, a}`: derive the digest for `h` LOCALLY (TaskBook + EVMSketch, via
+//! 1. `CommitRequest{h, a}`: derive the digest for `h` LOCALLY (TaskBook + EVMSketch, via
 //!    [`DigestResolver`]), then commit a fresh nonce pair together with that digest. The
 //!    coordinator signs the digest a quorum of commits agrees on, so the node's trace is what
 //!    the round waits for, not the router's. A height that resolves to its skip digest gets no
@@ -21,7 +21,7 @@
 //! - sessions live only in memory — a restart forgets secret nonces, so a rebooted
 //!   node simply refuses in-flight sessions (it becomes a non-signer and the
 //!   coordinator retries with fresh nonces);
-//! - duplicate `NonceRequest`s re-send the SAME public nonce (idempotent — the
+//! - duplicate `CommitRequest`s re-send the SAME public nonce (idempotent — the
 //!   secret is still unused);
 //! - signing consumes the secret nonce by value; the result is cached, and a
 //!   duplicate `SignRequest` with the SAME context fingerprint re-sends the cached
@@ -84,7 +84,7 @@ struct Shared {
 }
 
 /// Runs the participant actor until the channel closes. Spawns one child task per
-/// `NonceRequest`: digest resolution can block up to the validation retry budget, and
+/// `CommitRequest`: digest resolution can block up to the validation retry budget, and
 /// the actor loop must stay responsive to later sessions meanwhile.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run<R, S>(
@@ -145,13 +145,13 @@ pub(crate) async fn run<R, S>(
         }
 
         match msg {
-            SchnorrMsg::NonceRequest { height, attempt } => {
-                handle_nonce_request(&context, &shared, &sender, &router, height, attempt);
+            SchnorrMsg::CommitRequest { height, attempt } => {
+                handle_commit_request(&context, &shared, &sender, &router, height, attempt);
             }
             SchnorrMsg::SignRequest(request) => {
                 handle_sign_request(&shared, &sender, &router, request);
             }
-            SchnorrMsg::NonceCommit { .. } | SchnorrMsg::PartialSig { .. } => {
+            SchnorrMsg::Commit { .. } | SchnorrMsg::PartialSig { .. } => {
                 // Node → router messages; the router never sends these.
                 debug!(height, "unexpected node-bound schnorr message; ignored");
             }
@@ -161,7 +161,7 @@ pub(crate) async fn run<R, S>(
 
 /// Resolves the session's digest and commits a fresh nonce for it, or re-sends the
 /// commit a duplicate request is asking for.
-fn handle_nonce_request<S>(
+fn handle_commit_request<S>(
     context: &tokio::Context,
     shared: &Arc<Shared>,
     sender: &S,
@@ -203,10 +203,7 @@ fn handle_nonce_request<S>(
             Some(digest) if digest != shared.resolver.skip_digest(height) => digest,
             resolved => {
                 if resolved.is_some() {
-                    debug!(
-                        height,
-                        attempt, "height resolves to skip; no nonce committed"
-                    );
+                    debug!(height, attempt, "height resolves to skip; no commit sent");
                 }
                 shared
                     .sessions
@@ -251,7 +248,7 @@ fn send_commit<S>(
 ) where
     S: Sender<PublicKey = PublicKey> + Clone,
 {
-    let reply = SchnorrMsg::NonceCommit {
+    let reply = SchnorrMsg::Commit {
         height,
         attempt,
         pubkey: shared.own_pubkey,
