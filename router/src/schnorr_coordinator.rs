@@ -161,6 +161,9 @@ where
     /// How often an unanswered `CommitRequest` is re-sent. A lost request would otherwise
     /// cost the whole trace budget before the next attempt asks again.
     resend_interval: Duration,
+    /// Set once the channel-2 receiver has closed: the network is shutting down, so no session
+    /// can finish and waiting out its deadlines would only spin.
+    closed: bool,
 }
 
 impl<S, R> SchnorrCoordinator<S, R>
@@ -196,6 +199,7 @@ where
             trace_timeout,
             round_timeout,
             resend_interval,
+            closed: false,
         };
         info!(
             operators = coordinator.operator_keys.len(),
@@ -218,13 +222,14 @@ where
     }
 
     /// Runs signing attempts for `task` at `height` until one assembles a signature, the round
-    /// deadline passes, or the router's own trace fails.
+    /// deadline passes, or the router's own trace fails. `None` means the channel closed, so the
+    /// session could not run to an outcome.
     pub async fn drive_height(
         &mut self,
         height: u64,
         task: &GasKillerTaskData,
         trace: &RouterTrace,
-    ) -> SessionOutcome {
+    ) -> Option<SessionOutcome> {
         let deadline = Instant::now() + self.round_timeout;
         let trace = trace.clone();
         let trace_failed = async move {
@@ -243,6 +248,10 @@ where
 
         let mut attempt: u32 = 0;
         while Instant::now() < deadline {
+            if self.closed {
+                warn!(height, "schnorr channel closed; abandoning session");
+                return None;
+            }
             attempt += 1;
             // Biased toward the trace: a session whose router trace has failed cannot render,
             // so when both are ready it ends as a trace failure rather than as a signed round
@@ -251,7 +260,7 @@ where
                 biased;
                 reason = &mut trace_failed => {
                     warn!(height, %reason, "router trace failed, abandoning session");
-                    return SessionOutcome::TraceFailed(reason);
+                    return Some(SessionOutcome::TraceFailed(reason));
                 }
                 outcome = self.run_attempt(height, attempt, task, &mut suspects, deadline) => {
                     let Some((signature, non_signers, digest)) = outcome else {
@@ -264,11 +273,11 @@ where
                         non_signers = non_signers.len(),
                         "aggregate schnorr signature assembled"
                     );
-                    return SessionOutcome::Signed {
+                    return Some(SessionOutcome::Signed {
                         digest,
                         signature,
                         non_signers,
-                    };
+                    });
                 }
             }
         }
@@ -279,7 +288,7 @@ where
             timeout_secs = self.round_timeout.as_secs_f64(),
             "no aggregate signature before round timeout, abandoning session"
         );
-        SessionOutcome::TimedOut
+        Some(SessionOutcome::TimedOut)
     }
 
     /// One full two-round attempt. Returns the verified signature, the sorted non-signer
@@ -314,7 +323,7 @@ where
         let mut next_resend = Instant::now() + self.resend_interval;
         while commits.len() < self.operator_keys.len() {
             let Some(msg) = self.recv_until(stage_deadline.min(next_resend)).await else {
-                if Instant::now() >= stage_deadline {
+                if self.closed || Instant::now() >= stage_deadline {
                     break;
                 }
                 // A node dedupes by session, so the ones already tracing just ignore it.
@@ -495,15 +504,18 @@ where
         Some((signature, non_signers, message))
     }
 
-    /// Receives the next channel-2 message before `deadline`, or `None` on
-    /// timeout / channel close. Non-operator senders are dropped.
+    /// Receives the next channel-2 message before `deadline`, or `None` on timeout or channel
+    /// close (which also sets [`Self::closed`]). Non-operator senders are dropped.
     async fn recv_until(&mut self, deadline: Instant) -> Option<(PublicKey, SchnorrMsg)> {
         loop {
             let remaining = deadline.checked_duration_since(Instant::now())?;
             let received = tokio::time::timeout(remaining, self.receiver.recv())
                 .await
                 .ok()?;
-            let (peer, bytes) = received.ok()?;
+            let Ok((peer, bytes)) = received else {
+                self.closed = true;
+                return None;
+            };
             if !self.peer_to_address.contains_key(&peer) {
                 warn!(peer = %peer, "schnorr message from unknown peer; ignored");
                 continue;
@@ -522,9 +534,118 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_actor::{Feedback, Unreliable};
+    use commonware_avs_core::bn254::Bn254;
+    use commonware_cryptography::Signer as _;
+    use commonware_p2p::{CheckedSender, LimitedSender, Message};
+    use commonware_runtime::IoBufs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn addr(n: u8) -> Address {
         Address::from([n; 20])
+    }
+
+    /// A channel-2 receiver whose network has already shut down.
+    #[derive(Debug)]
+    struct ClosedReceiver;
+
+    impl Receiver for ClosedReceiver {
+        type Error = std::io::Error;
+        type PublicKey = PublicKey;
+
+        async fn recv(&mut self) -> Result<Message<PublicKey>, Self::Error> {
+            Err(std::io::Error::other("channel closed"))
+        }
+    }
+
+    /// A channel-2 sender that delivers to every recipient and counts its sends.
+    #[derive(Clone, Default)]
+    struct CountingSender {
+        sends: Arc<AtomicUsize>,
+    }
+
+    struct CountingChecked {
+        recipients: Vec<PublicKey>,
+        sends: Arc<AtomicUsize>,
+    }
+
+    impl CheckedSender for CountingChecked {
+        type PublicKey = PublicKey;
+
+        fn recipients(&self) -> Vec<PublicKey> {
+            self.recipients.clone()
+        }
+
+        fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Unreliable<Feedback> {
+            self.sends.fetch_add(1, Ordering::Relaxed);
+            Unreliable::new(Feedback::Ok)
+        }
+    }
+
+    impl LimitedSender for CountingSender {
+        type PublicKey = PublicKey;
+        type Checked<'a>
+            = CountingChecked
+        where
+            Self: 'a;
+
+        fn check(
+            &mut self,
+            recipients: Recipients<PublicKey>,
+        ) -> Result<CountingChecked, SystemTime> {
+            let recipients = match recipients {
+                Recipients::Some(peers) => peers,
+                Recipients::One(peer) => vec![peer],
+                Recipients::All => Vec::new(),
+            };
+            Ok(CountingChecked {
+                recipients,
+                sends: Arc::clone(&self.sends),
+            })
+        }
+    }
+
+    /// A coordinator over three operators whose channel-2 receiver is already closed.
+    fn closed_coordinator(
+        sender: CountingSender,
+    ) -> SchnorrCoordinator<CountingSender, ClosedReceiver> {
+        let operators = (0..3u8)
+            .map(|i| (Bn254::from_seed(u64::from(i)).public_key(), addr(i + 1)))
+            .collect();
+        SchnorrCoordinator::new(
+            sender,
+            ClosedReceiver,
+            operators,
+            (2, 3),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            Duration::from_millis(10),
+        )
+    }
+
+    /// A closed channel ends the session at once instead of re-sending in a hot loop until the
+    /// trace and round deadlines run out.
+    #[tokio::test]
+    async fn a_closed_channel_ends_the_session_without_spinning() {
+        let sender = CountingSender::default();
+        let mut coordinator = closed_coordinator(sender.clone());
+        let trace = RouterTrace::spawn(std::future::pending());
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            coordinator.drive_height(1, &GasKillerTaskData::default(), &trace),
+        )
+        .await
+        .expect("a closed channel must not hold the session until its deadlines");
+
+        assert!(outcome.is_none());
+        assert_eq!(
+            sender.sends.load(Ordering::Relaxed),
+            1,
+            "only the first request goes out"
+        );
     }
 
     /// A stage that ran its course blames everyone who stayed silent, which is what keeps a

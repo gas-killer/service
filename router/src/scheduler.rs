@@ -78,10 +78,20 @@ where
                 "assigned task to height"
             );
 
-            let outcome = self
+            // A closed channel means the process is going down: the task stays `processing` and
+            // the next router life re-queues it, instead of failing a task that did nothing wrong.
+            let Some(outcome) = self
                 .coordinator
                 .drive_height(height, &dispatched.task, &dispatched.trace)
-                .await;
+                .await
+            else {
+                info!(
+                    height,
+                    task_id = dispatched.task_id,
+                    "schnorr channel closed; scheduler exiting"
+                );
+                return;
+            };
             if matches!(outcome, SessionOutcome::Signed { .. }) {
                 self.metrics
                     .p2p_round_trip_seconds
