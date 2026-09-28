@@ -4,15 +4,16 @@
 //! The router announces tasks on channel 1 and the TaskBook resolves heights; the node then
 //! answers the router coordinator's session messages:
 //!
-//! 1. `NonceRequest{h, a}`: generate (or re-send) a fresh nonce pair for the
-//!    session. Nonces are message-independent, so this needs no task validation.
-//! 2. `SignRequest{h, a, …}`: derive the digest for `h` LOCALLY (TaskBook +
-//!    EVMSketch, via [`DigestResolver`]), refuse unless
-//!    it equals the request's message, authenticate the signer set (every point
-//!    must map to a known operator address — the identity the on-chain registry
-//!    binds with a proof of possession), recompute `X_agg`, then produce the
-//!    partial signature. `partial_sign` re-derives the nonce coefficient and
-//!    challenge itself and aborts on an inconsistent coordinator `R`.
+//! 1. `CommitRequest{h, a}`: derive the digest for `h` LOCALLY (TaskBook + EVMSketch, via
+//!    [`DigestResolver`]), then commit a fresh nonce pair together with that digest. The
+//!    coordinator signs the digest a quorum of commits agrees on, so the node's trace is what
+//!    the round waits for, not the router's. A height that resolves to its skip digest gets no
+//!    commit: the coordinator never signs skips.
+//! 2. `SignRequest{h, a, …}`: refuse unless the message equals the digest this session
+//!    committed to, authenticate the signer set (every point must map to a known operator
+//!    address — the identity the on-chain registry binds with a proof of possession),
+//!    recompute `X_agg`, then produce the partial signature. `partial_sign` re-derives the
+//!    nonce coefficient and challenge itself and aborts on an inconsistent coordinator `R`.
 //!
 //! # Nonce safety (the invariant everything here serves)
 //!
@@ -20,7 +21,7 @@
 //! - sessions live only in memory — a restart forgets secret nonces, so a rebooted
 //!   node simply refuses in-flight sessions (it becomes a non-signer and the
 //!   coordinator retries with fresh nonces);
-//! - duplicate `NonceRequest`s re-send the SAME public nonce (idempotent — the
+//! - duplicate `CommitRequest`s re-send the SAME public nonce (idempotent — the
 //!   secret is still unused);
 //! - signing consumes the secret nonce by value; the result is cached, and a
 //!   duplicate `SignRequest` with the SAME context fingerprint re-sends the cached
@@ -53,13 +54,14 @@ const SESSION_SLACK: u64 = 64;
 /// transition enforces.
 #[allow(clippy::large_enum_variant)] // few sessions live at once; boxing buys nothing
 enum Session {
-    /// Nonce issued, secret retained until the matching `SignRequest`.
+    /// A spawned task is resolving the digest; no nonce exists yet.
+    Resolving,
+    /// Nonce issued for `digest`, secret retained until the matching `SignRequest`.
     Issued {
         sec: gas_killer_common::schnorr::musig::SecNonce,
         pubn: PubNonce,
+        digest: [u8; 32],
     },
-    /// A spawned sign task owns the secret nonce and is resolving the digest.
-    Signing,
     /// Signed under `fingerprint`; the partial is cached for idempotent re-sends.
     Signed {
         fingerprint: [u8; 32],
@@ -82,8 +84,8 @@ struct Shared {
 }
 
 /// Runs the participant actor until the channel closes. Spawns one child task per
-/// `SignRequest` (digest resolution can block up to the validation retry budget;
-/// the actor loop must stay responsive to later sessions meanwhile).
+/// `CommitRequest`: digest resolution can block up to the validation retry budget, and
+/// the actor loop must stay responsive to later sessions meanwhile.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run<R, S>(
     context: tokio::Context,
@@ -143,13 +145,13 @@ pub(crate) async fn run<R, S>(
         }
 
         match msg {
-            SchnorrMsg::NonceRequest { height, attempt } => {
-                handle_nonce_request(&shared, &sender, &router, height, attempt);
+            SchnorrMsg::CommitRequest { height, attempt } => {
+                handle_commit_request(&context, &shared, &sender, &router, height, attempt);
             }
             SchnorrMsg::SignRequest(request) => {
-                handle_sign_request(&context, &shared, &sender, &router, request);
+                handle_sign_request(&shared, &sender, &router, request);
             }
-            SchnorrMsg::NonceCommit { .. } | SchnorrMsg::PartialSig { .. } => {
+            SchnorrMsg::Commit { .. } | SchnorrMsg::PartialSig { .. } => {
                 // Node → router messages; the router never sends these.
                 debug!(height, "unexpected node-bound schnorr message; ignored");
             }
@@ -157,160 +159,183 @@ pub(crate) async fn run<R, S>(
     }
 }
 
-/// Issues (or idempotently re-sends) the public nonce for a session.
-fn handle_nonce_request<S>(
+/// Resolves the session's digest and commits a fresh nonce for it, or re-sends the
+/// commit a duplicate request is asking for.
+fn handle_commit_request<S>(
+    context: &tokio::Context,
     shared: &Arc<Shared>,
     sender: &S,
     router: &PublicKey,
     height: u64,
     attempt: u32,
 ) where
-    S: Sender<PublicKey = PublicKey> + Clone,
+    S: Sender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
 {
-    let pubn = {
+    {
         let mut sessions = shared.sessions.lock().expect("sessions lock");
         match sessions.get(&(height, attempt)) {
             None => {
-                // OS entropy: nonce secrecy is what the whole protocol's key
-                // safety rests on, so nothing weaker is acceptable here.
-                let (sec, pubn) = shared.participant.new_nonce(&mut |b: &mut [u8]| {
-                    OsRng.try_fill_bytes(b).expect("OS entropy unavailable");
-                });
-                sessions.insert((height, attempt), Session::Issued { sec, pubn });
-                debug!(height, attempt, "issued nonce");
-                pubn
+                sessions.insert((height, attempt), Session::Resolving);
             }
             // Duplicate request (lost reply / router rebroadcast): re-send the SAME
             // public nonce — the secret is still unused, so this stays single-use.
-            Some(Session::Issued { pubn, .. }) => *pubn,
-            // Already signing/signed/refused: never issue a second nonce for the
-            // same session (the coordinator must escalate to a new attempt).
+            Some(Session::Issued { pubn, digest, .. }) => {
+                send_commit(shared, sender, router, height, attempt, *pubn, *digest);
+                return;
+            }
+            // Resolving answers once the digest is known; a consumed session never issues
+            // a second nonce (the coordinator must escalate to a new attempt).
             Some(_) => {
                 debug!(
                     height,
-                    attempt, "nonce request for consumed session; ignored"
+                    attempt, "nonce request for a session in progress or consumed; ignored"
                 );
                 return;
             }
         }
-    };
-    let reply = SchnorrMsg::NonceCommit {
+    }
+
+    let shared = Arc::clone(shared);
+    let sender = sender.clone();
+    let router = router.clone();
+    drop(context.child("commit").spawn(move |_| async move {
+        let digest = match shared.resolver.resolve(height).await {
+            Some(digest) if digest != shared.resolver.skip_digest(height) => digest,
+            resolved => {
+                if resolved.is_some() {
+                    debug!(height, attempt, "height resolves to skip; no commit sent");
+                }
+                shared
+                    .sessions
+                    .lock()
+                    .expect("sessions lock")
+                    .insert((height, attempt), Session::Refused);
+                return;
+            }
+        };
+        let digest: [u8; 32] = digest
+            .as_ref()
+            .try_into()
+            .expect("sha256 digest is 32 bytes");
+
+        let pubn = {
+            let mut sessions = shared.sessions.lock().expect("sessions lock");
+            // Pruned while resolving: the coordinator has moved past this session.
+            if !matches!(sessions.get(&(height, attempt)), Some(Session::Resolving)) {
+                return;
+            }
+            // OS entropy: nonce secrecy is what the whole protocol's key
+            // safety rests on, so nothing weaker is acceptable here.
+            let (sec, pubn) = shared.participant.new_nonce(&mut |b: &mut [u8]| {
+                OsRng.try_fill_bytes(b).expect("OS entropy unavailable");
+            });
+            sessions.insert((height, attempt), Session::Issued { sec, pubn, digest });
+            pubn
+        };
+        debug!(height, attempt, "issued nonce");
+        send_commit(&shared, &sender, &router, height, attempt, pubn, digest);
+    }));
+}
+
+fn send_commit<S>(
+    shared: &Shared,
+    sender: &S,
+    router: &PublicKey,
+    height: u64,
+    attempt: u32,
+    nonce: PubNonce,
+    digest: [u8; 32],
+) where
+    S: Sender<PublicKey = PublicKey> + Clone,
+{
+    let reply = SchnorrMsg::Commit {
         height,
         attempt,
         pubkey: shared.own_pubkey,
-        nonce: pubn,
+        nonce,
+        digest,
     };
     let mut sender = sender.clone();
     let _ = sender.send(Recipients::One(router.clone()), reply.encode(), true);
 }
 
-/// Validates a `SignRequest` and spawns the sign task that resolves the digest and
-/// produces the partial signature.
-fn handle_sign_request<S>(
-    context: &tokio::Context,
-    shared: &Arc<Shared>,
-    sender: &S,
-    router: &PublicKey,
-    request: SignRequest,
-) where
-    S: Sender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
+/// Validates a `SignRequest` and answers it with the partial signature, a re-send of the
+/// cached one, or a refusal.
+fn handle_sign_request<S>(shared: &Shared, sender: &S, router: &PublicKey, request: SignRequest)
+where
+    S: Sender<PublicKey = PublicKey> + Clone,
 {
     let (height, attempt) = (request.height, request.attempt);
     let fingerprint = request.fingerprint();
 
-    // Take the secret nonce (or serve the idempotent-resend / refuse cases).
-    let sec = {
-        let mut sessions = shared.sessions.lock().expect("sessions lock");
-        match sessions.get(&(height, attempt)) {
-            Some(Session::Issued { .. }) => {
-                let Some(Session::Issued { sec, .. }) =
-                    sessions.insert((height, attempt), Session::Signing)
-                else {
-                    unreachable!("entry checked above");
-                };
-                sec
-            }
-            Some(Session::Signed {
-                fingerprint: signed_fp,
-                partial_bytes,
-            }) => {
-                if *signed_fp == fingerprint {
-                    // Lost reply: re-send the cached partial for the SAME context.
-                    let Some(partial) = partial_from_bytes(partial_bytes) else {
-                        return;
-                    };
-                    let reply = SchnorrMsg::PartialSig {
-                        height,
-                        attempt,
-                        partial,
-                    };
-                    let mut sender = sender.clone();
-                    let _ = sender.send(Recipients::One(router.clone()), reply.encode(), true);
-                } else {
-                    // Same session, different context, after we already signed:
-                    // signing again would reuse the nonce and leak the key.
-                    warn!(
-                        height,
-                        attempt,
-                        "sign request with a DIFFERENT context for an already-signed session; refused (possible nonce-reuse attempt)"
-                    );
-                }
-                return;
-            }
-            Some(Session::Signing) => {
-                debug!(height, attempt, "sign already in progress; ignored");
-                return;
-            }
-            Some(Session::Refused) | None => {
-                debug!(
-                    height,
-                    attempt, "sign request without an issuable nonce; ignored"
-                );
-                return;
-            }
-        }
-    };
-
-    let shared = Arc::clone(shared);
-    let sender = sender.clone();
-    let router = router.clone();
-    drop(context.child("sign").spawn(move |_| async move {
-        let outcome = sign(&shared, sec, &request).await;
-        let mut sessions = shared.sessions.lock().expect("sessions lock");
-        match outcome {
-            Some(partial_bytes) => {
-                sessions.insert(
-                    (height, attempt),
-                    Session::Signed {
-                        fingerprint,
-                        partial_bytes,
-                    },
-                );
-                drop(sessions);
-                let Some(partial) = partial_from_bytes(&partial_bytes) else {
-                    return;
-                };
-                let reply = SchnorrMsg::PartialSig {
+    let key = (height, attempt);
+    let mut sessions = shared.sessions.lock().expect("sessions lock");
+    let partial_bytes = match sessions.get(&key) {
+        Some(Session::Signed {
+            fingerprint: signed_fp,
+            partial_bytes,
+        }) => {
+            if *signed_fp != fingerprint {
+                // Same session, different context, after we already signed:
+                // signing again would reuse the nonce and leak the key.
+                warn!(
                     height,
                     attempt,
-                    partial,
-                };
-                let mut sender = sender;
-                let _ = sender.send(Recipients::One(router), reply.encode(), true);
-                debug!(height, attempt, "partial signature sent");
+                    "sign request with a DIFFERENT context for an already-signed session; refused (possible nonce-reuse attempt)"
+                );
+                return;
             }
-            None => {
-                sessions.insert((height, attempt), Session::Refused);
-            }
+            // Lost reply: re-send the cached partial for the SAME context.
+            *partial_bytes
         }
-    }));
+        Some(Session::Issued { .. }) => {
+            let Some(Session::Issued { sec, digest, .. }) = sessions.remove(&key) else {
+                unreachable!("entry checked above");
+            };
+            // Signing consumes the secret nonce, so the session is terminal either way.
+            let Some(partial_bytes) = sign(shared, sec, &digest, &request) else {
+                sessions.insert(key, Session::Refused);
+                return;
+            };
+            sessions.insert(
+                key,
+                Session::Signed {
+                    fingerprint,
+                    partial_bytes,
+                },
+            );
+            partial_bytes
+        }
+        _ => {
+            debug!(
+                height,
+                attempt, "sign request without an issuable nonce; ignored"
+            );
+            return;
+        }
+    };
+    drop(sessions);
+
+    let Some(partial) = partial_from_bytes(&partial_bytes) else {
+        return;
+    };
+    let reply = SchnorrMsg::PartialSig {
+        height,
+        attempt,
+        partial,
+    };
+    let mut sender = sender.clone();
+    let _ = sender.send(Recipients::One(router.clone()), reply.encode(), true);
+    debug!(height, attempt, "partial signature sent");
 }
 
-/// The signing decision: authenticate the signer set, derive the digest locally,
-/// and produce the partial. Returns `None` to refuse (reasons logged inside).
-async fn sign(
+/// The signing decision: authenticate the signer set, check the message against the digest
+/// this session committed to, and produce the partial. Returns `None` to refuse (reasons
+/// logged inside).
+fn sign(
     shared: &Shared,
     sec: gas_killer_common::schnorr::musig::SecNonce,
+    digest: &[u8; 32],
     request: &SignRequest,
 ) -> Option<[u8; 32]> {
     let (height, attempt) = (request.height, request.attempt);
@@ -340,17 +365,14 @@ async fn sign(
     }
     let x_agg = schnorr::PublicKey::aggregate(request.signers.iter())?;
 
-    // Never sign a digest we did not derive ourselves. The resolver returns the
-    // validated task digest or the skip digest; the coordinator only runs signing
-    // sessions for real task digests, so any mismatch (including "we think this
-    // height should skip") is a refusal.
-    let local_digest = shared.resolver.resolve(height).await?;
-    if local_digest.as_ref() != request.message.as_slice() {
+    // Never sign a digest we did not derive ourselves: a coordinator that picked another
+    // group's digest gets a refusal, not our key behind it.
+    if *digest != request.message {
         warn!(
             height,
             attempt,
-            ours = ?local_digest,
-            theirs = ?alloy::primitives::hex::encode(request.message),
+            ours = %alloy::primitives::hex::encode(digest),
+            theirs = %alloy::primitives::hex::encode(request.message),
             "coordinator message does not match locally derived digest; refused"
         );
         return None;

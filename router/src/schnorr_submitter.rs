@@ -5,10 +5,11 @@
 //!
 //! - `skip_digest(height)`: the coordinator gave up on the height — log and
 //!   notify the sequencer ([`ResolutionKind::Skipped`]); nothing goes on-chain.
-//! - No assignment / digest mismatch: [`ResolutionKind::Foreign`].
-//! - Expected digest: submit the single aggregate signature `(s, Raddr)` plus the
-//!   strictly ascending non-signer list through
-//!   [`GasKillerHandler::handle_schnorr_verification`], with bounded retries.
+//! - No assignment: [`ResolutionKind::Foreign`].
+//! - Task digest: render the single aggregate signature `(s, Raddr)` plus the strictly
+//!   ascending non-signer list through [`GasKillerHandler::handle_schnorr_verification`],
+//!   with bounded retries. The digest comes from the nodes' commits, not the assignment;
+//!   the handler checks it against the router's own trace before rendering.
 //!
 //! The proof arguments are constant-size regardless of signer count — that is the
 //! entire point of the aggregate scheme.
@@ -129,19 +130,9 @@ impl SchnorrSubmitter {
             self.notify(height, ResolutionKind::Foreign);
             return;
         };
-        if assignment.digest != digest {
-            warn!(
-                height,
-                expected = %assignment.digest,
-                certified = %digest,
-                "signature digest does not match assignment; height consumed"
-            );
-            self.notify(height, ResolutionKind::Foreign);
-            return;
-        }
-
-        // Expected digest: submit with bounded retries — transient RPC errors recover,
-        // deterministic rejections release the height as failed after the budget.
+        // Submit with bounded retries — transient RPC errors recover,
+        // deterministic rejections release the height as failed after the budget. Only the
+        // last failure settles the task, so every retry still has the task's router trace.
         let mut backoff = INITIAL_RETRY_BACKOFF;
         let mut attempt = 0u32;
         loop {
@@ -181,6 +172,7 @@ impl SchnorrSubmitter {
                         %error,
                         "submission failed after retries; releasing height"
                     );
+                    self.handler.settle_failed(height, &error).await;
                     self.notify(height, ResolutionKind::Executed { success: false });
                     return;
                 }

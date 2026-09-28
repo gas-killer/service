@@ -571,7 +571,7 @@ impl GasKillerValidator {
     /// Fetches the current `stateTransitionCount()` from the contract on a known chain.
     ///
     /// Skips chain detection — use this when the chain has already been identified (e.g.
-    /// from `compute_storage_updates_for_tx`) to avoid a redundant `eth_getCode` round-trip.
+    /// from `detect_chain_for_address`) to avoid a redundant `eth_getCode` round-trip.
     pub async fn get_state_transition_count_on_chain(
         &self,
         address: alloy::primitives::Address,
@@ -615,57 +615,10 @@ impl GasKillerValidator {
             .await
     }
 
-    /// Computes storage updates for a transaction using gas-analyzer.
-    ///
-    /// Automatically detects which chain the contract is on, then computes storage updates.
-    /// Returns the storage updates, block height, and the actual EVM chain ID (u64).
-    pub async fn compute_storage_updates_for_tx(
-        &self,
-        contract_address: alloy::primitives::Address,
-        call_data: &[u8],
-        from_address: Option<alloy::primitives::Address>,
-        value: Option<alloy::primitives::U256>,
-        block_height: u64,
-    ) -> Result<(Vec<u8>, u64, u64)> {
-        let chain_role = self.detect_chain_for_address(contract_address).await?;
-
-        debug!(
-            chain = %chain_role,
-            address = %contract_address,
-            "Detected chain for contract"
-        );
-
-        let rpc_url = self
-            .sim_rpc_url_for_chain(chain_role)
-            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain_role))?;
-
-        // Read the chain ID from the chain RPC rather than the simulation one: a fork reports its
-        // upstream's ID, but it is the settling chain the commitment is bound to.
-        let numeric_chain_id = self.get_chain_id_for(chain_role).await?;
-
-        let result = self
-            .analyze_transaction(
-                rpc_url,
-                contract_address,
-                call_data,
-                from_address,
-                value,
-                block_height,
-            )
-            .await?;
-        Ok((
-            result.storage_updates,
-            result.block_height,
-            numeric_chain_id,
-        ))
-    }
-
-    /// Precomputes and caches the payload digest using already-computed storage updates.
-    ///
-    /// Call this from the task creator after it runs EVMSketch to build the payload, so that
-    /// the orchestrator's validator can skip running EVMSketch again when verifying each incoming
-    /// node signature for the same round.
-    pub async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
+    /// Caches the digest `storage_updates` produce for `task_data`, standing in for a finished
+    /// trace.
+    #[cfg(test)]
+    async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
         let digest = task_data.build_payload_hash(storage_updates);
         let cache_key = digest_cache_key(task_data);
         let mut cache = self.digest_cache.lock().await;
@@ -673,7 +626,7 @@ impl GasKillerValidator {
         debug!(
             transition_index = task_data.transition_index,
             block_height = task_data.block_height,
-            "Primed validator digest cache from creator (verification will skip EVMSketch)"
+            "Primed validator digest cache"
         );
     }
 
@@ -888,9 +841,8 @@ impl GasKillerValidator {
     /// `storage_updates` diverge from local re-execution yields a different digest and the
     /// dishonest announcement never reaches quorum.
     ///
-    /// Results are cached by (transition_index, block_height) so that repeated calls for the
-    /// same task (e.g. the router resolving its automaton digest after [`Self::prime_cache`],
-    /// or a node re-proposing a height after restart) only run the expensive EVMSketch
+    /// Results are cached by task identity so that repeated calls for the same task (a
+    /// node's later signing attempts for the same height) only run the expensive EVMSketch
     /// computation once. Errors are NOT cached: transient RPC failures surface to the caller,
     /// which retries with backoff (deterministic failures are the caller's cue to skip).
     pub async fn expected_digest_for_task(&self, task: &GasKillerTaskData) -> Result<Digest> {
@@ -1183,9 +1135,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_expected_digest_uses_primed_cache() {
-        // prime_cache stores the digest keyed by (transition_index, block_height), so
-        // expected_digest_for_task must return it without hitting any RPC. This is the
-        // router-side flow: the sequencer primes after EVMSketch, the automaton looks up.
+        // A cached digest must be returned without hitting any RPC: a node's retry for the
+        // same height reads the trace its first attempt finished.
         let validator = GasKillerValidator::with_rpc_url("https://example.com");
         let task_data = create_test_task_data();
         let storage_updates = vec![0x01, 0x02, 0x03, 0x04];
