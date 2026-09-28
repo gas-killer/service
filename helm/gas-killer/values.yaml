@@ -322,9 +322,6 @@ node:
   # P2P channel message queue depth. Messages are dropped when the queue is full.
   # Increase for bursty workloads; the cost is memory proportional to message size.
   p2pMessageBacklog: 256
-  # P2P channel rate limit in messages per second. Accepts floats (e.g. 0.5 = one
-  # message every two seconds). Raising beyond gas-analyzer throughput causes queue buildup.
-  p2pMessagesPerSecond: "1.0"
   # Writable runtime storage (STORAGE_DIR), backed by an emptyDir volume. Nothing the node
   # needs across restarts lives here.
   storageDir: /app/data
@@ -378,9 +375,6 @@ router:
   # P2P channel message queue depth. Messages are dropped when the queue is full.
   # Increase for bursty workloads; the cost is memory proportional to message size.
   p2pMessageBacklog: 256
-  # P2P channel rate limit in messages per second. Accepts floats (e.g. 0.5 = one
-  # message every two seconds). Raising beyond gas-analyzer throughput causes queue buildup.
-  p2pMessagesPerSecond: "1.0"
   # Writable runtime storage (STORAGE_DIR). Nothing the router needs across restarts lives
   # here: each router life starts its heights at the clock.
   storageDir: /app/data
@@ -410,13 +404,12 @@ router:
   # commit deadline (schnorr.traceTimeoutSecs, default roundTimeout/2), so the
   # stage that holds node compute scales with this value. Keep it below
   # ingress.taskTtlSeconds, which bounds how long a task queued behind this round
-  # survives. Tune against gas_killer_p2p_round_trip_seconds and the round-timeout
+  # survives. Tune against gas_killer_p2p_round_trip_seconds and the height-outcome
   # panel in the Grafana dashboard.
   roundTimeout: "300"
-  # How often (in seconds) the router re-sends the TaskDirective (Announce, then Skip
-  # after roundTimeout) for an in-flight height. Rebroadcast-until-certified is a liveness
-  # requirement: a node that misses every Announce can only resolve the height as a skip, so
-  # this MUST be well below roundTimeout.
+  # How often (in seconds) the coordinator re-sends a CommitRequest to the operators that
+  # have not committed yet. A node dedupes by session, so a re-send only matters to one whose
+  # request was lost; without it a lost request costs the whole trace stage.
   rebroadcastInterval: "15"
   # Max seconds the executor waits for a verifyAndUpdate transaction receipt before
   # timing out the round and proceeding to the next one. Prevents an indefinite stall

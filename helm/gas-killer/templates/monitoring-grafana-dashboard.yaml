@@ -473,13 +473,13 @@ data:
           "type": "text",
           "title": "Window and Heights",
           "gridPos": { "x": 0, "y": 75, "w": 24, "h": 1 },
-          "options": { "mode": "markdown", "content": "## Window and Heights\n\nThe aggregation pipeline's live shape. A wedged pipeline looks healthy everywhere else — pods up, memory flat, nothing restarting — and shows up only here, as a window whose base and highest-assigned height stop advancing together while the queue still has work.\n\nHeight outcomes are the disposition of every height the router assigned. `executed` is the healthy path. `skipped` means the quorum abandoned the height, so the task produced nothing; a sustained skip ratio above ~1% of certified heights is the signal that directives are not arriving. `foreign` is a certificate left over from a previous router life. `superseded` means the operators' reported tips moved past a height the router was still driving, which the safe-tip series explains.\n\nDirective sends are counted per recipient at the send site, because the p2p sender reports a partial drop and a full delivery identically. `rate_limited` is the operators' per-peer quota filtering our copy out before it is sent; `rejected` is our own send buffer refusing the message. Both are invisible upstream. The rate-limited messages panel is the opposite end of the same story: it counts what the *receiving* peer throttled, where the remedy is to sleep the connection rather than drop the message." }
+          "options": { "mode": "markdown", "content": "## Window and Heights\n\nThe signing pipeline's live shape. A wedged pipeline looks healthy everywhere else — pods up, memory flat, nothing restarting — and shows up only here, as a window whose base and highest-assigned height stop advancing together while the queue still has work.\n\nHeight outcomes are how every session's task settled. `ready` is the healthy path. `timed_out` means no quorum signed before ROUND_TIMEOUT. `trace_failed` means the router could not trace the task itself, so the session was abandoned at once. `failed` means a quorum signed but the payload could not be rendered: the router's trace disagreed with the signed digest, or the payload was proven to revert." }
         },
         {
           "id": 71,
           "type": "timeseries",
           "title": "Heights In Flight",
-          "description": "Aggregation heights assigned and not yet resolved. One at a time is the current design; this is the series that shows the window actually opening when SEQUENCER_WINDOW is raised.",
+          "description": "Signing sessions running now. One at a time is the current design; this is the series that shows the window actually opening once sessions run concurrently.",
           "gridPos": { "x": 0, "y": 76, "w": 8, "h": 8 },
           "targets": [
             {
@@ -493,7 +493,7 @@ data:
           "id": 72,
           "type": "timeseries",
           "title": "Window Base vs Highest Assigned",
-          "description": "The edges of the live window against the operators' safe tip. All advancing together is healthy. Base and highest pinned while the queue is non-empty is a wedge.",
+          "description": "The edges of the live window. Both advancing together is healthy. Base and highest pinned while the queue is non-empty is a wedge.",
           "gridPos": { "x": 8, "y": 76, "w": 8, "h": 8 },
           "targets": [
             {
@@ -503,10 +503,6 @@ data:
             {
               "expr": "gas_killer_highest_assigned_height",
               "legendFormat": "highest assigned"
-            },
-            {
-              "expr": "gas_killer_node_safe_tip",
-              "legendFormat": "operator safe tip"
             }
           ],
           "fieldConfig": { "defaults": { "unit": "short" } }
@@ -529,8 +525,8 @@ data:
           "id": 74,
           "type": "timeseries",
           "title": "Height Outcomes / min",
-          "description": "Final disposition of every assigned height. Anything other than `executed` means a task produced no on-chain effect.",
-          "gridPos": { "x": 0, "y": 84, "w": 12, "h": 8 },
+          "description": "How every session's task settled. Anything other than `ready` means a task produced no payload.",
+          "gridPos": { "x": 0, "y": 84, "w": 24, "h": 8 },
           "targets": [
             {
               "expr": "sum by (outcome) (rate(gas_killer_height_outcomes_total[5m])) * 60",
@@ -540,24 +536,10 @@ data:
           "fieldConfig": { "defaults": { "unit": "short" } }
         },
         {
-          "id": 75,
-          "type": "timeseries",
-          "title": "Directive Sends / min by Result",
-          "description": "Per-recipient outcomes of task-directive broadcasts, counted at the send site. Any sustained rate_limited is the split-digest hazard: an operator that misses an Announce and later sees a directive for a higher height votes to skip the height it missed, and that stall does not clear on its own.",
-          "gridPos": { "x": 12, "y": 84, "w": 12, "h": 8 },
-          "targets": [
-            {
-              "expr": "sum by (result) (rate(gas_killer_directive_sends_total[5m])) * 60",
-              "legendFormat": "{{ "{{" }} result {{ "}}" }}"
-            }
-          ],
-          "fieldConfig": { "defaults": { "unit": "short" } }
-        },
-        {
           "id": 76,
           "type": "timeseries",
           "title": "P2P Messages Rate-Limited (10m)",
-          "description": "Messages the receiving peer throttled, by channel: data_0 is the engine's ack gossip, data_1 the task directives, data_2 the interactive Schnorr rounds. The receive side does not drop a throttled message, it sleeps the whole connection — head-of-line blocking every channel on it, ping included — so any sustained value here is worse than it looks. Raise the receive side's quota before the send side's.",
+          "description": "Messages the receiving peer throttled, by channel: data_2 is the interactive Schnorr rounds. The receive side does not drop a throttled message, it sleeps the whole connection — head-of-line blocking every channel on it, ping included — so any sustained value here is worse than it looks. Raise the receive side's quota before the send side's.",
           "gridPos": { "x": 0, "y": 92, "w": 12, "h": 8 },
           "targets": [
             {

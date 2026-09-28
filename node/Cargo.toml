@@ -27,7 +27,6 @@ clap = { workspace = true }
 # Commonware ecosystem
 commonware-actor = { workspace = true }
 commonware-avs-core = { workspace = true }
-commonware-avs-node = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true }

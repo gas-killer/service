@@ -1,8 +1,6 @@
 use crate::metrics::MetricsCollector;
 use crate::payload_revert::PayloadRevert;
-use crate::sequencer::{
-    InFlightTask, in_flight_task, in_flight_trace, set_task_failed, set_task_ready,
-};
+use crate::sequencer::{DispatchedTask, set_task_failed, set_task_ready};
 use crate::store::SqliteStore;
 use crate::task_data::GasKillerTaskData;
 use alloy::network::Ethereum;
@@ -10,7 +8,6 @@ use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
 use anyhow::{Result, bail};
 use commonware_avs_router::executor::ExecutionResult;
-use commonware_avs_router::sequencer::{DispatchTime, take_dispatch_time};
 use gas_killer_common::ChainRole;
 use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
@@ -109,8 +106,6 @@ pub struct GasKillerHandler<P> {
     /// carried in task data, without re-querying `eth_chainId`.
     chain_roles: HashMap<u64, ChainRole>,
     metrics: Option<Arc<MetricsCollector>>,
-    /// Shared with the creator to measure P2P round-trip duration.
-    dispatch_time: DispatchTime,
     /// Memoizes ERC-165 GasKiller interface support per target address. A deployed
     /// contract's supported interfaces are immutable, so entries never expire.
     interface_cache: Arc<RwLock<HashMap<Address, bool>>>,
@@ -122,9 +117,6 @@ pub struct GasKillerHandler<P> {
     /// executes. `None` in store-less test/dev harnesses, where the transition is
     /// skipped.
     store: Option<SqliteStore>,
-    /// Shared with [`crate::sequencer::GasKillerTaskSource`]; see
-    /// [`crate::sequencer::InFlightTask`].
-    in_flight: InFlightTask,
     /// Blocks past the reference block for which a rendered payload's `valid_until_block` is set.
     /// Sourced from `PAYLOAD_BLOCK_BUFFER`.
     payload_block_buffer: u64,
@@ -139,11 +131,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             providers,
             chain_roles: HashMap::new(),
             metrics: None,
-            dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
             receipt_timeout_override: None,
             store: None,
-            in_flight: in_flight_task(),
             payload_block_buffer: gas_killer_common::DEFAULT_PAYLOAD_BLOCK_BUFFER,
         }
     }
@@ -154,11 +144,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             providers,
             chain_roles: HashMap::new(),
             metrics: None,
-            dispatch_time: Default::default(),
             interface_cache: Arc::new(RwLock::new(HashMap::new())),
             receipt_timeout_override: None,
             store: None,
-            in_flight: in_flight_task(),
             payload_block_buffer: gas_killer_common::DEFAULT_PAYLOAD_BLOCK_BUFFER,
         }
     }
@@ -175,11 +163,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         self
     }
 
-    pub fn with_dispatch_time(mut self, dispatch_time: DispatchTime) -> Self {
-        self.dispatch_time = dispatch_time;
-        self
-    }
-
     /// Overrides the receipt-wait timeout (seconds) for all chains. `None` keeps
     /// the per-chain defaults.
     pub fn with_receipt_timeout(mut self, timeout_secs: Option<u64>) -> Self {
@@ -191,14 +174,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// status.
     pub fn with_store(mut self, store: SqliteStore) -> Self {
         self.store = Some(store);
-        self
-    }
-
-    /// Shares the in-flight task slot with [`crate::sequencer::GasKillerTaskSource`].
-    /// Must be the same handle the task source is built with, or a settled height
-    /// won't map back to its task.
-    pub fn with_in_flight_task(mut self, in_flight: InFlightTask) -> Self {
-        self.in_flight = in_flight;
         self
     }
 
@@ -671,48 +646,42 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     }
 
     /// The certified task with the router's own storage updates, from the trace that started
-    /// when the task was announced. The payload hash preflight then checks them against the
-    /// digest the quorum signed, so the quorum's digest is never rendered unchecked.
-    async fn traced_task(
-        &self,
-        task_data: Option<&GasKillerTaskData>,
-    ) -> Result<GasKillerTaskData> {
-        let task = task_data
-            .ok_or_else(|| anyhow::anyhow!("Task data is required for gas killer verification"))?;
-        let trace = in_flight_trace(&self.in_flight, task)
-            .ok_or_else(|| anyhow::anyhow!("No router trace for the certified task"))?;
-        let storage_updates = trace
+    /// alongside the session. The payload hash preflight then checks them against the digest the
+    /// quorum signed, so the quorum's digest is never rendered unchecked.
+    async fn traced_task(&self, dispatched: &DispatchedTask) -> Result<GasKillerTaskData> {
+        let storage_updates = dispatched
+            .trace
             .wait()
             .await
             .map_err(|e| anyhow::anyhow!("task enrichment failed: {e}"))?;
         let traced = GasKillerTaskData {
             storage_updates,
-            ..task.clone()
+            ..dispatched.task.clone()
         };
         traced.validate()?;
         Ok(traced)
     }
 
-    /// Renders `verifyAndUpdate` for a certified height, settling its task `ready` on success.
-    /// Called by [`crate::schnorr_submitter::SchnorrSubmitter`] once per attempt.
+    /// Renders `verifyAndUpdate` for a signed session, settling its task `ready` on success.
+    /// Called by [`crate::schnorr_submitter::SchnorrSubmitter`] once per attempt; `started` is
+    /// when the session began, for the round-latency measurement.
     ///
-    /// A failed attempt leaves the task and its in-flight slot untouched, so a retry still finds
-    /// the router trace; the submitter settles the failure through [`Self::settle_failed`] once
-    /// it stops retrying.
+    /// A failed attempt leaves the task untouched so a retry can still render it; the
+    /// submitter settles the failure through [`Self::settle_failed`] once it stops retrying.
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_schnorr_verification(
         &mut self,
-        height: u64,
+        dispatched: &DispatchedTask,
+        started: Instant,
         msg_hash: FixedBytes<32>,
         current_block_number: u32,
         s: U256,
         r_addr: Address,
         non_signers: Vec<Address>,
-        task_data: Option<&GasKillerTaskData>,
     ) -> Result<ExecutionResult> {
         let exec_start = Instant::now();
 
-        let result = match self.traced_task(task_data).await {
+        let result = match self.traced_task(dispatched).await {
             Ok(traced) => {
                 self.render_schnorr_payload(
                     msg_hash,
@@ -733,27 +702,18 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         }
         let rendered = result?;
 
-        let dispatch_start = self.observe_round_trip(height);
         if let Some(m) = &self.metrics {
             m.aggregation_rounds_completed.inc();
-            if let Some(start) = dispatch_start {
-                m.round_latency_seconds
-                    .observe(start.elapsed().as_secs_f64());
-            }
+            m.round_latency_seconds
+                .observe(started.elapsed().as_secs_f64());
         }
 
-        // Settle the task this height was executing. `GasKillerTaskSource::next_task`
-        // set the in-flight slot when it dispatched this task; taking it here both
-        // records the outcome and clears the slot so a later skipped height is not
-        // mistaken for this one. The on-chain submission is left to the user (or the
-        // future auto-execute tier).
-        if let Some(store) = &self.store
-            && let Some(flight) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
-        {
+        // The on-chain submission is left to the user (or the future auto-execute tier).
+        if let Some(store) = &self.store {
             set_task_ready(
                 store,
                 self.metrics.as_deref(),
-                &flight.task_id,
+                &dispatched.task_id,
                 &rendered.payload,
                 &rendered.bundle,
             )
@@ -763,42 +723,21 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Ok(rendered_execution_result())
     }
 
-    /// Settles a certified height's task `failed` once its submitter has given up on it,
-    /// clearing the in-flight slot. A no-op on the store when nothing is in flight.
-    pub async fn settle_failed(&mut self, height: u64, error: &anyhow::Error) {
-        self.observe_round_trip(height);
+    /// Settles a session's task `failed` with `reason` once nothing more will be tried for it.
+    pub async fn settle_failed(&mut self, dispatched: &DispatchedTask, reason: &str) {
         if let Some(m) = &self.metrics {
             m.aggregation_rounds_failed.inc();
         }
-        if let Some(store) = &self.store
-            && let Some(flight) = self.in_flight.lock().ok().and_then(|mut slot| slot.take())
-        {
-            set_task_failed(
-                store,
-                self.metrics.as_deref(),
-                &flight.task_id,
-                &format!("verification failed: {error}"),
-            )
-            .await;
+        if let Some(store) = &self.store {
+            set_task_failed(store, self.metrics.as_deref(), &dispatched.task_id, reason).await;
         }
-    }
-
-    /// Consumes `height`'s dispatch instant, recording the dispatch-to-settlement round trip,
-    /// and returns it for the round-latency measurement.
-    fn observe_round_trip(&self, height: u64) -> Option<Instant> {
-        let start = take_dispatch_time(&self.dispatch_time, height)?;
-        if let Some(m) = &self.metrics {
-            m.p2p_round_trip_seconds
-                .observe(start.elapsed().as_secs_f64());
-        }
-        Some(start)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sequencer::{InFlight, RouterTrace};
+    use crate::sequencer::RouterTrace;
     use alloy::sol_types::SolValue;
     use alloy_provider::{ProviderBuilder, mock::Asserter};
 
@@ -998,82 +937,26 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_failed_attempt_leaves_the_task_for_the_submitter_to_settle() {
-        let store = store().await;
-        let key = key_id(&store).await;
-        let task = store
-            .create_task(&key, &request_body())
-            .await
-            .expect("task creation should succeed");
-
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
-        let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(flight(&task.id, &GasKillerTaskData::default()));
-
-        let mut handler = GasKillerHandler::new(1, provider)
-            .with_store(store.clone())
-            .with_in_flight_task(in_flight.clone());
-
-        // `task_data: None` fails the attempt before any provider call, exercising the
-        // settlement wiring without needing a real chain or a valid aggregate signature.
-        let error = handler
-            .handle_schnorr_verification(
-                0,
-                FixedBytes::<32>::ZERO,
-                0,
-                U256::ZERO,
-                Address::ZERO,
-                vec![],
-                None,
-            )
-            .await
-            .expect_err("an attempt without task data must fail");
-
-        assert!(
-            in_flight.lock().unwrap().is_some(),
-            "a failed attempt must keep the slot, or a retry loses the router trace"
-        );
-        assert_ne!(
-            store.get_task(&task.id).await.unwrap().unwrap().status,
-            TaskStatus::Failed,
-            "only the submitter's last attempt settles a failure"
-        );
-
-        handler.settle_failed(0, &error).await;
-        assert!(
-            in_flight.lock().unwrap().is_none(),
-            "the slot must be cleared once the task settles"
-        );
-        let settled = store
-            .get_task(&task.id)
-            .await
-            .unwrap()
-            .expect("task should still exist");
-        assert_eq!(settled.status, TaskStatus::Failed);
-        assert!(
-            settled
-                .error
-                .as_deref()
-                .is_some_and(|e| e.contains("verification failed"))
-        );
-    }
-
-    /// The slot for `task_id` whose router trace produced `task_data`'s storage updates.
-    fn flight(task_id: &str, task_data: &GasKillerTaskData) -> InFlight {
-        InFlight {
+    /// A dispatched session for `task_id` whose router trace ended in `trace`, carrying
+    /// `task_data` as announced (without storage updates).
+    fn dispatched(
+        task_id: &str,
+        task_data: &GasKillerTaskData,
+        trace: Result<Bytes, String>,
+    ) -> DispatchedTask {
+        DispatchedTask {
             task_id: task_id.to_owned(),
-            trace: RouterTrace::finished(task_data.clone(), Ok(task_data.storage_updates.clone())),
+            task: GasKillerTaskData {
+                storage_updates: Bytes::new(),
+                ..task_data.clone()
+            },
+            trace: RouterTrace::finished(trace),
         }
     }
 
-    /// The certified task as the assignment carries it: announced, so without storage updates.
-    fn announced(task_data: &GasKillerTaskData) -> GasKillerTaskData {
-        GasKillerTaskData {
-            storage_updates: Bytes::new(),
-            ..task_data.clone()
-        }
+    /// A session whose router trace produced `task_data`'s own storage updates.
+    fn traced(task_id: &str, task_data: &GasKillerTaskData) -> DispatchedTask {
+        dispatched(task_id, task_data, Ok(task_data.storage_updates.clone()))
     }
 
     /// Task data whose signed hash matches its own storage updates, so the render preflight passes.
@@ -1095,6 +978,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_attempt_leaves_the_task_for_the_submitter_to_settle() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request_body()).await.unwrap();
+        let (task_data, msg_hash) = matching_task_data();
+        let session = dispatched(&task.id, &task_data, Err("call reverted".to_owned()));
+
+        let provider = ProviderBuilder::new().connect_mocked_client(Asserter::new());
+        let mut handler = GasKillerHandler::new(1, provider).with_store(store.clone());
+
+        let error = handler
+            .handle_schnorr_verification(
+                &session,
+                Instant::now(),
+                msg_hash,
+                100,
+                U256::ZERO,
+                Address::ZERO,
+                vec![],
+            )
+            .await
+            .expect_err("an attempt whose trace failed must fail");
+        assert_ne!(
+            store.get_task(&task.id).await.unwrap().unwrap().status,
+            TaskStatus::Failed,
+            "only the submitter's last attempt settles a failure"
+        );
+
+        handler
+            .settle_failed(&session, &format!("verification failed: {error}"))
+            .await;
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Failed);
+        assert!(
+            settled
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("verification failed"))
+        );
+    }
+
+    #[tokio::test]
     async fn handle_schnorr_verification_settles_ready_with_rendered_payload_and_bundle() {
         use alloy::sol_types::SolCall;
 
@@ -1113,11 +1038,8 @@ mod tests {
         // the mutation-horizon read, leaving validity unclamped — the round still renders.
         push_supports_interface(&asserter, true);
 
-        let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(flight(&task.id, &task_data));
         let mut handler = GasKillerHandler::new(1, provider)
             .with_store(store.clone())
-            .with_in_flight_task(in_flight.clone())
             .with_payload_block_buffer(50);
 
         let current_block = 100u32;
@@ -1126,21 +1048,17 @@ mod tests {
         let non_signers = vec![Address::from([0x55; 20])];
         let result = handler
             .handle_schnorr_verification(
-                0,
+                &traced(&task.id, &task_data),
+                Instant::now(),
                 msg_hash,
                 current_block,
                 s,
                 r_addr,
                 non_signers.clone(),
-                Some(&announced(&task_data)),
             )
             .await;
 
         assert!(result.is_ok());
-        assert!(
-            in_flight.lock().unwrap().is_none(),
-            "the slot must be cleared once the task settles"
-        );
 
         let settled = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(settled.status, TaskStatus::Ready);
@@ -1188,30 +1106,27 @@ mod tests {
         let key = key_id(&store).await;
         let task = store.create_task(&key, &request_body()).await.unwrap();
         let (task_data, msg_hash) = matching_task_data();
+        let session = traced(&task.id, &task_data);
 
         let asserter = Asserter::new();
         let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
         asserter.push_failure_msg("connection reset");
         push_supports_interface(&asserter, true);
 
-        let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(flight(&task.id, &task_data));
         let mut handler = GasKillerHandler::new(1, provider)
             .with_store(store.clone())
-            .with_in_flight_task(in_flight.clone())
             .with_payload_block_buffer(50);
 
-        let assigned = announced(&task_data);
         for expect_render in [false, true] {
             let result = handler
                 .handle_schnorr_verification(
-                    0,
+                    &session,
+                    Instant::now(),
                     msg_hash,
                     100,
                     U256::from(42u64),
                     Address::from([0x44; 20]),
                     vec![],
-                    Some(&assigned),
                 )
                 .await;
             if expect_render {
@@ -1222,45 +1137,39 @@ mod tests {
             }
         }
 
-        assert!(in_flight.lock().unwrap().is_none());
         let settled = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(settled.status, TaskStatus::Ready);
         assert!(settled.payload.is_some());
     }
 
-    /// Settles a certified round whose router trace ended in `trace`, returning the failure the
+    /// Settles a signed session whose router trace ended in `trace`, returning the failure the
     /// task recorded. No RPC is queued: both cases must fail before the chain is touched.
     async fn settle_with_trace(trace: Result<Bytes, String>) -> String {
         let store = store().await;
         let key = key_id(&store).await;
         let task = store.create_task(&key, &request_body()).await.unwrap();
         let (task_data, msg_hash) = matching_task_data();
+        let session = dispatched(&task.id, &task_data, trace);
 
         let provider = ProviderBuilder::new().connect_mocked_client(Asserter::new());
-        let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(InFlight {
-            task_id: task.id.clone(),
-            trace: RouterTrace::finished(task_data.clone(), trace),
-        });
-        let mut handler = GasKillerHandler::new(1, provider)
-            .with_store(store.clone())
-            .with_in_flight_task(in_flight.clone());
+        let mut handler = GasKillerHandler::new(1, provider).with_store(store.clone());
 
         let result = handler
             .handle_schnorr_verification(
-                0,
+                &session,
+                Instant::now(),
                 msg_hash,
                 100,
                 U256::from(42u64),
                 Address::from([0x44; 20]),
                 vec![],
-                Some(&announced(&task_data)),
             )
             .await;
 
         let error = result.expect_err("the round must not render");
-        handler.settle_failed(0, &error).await;
-        assert!(in_flight.lock().unwrap().is_none());
+        handler
+            .settle_failed(&session, &format!("verification failed: {error}"))
+            .await;
         let settled = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(settled.status, TaskStatus::Failed);
         assert!(settled.payload.is_none());
@@ -1280,31 +1189,6 @@ mod tests {
             error.contains("task enrichment failed: call reverted"),
             "{error}"
         );
-    }
-
-    #[tokio::test]
-    async fn handle_schnorr_verification_is_noop_on_store_when_slot_empty() {
-        let store = store().await;
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
-
-        let mut handler = GasKillerHandler::new(1, provider).with_store(store);
-
-        // No task was recorded as in flight; settlement must not panic when there
-        // is nothing to settle.
-        let result = handler
-            .handle_schnorr_verification(
-                0,
-                FixedBytes::<32>::ZERO,
-                0,
-                U256::ZERO,
-                Address::ZERO,
-                vec![],
-                None,
-            )
-            .await;
-
-        assert!(result.is_err());
     }
 
     // -- payload gas estimation --
@@ -1410,27 +1294,27 @@ mod tests {
         push_supports_interface(&asserter, true);
         push_execution_revert(&asserter, "0x68477238");
 
-        let in_flight = in_flight_task();
-        *in_flight.lock().unwrap() = Some(flight(&task.id, &task_data));
+        let session = traced(&task.id, &task_data);
         let mut handler = GasKillerHandler::new(1, provider)
             .with_store(store.clone())
-            .with_in_flight_task(in_flight.clone())
             .with_payload_block_buffer(50);
 
         let result = handler
             .handle_schnorr_verification(
-                0,
+                &session,
+                Instant::now(),
                 msg_hash,
                 100,
                 U256::from(42u64),
                 Address::from([0x44; 20]),
                 vec![],
-                Some(&announced(&task_data)),
             )
             .await;
 
         let error = result.expect_err("a payload proven to revert must fail the attempt");
-        handler.settle_failed(0, &error).await;
+        handler
+            .settle_failed(&session, &format!("verification failed: {error}"))
+            .await;
         let settled = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(settled.status, TaskStatus::Failed);
         assert!(

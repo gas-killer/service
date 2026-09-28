@@ -214,16 +214,10 @@ spec:
               value: {{ $root.Values.node.healthzPort | quote }}
             - name: P2P_MESSAGE_BACKLOG
               value: {{ $root.Values.node.p2pMessageBacklog | quote }}
-            - name: P2P_MESSAGES_PER_SECOND
-              value: {{ $root.Values.node.p2pMessagesPerSecond | quote }}
-            # Shared with the router (values.router.*): the node automaton's
-            # validation-retry budget must give up in lockstep with the router's
-            # Announce->Skip switch, or a transient RPC error on one node converts
-            # into a skip-vs-real digest split at 3-of-3 quorum.
+            # Shared with the router (values.router.*): the node's validation-retry budget gives
+            # up in lockstep with the coordinator's round timeout.
             - name: ROUND_TIMEOUT
               value: {{ $root.Values.router.roundTimeout | quote }}
-            - name: REBROADCAST_INTERVAL
-              value: {{ $root.Values.router.rebroadcastInterval | quote }}
             - name: STORAGE_DIR
               value: {{ $root.Values.node.storageDir | quote }}
             {{- with $root.Values.schnorr.messagesPerSecond }}

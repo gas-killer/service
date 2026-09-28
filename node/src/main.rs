@@ -1,8 +1,8 @@
 //! Gas Killer Node — aggregate-Schnorr signing participant for the Gas Killer AVS.
 //!
-//! The router announces a task on p2p channel 1 and the node validates it via EVMSketch. The
-//! node then answers the router coordinator's two-round MuSig2 session on channel 2 (see
-//! [`schnorr_participant`]), signing the expected task digest. The p2p transport identity is
+//! The node answers the router coordinator's two-round MuSig2 session on channel 2 (see
+//! [`schnorr_participant`]): the first round carries the task, which the node validates via
+//! EVMSketch, and the second signs the expected task digest. The p2p transport identity is
 //! BN254; the Schnorr signing key is a separate secp256k1 operator key loaded from
 //! `--schnorr-key-file`.
 
@@ -15,7 +15,6 @@ use axum::{
 };
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{Bn254, PublicKey, get_signer};
-use commonware_avs_node::task_book::{self, TaskBook};
 use commonware_cryptography::Signer as _;
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_p2p::{Address, AddressableManager as _};
@@ -24,24 +23,19 @@ use commonware_utils::NZU32;
 use commonware_utils::ordered::{Map, Set};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
-    APPLICATION_NAMESPACE, ConfigMetrics, GasKillerTaskData, GasKillerValidator,
-    OrchestratorConfig, SpeculativePrebuildConfig, ValidatorMetrics, agg_window,
-    config_fingerprint, get_operator_states, load_key_from_file, load_orchestrator_config,
-    p2p_message_backlog, p2p_quota_period, rebroadcast_interval, round_timeout,
+    APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, OrchestratorConfig,
+    SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint, get_operator_states,
+    load_key_from_file, load_orchestrator_config, p2p_message_backlog, round_timeout,
     schnorr_messages_per_second, storage_directory,
 };
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::digest::DigestResolver;
-
-/// P2P channel carrying the router's `TaskDirective` broadcasts (nodes only
-/// receive; the sender half is registered but never used).
-const TASK_DIRECTIVE_CHANNEL: u64 = 1;
 
 /// P2P channel carrying the interactive Schnorr signing rounds.
 const SCHNORR_CHANNEL: u64 = 2;
@@ -411,15 +405,9 @@ fn main() {
             tracing::info!(key = ?key, "registered participant");
         }
 
-        // Shared channel registration (all channels must be registered BEFORE
-        // network.start()): channel 1 carries the router's task directives (nodes receive; the
-        // sender is only used for rate-limited TipReport replies to stale directives), and
-        // channel 2 the Schnorr rounds, registered below.
+        // All channels must be registered BEFORE network.start(); the Schnorr rounds (channel 2)
+        // are registered below.
         let p2p_backlog = p2p_message_backlog();
-        let p2p_quota = Quota::with_period(p2p_quota_period())
-            .expect("p2p_quota_period always returns a non-zero duration");
-        let (directive_sender, directive_receiver) =
-            network.register(TASK_DIRECTIVE_CHANNEL, p2p_quota, p2p_backlog);
 
         // Create validator metrics and validator for the gas killer use case
         let validator_metrics = Arc::new(ValidatorMetrics::new());
@@ -436,40 +424,6 @@ fn main() {
             let prebuild_cfg = SpeculativePrebuildConfig::from_env();
             context.child("prebuild").spawn(move |_| async move {
                 spec_validator.run_speculative_prebuild(prebuild_cfg).await;
-            });
-        }
-
-        // TaskBook actor: owns the router's per-height directives and parks the
-        // per-height subscriptions the digest resolver makes until the skip rules resolve them.
-        let (task_book, task_book_mailbox) =
-            TaskBook::<GasKillerTaskData>::new(context.child("task_book"));
-        context
-            .child("task_book_actor")
-            .spawn(move |_| task_book.run());
-
-        // The highest height the coordinator is working on, written by the Schnorr participant and
-        // read by the directive ingest loop to answer stale directives with a TipReport (see
-        // task_book).
-        let engine_tip = Arc::new(AtomicU64::new(0));
-
-        // Feed the TaskBook from channel 1 (router directives only; other peers
-        // are authorized on the channel but must not assign heights).
-        {
-            let task_book_mailbox = task_book_mailbox.clone();
-            let router_key = orchestrator_pub_key.clone();
-            let engine_tip = Arc::clone(&engine_tip);
-            let min_report_interval = rebroadcast_interval();
-            context.child("directives").spawn(move |_| async move {
-                task_book::ingest(
-                    directive_receiver,
-                    directive_sender,
-                    router_key,
-                    task_book_mailbox,
-                    engine_tip,
-                    agg_window().get(),
-                    min_report_interval,
-                )
-                .await;
             });
         }
 
@@ -497,16 +451,10 @@ fn main() {
         let (schnorr_sender, schnorr_receiver) =
             network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
 
-        // Announce-vs-skip resolution plus EVMSketch validation of the expected digest.
-        let resolver = DigestResolver::new(
-            task_book_mailbox.clone(),
-            Arc::clone(&validator),
-            APPLICATION_NAMESPACE.to_vec(),
-            round_timeout(),
-        );
+        // EVMSketch validation of each requested task's expected digest.
+        let resolver = DigestResolver::new(Arc::clone(&validator), round_timeout());
         let operator_addresses: HashSet<_> = operators.iter().map(|o| o.address).collect();
         let router_key = orchestrator_pub_key.clone();
-        let participant_tip = Arc::clone(&engine_tip);
         let participant_ctx = context.child("schnorr_participant");
         context
             .child("schnorr_participant_actor")
@@ -517,7 +465,6 @@ fn main() {
                     router_key,
                     operator_addresses,
                     resolver,
-                    participant_tip,
                     schnorr_receiver,
                     schnorr_sender,
                 )

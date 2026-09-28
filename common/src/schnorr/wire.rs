@@ -9,7 +9,7 @@
 //! Flow (router = coordinator, nodes = participants):
 //!
 //! ```text
-//! router --CommitRequest{h,a}-->  all operators
+//! router --CommitRequest{h,a,task}-->  all operators
 //! node   --Commit{h,a,pubkey,nonce,digest}--> router  (sent once the node has derived
 //!                                                         the digest; duplicates re-send the
 //!                                                         SAME pubnonce)
@@ -35,14 +35,17 @@ use k256::elliptic_curve::PrimeField;
 
 use super::musig::PubNonce;
 use super::{MESSAGE_LEN, PublicKey};
+use crate::task_data::GasKillerTaskData;
 
-/// Tags of the first-round messages before a commit carried the node's digest. Retired
-/// rather than reused, so a peer on the older protocol is rejected by name instead of
-/// misparsed; the two sides cannot sign together.
+/// Tags of first-round requests from older protocols: before a commit carried the node's
+/// digest, and before the request carried the task. Retired rather than reused, so a peer on
+/// an older protocol is rejected by name instead of misparsed; the two sides cannot sign
+/// together.
 const TAG_RETIRED_NONCE_REQUEST: u8 = 0;
 const TAG_RETIRED_NONCE_COMMIT: u8 = 1;
+const TAG_RETIRED_COMMIT_REQUEST: u8 = 4;
 /// Wire tag for [`SchnorrMsg::CommitRequest`].
-const TAG_COMMIT_REQUEST: u8 = 4;
+const TAG_COMMIT_REQUEST: u8 = 6;
 /// Wire tag for [`SchnorrMsg::Commit`].
 const TAG_COMMIT: u8 = 5;
 /// Wire tag for [`SchnorrMsg::SignRequest`].
@@ -62,7 +65,7 @@ pub struct SignRequest {
     pub height: u64,
     pub attempt: u32,
     /// The 32-byte digest being signed. Participants refuse to sign unless this
-    /// equals the digest they derived themselves from their own TaskBook/validator.
+    /// equals the digest they committed to, which they derived themselves.
     pub message: [u8; MESSAGE_LEN],
     /// The signer subset `S` as compressed public-key points (the coordinator's
     /// commit-round responders). Participants recompute `X_agg = Σ signers` after
@@ -94,9 +97,14 @@ impl SignRequest {
 /// A message on the Schnorr protocol channel.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SchnorrMsg {
-    /// Router → operators: open session `(height, attempt)`; each node traces the task and
-    /// answers with a [`SchnorrMsg::Commit`].
-    CommitRequest { height: u64, attempt: u32 },
+    /// Router → operators: open session `(height, attempt)` for `task`; each node traces it
+    /// and answers with a [`SchnorrMsg::Commit`]. The task is the announced view, without
+    /// storage updates: every node derives those itself.
+    CommitRequest {
+        height: u64,
+        attempt: u32,
+        task: GasKillerTaskData,
+    },
     /// Node → router: a fresh public nonce pair bound to the task digest the node derived
     /// for the height, plus its public key so the router learns the point behind the p2p
     /// address. The coordinator signs the digest a quorum agrees on, so
@@ -177,10 +185,15 @@ fn read_pubnonce(buf: &mut impl Buf) -> Result<PubNonce, Error> {
 impl Write for SchnorrMsg {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            SchnorrMsg::CommitRequest { height, attempt } => {
+            SchnorrMsg::CommitRequest {
+                height,
+                attempt,
+                task,
+            } => {
                 TAG_COMMIT_REQUEST.write(buf);
                 UInt(*height).write(buf);
                 attempt.write(buf);
+                task.write(buf);
             }
             SchnorrMsg::Commit {
                 height,
@@ -230,11 +243,17 @@ impl Read for SchnorrMsg {
         let height: u64 = UInt::read(buf)?.into();
         let attempt = u32::read(buf)?;
         match tag {
-            TAG_RETIRED_NONCE_REQUEST | TAG_RETIRED_NONCE_COMMIT => Err(Error::Invalid(
-                "SchnorrMsg",
-                "retired first-round tag: the peer runs an older schnorr protocol; upgrade the router and nodes together",
-            )),
-            TAG_COMMIT_REQUEST => Ok(SchnorrMsg::CommitRequest { height, attempt }),
+            TAG_RETIRED_NONCE_REQUEST | TAG_RETIRED_NONCE_COMMIT | TAG_RETIRED_COMMIT_REQUEST => {
+                Err(Error::Invalid(
+                    "SchnorrMsg",
+                    "retired first-round tag: the peer runs an older schnorr protocol; upgrade the router and nodes together",
+                ))
+            }
+            TAG_COMMIT_REQUEST => Ok(SchnorrMsg::CommitRequest {
+                height,
+                attempt,
+                task: GasKillerTaskData::read(buf)?,
+            }),
             TAG_COMMIT => {
                 let pubkey = read_pubkey(buf)?;
                 let nonce = read_pubnonce(buf)?;
@@ -290,7 +309,7 @@ impl EncodeSize for SchnorrMsg {
     fn encode_size(&self) -> usize {
         let header = 1 + UInt(self.height()).encode_size() + self.attempt().encode_size();
         match self {
-            SchnorrMsg::CommitRequest { .. } => header,
+            SchnorrMsg::CommitRequest { task, .. } => header + task.encode_size(),
             SchnorrMsg::Commit { .. } => header + 33 + 66 + MESSAGE_LEN,
             SchnorrMsg::SignRequest(r) => header + MESSAGE_LEN + 4 + r.signers.len() * 33 + 66 + 20,
             SchnorrMsg::PartialSig { .. } => header + 32,
@@ -312,11 +331,24 @@ mod tests {
         move |b: &mut [u8]| rng.fill_bytes(b)
     }
 
+    fn task() -> GasKillerTaskData {
+        GasKillerTaskData {
+            transition_index: 3,
+            target_address: Address::from([1; 20]),
+            call_data: vec![0x12, 0x34, 0x56, 0x78, 0x9a],
+            from_address: Address::from([2; 20]),
+            block_height: 42,
+            chain_id: 11155111,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn commit_request_roundtrip() {
         let original = SchnorrMsg::CommitRequest {
             height: u64::MAX,
             attempt: 7,
+            task: task(),
         };
         let encoded = original.encode();
         assert_eq!(encoded.len(), original.encode_size());
@@ -389,14 +421,19 @@ mod tests {
         ));
     }
 
-    /// A peer still on the older first round must be refused by name, not misparsed: both
+    /// A peer still on an older first round must be refused by name, not misparsed: the
     /// retired tags carry the same header, so only the tag tells the versions apart.
     #[test]
     fn retired_first_round_tags_are_refused_as_an_older_protocol() {
-        for retired in [TAG_RETIRED_NONCE_REQUEST, TAG_RETIRED_NONCE_COMMIT] {
+        for retired in [
+            TAG_RETIRED_NONCE_REQUEST,
+            TAG_RETIRED_NONCE_COMMIT,
+            TAG_RETIRED_COMMIT_REQUEST,
+        ] {
             let mut bytes = SchnorrMsg::CommitRequest {
                 height: 1,
                 attempt: 1,
+                task: task(),
             }
             .encode_mut();
             bytes[0] = retired;
@@ -413,6 +450,7 @@ mod tests {
         let mut bytes = SchnorrMsg::CommitRequest {
             height: 1,
             attempt: 1,
+            task: task(),
         }
         .encode_mut();
         bytes[0] = 9;

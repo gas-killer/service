@@ -174,12 +174,6 @@ pub async fn get_operator_states() -> Result<Vec<QuorumInfo>, Box<dyn std::error
 /// blocks or drops new messages. Configurable at runtime via `P2P_MESSAGE_BACKLOG`.
 pub const DEFAULT_P2P_MESSAGE_BACKLOG: usize = 256;
 
-/// Default P2P channel rate limit in messages per second.
-///
-/// Configurable at runtime via `P2P_MESSAGES_PER_SECOND`. Accepts fractional values
-/// (e.g. `0.5` for one message every two seconds).
-pub const DEFAULT_P2P_MESSAGES_PER_SECOND: f64 = 1.0;
-
 /// Reads the P2P channel backlog depth from `P2P_MESSAGE_BACKLOG`, defaulting to
 /// [`DEFAULT_P2P_MESSAGE_BACKLOG`].
 pub fn p2p_message_backlog() -> usize {
@@ -294,32 +288,6 @@ pub fn rate_limit_rpm() -> std::num::NonZeroU32 {
         })
 }
 
-/// Reads the P2P channel rate limit from `P2P_MESSAGES_PER_SECOND` and returns the
-/// per-message quota period (`1 / rate`), defaulting to
-/// [`DEFAULT_P2P_MESSAGES_PER_SECOND`] when unset or invalid.
-///
-/// The quota is a smooth rate with no burst allowance: a rate of `5.0` permits one
-/// message every 200 ms, not bursts of five. Values whose reciprocal would overflow
-/// a `Duration` (e.g. `1e-20`) or round below its 1 ns resolution (e.g. `3e9`) are
-/// treated as invalid and fall back to the default.
-pub fn p2p_quota_period() -> std::time::Duration {
-    parse_p2p_quota_period(env::var("P2P_MESSAGES_PER_SECOND").ok().as_deref())
-}
-
-/// Parses a `P2P_MESSAGES_PER_SECOND` value into a quota period, falling back to the
-/// default rate on malformed, non-positive, non-finite, or non-representable input
-/// (including `Duration` overflow and sub-nanosecond reciprocals that round to zero).
-fn parse_p2p_quota_period(value: Option<&str>) -> std::time::Duration {
-    value
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|&v| v > 0.0 && v.is_finite())
-        .and_then(|v| std::time::Duration::try_from_secs_f64(1.0 / v).ok())
-        .filter(|d| !d.is_zero())
-        .unwrap_or_else(|| {
-            std::time::Duration::from_secs_f64(1.0 / DEFAULT_P2P_MESSAGES_PER_SECOND)
-        })
-}
-
 /// Default storage directory handed to the commonware runtime.
 ///
 /// Matches the writable data volume mounted in the container images; the runtime
@@ -363,22 +331,6 @@ fn directory_is_writable(path: &std::path::Path) -> bool {
     }
 }
 
-/// Default number of heights above a node's tip it expects the router to be driving. A directive
-/// past `tip + window` is logged as evidence the node has fallen behind (`task_book::ingest`).
-pub const DEFAULT_AGG_WINDOW: u64 = 8;
-
-/// Reads the window from `AGG_WINDOW`, defaulting to [`DEFAULT_AGG_WINDOW`]. Zero or unparseable
-/// values fall back to the default.
-pub fn agg_window() -> std::num::NonZeroU64 {
-    env::var("AGG_WINDOW")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .and_then(std::num::NonZeroU64::new)
-        .unwrap_or_else(|| {
-            std::num::NonZeroU64::new(DEFAULT_AGG_WINDOW).expect("default window is non-zero")
-        })
-}
-
 /// Default time the router waits for a certificate on its assigned height before
 /// broadcasting `Skip` for it.
 pub const DEFAULT_ROUND_TIMEOUT_SECS: f64 = 30.0;
@@ -393,13 +345,13 @@ pub fn round_timeout() -> std::time::Duration {
     )
 }
 
-/// Default cadence at which the router re-broadcasts the current `TaskDirective`
-/// until the height certifies.
+/// Default cadence at which the Schnorr coordinator re-sends a `CommitRequest` to the operators
+/// that have not committed yet.
 pub const DEFAULT_REBROADCAST_INTERVAL_SECS: f64 = 5.0;
 
-/// Reads the rebroadcast interval from `REBROADCAST_INTERVAL` (seconds, fractional
-/// allowed), defaulting to [`DEFAULT_REBROADCAST_INTERVAL_SECS`]. Non-positive,
-/// non-finite, or unparseable values fall back to the default.
+/// Reads the commit-request resend interval from `REBROADCAST_INTERVAL` (seconds, fractional
+/// allowed), defaulting to [`DEFAULT_REBROADCAST_INTERVAL_SECS`]. Non-positive, non-finite, or
+/// unparseable values fall back to the default.
 pub fn rebroadcast_interval() -> std::time::Duration {
     parse_secs_env_duration(
         env::var("REBROADCAST_INTERVAL").ok().as_deref(),
@@ -498,18 +450,17 @@ fn parse_sim_profile(raw: Option<&str>) -> gas_analyzer::SimProfile {
 /// every operator must agree on it. Defined here rather than per binary so the two cannot drift.
 pub const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 
-/// Version of the task-directive wire format the router speaks and the operators parse.
+/// Version of the Schnorr signing-round wire format the router speaks and the operators parse.
 ///
-/// The directive encoding carries no version byte of its own: an unknown variant tag decodes to
-/// an error the receiver logs and ignores, so a mismatch is silent rather than fatal. Carrying
-/// the version in the config fingerprint is what makes a mixed fleet visible. Bump this whenever
-/// the directive encoding changes.
-pub const DIRECTIVE_WIRE_VERSION: u32 = 0;
+/// A peer on a retired first-round tag is refused by name, but that only shows in its logs;
+/// carrying the version in the config fingerprint is what makes a mixed fleet visible on the
+/// dashboard. Bump this whenever the signing-round encoding changes.
+pub const SCHNORR_WIRE_VERSION: u32 = 1;
 
 /// A short digest of every setting that must be identical on the router and all operators.
 ///
 /// Each input either feeds the task digest (the simulation profile, the state encoding, the
-/// namespace) or determines which heights a binary will sign at all (the window, the directive
+/// namespace) or determines whether the two sides can run a signing round at all (the wire
 /// format). A fleet running two values of any of them does not fail loudly: peers stay
 /// connected, quorum simply never forms, and the pipeline stalls while every pod reports healthy.
 ///
@@ -520,8 +471,7 @@ pub fn config_fingerprint() -> String {
         &format!("{:?}", sim_profile()),
         &format!("{:?}", state_encoding()),
         APPLICATION_NAMESPACE,
-        agg_window().get(),
-        DIRECTIVE_WIRE_VERSION,
+        SCHNORR_WIRE_VERSION,
     )
 }
 
@@ -533,8 +483,7 @@ fn fingerprint_of(
     sim_profile: &str,
     state_encoding: &str,
     application_namespace: &[u8],
-    agg_window: u64,
-    directive_wire_version: u32,
+    schnorr_wire_version: u32,
 ) -> String {
     let namespace: String = application_namespace
         .iter()
@@ -542,7 +491,7 @@ fn fingerprint_of(
         .collect();
     let canonical = format!(
         "sim_profile={sim_profile};state_encoding={state_encoding};\
-         application_namespace={namespace};agg_window={agg_window};directive_wire_version={directive_wire_version}"
+         application_namespace={namespace};schnorr_wire_version={schnorr_wire_version}"
     );
 
     let mut hasher = Sha256::new();
@@ -925,46 +874,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn p2p_quota_period_default_is_one_per_second() {
-        assert_eq!(parse_p2p_quota_period(None), Duration::from_secs(1));
-    }
-
-    #[test]
-    fn p2p_quota_period_converts_rate_to_period() {
-        assert_eq!(
-            parse_p2p_quota_period(Some("5.0")),
-            Duration::from_millis(200)
-        );
-        assert_eq!(parse_p2p_quota_period(Some("0.5")), Duration::from_secs(2));
-    }
-
-    #[test]
-    fn p2p_quota_period_rejects_invalid_values() {
-        let default = Duration::from_secs(1);
-        assert_eq!(parse_p2p_quota_period(Some("")), default);
-        assert_eq!(parse_p2p_quota_period(Some("abc")), default);
-        assert_eq!(parse_p2p_quota_period(Some("0")), default);
-        assert_eq!(parse_p2p_quota_period(Some("-1.5")), default);
-        assert_eq!(parse_p2p_quota_period(Some("inf")), default);
-        assert_eq!(parse_p2p_quota_period(Some("NaN")), default);
-    }
-
-    #[test]
-    fn p2p_quota_period_rejects_duration_overflow() {
-        // 1.0 / 1e-20 overflows Duration; must fall back to the default, not panic.
-        assert_eq!(
-            parse_p2p_quota_period(Some("1e-20")),
-            Duration::from_secs(1)
-        );
-    }
-
-    #[test]
-    fn p2p_quota_period_rejects_excessive_rate() {
-        // 1.0 / 3e9 rounds below 1 ns and becomes Duration::ZERO; must fall back to default.
-        assert_eq!(parse_p2p_quota_period(Some("3e9")), Duration::from_secs(1));
-    }
-
-    #[test]
     fn state_encoding_parsing() {
         use gas_analyzer::StateEncoding;
         assert_eq!(parse_state_encoding(None), StateEncoding::Legacy);
@@ -1191,12 +1100,6 @@ mod tests {
     }
 
     #[test]
-    fn agg_defaults_are_sane() {
-        assert_eq!(DEFAULT_AGG_WINDOW, 8);
-        assert_eq!(agg_window().get(), DEFAULT_AGG_WINDOW);
-    }
-
-    #[test]
     fn payload_block_buffer_defaults_are_sane() {
         assert_eq!(DEFAULT_PAYLOAD_BLOCK_BUFFER, 50);
         // The buffer-within-staleness-window invariant is enforced at compile time next to the
@@ -1275,12 +1178,12 @@ mod tests {
     }
 
     /// The consensus-critical settings of a healthy fleet, as `fingerprint_of` arguments.
-    fn healthy_inputs() -> (&'static str, &'static str, &'static [u8], u64, u32) {
-        ("Chain", "Legacy", b"_COMMONWARE_AGGREGATION_", 8, 0)
+    fn healthy_inputs() -> (&'static str, &'static str, &'static [u8], u32) {
+        ("Chain", "Legacy", b"_COMMONWARE_AGGREGATION_", 1)
     }
 
-    fn fingerprint(inputs: (&'static str, &'static str, &'static [u8], u64, u32)) -> String {
-        fingerprint_of(inputs.0, inputs.1, inputs.2, inputs.3, inputs.4)
+    fn fingerprint(inputs: (&'static str, &'static str, &'static [u8], u32)) -> String {
+        fingerprint_of(inputs.0, inputs.1, inputs.2, inputs.3)
     }
 
     #[test]
@@ -1312,12 +1215,8 @@ mod tests {
         assert_ne!(fingerprint(divergent), healthy, "application namespace");
 
         let mut divergent = healthy_inputs();
-        divergent.3 = 4;
-        assert_ne!(fingerprint(divergent), healthy, "agg window");
-
-        let mut divergent = healthy_inputs();
-        divergent.4 = 1;
-        assert_ne!(fingerprint(divergent), healthy, "directive wire version");
+        divergent.3 = 2;
+        assert_ne!(fingerprint(divergent), healthy, "schnorr wire version");
     }
 
     #[test]

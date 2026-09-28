@@ -55,36 +55,33 @@ column exists so later rows are comparable as the window opens.
 
 ## Window and heights
 
-The shape of the aggregation pipeline rather than the cost of one round. Capture these alongside
-the aggregation speed for each `W`: a throughput gain that comes with a rising skip ratio or a
-rising directive-drop rate is not a gain, it is a pipeline about to stall.
+The shape of the signing pipeline rather than the cost of one round. Capture these alongside
+the aggregation speed for each `W`: a throughput gain that comes with a rising failure ratio is
+not a gain, it is a pipeline about to stall.
 
 ```promql
 # Concurrent heights actually being driven — the value W buys
 avg_over_time(gas_killer_in_flight_heights[10m])
 max_over_time(gas_killer_in_flight_heights[10m])
 
-# Oldest unresolved height, in seconds. Should stay within ROUND_TIMEOUT plus settlement.
+# Oldest running session, in seconds. Should stay within ROUND_TIMEOUT plus settlement.
 max_over_time(gas_killer_height_age_seconds[10m])
 
-# Height dispositions per minute. Anything but `executed` produced no on-chain effect.
+# Session outcomes per minute. Anything but `ready` produced no payload.
 sum by (outcome) (rate(gas_killer_height_outcomes_total[10m])) * 60
 
-# Skip ratio — the ramp gate. Hold this under 0.01 before raising W further.
-sum(rate(reporter_skipped_total[10m])) / sum(rate(reporter_certified_total[10m]))
+# Failure ratio — the ramp gate. Hold this under 0.01 before raising W further.
+sum(rate(gas_killer_height_outcomes_total{outcome!="ready"}[10m])) / sum(rate(gas_killer_height_outcomes_total[10m]))
 
-# Directive delivery at the send site. Any sustained rate_limited is the split-digest hazard.
-sum by (result) (rate(gas_killer_directive_sends_total[10m])) * 60
-
-# What the receiving peers throttled, by channel (data_1 is the task directives).
+# What the receiving peers throttled, by channel (data_2 is the Schnorr rounds).
 sum by (message) (increase(network_spawner_messages_rate_limited_total[10m]))
 
 # Must be exactly 1: more means the fleet disagrees on a consensus-critical setting.
 count(count by (fingerprint) (gas_killer_config_fingerprint))
 ```
 
-| Date | Commit | W | in-flight avg/max | height_age max | skip ratio | directive rate_limited/min | Notes |
-|------|--------|---|-------------------|----------------|------------|----------------------------|-------|
+| Date | Commit | W | in-flight avg/max | height_age max | failure ratio | Notes |
+|------|--------|---|-------------------|----------------|---------------|-------|
 
 ## EVMSketch phases
 

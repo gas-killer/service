@@ -93,50 +93,45 @@ Operator discovery goes through EigenLayer (`RegistryCoordinator`/`BLSApkRegistr
                              │
                      router: HTTP ingress
                              │
-                     router: sequencer
-        assigns the task the next height H and broadcasts
-        TaskDirective::Announce{H, task} on p2p channel 1
-        (rebroadcast until resolved; Skip{H} after ROUND_TIMEOUT)
+                     router: scheduler
+        resolves the task, gives it the next height H,
+        and starts the router's own trace alongside
                              │
   ┌──────────────────────────┼───────────────────────────┐
   │ node 1..N (Schnorr participants)                     │ router: Schnorr coordinator
-  │  TaskBook: records the directive for H               │  p2p channel 2, per attempt:
-  │  channel 2:                                          │   CommitRequest → all operators
-  │   Commit: validate the task via EVMSketch,           │   Commit        ← responders
-  │   commit a fresh nonce with the local digest         │   SignRequest   → agreeing subset
-  │   PartialSig: sign only that digest                  │   PartialSig    ← subset
+  │  channel 2:                                          │  p2p channel 2, per attempt:
+  │   Commit: validate the task via EVMSketch,           │   CommitRequest → all operators
+  │   commit a fresh nonce with the local digest         │   Commit        ← responders
+  │   PartialSig: sign only that digest                  │   SignRequest   → agreeing subset
+  │                                                      │   PartialSig    ← subset
   └──────────────────────────────────────────────────────┘            │
                                                             submitter: renders
                                                             verifyAndUpdate(s, rAddr,
                                                             nonSigners) for the client
 ```
 
-- **Sequencer** (router, `commonware_avs_router::sequencer`): dequeues ingress tasks,
-  resolves their chain and transition index, and assigns each task the next height. The
-  router's own EVMSketch trace starts alongside the announce rather than ahead of it. Exactly
-  one height is outstanding at a time; the next task is assigned only after the current
-  height resolves (and, for a signed digest, its payload is rendered).
-- **Task-directive channel** (p2p channel 1): the router broadcasts
-  `TaskDirective::Announce { height, task }` and, after `ROUND_TIMEOUT`,
-  `TaskDirective::Skip { height }`. Nodes record directives in their TaskBook and reply on
-  this channel only with rate-limited `TipReport`s to directives below their own tip.
-- **Schnorr coordinator** (router, p2p channel 2): per assigned height, runs attempts of
-  `CommitRequest`/`Commit` then `SignRequest`/`PartialSig`, with fresh nonces each
-  attempt, and signs the digest at least `min_signers` commits carry. A `Commit` is
-  accepted only if its public key maps to the sender's registered operator address; each
-  partial is verified against the signer's own nonce commitment, and the assembled signature
-  is self-verified. It also serves as the sequencer's certificate
-  index. The certified log lives in memory only.
-- **Schnorr participant** (node, p2p channel 2): on `CommitRequest` it derives the height's
-  digest locally (TaskBook + EVMSketch via `DigestResolver`) and commits a fresh nonce pair
-  with it; a skipped height gets no commit. On `SignRequest` it refuses unless the message is
-  the digest it committed to, checks that every signer point maps to a known operator
-  address, and only then produces a partial. A secret nonce signs at most one context; sessions live in memory only.
+- **Scheduler** (router): dequeues ingress tasks, resolves their chain and transition index,
+  gives each the next height, and starts the router's own EVMSketch trace alongside the signing
+  session rather than ahead of it. One session runs at a time; the next task starts once the
+  current one settles. A height only names a session: it never reaches the chain.
+- **Schnorr coordinator** (router, p2p channel 2): per session, runs attempts of
+  `CommitRequest`/`Commit` then `SignRequest`/`PartialSig`, with fresh nonces each attempt,
+  and signs the digest at least `min_signers` commits carry. The `CommitRequest` carries the
+  task, without storage updates, and is re-sent every `REBROADCAST_INTERVAL` to operators that
+  have not committed. A `Commit` is accepted only if its public key maps to the sender's
+  registered operator address; each partial is verified against the signer's own nonce
+  commitment, and the assembled signature is self-verified.
+- **Schnorr participant** (node, p2p channel 2): on `CommitRequest` it derives the task's
+  digest locally (EVMSketch via `DigestResolver`) and commits a fresh nonce pair with it; a
+  task it cannot derive a digest for gets no commit. On `SignRequest` it refuses unless the
+  message is the digest it committed to, checks that every signer point maps to a known
+  operator address, and only then produces a partial. A secret nonce signs at most one
+  context; sessions live in memory only.
 - **Digest**: nodes sign the 32-byte task digest, which binds
   `(transitionIndex, target, selector, storageUpdates)`. The signature does not bind the
   height, and the contract enforces transition-index ordering, so an identical digest at a
   different height is harmless.
-- **Submitter** (router): takes the aggregate signature `(s, rAddr)` and the strictly
+- **Submitter** (router): settles each session's task. For a signed session it takes the aggregate signature `(s, rAddr)` and the strictly
   ascending non-signer address list, waits for the router's own trace, refuses unless its
   storage updates hash to the signed digest, and renders `verifyAndUpdate` calldata, checked with
   `eth_estimateGas` as the requesting account. The task settles `ready` with that payload;
@@ -161,24 +156,21 @@ with the same threshold:
 ### Runtime storage
 
 `STORAGE_DIR` is the commonware runtime's storage directory. Neither binary keeps protocol
-state on disk: the coordinator's certified log, the node's TaskBook, and its signing sessions
-are all in memory. docker-compose mounts a named volume per service at `/app/data`; the Helm chart
+state on disk: the coordinator's sessions and the node's signing sessions are all in memory. docker-compose mounts a named volume per service at `/app/data`; the Helm chart
 mounts a dedicated volume. Without any writable directory the binaries fall back to
 `$TMPDIR/gas-killer`, which is for bare-metal dev runs only.
 
 ### Failure modes and recovery
 
-Every height the router assigns resolves one of two ways: an aggregate signature over the
-task digest, or a skip once `ROUND_TIMEOUT` passes from the coordinator's first sight of the
-assignment. The router rebroadcasts `Announce` every `REBROADCAST_INTERVAL` and switches to
-`Skip` after `ROUND_TIMEOUT`. A skip runs no signing session and puts nothing on chain; the
-submitter resolves the height as `skipped` and the task fails.
+Every session ends one of three ways: an aggregate signature over the task digest, the router's
+own trace of the task failing, or `ROUND_TIMEOUT` passing from the session's start. Only the
+first puts a payload in front of the client; the other two settle the task `failed`.
 
-Each node traces the announced task and commits its nonce together with the digest it
-derived; the coordinator signs the digest at least `min_signers` commits agree on, without
-waiting for the router's own trace. The router trace runs alongside and gates the result: a
-payload is rendered only when the router's storage updates hash to the digest the quorum
-signed, and a router trace that fails skips the height at once.
+Each node traces the task its `CommitRequest` carries and commits its nonce together with the
+digest it derived; the coordinator signs the digest at least `min_signers` commits agree on,
+without waiting for the router's own trace. The router trace runs alongside and gates the
+result: a payload is rendered only when the router's storage updates hash to the digest the
+quorum signed, and a router trace that fails ends the session at once.
 
 - **Offline or unresponsive node**: once enough commits agree on a digest, the rest get one
   more `SCHNORR_STAGE_TIMEOUT_SECS`; a node that misses it is listed as a non-signer. If the
@@ -190,20 +182,17 @@ signed, and a router trace that fails skips the height at once.
   attempt runs with fresh nonces on a subset that excludes suspects. An invalid partial ends
   the attempt at once. Suspects are re-admitted only if the rest cannot reach `min_signers`.
 - **Too few signers**: if fewer than `min_signers` honest operators respond, every attempt
-  fails, the height is skipped at `ROUND_TIMEOUT`, and the sequencer moves on to the next
-  task. There is no wedge to clear by hand.
+  fails, the task fails at `ROUND_TIMEOUT`, and the scheduler moves on to the next task.
+  There is no wedge to clear by hand.
 - **Node restart**: secret nonces and sessions are in memory only, so a restarted node
   refuses the sessions it forgot; it becomes a non-signer and the coordinator retries with
-  fresh nonces. Its TaskBook refills from the router's rebroadcast directives.
+  fresh nonces. The next `CommitRequest` carries the task again.
 - **Router restart**: tasks still `queued` or `processing` are re-queued, except one whose
   `transition_index` the contract has already consumed. That settles `expired`, counted in
-  `gas_killer_tasks_expired_at_requeue_total`. There is no persisted height, and TipReports
-  cannot recover one: a node reports only directives below the highest height it has seen,
-  while a router restarting from 0 would re-announce exactly that height, which the node drops
-  as a conflict. Each router life instead starts its heights at the wall clock in
-  milliseconds, above anything a previous life announced. Heights never reach the chain, and
-  nodes resolve the skipped range as skips. A clock stepped back by more than the previous
-  life's uptime would bring the wedge back; restart the nodes to clear it.
+  `gas_killer_tasks_expired_at_requeue_total`. There is no persisted height: each router life
+  starts its heights at the wall clock in milliseconds, above anything a previous life used, so
+  no node sees a session key twice. A clock stepped back by more than the previous life's uptime
+  would reuse heights the nodes still hold sessions for; restart the nodes to clear them.
 - **Operator-set changes**: the participant set is frozen per process at startup from the
   on-chain registry. Registering or deregistering an operator requires restarting the router
   and all nodes together. `SchnorrStakeRegistry` changes are also subject to
@@ -226,9 +215,8 @@ LOCAL-mode-only:
 
 Optional environment variables:
 - `STORAGE_DIR`: Writable directory handed to the commonware runtime (default: `/app/data` if writable, else `$TMPDIR/gas-killer`). docker-compose and Helm mount a dedicated volume here — see "Runtime storage" above.
-- `AGG_WINDOW`: Heights above a node's tip it expects the router to be driving (default: 8). A directive past `tip + window` is logged as evidence the node has fallen behind. Part of the config fingerprint.
-- `ROUND_TIMEOUT`: Max seconds the Schnorr coordinator keeps retrying signing attempts on an assigned height before resolving it as a skip, and the point at which the sequencer switches from `Announce` to `Skip` broadcasts (accepts fractional seconds). Also the nodes' retry budget for transient validation errors. A height resolves as soon as an attempt assembles a signature, so this only affects heights that stall. Library default: 30; the chart sets 300 and a heavy-trace deployment raises it in its own overrides. Must exceed worst-case node compute + sign time. It is also the base for the Schnorr coordinator's commit deadline (`SCHNORR_TRACE_TIMEOUT_SECS`, default `ROUND_TIMEOUT/2`), so a fleet running multi-minute EVMSketch traces raises this one value and the stage that holds that compute grows with it.
-- `REBROADCAST_INTERVAL`: How often (in seconds) the router re-sends the in-flight `TaskDirective` until the height resolves (accepts fractional seconds); also the minimum interval between a node's `TipReport`s. Library default: 5; Helm deployments set 15. Must stay well below `ROUND_TIMEOUT`: a node that misses every `Announce` can only resolve the height as a skip.
+- `ROUND_TIMEOUT`: Max seconds the Schnorr coordinator keeps retrying a session before failing its task (accepts fractional seconds). Also the nodes' retry budget for transient validation errors. A session ends as soon as an attempt assembles a signature, so this only affects sessions that stall. Library default: 30; the chart sets 300 and a heavy-trace deployment raises it in its own overrides. Must exceed worst-case node compute + sign time. It is also the base for the Schnorr coordinator's commit deadline (`SCHNORR_TRACE_TIMEOUT_SECS`, default `ROUND_TIMEOUT/2`), so a fleet running multi-minute EVMSketch traces raises this one value and the stage that holds that compute grows with it.
+- `REBROADCAST_INTERVAL`: How often (in seconds) the coordinator re-sends a `CommitRequest` to the operators that have not committed yet (accepts fractional seconds). Library default: 5; Helm deployments set 15. A node dedupes by session, so a re-send only matters to one whose request was lost.
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
 - `INGRESS_TIMEOUT_MS`: Timeout for waiting on ingress tasks in milliseconds (default: 0, no timeout)
@@ -255,7 +243,6 @@ Optional environment variables:
 - `QUORUM_THRESHOLD` / `THRESHOLD_DENOMINATOR`: Signing threshold `num/den` (default: 2/3). Sets the coordinator's `min_signers` floor and the `SchnorrStakeRegistry`'s on-chain threshold, so the two checks stay in lockstep (see "Quorum model" above).
 - `SCHNORR_STAGE_TIMEOUT_SECS`: Round-trip deadline per attempt for partial collection, and for the remaining commits once enough agree on a digest (default: `min(5, ROUND_TIMEOUT/6)`).
 - `SCHNORR_TRACE_TIMEOUT_SECS`: Commit deadline per attempt (default: `ROUND_TIMEOUT/2`). A node commits only after tracing the task, so this must cover a full cold trace.
-- `P2P_MESSAGES_PER_SECOND`: Per-peer rate for the task-directive channel, channel 1 (default: 1.0).
 - `P2P_SCHNORR_MESSAGES_PER_SECOND`: Per-peer rate for the Schnorr channel, channel 2 (default: 64). The p2p sender silently drops over-rate messages, and a dropped signing-round message costs a whole attempt.
 - `SCHNORR_NOTICE_WINDOW`: Blocks a `SchnorrStakeRegistry` operator-set change must be announced ahead of taking effect (default: 0). `example.env` covers when to raise it.
 
@@ -276,15 +263,13 @@ The pipeline's shape, as opposed to the cost of one round:
 
 | Metric | Meaning |
 |---|---|
-| `gas_killer_in_flight_heights` | Heights assigned and not yet resolved |
+| `gas_killer_in_flight_heights` | Sessions running now |
 | `gas_killer_window_base`, `gas_killer_highest_assigned_height` | Edges of the live window. Both pinned while work is queued is a wedge |
-| `gas_killer_height_age_seconds` | Age of the oldest unresolved height |
-| `gas_killer_height_outcomes_total{outcome}` | Final disposition per height: `executed`, `skipped`, `foreign`, `superseded` |
-| `gas_killer_node_safe_tip` | Tip floor from the operators' reports; explains a `superseded` spike |
-| `gas_killer_directive_sends_total{result}` | Per-recipient directive delivery: `delivered`, `rate_limited`, `rejected` |
+| `gas_killer_height_age_seconds` | Age of the oldest running session |
+| `gas_killer_height_outcomes_total{outcome}` | How each session's task settled: `ready`, `failed`, `timed_out`, `trace_failed` |
 | `gas_killer_settlement_conflicts_total` | Terminal-state transitions the store refused. Must be 0 |
 | `gas_killer_config_fingerprint{fingerprint}` | Always 1, labelled with this process's consensus-critical config |
-| `network_spawner_messages_rate_limited_total{peer,message}` | Messages the *receiving* peer throttled, by channel (`data_1` directives, `data_2` Schnorr) |
+| `network_spawner_messages_rate_limited_total{peer,message}` | Messages the *receiving* peer throttled, by channel (`data_2` Schnorr) |
 
 Where the time inside one gas analysis goes. Both the router and the operators publish these,
 separated by the scrape target:
@@ -312,19 +297,9 @@ To answer "is this workload RPC-bound or CPU-bound", compare seconds of work per
 histogram sums rather than percentiles: `trace_fetch + state_prefetch` against
 `parse + revm_estimate`.
 
-Three of these need reading together rather than alone.
-
-`gas_killer_directive_sends_total` and `network_spawner_messages_rate_limited_total` are opposite
-ends of the same channel and neither substitutes for the other. The send-side counter exists
-because the p2p sender returns the peers it will attempt and silently omits the ones over quota,
-so a partial drop and a full delivery are indistinguishable at the call site — and a dropped
-`Announce` is how an operator ends up refusing to sign a height everyone else signed. The
-receive-side counter is the peer's own view, where a throttled message is not dropped but sleeps
-the entire connection, blocking every channel on it.
-
 `gas_killer_config_fingerprint` is a hash of the settings that must match across the router and
 every operator: `GK_SIM_PROFILE`, `STATE_ENCODING`, the application namespace,
-`AGG_WINDOW`, and the directive wire version. A fleet that disagrees on any of them
+and the Schnorr wire version. A fleet that disagrees on any of them
 does not fail loudly — peers stay connected, quorum never forms, and every pod reports healthy —
 so `count(count by (fingerprint) (gas_killer_config_fingerprint))` must be exactly 1. It is also
 the pre-flight check for a rolling upgrade: none of these may be changed on a live fleet.
@@ -422,7 +397,7 @@ GAS_KILLER_TASKS_URL=https://<host>/tasks GAS_KILLER_API_KEY=gk_... cargo run -p
 
 ### Dependencies
 - `alloy`: Ethereum interaction
-- `commonware-avs-*` (git, `commonware-restaking`): the upstream sequencer, node TaskBook, BN254 p2p identity, EigenLayer operator discovery, and contract bindings
+- `commonware-avs-*` (git, `commonware-restaking`): BN254 p2p identity, EigenLayer operator discovery, and contract bindings
 - `commonware-p2p`, `commonware-runtime`, `commonware-cryptography`, `commonware-codec`: P2P networking, runtime, and primitives
 - `k256`: secp256k1 arithmetic for the MuSig2 implementation in `common/src/schnorr/`
 - `gas-analyzer-evmsketch`: EVM gas analysis and storage update computation

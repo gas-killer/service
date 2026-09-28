@@ -1,5 +1,4 @@
-// Gas killer router: task sequencer, aggregate-Schnorr coordinator, and payload renderer.
-pub mod directive_metrics;
+// Gas killer router: task scheduler, aggregate-Schnorr coordinator, and payload renderer.
 pub mod error;
 pub mod executor;
 pub mod expiry;
@@ -14,6 +13,7 @@ pub mod operator_http;
 pub mod payload_revert;
 pub mod rate_limit;
 pub mod rpc_health;
+pub mod scheduler;
 pub mod schnorr_coordinator;
 pub mod schnorr_submitter;
 pub mod sequencer;

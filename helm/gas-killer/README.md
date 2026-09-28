@@ -408,7 +408,7 @@ The **Gas Killer** dashboard is pre-loaded automatically via the Grafana sidecar
 - Aggregation throughput, end-to-end and per-phase latency breakdowns
 - Ingress request rates and per-API-key accept/reject series
 - Window and height observability: concurrent heights, window base against the engine tip,
-  per-height outcomes, directive delivery, and the configuration fingerprint across the fleet
+  per-height outcomes and the configuration fingerprint across the fleet
 
 ### Verifying scrape targets
 
