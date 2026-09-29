@@ -407,12 +407,13 @@ router:
   # survives. Tune against gas_killer_p2p_round_trip_seconds and the height-outcome
   # panel in the Grafana dashboard.
   roundTimeout: "300"
-  # Signing sessions the router runs at once (MAX_IN_FLIGHT_TASKS). Tasks for one target always run
-  # one at a time, so raising this only helps traffic spread across targets. Every session
+  # Signing sessions the router runs at once (MAX_IN_FLIGHT_TASKS). Tasks for one target always
+  # run one at a time, so raising this only helps traffic spread across targets. Every session
   # traces its task on the router and on every node at once, so scale router.resources and
-  # node.resources (and the fork, under l1.simFork) with it. With few operators, a slow
-  # operator holds up every concurrent session instead of one, so leave it at 1 until the
-  # operator set can absorb that.
+  # node.resources (and the fork, under l1.simFork) with it. Load lands on every node together,
+  # so with little headroom beyond the quorum (1 spare operator at 3 operators, 2-of-3) an
+  # overloaded fleet times out all live sessions at once rather than one. Raise it while
+  # watching the timed_out outcome and gas_killer_in_flight_heights.
   maxInFlightTasks: "1"
   # How often (in seconds) the coordinator re-sends a CommitRequest to the operators that
   # have not committed yet. A node dedupes by session, so a re-send only matters to one whose
