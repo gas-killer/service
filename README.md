@@ -112,9 +112,13 @@ Operator discovery goes through EigenLayer (`RegistryCoordinator`/`BLSApkRegistr
 
 - **Scheduler** (router): dequeues ingress tasks, resolves their chain and transition index,
   gives each the next height, and starts the router's own EVMSketch trace alongside the signing
-  session rather than ahead of it. One session runs at a time; the next task starts once the
-  current one settles. A height only names a session: it never reaches the chain.
-- **Schnorr coordinator** (router, p2p channel 2): per session, runs attempts of
+  session rather than ahead of it. Up to `MAX_IN_FLIGHT_TASKS` sessions (default 1) run at once,
+  but only one per target: a task's transition index is read when it is resolved, so a second
+  task for the same target waits until the first settles, without holding up other targets. A
+  height only names a session: it never reaches the chain.
+- **Schnorr coordinator** (router, p2p channel 2): one reader routes channel-2 traffic to the
+  session whose height it names, so concurrent sessions never read each other's commits. Per
+  session, it runs attempts of
   `CommitRequest`/`Commit` then `SignRequest`/`PartialSig`, with fresh nonces each attempt,
   and signs the digest at least `min_signers` commits carry. The `CommitRequest` carries the
   task, without storage updates, and is re-sent every `REBROADCAST_INTERVAL` to operators that
@@ -126,7 +130,8 @@ Operator discovery goes through EigenLayer (`RegistryCoordinator`/`BLSApkRegistr
   task it cannot derive a digest for gets no commit. On `SignRequest` it refuses unless the
   message is the digest it committed to, checks that every signer point maps to a known
   operator address, and only then produces a partial. A secret nonce signs at most one
-  context; sessions live in memory only.
+  context; sessions live in memory only, and are pruned once they fall two `ROUND_TIMEOUT`s of
+  heights behind the newest, so nodes must run the router's `ROUND_TIMEOUT`.
 - **Digest**: nodes sign the 32-byte task digest, which binds
   `(transitionIndex, target, selector, storageUpdates)`. The signature does not bind the
   height, and the contract enforces transition-index ordering, so an identical digest at a
@@ -182,7 +187,7 @@ quorum signed, and a router trace that fails ends the session at once.
   attempt runs with fresh nonces on a subset that excludes suspects. An invalid partial ends
   the attempt at once. Suspects are re-admitted only if the rest cannot reach `min_signers`.
 - **Too few signers**: if fewer than `min_signers` honest operators respond, every attempt
-  fails, the task fails at `ROUND_TIMEOUT`, and the scheduler moves on to the next task.
+  fails, and the task fails at `ROUND_TIMEOUT`, freeing its slot for the next task.
   There is no wedge to clear by hand.
 - **Node restart**: secret nonces and sessions are in memory only, so a restarted node
   refuses the sessions it forgot; it becomes a non-signer and the coordinator retries with
@@ -216,6 +221,7 @@ LOCAL-mode-only:
 Optional environment variables:
 - `STORAGE_DIR`: Writable directory handed to the commonware runtime (default: `/app/data` if writable, else `$TMPDIR/gas-killer`). docker-compose and Helm mount a dedicated volume here — see "Runtime storage" above.
 - `ROUND_TIMEOUT`: Max seconds the Schnorr coordinator keeps retrying a session before failing its task (accepts fractional seconds). Also the nodes' retry budget for transient validation errors. A session ends as soon as an attempt assembles a signature, so this only affects sessions that stall. Library default: 30; the chart sets 300 and a heavy-trace deployment raises it in its own overrides. Must exceed worst-case node compute + sign time. It is also the base for the Schnorr coordinator's commit deadline (`SCHNORR_TRACE_TIMEOUT_SECS`, default `ROUND_TIMEOUT/2`), so a fleet running multi-minute EVMSketch traces raises this one value and the stage that holds that compute grows with it.
+- `MAX_IN_FLIGHT_TASKS`: Signing sessions the router runs at once (default: 1). Tasks for one target always run one at a time, so raising it only helps traffic spread across targets. Each session traces its task on the router and on every node at once, so scale their CPU with it. That load lands on every node together, so with little headroom beyond the quorum an overloaded fleet times out all live sessions at once rather than one; raise it while watching the `timed_out` outcome and `gas_killer_in_flight_heights`.
 - `REBROADCAST_INTERVAL`: How often (in seconds) the coordinator re-sends a `CommitRequest` to the operators that have not committed yet (accepts fractional seconds). Library default: 5; Helm deployments set 15. A node dedupes by session, so a re-send only matters to one whose request was lost.
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
@@ -263,7 +269,7 @@ The pipeline's shape, as opposed to the cost of one round:
 
 | Metric | Meaning |
 |---|---|
-| `gas_killer_in_flight_heights` | Sessions running now |
+| `gas_killer_in_flight_heights` | Sessions running now, at most `MAX_IN_FLIGHT_TASKS` |
 | `gas_killer_window_base`, `gas_killer_highest_assigned_height` | Edges of the live window. Both pinned while work is queued is a wedge |
 | `gas_killer_height_age_seconds` | Age of the oldest running session |
 | `gas_killer_height_outcomes_total{outcome}` | How each session's task settled: `ready`, `failed`, `timed_out`, `trace_failed` |
@@ -298,10 +304,11 @@ histogram sums rather than percentiles: `trace_fetch + state_prefetch` against
 `parse + revm_estimate`.
 
 `gas_killer_config_fingerprint` is a hash of the settings that must match across the router and
-every operator: `GK_SIM_PROFILE`, `STATE_ENCODING`, the application namespace,
-and the Schnorr wire version. A fleet that disagrees on any of them
-does not fail loudly — peers stay connected, quorum never forms, and every pod reports healthy —
-so `count(count by (fingerprint) (gas_killer_config_fingerprint))` must be exactly 1. It is also
+every operator: `GK_SIM_PROFILE`, `STATE_ENCODING`, the application namespace, the Schnorr wire
+version, and `ROUND_TIMEOUT`, which also sets how long a node keeps a session's nonces. A fleet
+that disagrees on any of them does not fail loudly — peers stay connected, and quorum never
+forms or a node quietly drops out of long rounds, while every pod reports healthy — so
+`count(count by (fingerprint) (gas_killer_config_fingerprint))` must be exactly 1. It is also
 the pre-flight check for a rolling upgrade: none of these may be changed on a live fleet.
 
 ## Ingress Mode

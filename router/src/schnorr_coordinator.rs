@@ -1,6 +1,7 @@
 //! Schnorr coordinator: the router's side of the two-round MuSig2 aggregate signing protocol
-//! (p2p channel 2). The scheduler hands it one session at a time — a height and its task — and
-//! gets back how the session ended.
+//! (p2p channel 2). The scheduler hands it sessions — a height and its task each — and gets back
+//! how each ended. Sessions run concurrently, each reading its own inbox from
+//! [`SessionInboxes`].
 //!
 //! # Session flow
 //!
@@ -39,9 +40,10 @@
 //! address.
 
 use crate::sequencer::RouterTrace;
+use crate::session_inboxes::{Inbox, SessionInboxes};
 use alloy_primitives::Address;
 use commonware_avs_core::bn254::PublicKey;
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::Encode;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use gas_killer_common::schnorr::musig::{Coordinator, PubNonce};
 use gas_killer_common::schnorr::wire::{SchnorrMsg, SignRequest};
@@ -130,14 +132,15 @@ pub enum SessionOutcome {
     TraceFailed(String),
 }
 
-/// The coordinator. Owns the channel-2 endpoints and drives one session at a time.
-pub struct SchnorrCoordinator<S, R>
+/// The coordinator. Cloning shares the channel-2 endpoints, so each concurrent session can drive
+/// its own clone.
+#[derive(Clone)]
+pub struct SchnorrCoordinator<S>
 where
     S: Sender<PublicKey = PublicKey>,
-    R: Receiver<PublicKey = PublicKey>,
 {
     sender: S,
-    receiver: R,
+    inboxes: SessionInboxes,
     /// Operator p2p keys, the round-1 `CommitRequest` recipients.
     operator_keys: Vec<PublicKey>,
     /// p2p key → operator address: authenticates an incoming commit/partial by the
@@ -161,18 +164,15 @@ where
     /// How often an unanswered `CommitRequest` is re-sent. A lost request would otherwise
     /// cost the whole trace budget before the next attempt asks again.
     resend_interval: Duration,
-    /// Set once the channel-2 receiver has closed: the network is shutting down, so no session
-    /// can finish and waiting out its deadlines would only spin.
-    closed: bool,
 }
 
-impl<S, R> SchnorrCoordinator<S, R>
+impl<S> SchnorrCoordinator<S>
 where
     S: Sender<PublicKey = PublicKey>,
-    R: Receiver<PublicKey = PublicKey>,
 {
+    /// Starts the channel-2 reader over `receiver`, so this needs a Tokio runtime.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<R: Receiver<PublicKey = PublicKey>>(
         sender: S,
         receiver: R,
         operators: Vec<(PublicKey, Address)>,
@@ -187,9 +187,10 @@ where
         let address_to_peer: HashMap<Address, PublicKey> =
             operators.iter().map(|(k, a)| (*a, k.clone())).collect();
         let operator_addresses: HashSet<Address> = operators.iter().map(|(_, a)| *a).collect();
+        let inboxes = SessionInboxes::spawn(receiver, operator_keys.iter().cloned().collect());
         let coordinator = Self {
             sender,
-            receiver,
+            inboxes,
             operator_keys,
             peer_to_address,
             address_to_peer,
@@ -199,7 +200,6 @@ where
             trace_timeout,
             round_timeout,
             resend_interval,
-            closed: false,
         };
         info!(
             operators = coordinator.operator_keys.len(),
@@ -225,12 +225,18 @@ where
     /// deadline passes, or the router's own trace fails. `None` means the channel closed, so the
     /// session could not run to an outcome.
     pub async fn drive_height(
-        &mut self,
+        &self,
         height: u64,
         task: &GasKillerTaskData,
         trace: &RouterTrace,
     ) -> Option<SessionOutcome> {
         let deadline = Instant::now() + self.round_timeout;
+        // Opened before the first request goes out, so no commit can arrive unrouted.
+        let Some(mut inbox) = self.inboxes.open(height) else {
+            warn!(height, "schnorr channel closed; abandoning session");
+            return None;
+        };
+        let mut sender = self.sender.clone();
         let trace = trace.clone();
         let trace_failed = async move {
             match trace.wait().await {
@@ -248,7 +254,7 @@ where
 
         let mut attempt: u32 = 0;
         while Instant::now() < deadline {
-            if self.closed {
+            if inbox.closed() {
                 warn!(height, "schnorr channel closed; abandoning session");
                 return None;
             }
@@ -262,7 +268,9 @@ where
                     warn!(height, %reason, "router trace failed, abandoning session");
                     return Some(SessionOutcome::TraceFailed(reason));
                 }
-                outcome = self.run_attempt(height, attempt, task, &mut suspects, deadline) => {
+                outcome = self.run_attempt(
+                    &mut sender, &mut inbox, height, attempt, task, &mut suspects, deadline,
+                ) => {
                     let Some((signature, non_signers, digest)) = outcome else {
                         debug!(height, attempt, "signing attempt failed; retrying");
                         continue;
@@ -293,8 +301,11 @@ where
 
     /// One full two-round attempt. Returns the verified signature, the sorted non-signer
     /// list and the digest signed, or `None` (reasons logged; `suspects` updated).
+    #[allow(clippy::too_many_arguments)]
     async fn run_attempt(
-        &mut self,
+        &self,
+        sender: &mut S,
+        inbox: &mut Inbox,
         height: u64,
         attempt: u32,
         task: &GasKillerTaskData,
@@ -309,7 +320,7 @@ where
             task: task.clone(),
         }
         .encode();
-        let _ = self.sender.send(
+        let _ = sender.send(
             Recipients::Some(self.operator_keys.clone()),
             request.clone(),
             true,
@@ -322,8 +333,8 @@ where
             HashMap::new();
         let mut next_resend = Instant::now() + self.resend_interval;
         while commits.len() < self.operator_keys.len() {
-            let Some(msg) = self.recv_until(stage_deadline.min(next_resend)).await else {
-                if self.closed || Instant::now() >= stage_deadline {
+            let Some(msg) = inbox.recv_until(stage_deadline.min(next_resend)).await else {
+                if inbox.closed() || Instant::now() >= stage_deadline {
                     break;
                 }
                 // A node dedupes by session, so the ones already tracing just ignore it.
@@ -338,9 +349,7 @@ where
                     })
                     .cloned()
                     .collect();
-                let _ = self
-                    .sender
-                    .send(Recipients::Some(silent), request.clone(), true);
+                let _ = sender.send(Recipients::Some(silent), request.clone(), true);
                 next_resend = Instant::now() + self.resend_interval;
                 continue;
             };
@@ -435,9 +444,7 @@ where
             .iter()
             .map(|addr| self.address_to_peer[addr].clone())
             .collect();
-        let _ = self
-            .sender
-            .send(Recipients::Some(recipients), sign_request, true);
+        let _ = sender.send(Recipients::Some(recipients), sign_request, true);
 
         let stage_deadline = (Instant::now() + self.stage_timeout).min(deadline);
         // (address, partial scalar) pairs; the scalar type is inferred so the
@@ -449,7 +456,7 @@ where
         // because the two attribute blame differently below.
         let mut foreclosed = false;
         while partials.len() < subset.len() {
-            let Some((peer, msg)) = self.recv_until(stage_deadline).await else {
+            let Some((peer, msg)) = inbox.recv_until(stage_deadline).await else {
                 break;
             };
             if let SchnorrMsg::PartialSig {
@@ -502,32 +509,6 @@ where
             .collect();
         non_signers.sort();
         Some((signature, non_signers, message))
-    }
-
-    /// Receives the next channel-2 message before `deadline`, or `None` on timeout or channel
-    /// close (which also sets [`Self::closed`]). Non-operator senders are dropped.
-    async fn recv_until(&mut self, deadline: Instant) -> Option<(PublicKey, SchnorrMsg)> {
-        loop {
-            let remaining = deadline.checked_duration_since(Instant::now())?;
-            let received = tokio::time::timeout(remaining, self.receiver.recv())
-                .await
-                .ok()?;
-            let Ok((peer, bytes)) = received else {
-                self.closed = true;
-                return None;
-            };
-            if !self.peer_to_address.contains_key(&peer) {
-                warn!(peer = %peer, "schnorr message from unknown peer; ignored");
-                continue;
-            }
-            match SchnorrMsg::decode(bytes) {
-                Ok(msg) => return Some((peer, msg)),
-                Err(error) => {
-                    warn!(%error, "malformed schnorr message; ignored");
-                    continue;
-                }
-            }
-        }
     }
 }
 
@@ -603,9 +584,7 @@ pub(crate) mod testing {
     }
 
     /// A coordinator over three operators whose channel-2 receiver is already closed.
-    pub(crate) fn closed_coordinator(
-        sender: CountingSender,
-    ) -> SchnorrCoordinator<CountingSender, ClosedReceiver> {
+    pub(crate) fn closed_coordinator(sender: CountingSender) -> SchnorrCoordinator<CountingSender> {
         let operators = (0..3u8)
             .map(|i| {
                 (
@@ -642,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn a_closed_channel_ends_the_session_without_spinning() {
         let sender = CountingSender::default();
-        let mut coordinator = closed_coordinator(sender.clone());
+        let coordinator = closed_coordinator(sender.clone());
         let trace = RouterTrace::spawn(std::future::pending());
 
         let outcome = tokio::time::timeout(
@@ -652,11 +631,12 @@ mod tests {
         .await
         .expect("a closed channel must not hold the session until its deadlines");
 
+        // The reader may see the close before the session opens its inbox, and then nothing
+        // goes out at all.
         assert!(outcome.is_none());
-        assert_eq!(
-            sender.sends.load(Ordering::Relaxed),
-            1,
-            "only the first request goes out"
+        assert!(
+            sender.sends.load(Ordering::Relaxed) <= 1,
+            "at most the first request goes out"
         );
     }
 

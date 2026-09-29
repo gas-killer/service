@@ -17,6 +17,7 @@ pub mod scheduler;
 pub mod schnorr_coordinator;
 pub mod schnorr_submitter;
 pub mod sequencer;
+pub mod session_inboxes;
 pub mod store;
 
 // Re-export task_data from common crate

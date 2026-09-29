@@ -1,7 +1,8 @@
-//! Task source: pulls tasks off the ingress queue, resolves them into [`GasKillerTaskData`]
-//! ready for a signing session, and starts the router's own EVMSketch trace alongside it.
+//! Task source: [`TaskQueue`] pulls tasks off the ingress queue, and [`TaskDispatcher`] resolves
+//! each into [`GasKillerTaskData`] ready for a signing session and starts the router's own
+//! EVMSketch trace alongside it.
 //!
-//! The session loop that consumes these lives in [`crate::scheduler`].
+//! The scheduler that consumes these lives in [`crate::scheduler`].
 
 use crate::ingress::GasKillerTaskRequest;
 use crate::metrics::MetricsCollector;
@@ -188,40 +189,36 @@ impl ResolvedTask {
     }
 }
 
-/// Pulls tasks from the ingress queue and resolves them into [`GasKillerTaskData`] for the
-/// [`crate::scheduler::Scheduler`].
-pub struct GasKillerTaskSource {
+/// The scheduler's end of the ingress queue.
+///
+/// A task counts toward the queue depth until the scheduler starts it, not just until it is
+/// dequeued, so tasks held back behind a busy target still count against `MAX_QUEUE_DEPTH`.
+pub struct TaskQueue {
     receiver: TaskReceiver,
     queue_depth: TaskQueueDepth,
-    validator: Arc<GasKillerValidator>,
     metrics: Option<Arc<MetricsCollector>>,
-    /// Durable store used to advance task status as work progresses. `None` in
-    /// store-less test/dev harnesses, where status transitions are simply skipped.
-    store: Option<SqliteStore>,
 }
 
-impl GasKillerTaskSource {
+impl TaskQueue {
     pub fn new(
         receiver: TaskReceiver,
         queue_depth: TaskQueueDepth,
-        validator: Arc<GasKillerValidator>,
         metrics: Option<Arc<MetricsCollector>>,
-        store: Option<SqliteStore>,
     ) -> Self {
         Self {
             receiver,
             queue_depth,
-            validator,
             metrics,
-            store,
         }
     }
 
-    /// Blocks until a task arrives, maintaining the queue-depth metric.
-    ///
-    /// Returns `None` when the ingress side of the channel closed.
-    async fn wait_for_task(&mut self) -> Option<QueuedTask> {
-        let task = self.receiver.recv().await?;
+    /// Blocks until a task arrives. Returns `None` when the ingress side of the channel closed.
+    pub async fn next(&mut self) -> Option<QueuedTask> {
+        self.receiver.recv().await
+    }
+
+    /// Records that a dequeued task has left the queue for a session.
+    pub fn started(&self) {
         let depth = self
             .queue_depth
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -232,7 +229,30 @@ impl GasKillerTaskSource {
         if let Some(m) = &self.metrics {
             m.task_queue_depth.set(depth as i64);
         }
-        Some(task)
+    }
+}
+
+/// Claims and resolves dequeued tasks for signing sessions. Cheap to clone.
+#[derive(Clone)]
+pub struct TaskDispatcher {
+    validator: Arc<GasKillerValidator>,
+    metrics: Option<Arc<MetricsCollector>>,
+    /// Durable store used to advance task status as work progresses. `None` in
+    /// store-less test/dev harnesses, where status transitions are simply skipped.
+    store: Option<SqliteStore>,
+}
+
+impl TaskDispatcher {
+    pub fn new(
+        validator: Arc<GasKillerValidator>,
+        metrics: Option<Arc<MetricsCollector>>,
+        store: Option<SqliteStore>,
+    ) -> Self {
+        Self {
+            validator,
+            metrics,
+            store,
+        }
     }
 
     /// Resolves what the announce needs for a dequeued task: its chain, its transition index
@@ -345,53 +365,50 @@ pub struct DispatchedTask {
     pub trace: RouterTrace,
 }
 
-impl GasKillerTaskSource {
-    /// Dequeues the next ingress task, resolves it and starts its trace. Resolution failures are
-    /// logged, settled as `failed`, and dropped; the loop keeps waiting for the next task. Returns
-    /// `None` once the ingress side of the channel closed.
-    pub async fn next_task(&mut self) -> Option<DispatchedTask> {
-        loop {
-            let QueuedTask { task_id, request } = self.wait_for_task().await?;
+impl TaskDispatcher {
+    /// Claims a dequeued task, resolves it and starts its trace. `None` means the task is not
+    /// going to a session: it settled while it waited (the expiry sweep), or it could not be
+    /// resolved and is settled as `failed` here.
+    pub async fn dispatch(&self, queued: QueuedTask) -> Option<DispatchedTask> {
+        let QueuedTask { task_id, request } = queued;
 
-            // A task the expiry sweep settled while it waited here is dropped rather than
-            // aggregated: its pinned block is stale enough that the round could not produce a
-            // submittable payload, so the session goes to the next task instead.
-            if let Some(store) = &self.store
-                && !claim_task_for_processing(store, &task_id).await
-            {
-                info!(task_id, "task settled while queued, skipping dispatch");
-                continue;
-            }
-
-            let resolved = match self.resolve(request).await {
-                Ok(resolved) => resolved,
-                Err(e) => {
-                    error!(error = %e, task_id, "failed to enrich task, dropping request");
-                    if let Some(store) = &self.store {
-                        set_task_failed(
-                            store,
-                            self.metrics.as_deref(),
-                            &task_id,
-                            &format!("task enrichment failed: {e}"),
-                        )
-                        .await;
-                    }
-                    continue;
-                }
-            };
-
-            // Operators get the task WITHOUT storage_updates: they independently recompute them
-            // with EVMSketch (that is the whole trust model — see
-            // GasKillerValidator::expected_digest_for_task), and the router's own come from the
-            // trace started here, alongside the round rather than ahead of it.
-            let task = resolved.task_data();
-            let trace = self.spawn_trace(&resolved);
-            return Some(DispatchedTask {
-                task_id,
-                task,
-                trace,
-            });
+        // A task the expiry sweep settled while it waited is dropped rather than aggregated: its
+        // pinned block is stale enough that the round could not produce a submittable payload.
+        if let Some(store) = &self.store
+            && !claim_task_for_processing(store, &task_id).await
+        {
+            info!(task_id, "task settled while queued, skipping dispatch");
+            return None;
         }
+
+        let resolved = match self.resolve(request).await {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                error!(error = %e, task_id, "failed to enrich task, dropping request");
+                if let Some(store) = &self.store {
+                    set_task_failed(
+                        store,
+                        self.metrics.as_deref(),
+                        &task_id,
+                        &format!("task enrichment failed: {e}"),
+                    )
+                    .await;
+                }
+                return None;
+            }
+        };
+
+        // Operators get the task WITHOUT storage_updates: they independently recompute them
+        // with EVMSketch (that is the whole trust model — see
+        // GasKillerValidator::expected_digest_for_task), and the router's own come from the
+        // trace started here, alongside the round rather than ahead of it.
+        let task = resolved.task_data();
+        let trace = self.spawn_trace(&resolved);
+        Some(DispatchedTask {
+            task_id,
+            task,
+            trace,
+        })
     }
 }
 
@@ -590,34 +607,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_task_marks_processing_then_failed_on_enrich_error() {
+    async fn dispatch_marks_processing_then_failed_on_enrich_error() {
         let store = store().await;
         let key = key_id(&store).await;
         let task = store.create_task(&key, &request_body()).await.unwrap();
 
-        let (sender, receiver) = task_channel();
-        let mut source = GasKillerTaskSource::new(
-            receiver,
-            task_queue_depth(),
-            unreachable_validator(),
-            None,
-            Some(store.clone()),
-        );
+        let dispatcher = TaskDispatcher::new(unreachable_validator(), None, Some(store.clone()));
+        let queued = QueuedTask {
+            task_id: task.id.clone(),
+            request: GasKillerTaskRequest {
+                body: request_body(),
+            },
+        };
 
-        sender
-            .send(QueuedTask {
-                task_id: task.id.clone(),
-                request: GasKillerTaskRequest {
-                    body: request_body(),
-                },
-            })
-            .unwrap();
-        // Closing the sender lets `next_task` observe a closed channel (and return
-        // `None`) once the one queued task's resolution fails and it loops back
-        // for the next task, instead of blocking forever.
-        drop(sender);
-
-        assert!(source.next_task().await.is_none());
+        assert!(dispatcher.dispatch(queued).await.is_none());
 
         let settled = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(settled.status, TaskStatus::Failed);
@@ -654,7 +657,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_task_skips_a_task_expired_while_queued() {
+    async fn dispatch_skips_a_task_expired_while_queued() {
         let store = store().await;
         let key = key_id(&store).await;
         let task = store.create_task(&key, &request_body()).await.unwrap();
@@ -663,28 +666,15 @@ mod tests {
             .await
             .unwrap();
 
-        let (sender, receiver) = task_channel();
-        let mut source = GasKillerTaskSource::new(
-            receiver,
-            task_queue_depth(),
-            unreachable_validator(),
-            None,
-            Some(store.clone()),
-        );
+        let dispatcher = TaskDispatcher::new(unreachable_validator(), None, Some(store.clone()));
+        let queued = QueuedTask {
+            task_id: task.id.clone(),
+            request: GasKillerTaskRequest {
+                body: request_body(),
+            },
+        };
 
-        sender
-            .send(QueuedTask {
-                task_id: task.id.clone(),
-                request: GasKillerTaskRequest {
-                    body: request_body(),
-                },
-            })
-            .unwrap();
-        // As above: closing the sender lets `next_task` return once it has skipped the task
-        // rather than blocking for another.
-        drop(sender);
-
-        assert!(source.next_task().await.is_none());
+        assert!(dispatcher.dispatch(queued).await.is_none());
 
         // Untouched: not re-dispatched (which resolution would have settled as `failed` against
         // the unreachable validator) and still carrying the sweep's reason.

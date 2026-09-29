@@ -98,6 +98,7 @@ fn clamp_to_mutation_horizon(valid_until_block: u64, horizon: Option<U256>) -> u
 }
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
+#[derive(Clone)]
 pub struct GasKillerHandler<P> {
     /// Wallet providers keyed by EVM chain ID
     providers: HashMap<u64, P>,
@@ -384,6 +385,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// account-abstraction tier. The completion handler renders a
     /// user-signed payload via [`Self::render_schnorr_payload`]; both share
     /// [`Self::prepare_schnorr`].
+    ///
+    /// Concurrent sessions settle through clones sharing one wallet, and `SimpleNonceManager`
+    /// reserves nothing, so a caller must serialize fill-through-send per chain wallet.
     pub async fn execute_schnorr_verification(
         &mut self,
         msg_hash: FixedBytes<32>,

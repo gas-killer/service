@@ -113,7 +113,7 @@ pub struct IngressHandles {
     /// the bound's, is inside the walk and reaches the channel twice. Reaching it takes the
     /// previous life's newest row, this read, and a first request inside one second, which is
     /// shorter than the bind-and-connect path that separates them, and the claim guard in
-    /// `GasKillerTaskSource` drops the duplicate without spending a round. Closing it needs a
+    /// `TaskDispatcher` drops the duplicate without spending a round. Closing it needs a
     /// monotonic insertion key rather than a timestamp.
     pub requeue_bound: Option<TaskCursor>,
 }

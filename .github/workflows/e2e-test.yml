@@ -26,6 +26,8 @@ jobs:
         # `include` added to a base axis would MERGE into the matching base combination
         # instead of creating a separate leg):
         #   - legacy encoding, array-summation example: the baseline round.
+        #   - the same, with the router running two sessions at once: after the baseline task it
+        #     signs tasks for two targets concurrently, and asserts the sessions overlapped.
         #   - the CANONICAL encoding settling a task that makes a re-entrant external call
         #     mid-transition — a green run proves re-entrancy settles safely end-to-end.
         #   - the PRESTATE-NET encoding, which signs the target's net storage diff read from
@@ -41,6 +43,9 @@ jobs:
         include:
           - state_encoding: legacy
             e2e_example: array-summation
+          - state_encoding: legacy
+            e2e_example: array-summation
+            parallel: true
           - state_encoding: canonical
             e2e_example: reentrant
           - state_encoding: prestate-net
@@ -102,6 +107,7 @@ jobs:
           # Unset on every leg but the unbounded one, where an empty value means the default.
           GK_SIM_PROFILE: ${{ matrix.sim_profile || 'chain' }}
           ANVIL_EXTRA_ARGS: ${{ matrix.anvil_extra_args }}
+          E2E_PARALLEL: ${{ matrix.parallel || 'false' }}
         run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log; exit ${PIPESTATUS[0]}
 
       - name: Show router logs
@@ -114,6 +120,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-output-${{ matrix.state_encoding }}-${{ matrix.e2e_example }}
+          name: e2e-test-output-${{ matrix.state_encoding }}-${{ matrix.e2e_example }}${{ matrix.parallel && '-parallel' || '' }}
           path: e2e-test-output.log
           retention-days: 1
