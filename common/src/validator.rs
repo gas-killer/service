@@ -2,14 +2,14 @@ use alloy_provider::Provider;
 use anyhow::Result;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
-use commonware_runtime::telemetry::metrics::raw::{Counter, Family, Histogram};
+use commonware_runtime::telemetry::metrics::raw::{Counter, Family, Gauge, Histogram};
 use commonware_runtime::telemetry::metrics::registry::Registry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::{debug, info, warn};
 
 use alloy_primitives::{Address, U256};
@@ -58,9 +58,28 @@ struct DigestFlight {
 }
 
 impl DigestFlight {
-    fn lock(&self) -> &Mutex<()> {
-        self.lock.as_deref().expect("released only in drop")
+    fn lock(&self) -> &Arc<Mutex<()>> {
+        self.lock.as_ref().expect("released only in drop")
     }
+}
+
+/// What [`GasKillerValidator::claim_digest`] found for a task.
+pub enum DigestClaim {
+    /// Already traced; nothing to do.
+    Known(Digest),
+    /// Not yet traced, and this caller holds the task's flight: trace it with
+    /// [`GasKillerValidator::trace_digest`]. Every other caller for the task waits until the turn
+    /// is dropped, then reads what it left in the cache.
+    Trace(Box<DigestTurn>),
+}
+
+/// The exclusive right to trace one task, held from the claim until the trace ends or is dropped.
+pub struct DigestTurn {
+    // Declared first so it drops first: the guard holds a handle to the flight's lock, and the
+    // flight only leaves the map once it holds the last one.
+    _guard: OwnedMutexGuard<()>,
+    _flight: DigestFlight,
+    key: DigestCacheKey,
 }
 
 impl Drop for DigestFlight {
@@ -169,6 +188,12 @@ pub struct ValidatorMetrics {
     /// Digest-cache outcomes. A hit skips the entire analysis, so the phase histograms cannot be
     /// interpreted without knowing how often that happened.
     pub digest_cache: PerCacheResultCounter,
+    /// Traces waiting for a validation slot. Only a node bounds its traces, so this stays zero
+    /// on the router.
+    pub validation_queue_depth: Gauge<i64, AtomicI64>,
+    /// How long each trace waited for a validation slot. Read with the phase histograms: a slow
+    /// task that mostly queued needs a higher limit or more CPU, not a faster trace RPC.
+    pub validation_queue_wait_seconds: Histogram,
 }
 
 impl ValidatorMetrics {
@@ -235,6 +260,22 @@ impl ValidatorMetrics {
             digest_cache.clone(),
         );
 
+        let validation_queue_depth = Gauge::default();
+        registry.register(
+            "gas_killer_validation_queue_depth",
+            "Task traces waiting for a validation slot (GK_VALIDATION_CONCURRENCY)",
+            validation_queue_depth.clone(),
+        );
+
+        let validation_queue_wait_seconds = Histogram::new([
+            0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0,
+        ]);
+        registry.register(
+            "gas_killer_validation_queue_wait_seconds",
+            "Time a task trace waited for a validation slot",
+            validation_queue_wait_seconds.clone(),
+        );
+
         Self {
             registry,
             evmsketch_duration_seconds,
@@ -245,6 +286,8 @@ impl ValidatorMetrics {
             revm_estimate_seconds,
             executor_cache,
             digest_cache,
+            validation_queue_depth,
+            validation_queue_wait_seconds,
         }
     }
 
@@ -848,20 +891,50 @@ impl GasKillerValidator {
     pub async fn expected_digest_for_task(&self, task: &GasKillerTaskData) -> Result<Digest> {
         let task_data = task;
 
-        let cache_key = digest_cache_key(task_data);
-
-        // Check cache before running expensive EVMSketch
-        if let Some(cached) = self.cached_digest(&cache_key).await {
-            return Ok(cached);
+        match self.claim_digest(task_data).await {
+            DigestClaim::Known(digest) => Ok(digest),
+            DigestClaim::Trace(turn) => self.trace_digest(task_data, turn).await,
         }
+    }
 
-        // Missed: claim this key's flight, or wait behind the caller already tracing it. The
-        // trace runs under the flight lock so only one runs per key at a time. Errors are not
-        // shared, so waiters behind a failed trace each retry it in turn rather than together.
-        let flight = self.acquire_digest_flight(&cache_key);
-        let _permit = flight.lock().lock().await;
+    /// The task's digest if it is already known, or else the turn to trace it, once any caller
+    /// already tracing it has finished.
+    ///
+    /// The flight is taken here rather than inside the trace so a caller can hold it while it
+    /// waits for somewhere to run the trace: a second caller for the same task then waits on the
+    /// first, not on that queue. Errors are not shared, so waiters behind a failed trace each
+    /// take the turn and retry it in turn rather than together.
+    pub async fn claim_digest(&self, task: &GasKillerTaskData) -> DigestClaim {
+        let key = digest_cache_key(task);
+        if let Some(cached) = self.cached_digest(&key).await {
+            return DigestClaim::Known(cached);
+        }
+        let flight = self.acquire_digest_flight(&key);
+        let guard = Arc::clone(flight.lock()).lock_owned().await;
+        // A caller that waited is here because someone else traced the task, and that trace
+        // has usually filled the cache since.
+        if let Some(cached) = self.cached_digest(&key).await {
+            return DigestClaim::Known(cached);
+        }
+        DigestClaim::Trace(Box::new(DigestTurn {
+            _guard: guard,
+            _flight: flight,
+            key,
+        }))
+    }
 
-        self.resolve_digest_uncached(task_data, &cache_key).await
+    /// Traces the task `turn` was claimed for and caches its digest. The turn is held until the
+    /// trace ends, so no other caller traces the task meanwhile.
+    pub async fn trace_digest(
+        &self,
+        task_data: &GasKillerTaskData,
+        turn: Box<DigestTurn>,
+    ) -> Result<Digest> {
+        debug_assert!(
+            turn.key == digest_cache_key(task_data),
+            "turn is for another task"
+        );
+        self.resolve_digest_uncached(task_data, &turn.key).await
     }
 
     /// Reads a digest already in the cache, counting the lookup.
@@ -878,20 +951,13 @@ impl GasKillerValidator {
         Some(cached)
     }
 
-    /// Runs the EVMSketch path for a key whose flight this caller holds.
-    ///
-    /// Re-reads the cache first: a caller that waited for the flight is here because someone
-    /// else was tracing the same task, and that trace has since filled the cache. Errors leave
-    /// the cache untouched, so the next caller retries rather than inheriting a failure.
+    /// Runs the EVMSketch path for a key whose flight this caller holds. Errors leave the cache
+    /// untouched, so the next caller retries rather than inheriting a failure.
     async fn resolve_digest_uncached(
         &self,
         task_data: &GasKillerTaskData,
         cache_key: &DigestCacheKey,
     ) -> Result<Digest> {
-        if let Some(cached) = self.cached_digest(cache_key).await {
-            return Ok(cached);
-        }
-
         if let Some(metrics) = &self.validator_metrics {
             metrics.observe_digest_cache(false);
         }
@@ -1021,13 +1087,65 @@ mod tests {
         let unrelated = validator.acquire_digest_flight(&other_key);
 
         assert!(
-            std::ptr::eq(first.lock(), second.lock()),
+            Arc::ptr_eq(first.lock(), second.lock()),
             "the same task must map to one flight, or both callers trace it"
         );
         assert!(
-            !std::ptr::eq(first.lock(), unrelated.lock()),
+            !Arc::ptr_eq(first.lock(), unrelated.lock()),
             "different tasks must not serialize against each other"
         );
+    }
+
+    #[tokio::test]
+    async fn a_second_claim_waits_for_the_first_turn_and_reads_its_digest() {
+        let validator = Arc::new(GasKillerValidator::with_rpc_url("https://example.com"));
+        let task = create_test_task_data();
+
+        let DigestClaim::Trace(turn) = validator.claim_digest(&task).await else {
+            panic!("nothing is cached yet");
+        };
+        let follower = tokio::spawn({
+            let (validator, task) = (Arc::clone(&validator), task.clone());
+            async move { validator.claim_digest(&task).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !follower.is_finished(),
+            "the follower must wait for the turn"
+        );
+
+        validator.prime_cache(&task, &[0xaa]).await;
+        drop(turn);
+        let claim = tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .expect("releasing the turn must wake the follower")
+            .unwrap();
+        assert!(
+            matches!(claim, DigestClaim::Known(d) if d == task.build_payload_hash(&[0xaa])),
+            "the follower must read the leader's digest rather than trace again"
+        );
+        assert!(validator.digest_flights.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_turn_dropped_without_a_digest_passes_to_the_next_caller() {
+        let validator = Arc::new(GasKillerValidator::with_rpc_url("https://example.com"));
+        let task = create_test_task_data();
+
+        let DigestClaim::Trace(turn) = validator.claim_digest(&task).await else {
+            panic!("nothing is cached yet");
+        };
+        let follower = tokio::spawn({
+            let (validator, task) = (Arc::clone(&validator), task.clone());
+            async move { validator.claim_digest(&task).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(turn);
+        let claim = tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(claim, DigestClaim::Trace(_)));
     }
 
     #[tokio::test]

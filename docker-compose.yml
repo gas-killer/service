@@ -62,6 +62,7 @@ services:
       - STORAGE_DIR=/app/data
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
+      - GK_VALIDATION_CONCURRENCY=${GK_VALIDATION_CONCURRENCY:-${MAX_IN_FLIGHT_TASKS:-1}}
     volumes:
       - ./config/.nodes/operator_keys/testacc1.private.bls.key.json:/app/key.json:ro
       # secp256k1 Schnorr signing key, separate from the BN254 p2p identity above.
@@ -106,6 +107,7 @@ services:
       - STORAGE_DIR=/app/data
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
+      - GK_VALIDATION_CONCURRENCY=${GK_VALIDATION_CONCURRENCY:-${MAX_IN_FLIGHT_TASKS:-1}}
     volumes:
       - ./config/.nodes/operator_keys/testacc2.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes/operator_keys/testacc2.private.ecdsa.key.json:/app/schnorr_key.json:ro
@@ -141,6 +143,7 @@ services:
       - STORAGE_DIR=/app/data
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
+      - GK_VALIDATION_CONCURRENCY=${GK_VALIDATION_CONCURRENCY:-${MAX_IN_FLIGHT_TASKS:-1}}
     volumes:
       - ./config/.nodes/operator_keys/testacc3.private.bls.key.json:/app/key.json:ro
       - ./config/.nodes/operator_keys/testacc3.private.ecdsa.key.json:/app/schnorr_key.json:ro

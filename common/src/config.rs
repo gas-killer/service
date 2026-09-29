@@ -221,6 +221,26 @@ pub fn max_in_flight_tasks() -> usize {
         .unwrap_or(DEFAULT_MAX_IN_FLIGHT_TASKS)
 }
 
+/// Reads how many task traces a node runs at once from `GK_VALIDATION_CONCURRENCY`, defaulting to
+/// [`max_in_flight_tasks`] so a node can trace every session the router runs side by side. Zero or
+/// unparseable values fall back to that default.
+///
+/// Traces past the limit wait their turn in arrival order rather than all running at a fraction
+/// of the speed: one trace that finishes inside the round is worth more than several that miss it.
+pub fn validation_concurrency() -> usize {
+    validation_concurrency_from(
+        env::var("GK_VALIDATION_CONCURRENCY").ok().as_deref(),
+        max_in_flight_tasks(),
+    )
+}
+
+fn validation_concurrency_from(value: Option<&str>, in_flight: usize) -> usize {
+    value
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&v: &usize| v > 0)
+        .unwrap_or(in_flight)
+}
+
 /// Default number of consecutive RPC failures against one chain before that chain is treated as
 /// unavailable.
 ///
@@ -1248,6 +1268,14 @@ mod tests {
         assert_eq!(schnorr_straggler_margin_percent_from(Some("0")), 0);
         assert_eq!(schnorr_straggler_margin_percent_from(Some("-5")), 20);
         assert_eq!(schnorr_straggler_margin_percent_from(Some("lots")), 20);
+    }
+
+    #[test]
+    fn validation_concurrency_follows_the_session_cap_unless_set() {
+        assert_eq!(validation_concurrency_from(None, 2), 2);
+        assert_eq!(validation_concurrency_from(Some(" 1 "), 2), 1);
+        assert_eq!(validation_concurrency_from(Some("0"), 2), 2);
+        assert_eq!(validation_concurrency_from(Some("many"), 3), 3);
     }
 
     #[test]

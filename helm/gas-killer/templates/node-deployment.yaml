@@ -219,6 +219,8 @@ spec:
             # keep every session the router can still be running.
             - name: ROUND_TIMEOUT
               value: {{ $root.Values.router.roundTimeout | quote }}
+            - name: GK_VALIDATION_CONCURRENCY
+              value: {{ $root.Values.node.validationConcurrency | default $root.Values.router.maxInFlightTasks | quote }}
             - name: STORAGE_DIR
               value: {{ $root.Values.node.storageDir | quote }}
             {{- with $root.Values.schnorr.messagesPerSecond }}
