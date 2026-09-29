@@ -107,8 +107,9 @@ impl Lanes {
 }
 
 /// Runs `session` for each task from `queue`, at most `max_in_flight` at once and one per
-/// target, until the ingress side closes and every session has ended, or a session reports the
-/// schnorr channel closed by returning `false`.
+/// target, until the ingress side closes and every session has ended. A session returning
+/// `false` reports the schnorr channel closed: nothing new starts, and the live sessions are
+/// drained rather than aborted, so one that already signed still settles its task.
 async fn schedule<F, Fut>(mut queue: TaskQueue, max_in_flight: usize, session: F)
 where
     F: Fn(QueuedTask) -> Fut,
@@ -118,8 +119,10 @@ where
     let mut live = JoinSet::new();
     let mut targets = HashMap::new();
     let mut ingress_open = true;
+    let mut channel_closed = false;
     loop {
-        while live.len() < max_in_flight
+        while !channel_closed
+            && live.len() < max_in_flight
             && let Some(task) = lanes.next_ready()
         {
             queue.started();
@@ -128,8 +131,12 @@ where
                 task.request.body.target_address,
             );
         }
-        if !ingress_open && live.is_empty() {
-            info!("task channel closed; scheduler exiting");
+        if live.is_empty() && (channel_closed || !ingress_open) {
+            if channel_closed {
+                info!("schnorr channel closed; scheduler exiting");
+            } else {
+                info!("task channel closed; scheduler exiting");
+            }
             return;
         }
         tokio::select! {
@@ -146,14 +153,14 @@ where
                 if let Some(target) = targets.remove(&id) {
                     lanes.release(target);
                 }
-                if !keep_going {
-                    // Aborting the other sessions leaves their tasks `processing` for the next
-                    // router life, like the one that saw the close.
-                    info!("schnorr channel closed; scheduler exiting");
-                    return;
+                if !keep_going && !channel_closed {
+                    // Sessions still signing see their inbox closed and end at once; only a
+                    // session that already signed keeps the drain waiting, while it settles.
+                    info!(live = live.len(), "schnorr channel closed; draining live sessions");
+                    channel_closed = true;
                 }
             }
-            queued = queue.next(), if ingress_open && live.len() < max_in_flight => {
+            queued = queue.next(), if !channel_closed && ingress_open && live.len() < max_in_flight => {
                 match queued {
                     Some(task) => lanes.hold(task),
                     None => ingress_open = false,
@@ -525,17 +532,27 @@ mod tests {
         harness.assert_started(&["a1", "a2"]).await;
     }
 
+    /// A session that already signed must settle its task rather than be aborted and signed
+    /// again by the next router life, and nothing new may start once the channel is gone.
     #[tokio::test]
-    async fn a_closed_channel_stops_the_scheduler_with_ingress_still_open() {
+    async fn a_closed_channel_drains_live_sessions_and_starts_nothing_new() {
         let harness = Harness::default();
-        let (_sender, queue, _) = ingress(&[queued("a1", 1), queued("b1", 2)]);
+        // a2 waits behind a1, so the close frees a lane it could otherwise take.
+        let (_sender, queue, _) = ingress(&[queued("a1", 1), queued("a2", 1), queued("b1", 2)]);
         let scheduler = tokio::spawn(schedule(queue, 2, harness.session()));
 
         harness.assert_started(&["a1", "b1"]).await;
         harness.end("a1", Ending::ChannelClosed);
+        harness.assert_started(&["a1", "b1"]).await;
+        assert!(
+            !scheduler.is_finished(),
+            "the scheduler waits for the session still settling"
+        );
+
+        harness.end("b1", Ending::Settled);
         tokio::time::timeout(Duration::from_secs(1), scheduler)
             .await
-            .expect("a closed channel ends the scheduler")
+            .expect("the scheduler exits once the live sessions drained, with ingress still open")
             .unwrap();
     }
 
