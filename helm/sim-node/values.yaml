@@ -21,7 +21,14 @@ reth:
     - --rpc.gascap=max
     - --rpc.eth-proof-window=86400
     - --rpc.max-response-size=512
-    - --rpc.max-tracing-requests=8
+    # Sized so every trace the fleet sends at once gets a slot: each prestate-net trace issues two
+    # tracer calls together, from the router and every node, for each live session. That is
+    # 2 x (1 + operators) x MAX_IN_FLIGHT_TASKS = 16 for 3 operators at 2 sessions. A call that
+    # misses a slot waits for a whole heavy trace to finish, so its operator finishes that task
+    # last and is left out of the signature, and a light task waits minutes behind heavy ones.
+    # Slots past the core count share the CPU rather than add throughput, which is the point:
+    # every operator's trace of a task then finishes at about the same time.
+    - --rpc.max-tracing-requests=16
     # MDBX read transactions default to a 300 s timeout ("read transaction has been timed out
     # (-96000)"), which is exactly what a multi-minute eth_call/debug_traceCall runs into: a
     # 663 Ggas call died at 336 s. 2 h covers a ~30 min trace with margin; 0 would disable it
