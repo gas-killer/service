@@ -278,6 +278,8 @@ The pipeline's shape, as opposed to the cost of one round:
 | `gas_killer_window_base`, `gas_killer_highest_assigned_height` | Edges of the live window. Both pinned while work is queued is a wedge |
 | `gas_killer_height_age_seconds` | Age of the oldest running session |
 | `gas_killer_height_outcomes_total{outcome}` | How each session's task settled: `ready`, `failed`, `timed_out`, `trace_failed` |
+| `gas_killer_non_signers_total{operator}` | Signed sessions each operator was left out of. One operator here on every long task is slower than the straggler margin allows |
+| `gas_killer_straggler_wait_seconds` | How long a signed session waited past its quorum for the remaining operators: the latency the straggler margin costs |
 | `gas_killer_settlement_conflicts_total` | Terminal-state transitions the store refused. Must be 0 |
 | `gas_killer_config_fingerprint{fingerprint}` | Always 1, labelled with this process's consensus-critical config |
 | `network_spawner_messages_rate_limited_total{peer,message}` | Messages the *receiving* peer throttled, by channel (`data_2` Schnorr) |

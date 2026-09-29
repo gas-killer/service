@@ -550,6 +550,38 @@ data:
           "fieldConfig": { "defaults": { "unit": "short" } }
         },
         {
+          "id": 77,
+          "type": "timeseries",
+          "title": "Non-Signers by Operator (1h)",
+          "description": "Signed sessions each operator was left out of. A non-signer costs its operator its participation and makes verifyAndUpdate dearer to settle. One operator here on every long task is slower than SCHNORR_STRAGGLER_MARGIN_PERCENT allows past the router's own trace, or down; every operator here at once points at the shared trace RPC.",
+          "gridPos": { "x": 12, "y": 92, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "sum by (operator) (increase(gas_killer_non_signers_total[1h]))",
+              "legendFormat": "{{ "{{" }} operator {{ "}}" }}"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 78,
+          "type": "timeseries",
+          "title": "Straggler Wait (p50 / p95)",
+          "description": "How long a signed session's commit stage ran past its quorum, waiting for the remaining operators. This is the latency the straggler margin buys full participation with; it stays near zero when every operator commits alongside the quorum.",
+          "gridPos": { "x": 0, "y": 100, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, rate(gas_killer_straggler_wait_seconds_bucket[15m]))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, rate(gas_killer_straggler_wait_seconds_bucket[15m]))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" } }
+        },
+        {
           "id": 79,
           "type": "stat",
           "title": "Config Fingerprints",

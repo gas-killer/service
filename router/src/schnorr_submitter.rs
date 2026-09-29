@@ -62,6 +62,7 @@ impl SchnorrSubmitter {
                 digest,
                 signature,
                 non_signers,
+                ..
             } => {
                 self.render(
                     height,

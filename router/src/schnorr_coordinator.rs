@@ -121,6 +121,14 @@ fn straggler_deadline(
         .min(trace_deadline)
 }
 
+/// A signing attempt that assembled a signature.
+struct Signing {
+    signature: AggregateSignature,
+    non_signers: Vec<Address>,
+    digest: [u8; 32],
+    straggler_wait: Duration,
+}
+
 /// The router's own trace as the commit stage paces against it.
 struct RouterPace {
     trace: RouterTrace,
@@ -160,6 +168,8 @@ pub enum SessionOutcome {
         /// Operator identity addresses that did NOT sign, strictly ascending — the exact
         /// list `SchnorrStakeRegistry.isValidSignature` subtracts on-chain.
         non_signers: Vec<Address>,
+        /// How long the signing attempt's commit stage ran past its quorum.
+        straggler_wait: Duration,
     },
     /// No attempt assembled a signature before `ROUND_TIMEOUT`.
     TimedOut,
@@ -318,7 +328,8 @@ where
                     &mut sender, &mut inbox, &mut pace, height, attempt, task, &mut suspects,
                     deadline,
                 ) => {
-                    let Some((signature, non_signers, digest)) = outcome else {
+                    let Some(Signing { signature, non_signers, digest, straggler_wait }) = outcome
+                    else {
                         debug!(height, attempt, "signing attempt failed; retrying");
                         continue;
                     };
@@ -332,6 +343,7 @@ where
                         digest,
                         signature,
                         non_signers,
+                        straggler_wait,
                     });
                 }
             }
@@ -375,7 +387,7 @@ where
         task: &GasKillerTaskData,
         suspects: &mut HashSet<Address>,
         deadline: Instant,
-    ) -> Option<(AggregateSignature, Vec<Address>, [u8; 32])> {
+    ) -> Option<Signing> {
         // Round 1: fresh nonces from everyone (suspects included — flapping nodes
         // recover here; they are filtered at subset selection below).
         let request = SchnorrMsg::CommitRequest {
@@ -462,6 +474,7 @@ where
             }
         }
 
+        let straggler_wait = quorum_at.map_or(Duration::ZERO, |at| at.elapsed());
         let Some(message) = agreed_digest(commits.values().map(|(_, _, d)| d), min_signers) else {
             debug!(
                 height,
@@ -585,7 +598,12 @@ where
             .copied()
             .collect();
         non_signers.sort();
-        Some((signature, non_signers, message))
+        Some(Signing {
+            signature,
+            non_signers,
+            digest: message,
+            straggler_wait,
+        })
     }
 }
 
@@ -951,15 +969,17 @@ mod tests {
         })
     }
 
-    fn signed_non_signers(outcome: Option<SessionOutcome>) -> usize {
+    /// The signed session's non-signer count and how long it waited past its quorum.
+    fn signed(outcome: Option<SessionOutcome>) -> (usize, Duration) {
         match outcome {
             Some(SessionOutcome::Signed {
                 digest,
                 non_signers,
+                straggler_wait,
                 ..
             }) => {
                 assert_eq!(digest, loopback::DIGEST);
-                non_signers.len()
+                (non_signers.len(), straggler_wait)
             }
             other => panic!("session did not sign: {other:?}"),
         }
@@ -980,7 +1000,12 @@ mod tests {
                 &trace_taking(Duration::from_millis(500)),
             )
             .await;
-        assert_eq!(signed_non_signers(outcome), 0);
+        let (non_signers, waited) = signed(outcome);
+        assert_eq!(non_signers, 0);
+        assert!(
+            waited >= Duration::from_millis(450) && waited < Duration::from_millis(1000),
+            "waited {waited:?} past the quorum for a node committing at 540ms"
+        );
     }
 
     /// A node that never catches up costs the session only the margin past the router's trace.
@@ -998,7 +1023,12 @@ mod tests {
                 &trace_taking(Duration::from_millis(500)),
             )
             .await;
-        assert_eq!(signed_non_signers(outcome), 1);
+        let (non_signers, waited) = signed(outcome);
+        assert_eq!(non_signers, 1);
+        assert!(
+            waited >= Duration::from_millis(550),
+            "waited only {waited:?}, short of the router's 500ms trace plus its margin"
+        );
         assert!(
             started.elapsed() < Duration::from_millis(1500),
             "the session waited {:?} for a stuck node",
