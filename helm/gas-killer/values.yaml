@@ -604,8 +604,9 @@ schnorr:
   stakeRegistryAddress: ""
 
   # Round-trip timeout for the coordinator's stages that hold no node compute, in seconds:
-  # partial-signature collection, and the wait for the remaining commits once enough
-  # operators agree on a digest to sign. Empty uses the binary's default of
+  # partial-signature collection, and the least the remaining operators get to commit once
+  # enough agree on a digest (they get until the router's own trace finishes plus 20% of its
+  # duration when that is longer). Empty uses the binary's default of
   # min(5, ROUND_TIMEOUT/6), so several attempts fit inside one round-timeout window, and a short
   # deadline is what lets the coordinator drop an unresponsive operator quickly.
   stageTimeoutSecs: ""

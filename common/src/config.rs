@@ -598,8 +598,9 @@ pub const DEFAULT_SCHNORR_STAGE_TIMEOUT_SECS: f64 = 5.0;
 ///
 /// It bounds the two stages that contain no node compute: partial collection (a signer
 /// answers from the digest its commit already carried) and, once enough commits agree
-/// on a digest to sign, the wait for the remaining operators' commits. The stage that holds
-/// the node's trace is [`schnorr_trace_timeout`].
+/// on a digest to sign, the least the remaining operators get to commit; they get longer
+/// when the router's own trace does. The stage that holds the node's trace is
+/// [`schnorr_trace_timeout`].
 pub fn schnorr_stage_timeout() -> std::time::Duration {
     schnorr_stage_timeout_from(
         round_timeout(),

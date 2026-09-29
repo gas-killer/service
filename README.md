@@ -177,9 +177,13 @@ without waiting for the router's own trace. The router trace runs alongside and 
 result: a payload is rendered only when the router's storage updates hash to the digest the
 quorum signed, and a router trace that fails ends the session at once.
 
-- **Offline or unresponsive node**: once enough commits agree on a digest, the rest get one
-  more `SCHNORR_STAGE_TIMEOUT_SECS`; a node that misses it is listed as a non-signer. If the
-  quorum needs it, the coordinator waits up to `SCHNORR_TRACE_TIMEOUT_SECS` for its commit.
+- **Slow, offline or unresponsive node**: once enough commits agree on a digest, the rest get
+  until the router's own trace of the task finishes plus 20% of its duration, and at least one
+  more `SCHNORR_STAGE_TIMEOUT_SECS`. The session cannot render before the router's trace
+  finishes anyway, so a node about as fast as the router still signs at almost no cost; each
+  non-signer costs its operator participation and makes `verifyAndUpdate` dearer to settle. A
+  node that misses the margin is listed as a non-signer. If the quorum needs it, the
+  coordinator waits up to `SCHNORR_TRACE_TIMEOUT_SECS` for its commit.
 - **Divergent node**: a node that committed to a different digest than the quorum is left out
   of the signing subset and listed as a non-signer, and it refuses to sign any message other
   than its own digest. A signer that sends no partial by the stage deadline
@@ -247,7 +251,7 @@ Optional environment variables:
 - `INGRESS_STALENESS_WINDOW_BLOCKS`: How far behind the target chain's head a submitted `block_height` may be and still be admitted; past it `POST /tasks` returns `400 STALE_BLOCK`. Defaults to `BLOCK_STALE_MEASURE - PAYLOAD_BLOCK_BUFFER` (250 at the stock 300/50), floored at 1 block — a task's analysis is anchored at its `block_height`, and both the aggregation round and the rendered payload's validity window have to fit in what is left of the contract's staleness window, so admission holds the payload buffer back instead of accepting work that can only just finish simulating. An explicit value above `BLOCK_STALE_MEASURE` is clamped to it (and warned about at startup); `0` disables the check entirely. The effective window is logged at startup.
 - `QUORUM_NUMBER`: Quorum number to use (default: 0)
 - `QUORUM_THRESHOLD` / `THRESHOLD_DENOMINATOR`: Signing threshold `num/den` (default: 2/3). Sets the coordinator's `min_signers` floor and the `SchnorrStakeRegistry`'s on-chain threshold, so the two checks stay in lockstep (see "Quorum model" above).
-- `SCHNORR_STAGE_TIMEOUT_SECS`: Round-trip deadline per attempt for partial collection, and for the remaining commits once enough agree on a digest (default: `min(5, ROUND_TIMEOUT/6)`).
+- `SCHNORR_STAGE_TIMEOUT_SECS`: Round-trip deadline per attempt for partial collection, and the least the remaining operators get to commit once enough agree on a digest; they get until the router's own trace finishes plus 20% of its duration when that is longer (default: `min(5, ROUND_TIMEOUT/6)`).
 - `SCHNORR_TRACE_TIMEOUT_SECS`: Commit deadline per attempt (default: `ROUND_TIMEOUT/2`). A node commits only after tracing the task, so this must cover a full cold trace.
 - `P2P_SCHNORR_MESSAGES_PER_SECOND`: Per-peer rate for the Schnorr channel, channel 2 (default: 64). The p2p sender silently drops over-rate messages, and a dropped signing-round message costs a whole attempt.
 - `SCHNORR_NOTICE_WINDOW`: Blocks a `SchnorrStakeRegistry` operator-set change must be announced ahead of taking effect (default: 0). `example.env` covers when to raise it.
