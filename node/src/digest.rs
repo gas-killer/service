@@ -66,17 +66,26 @@ impl DigestResolver {
             // unrelated ones, and never holds a slot to do nothing.
             let outcome = ::tokio::time::timeout_at(deadline, async {
                 let turn = match self.validator.claim_digest(task).await {
-                    DigestClaim::Known(digest) => return Ok(digest),
+                    DigestClaim::Known(digest) => return Some(Ok(digest)),
                     DigestClaim::Trace(turn) => turn,
                 };
+                // `timeout_at` polls this before its timer, so a turn handed over in the tick
+                // the round ends would otherwise start a trace before the timeout lands.
+                if ::tokio::time::Instant::now() >= deadline {
+                    return None;
+                }
                 let validator = Arc::clone(&self.validator);
                 let owned = task.clone();
-                self.traces
-                    .run(async move { validator.trace_digest(&owned, turn).await })
-                    .await
+                Some(
+                    self.traces
+                        .run(async move { validator.trace_digest(&owned, turn).await })
+                        .await,
+                )
             })
-            .await;
-            let Ok(outcome) = outcome else {
+            .await
+            .ok()
+            .flatten();
+            let Some(outcome) = outcome else {
                 warn!(
                     height,
                     "task validation ran past its round; declining to commit"
@@ -238,6 +247,43 @@ mod tests {
             .unwrap();
     }
 
+    /// A turn claimed once the round is already over must not start a trace. `timeout_at`
+    /// polls its future before its timer, so without a check of its own a waiter that takes the
+    /// turn in the tick the deadline fires would take a slot and spawn a trace before the
+    /// timeout cancelled it.
+    #[tokio::test]
+    async fn a_turn_claimed_after_the_deadline_starts_no_trace() {
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", silent.local_addr().unwrap());
+        let runtime = TraceRuntime::new(1).unwrap();
+        let metrics = Arc::new(ValidatorMetrics::new());
+        let resolver = DigestResolver::new(
+            Arc::new(GasKillerValidator::with_rpc_url(url)),
+            runtime.pool().with_metrics(Arc::clone(&metrics)),
+        );
+        let task = GasKillerTaskData {
+            block_height: 1,
+            ..Default::default()
+        };
+
+        let over = Instant::now() - Duration::from_millis(1);
+        assert!(resolver.resolve(7, &task, over).await.is_none());
+        assert_eq!(slots_requested(&metrics), None);
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    fn slots_requested(metrics: &ValidatorMetrics) -> Option<String> {
+        metrics
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix("gas_killer_validation_queue_wait_seconds_count "))
+            .map(str::to_owned)
+            .filter(|count| count != "0")
+    }
+
     /// A later attempt of a session shares the first attempt's deadline, so once the first
     /// attempt's trace is aborted at the end of the round the later one gives up too, rather
     /// than taking the turn and tracing afresh for a session nobody will sign.
@@ -271,13 +317,8 @@ mod tests {
         let started = Instant::now();
         assert!(later.await.unwrap().is_none());
         assert!(started.elapsed() < Duration::from_millis(200));
-        let slots_requested = metrics
-            .encode()
-            .lines()
-            .find_map(|line| line.strip_prefix("gas_killer_validation_queue_wait_seconds_count "))
-            .map(str::to_owned);
         assert_eq!(
-            slots_requested.as_deref(),
+            slots_requested(&metrics).as_deref(),
             Some("1"),
             "only the first attempt may ever have asked for a trace slot"
         );
