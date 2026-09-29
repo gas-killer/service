@@ -258,6 +258,9 @@ struct Endpoints {
     api_key: Arc<Option<String>>,
     /// `None` when no request needs an RPC endpoint.
     http_rpc: Arc<Option<String>>,
+    /// Every payload is submitted from the one funded key, and each submission reads the pending
+    /// nonce afresh, so parallel requests take turns here or two of them send the same nonce.
+    submit_turn: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Endpoints {
@@ -287,6 +290,7 @@ impl Endpoints {
             ready_timeout_secs,
         )
         .await?;
+        let _turn = self.submit_turn.lock().await;
         submit_payload(&payload, http_rpc, &submitter_key()?).await
     }
 }
@@ -972,6 +976,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         router_url: Arc::new(config.router_url.clone()),
         api_key: Arc::new(api_key),
         http_rpc: Arc::new(config.http_rpc.clone()),
+        submit_turn: Arc::default(),
     };
 
     let mut all_results: Vec<RequestResult> = Vec::new();

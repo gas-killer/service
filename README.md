@@ -304,10 +304,11 @@ histogram sums rather than percentiles: `trace_fetch + state_prefetch` against
 `parse + revm_estimate`.
 
 `gas_killer_config_fingerprint` is a hash of the settings that must match across the router and
-every operator: `GK_SIM_PROFILE`, `STATE_ENCODING`, the application namespace,
-and the Schnorr wire version. A fleet that disagrees on any of them
-does not fail loudly — peers stay connected, quorum never forms, and every pod reports healthy —
-so `count(count by (fingerprint) (gas_killer_config_fingerprint))` must be exactly 1. It is also
+every operator: `GK_SIM_PROFILE`, `STATE_ENCODING`, the application namespace, the Schnorr wire
+version, and `ROUND_TIMEOUT`, which also sets how long a node keeps a session's nonces. A fleet
+that disagrees on any of them does not fail loudly — peers stay connected, and quorum never
+forms or a node quietly drops out of long rounds, while every pod reports healthy — so
+`count(count by (fingerprint) (gas_killer_config_fingerprint))` must be exactly 1. It is also
 the pre-flight check for a rolling upgrade: none of these may be changed on a live fleet.
 
 ## Ingress Mode

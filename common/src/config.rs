@@ -479,7 +479,7 @@ pub const SCHNORR_WIRE_VERSION: u32 = 1;
 ///
 /// Each input either feeds the task digest (the simulation profile, the state encoding, the
 /// namespace) or determines whether the two sides can run a signing round at all (the wire
-/// format). A fleet running two values of any of them does not fail loudly: peers stay
+/// format, and the round timeout, which bounds how long a node keeps a session's nonces). A fleet running two values of any of them does not fail loudly: peers stay
 /// connected, quorum simply never forms, and the pipeline stalls while every pod reports healthy.
 ///
 /// Exported as a label so a split is one query — more than one distinct fingerprint across the
@@ -490,6 +490,7 @@ pub fn config_fingerprint() -> String {
         &format!("{:?}", state_encoding()),
         APPLICATION_NAMESPACE,
         SCHNORR_WIRE_VERSION,
+        round_timeout(),
     )
 }
 
@@ -502,6 +503,7 @@ fn fingerprint_of(
     state_encoding: &str,
     application_namespace: &[u8],
     schnorr_wire_version: u32,
+    round_timeout: std::time::Duration,
 ) -> String {
     let namespace: String = application_namespace
         .iter()
@@ -509,7 +511,9 @@ fn fingerprint_of(
         .collect();
     let canonical = format!(
         "sim_profile={sim_profile};state_encoding={state_encoding};\
-         application_namespace={namespace};schnorr_wire_version={schnorr_wire_version}"
+         application_namespace={namespace};schnorr_wire_version={schnorr_wire_version};\
+         round_timeout_ms={}",
+        round_timeout.as_millis()
     );
 
     let mut hasher = Sha256::new();
@@ -1196,12 +1200,18 @@ mod tests {
     }
 
     /// The consensus-critical settings of a healthy fleet, as `fingerprint_of` arguments.
-    fn healthy_inputs() -> (&'static str, &'static str, &'static [u8], u32) {
-        ("Chain", "Legacy", b"_COMMONWARE_AGGREGATION_", 1)
+    fn healthy_inputs() -> (&'static str, &'static str, &'static [u8], u32, Duration) {
+        (
+            "Chain",
+            "Legacy",
+            b"_COMMONWARE_AGGREGATION_",
+            1,
+            Duration::from_secs(300),
+        )
     }
 
-    fn fingerprint(inputs: (&'static str, &'static str, &'static [u8], u32)) -> String {
-        fingerprint_of(inputs.0, inputs.1, inputs.2, inputs.3)
+    fn fingerprint(inputs: (&'static str, &'static str, &'static [u8], u32, Duration)) -> String {
+        fingerprint_of(inputs.0, inputs.1, inputs.2, inputs.3, inputs.4)
     }
 
     #[test]
@@ -1235,6 +1245,10 @@ mod tests {
         let mut divergent = healthy_inputs();
         divergent.3 = 2;
         assert_ne!(fingerprint(divergent), healthy, "schnorr wire version");
+
+        let mut divergent = healthy_inputs();
+        divergent.4 = Duration::from_secs(30);
+        assert_ne!(fingerprint(divergent), healthy, "round timeout");
     }
 
     #[test]
