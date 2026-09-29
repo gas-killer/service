@@ -19,7 +19,7 @@ use commonware_avs_core::bn254::{Bn254, PublicKey, get_signer};
 use commonware_cryptography::Signer as _;
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_p2p::{Address, AddressableManager as _};
-use commonware_runtime::{Metrics, Quota, Runner, Spawner, Supervisor, tokio};
+use commonware_runtime::{Clock, Metrics, Quota, Runner, Spawner, Supervisor, tokio};
 use commonware_utils::NZU32;
 use commonware_utils::ordered::{Map, Set};
 use eigen_logging::log_level::LogLevel;
@@ -33,8 +33,8 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::digest::DigestResolver;
 use crate::trace_pool::TraceRuntime;
@@ -42,9 +42,49 @@ use crate::trace_pool::TraceRuntime;
 /// P2P channel carrying the interactive Schnorr signing rounds.
 const SCHNORR_CHANNEL: u64 = 2;
 
+/// How often the main runtime proves it is still scheduling work.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How old a heartbeat may get before liveness fails. Traces run elsewhere, so the main runtime
+/// only drives p2p and the signing rounds: this long without a turn means it is wedged, not busy.
+const HEARTBEAT_STALE: Duration = Duration::from_secs(30);
+
+/// When the node's main runtime last ran a task. healthz is served from its own thread so load
+/// cannot starve the probe, which leaves this as the probe's view of the runtime that signs.
+#[derive(Clone)]
+struct Heartbeat {
+    origin: Instant,
+    last_ms: Arc<AtomicU64>,
+}
+
+impl Heartbeat {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            last_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn beat(&self) {
+        self.last_ms
+            .store(millis(self.origin.elapsed()), Ordering::Relaxed);
+    }
+
+    fn is_fresh(&self, stale: Duration) -> bool {
+        let age =
+            millis(self.origin.elapsed()).saturating_sub(self.last_ms.load(Ordering::Relaxed));
+        age <= millis(stale)
+    }
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[derive(Clone)]
 struct HealthState {
     ready: Arc<AtomicBool>,
+    heartbeat: Heartbeat,
     /// `tokio::Context` is not `Clone` in 2026.5.0; `Metrics::encode` works
     /// through a shared handle.
     context: Arc<tokio::Context>,
@@ -54,9 +94,14 @@ struct HealthState {
     config_metrics: Arc<ConfigMetrics>,
 }
 
-/// Liveness probe — always 200 if the process is running.
-async fn healthz_handler() -> StatusCode {
-    StatusCode::OK
+/// Liveness probe — 503 once the main runtime has stopped taking turns, so a wedged node is
+/// restarted rather than left connected and silent.
+async fn healthz_handler(State(s): State<HealthState>) -> StatusCode {
+    if s.heartbeat.is_fresh(HEARTBEAT_STALE) {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
 }
 
 /// Readiness probe — 503 until the signing path is spawned and the network is starting.
@@ -525,8 +570,19 @@ fn main() {
         let healthz_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), healthz_port);
         let fingerprint = config_fingerprint();
         tracing::info!(%fingerprint, "configuration fingerprint");
+        let heartbeat = Heartbeat::new();
+        context.child("heartbeat").spawn({
+            let heartbeat = heartbeat.clone();
+            move |context| async move {
+                loop {
+                    heartbeat.beat();
+                    context.sleep(HEARTBEAT_INTERVAL).await;
+                }
+            }
+        });
         let health_state = HealthState {
             ready: Arc::clone(&ready),
+            heartbeat,
             context: Arc::new(context.child("metrics_view")),
             validator_metrics,
             config_metrics: Arc::new(ConfigMetrics::new(&fingerprint)),
@@ -547,4 +603,21 @@ fn main() {
             tracing::error!(error = %e, "p2p network terminated");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_heartbeat_goes_stale_once_the_runtime_stops_beating() {
+        let heartbeat = Heartbeat::new();
+        heartbeat.beat();
+        assert!(heartbeat.is_fresh(Duration::from_secs(30)));
+
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!heartbeat.is_fresh(Duration::from_millis(5)));
+        heartbeat.beat();
+        assert!(heartbeat.is_fresh(Duration::from_millis(5)));
+    }
 }
