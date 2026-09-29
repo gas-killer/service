@@ -33,7 +33,13 @@ E2E_EXAMPLE_CHOICE="${E2E_EXAMPLE:-array-summation}"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
 GK_SIM_PROFILE_CHOICE="${GK_SIM_PROFILE:-chain}"
 export GK_SIM_PROFILE="$GK_SIM_PROFILE_CHOICE"
-echo "State encoding: $STATE_ENCODING_CHOICE | e2e example: $E2E_EXAMPLE_CHOICE | sim profile: $GK_SIM_PROFILE_CHOICE"
+# E2E_PARALLEL=true runs the router with two concurrent sessions and, after the main task, signs
+# tasks for two targets at once (array-summation only).
+E2E_PARALLEL_CHOICE="${E2E_PARALLEL:-false}"
+if [ "$E2E_PARALLEL_CHOICE" = "true" ]; then
+    export MAX_IN_FLIGHT_TASKS=2
+fi
+echo "State encoding: $STATE_ENCODING_CHOICE | e2e example: $E2E_EXAMPLE_CHOICE | sim profile: $GK_SIM_PROFILE_CHOICE | parallel: $E2E_PARALLEL_CHOICE"
 
 # Track if test passed
 TEST_PASSED=false
@@ -471,6 +477,51 @@ else
         cast run "$USER_TX_HASH" --rpc-url http://localhost:8545 || true
     fi
     exit 1
+fi
+
+# Step 11 (parallel only): sign tasks for two targets at once. A second ArraySummation gives the
+# second target; both tasks must land on-chain, and the router log must show both sessions live
+# at the same time, which a scheduler still running one session at a time would never print.
+if [ "$E2E_PARALLEL_CHOICE" = "true" ]; then
+    echo -e "${YELLOW}Step 11: Signing tasks for two targets concurrently...${NC}"
+    [ "$MANIFEST_EXAMPLE" = "arraySummation" ] \
+        || { echo -e "${RED}E2E_PARALLEL needs the array-summation example${NC}"; exit 1; }
+    DEPLOY_JSON="$PROJECT_ROOT/config/.nodes/avs_deploy.json"
+    FIRST_TARGET=$(jq -r '.addresses.arraySummation // empty' "$DEPLOY_JSON")
+    run_from_root --bin deploy_example -- --example arraySummation \
+        || { echo -e "${RED}Second ArraySummation deployment failed${NC}"; exit 1; }
+    SECOND_TARGET=$(jq -r '.addresses.arraySummation // empty' "$DEPLOY_JSON")
+    if [ -z "$FIRST_TARGET" ] || [ -z "$SECOND_TARGET" ] || [ "$FIRST_TARGET" = "$SECOND_TARGET" ]; then
+        echo -e "${RED}Could not resolve two distinct targets ($FIRST_TARGET, $SECOND_TARGET)${NC}"
+        exit 1
+    fi
+    cast rpc evm_mine --rpc-url http://localhost:8545 >/dev/null \
+        || { echo -e "${RED}could not mine a block after deploying${NC}"; exit 1; }
+
+    CALL_DATA=$(sed -nE 's/^[[:space:]]*call_data[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' \
+        "$PROJECT_ROOT/scripts/scenarios/generated/arraySummation.toml" | head -1)
+    PARALLEL_SCENARIO="$(mktemp -d)/parallel.toml"
+    {
+        printf 'router_url = "http://localhost:8080"\nhttp_rpc   = "$HTTP_RPC"\n\n'
+        printf '[[scenarios]]\nname = "two_targets"\nmode = "parallel"\n'
+        for target in "$FIRST_TARGET" "$SECOND_TARGET"; do
+            printf '\n  [[scenarios.requests]]\n  target_address = "%s"\n  call_data      = "%s"\n' "$target" "$CALL_DATA"
+            printf '  from_address   = "local"\n  submit         = true\n  verify         = true\n'
+        done
+    } > "$PARALLEL_SCENARIO"
+
+    run_from_root --bin run_scenario -- "$PARALLEL_SCENARIO" \
+        || { echo -e "${RED}❌ Concurrent tasks did not both settle${NC}"; docker compose logs --tail=100 router || true; exit 1; }
+
+    # Replays session starts and ends in log order; the deepest overlap is the most sessions
+    # that were live at once.
+    MAX_LIVE=$(docker compose logs --no-color router 2>/dev/null \
+        | awk '/assigned task to height/ { live++; if (live > max) max = live } /session settled/ { live-- } END { print max + 0 }')
+    if [ "$MAX_LIVE" -lt 2 ]; then
+        echo -e "${RED}❌ Sessions never overlapped (at most $MAX_LIVE live at once)${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Two targets signed concurrently ($MAX_LIVE sessions live at once)${NC}"
 fi
 
 # Show recent router logs for confirmation

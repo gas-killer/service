@@ -215,7 +215,8 @@ spec:
             - name: P2P_MESSAGE_BACKLOG
               value: {{ $root.Values.node.p2pMessageBacklog | quote }}
             # Shared with the router (values.router.*): the node's validation-retry budget gives
-            # up in lockstep with the coordinator's round timeout.
+            # up in lockstep with the coordinator's round timeout, and its session pruning must
+            # keep every session the router can still be running.
             - name: ROUND_TIMEOUT
               value: {{ $root.Values.router.roundTimeout | quote }}
             - name: STORAGE_DIR

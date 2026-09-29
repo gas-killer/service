@@ -465,6 +465,7 @@ fn main() {
                     router_key,
                     operator_addresses,
                     resolver,
+                    round_timeout(),
                     schnorr_receiver,
                     schnorr_sender,
                 )

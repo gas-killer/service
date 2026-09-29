@@ -40,15 +40,22 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::digest::DigestResolver;
 
-/// Sessions for heights this far below the highest height seen are pruned: a session is
-/// useless the moment the coordinator moves on (it will never ask for that
-/// `(height, attempt)` again). It must stay above the number of sessions the router runs at
-/// once, or a live session is pruned under a newer one.
-const SESSION_SLACK: u64 = 64;
+/// How far below the highest height seen a session is kept, in height units.
+///
+/// Heights are the router's clock in milliseconds when a session starts, and a session asks
+/// nothing of the nodes after its round timeout, so every session still live is within one round
+/// timeout of the newest height. Twice that leaves room for a round that overruns its deadline
+/// by an attempt, while still bounding memory to the sessions of the last two rounds.
+fn session_window(round_timeout: Duration) -> u64 {
+    u64::try_from(round_timeout.as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(2)
+}
 
 /// Per-session signing state. See the module docs for the nonce-safety rules each
 /// transition enforces.
@@ -93,6 +100,7 @@ pub(crate) async fn run<R, S>(
     router: PublicKey,
     operator_addresses: HashSet<Address>,
     resolver: DigestResolver,
+    round_timeout: Duration,
     mut receiver: R,
     sender: S,
 ) where
@@ -107,6 +115,7 @@ pub(crate) async fn run<R, S>(
         operator_addresses,
         resolver,
     });
+    let window = session_window(round_timeout);
     let mut max_height = 0u64;
 
     info!(
@@ -138,7 +147,7 @@ pub(crate) async fn run<R, S>(
         let height = msg.height();
         if height > max_height {
             max_height = height;
-            prune_sessions(&shared, max_height);
+            prune_sessions(&shared, max_height, window);
         }
 
         match msg {
@@ -387,14 +396,41 @@ fn sign(
 }
 
 /// Drops sessions too far below the coordinator's working height to ever complete.
-fn prune_sessions(shared: &Shared, max_height: u64) {
-    let floor = max_height.saturating_sub(SESSION_SLACK);
+fn prune_sessions(shared: &Shared, max_height: u64, window: u64) {
+    retain_live(
+        &mut shared.sessions.lock().expect("sessions lock"),
+        max_height,
+        window,
+    );
+}
+
+fn retain_live(sessions: &mut HashMap<(u64, u32), Session>, max_height: u64, window: u64) {
+    let floor = max_height.saturating_sub(window);
     if floor == 0 {
         return;
     }
-    shared
-        .sessions
-        .lock()
-        .expect("sessions lock")
-        .retain(|(h, _), _| *h >= floor);
+    sessions.retain(|(h, _), _| *h >= floor);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ROUND_TIMEOUT: Duration = Duration::from_secs(300);
+
+    /// Concurrent sessions start milliseconds apart, and a newer one must not prune an older
+    /// one that is still signing.
+    #[test]
+    fn a_session_still_inside_its_round_survives_newer_heights() {
+        let window = session_window(ROUND_TIMEOUT);
+        let start = 1_790_000_000_000;
+        let mut sessions = HashMap::from([((start, 1), Session::Resolving)]);
+
+        let one_round_later = start + ROUND_TIMEOUT.as_millis() as u64;
+        retain_live(&mut sessions, one_round_later, window);
+        assert!(sessions.contains_key(&(start, 1)));
+
+        retain_live(&mut sessions, start + window + 1, window);
+        assert!(sessions.is_empty());
+    }
 }

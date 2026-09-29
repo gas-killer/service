@@ -186,8 +186,8 @@ pub fn p2p_message_backlog() -> usize {
 
 /// Default maximum number of tasks the ingress queue holds before shedding load.
 ///
-/// The router processes one task at a time, so a deep queue means later submissions are
-/// aggregated long after their block references have gone stale. Capping the depth bounds
+/// The router signs at most [`max_in_flight_tasks`] tasks at once, so a deep queue means later
+/// submissions are aggregated long after their block references have gone stale. Capping the depth bounds
 /// both memory and worst-case queue latency; requests arriving at capacity are rejected with
 /// `503 QUEUE_FULL` rather than accepted and starved. Configurable via `MAX_QUEUE_DEPTH`.
 pub const DEFAULT_MAX_QUEUE_DEPTH: usize = 100;
@@ -201,6 +201,24 @@ pub fn max_queue_depth() -> usize {
         .and_then(|v| v.trim().parse().ok())
         .filter(|&v: &usize| v > 0)
         .unwrap_or(DEFAULT_MAX_QUEUE_DEPTH)
+}
+
+/// Default number of signing sessions the router runs at once.
+///
+/// Each session costs a trace on the router and on every node, and tasks for one target still
+/// run one at a time, so raising it only helps traffic spread across targets.
+/// Configurable via `MAX_IN_FLIGHT_TASKS`.
+pub const DEFAULT_MAX_IN_FLIGHT_TASKS: usize = 1;
+
+/// Reads the concurrent-session cap from `MAX_IN_FLIGHT_TASKS`, defaulting to
+/// [`DEFAULT_MAX_IN_FLIGHT_TASKS`]. Zero or unparseable values fall back to the default, since a
+/// cap of zero would never sign anything.
+pub fn max_in_flight_tasks() -> usize {
+    env::var("MAX_IN_FLIGHT_TASKS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&v: &usize| v > 0)
+        .unwrap_or(DEFAULT_MAX_IN_FLIGHT_TASKS)
 }
 
 /// Default number of consecutive RPC failures against one chain before that chain is treated as

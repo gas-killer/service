@@ -98,6 +98,7 @@ fn clamp_to_mutation_horizon(valid_until_block: u64, horizon: Option<U256>) -> u
 }
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
+#[derive(Clone)]
 pub struct GasKillerHandler<P> {
     /// Wallet providers keyed by EVM chain ID
     providers: HashMap<u64, P>,

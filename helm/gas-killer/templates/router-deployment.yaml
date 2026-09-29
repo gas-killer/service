@@ -336,6 +336,8 @@ spec:
               value: {{ .Values.router.pollingIntervalMs | quote }}
             - name: ROUND_TIMEOUT
               value: {{ .Values.router.roundTimeout | quote }}
+            - name: MAX_IN_FLIGHT_TASKS
+              value: {{ .Values.router.maxInFlightTasks | quote }}
             - name: REBROADCAST_INTERVAL
               value: {{ .Values.router.rebroadcastInterval | quote }}
             {{- if .Values.router.receiptTimeoutSecs }}

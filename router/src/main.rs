@@ -24,9 +24,9 @@ use gas_killer_common::get_operator_states;
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, IngressStalenessWindow,
     SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint, load_key_from_file,
-    p2p_message_backlog, quorum_threshold_fraction, rebroadcast_interval, round_timeout,
-    schnorr_messages_per_second, schnorr_stage_timeout, schnorr_trace_timeout, storage_directory,
-    task_ttl,
+    max_in_flight_tasks, p2p_message_backlog, quorum_threshold_fraction, rebroadcast_interval,
+    round_timeout, schnorr_messages_per_second, schnorr_stage_timeout, schnorr_trace_timeout,
+    storage_directory, task_ttl,
 };
 use gas_killer_router::expiry::run_expiry_sweeper;
 use gas_killer_router::factories::{
@@ -37,7 +37,7 @@ use gas_killer_router::metrics::MetricsCollector;
 use gas_killer_router::operator_http::{HealthState, build_operator_app};
 use gas_killer_router::scheduler::Scheduler;
 use gas_killer_router::schnorr_coordinator::SchnorrCoordinator;
-use gas_killer_router::sequencer::GasKillerTaskSource;
+use gas_killer_router::sequencer::{TaskDispatcher, TaskQueue};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -386,15 +386,15 @@ fn main() {
         }
         let _task_sender = ingress.sender;
 
-        // Task source: dequeues ingress tasks, resolves them for the sequencer, and starts
-        // the router's own trace of each.
-        let task_source = GasKillerTaskSource::new(
+        // Task source: the queue hands ingress tasks to the scheduler, and the dispatcher
+        // resolves each for its session and starts the router's own trace of it.
+        let task_queue = TaskQueue::new(
             ingress.receiver,
             ingress.queue_depth,
-            validator,
             Some(Arc::clone(&metrics)),
-            ingress.store.clone(),
         );
+        let dispatcher =
+            TaskDispatcher::new(validator, Some(Arc::clone(&metrics)), ingress.store.clone());
 
         // The Schnorr rounds are request/response, but a dropped message costs a whole retry
         // attempt, so the quota is generous.
@@ -429,11 +429,13 @@ fn main() {
             .expect("Failed to create schnorr submitter");
 
         let scheduler = Scheduler::new(
-            task_source,
+            task_queue,
+            dispatcher,
             coordinator,
             submitter,
             height_observer,
             Arc::clone(&metrics),
+            max_in_flight_tasks(),
         );
         context.child("scheduler").spawn(move |_| scheduler.run());
 

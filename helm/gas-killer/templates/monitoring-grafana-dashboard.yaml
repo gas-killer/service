@@ -479,7 +479,7 @@ data:
           "id": 71,
           "type": "timeseries",
           "title": "Heights In Flight",
-          "description": "Signing sessions running now. One at a time is the current design; this is the series that shows the window actually opening once sessions run concurrently.",
+          "description": "Signing sessions running now, at most MAX_IN_FLIGHT_TASKS. Sitting at the cap while the queue grows means sessions are the bottleneck; staying below it with a queue means the waiting tasks share targets, which sign one at a time.",
           "gridPos": { "x": 0, "y": 76, "w": 8, "h": 8 },
           "targets": [
             {

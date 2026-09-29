@@ -28,7 +28,8 @@ const MAX_RETRIES: u32 = 2;
 /// Delay before the first retry; doubles per attempt.
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Settles finished signing sessions.
+/// Settles finished signing sessions. Each concurrent session settles through its own clone.
+#[derive(Clone)]
 pub struct SchnorrSubmitter {
     /// L1 read-side provider: supplies the reference block for the registry's
     /// aggregate-key/weight snapshot check (operator state lives on L1 only).
