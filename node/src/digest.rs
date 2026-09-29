@@ -8,7 +8,7 @@
 //! never changes the digest value.
 
 use commonware_cryptography::sha256::Digest;
-use gas_killer_common::{GasKillerTaskData, GasKillerValidator};
+use gas_killer_common::{DigestClaim, GasKillerTaskData, GasKillerValidator};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -63,22 +63,25 @@ impl DigestResolver {
             return None;
         }
 
-        // A later attempt of a session reuses its first trace; it must not queue behind others.
-        if let Some(digest) = self.validator.cached_digest_for_task(task).await {
-            return Some(digest);
-        }
-
-        let deadline = Instant::now() + self.retry_budget;
+        let deadline = ::tokio::time::Instant::from_std(Instant::now() + self.retry_budget);
         let mut backoff = INITIAL_RETRY_BACKOFF;
         loop {
-            let validator = Arc::clone(&self.validator);
-            let owned = task.clone();
-            let trace = self
-                .traces
-                .run(async move { validator.expected_digest_for_task(&owned).await });
-            let Ok(outcome) =
-                ::tokio::time::timeout_at(::tokio::time::Instant::from_std(deadline), trace).await
-            else {
+            // The task's flight is claimed before a trace slot, so a later attempt of a session
+            // whose first trace is still queued or running waits for that trace, not behind
+            // unrelated ones, and never holds a slot to do nothing.
+            let outcome = ::tokio::time::timeout_at(deadline, async {
+                let turn = match self.validator.claim_digest(task).await {
+                    DigestClaim::Known(digest) => return Ok(digest),
+                    DigestClaim::Trace(turn) => turn,
+                };
+                let validator = Arc::clone(&self.validator);
+                let owned = task.clone();
+                self.traces
+                    .run(async move { validator.trace_digest(&owned, turn).await })
+                    .await
+            })
+            .await;
+            let Ok(outcome) = outcome else {
                 warn!(
                     height,
                     budget_secs = self.retry_budget.as_secs_f64(),
@@ -96,7 +99,7 @@ impl DigestResolver {
                     );
                     return Some(digest);
                 }
-                Err(error) if Instant::now() + backoff < deadline => {
+                Err(error) if ::tokio::time::Instant::now() + backoff < deadline => {
                     debug!(
                         height,
                         %error,
@@ -124,6 +127,7 @@ impl DigestResolver {
 mod tests {
     use super::*;
     use crate::trace_pool::TraceRuntime;
+    use gas_killer_common::ValidatorMetrics;
 
     /// A task every honest node rejects the same way gets no commit, so it can never reach a
     /// quorum; it must not wait out the retry budget first.
@@ -147,6 +151,66 @@ mod tests {
         tokio::task::spawn_blocking(move || drop(runtime))
             .await
             .unwrap();
+    }
+
+    /// A later attempt of a session starts while the first attempt's trace is still running
+    /// when the coordinator's commit stage runs out first. It must wait for that trace, not
+    /// take a slot to do nothing or queue behind unrelated tasks.
+    async fn a_second_resolve_of_a_task_in_flight_waits_outside_the_queue(concurrency: usize) {
+        // Accepts connections into its backlog and never answers them, so traces hang.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", silent.local_addr().unwrap());
+        let runtime = TraceRuntime::new(concurrency).unwrap();
+        let metrics = Arc::new(ValidatorMetrics::new());
+        let resolver = DigestResolver::new(
+            Arc::new(GasKillerValidator::with_rpc_url(url)),
+            runtime.pool().with_metrics(Arc::clone(&metrics)),
+            Duration::from_secs(2),
+        );
+        let task = GasKillerTaskData {
+            block_height: 1,
+            ..Default::default()
+        };
+        let unrelated = GasKillerTaskData {
+            block_height: 2,
+            ..Default::default()
+        };
+
+        let resolve = |task: GasKillerTaskData| {
+            let resolver = resolver.clone();
+            tokio::spawn(async move { resolver.resolve(7, &task).await })
+        };
+        let leader = resolve(task.clone());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let follower = resolve(task);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let other = resolve(unrelated);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Only the unrelated task can be short of a slot, and only when the leader holds the
+        // last one.
+        assert_eq!(
+            metrics.validation_queue_depth.get(),
+            i64::from(concurrency == 1)
+        );
+
+        for handle in [leader, follower, other] {
+            assert!(handle.await.unwrap().is_none());
+        }
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_one_slot_a_second_resolve_does_not_queue_behind_unrelated_tasks() {
+        a_second_resolve_of_a_task_in_flight_waits_outside_the_queue(1).await;
+    }
+
+    #[tokio::test]
+    async fn with_two_slots_a_second_resolve_leaves_the_other_slot_to_an_unrelated_task() {
+        a_second_resolve_of_a_task_in_flight_waits_outside_the_queue(2).await;
     }
 
     /// A trace that neither answers nor errors must not outlive the round: the node gives up at
