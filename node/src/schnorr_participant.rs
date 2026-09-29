@@ -40,7 +40,7 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::digest::DigestResolver;
@@ -88,10 +88,15 @@ struct Shared {
     /// points in a `SignRequest` must map into this set.
     operator_addresses: HashSet<Address>,
     resolver: DigestResolver,
+    round_timeout: Duration,
+    /// When each live height's digest must be resolved by: one round after its first
+    /// `CommitRequest`, the router's own deadline for the whole session, shared by every attempt.
+    /// Pruned with `sessions`.
+    deadlines: Mutex<HashMap<u64, Instant>>,
 }
 
 /// Runs the participant actor until the channel closes. Spawns one child task per
-/// `CommitRequest`: digest resolution can block up to the validation retry budget, and
+/// `CommitRequest`: digest resolution can block until the end of the session's round, and
 /// the actor loop must stay responsive to later sessions meanwhile.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run<R, S>(
@@ -114,6 +119,8 @@ pub(crate) async fn run<R, S>(
         own_pubkey,
         operator_addresses,
         resolver,
+        round_timeout,
+        deadlines: Mutex::new(HashMap::new()),
     });
     let window = session_window(round_timeout);
     let mut max_height = 0u64;
@@ -206,11 +213,17 @@ fn handle_commit_request<S>(
         }
     }
 
+    let deadline = height_deadline(
+        &mut shared.deadlines.lock().expect("deadlines lock"),
+        height,
+        Instant::now(),
+        shared.round_timeout,
+    );
     let shared = Arc::clone(shared);
     let sender = sender.clone();
     let router = router.clone();
     drop(context.child("commit").spawn(move |_| async move {
-        let Some(digest) = shared.resolver.resolve(height, &task).await else {
+        let Some(digest) = shared.resolver.resolve(height, &task, deadline).await else {
             shared
                 .sessions
                 .lock()
@@ -395,6 +408,16 @@ fn sign(
     Some(gas_killer_common::schnorr::wire::partial_to_bytes(&partial))
 }
 
+/// The deadline every attempt of `height` resolves against, fixed by the first attempt seen.
+fn height_deadline(
+    deadlines: &mut HashMap<u64, Instant>,
+    height: u64,
+    now: Instant,
+    round_timeout: Duration,
+) -> Instant {
+    *deadlines.entry(height).or_insert(now + round_timeout)
+}
+
 /// Drops sessions too far below the coordinator's working height to ever complete.
 fn prune_sessions(shared: &Shared, max_height: u64, window: u64) {
     retain_live(
@@ -402,14 +425,23 @@ fn prune_sessions(shared: &Shared, max_height: u64, window: u64) {
         max_height,
         window,
     );
+    if let Some(floor) = prune_floor(max_height, window) {
+        shared
+            .deadlines
+            .lock()
+            .expect("deadlines lock")
+            .retain(|h, _| *h >= floor);
+    }
 }
 
 fn retain_live(sessions: &mut HashMap<(u64, u32), Session>, max_height: u64, window: u64) {
-    let floor = max_height.saturating_sub(window);
-    if floor == 0 {
-        return;
+    if let Some(floor) = prune_floor(max_height, window) {
+        sessions.retain(|(h, _), _| *h >= floor);
     }
-    sessions.retain(|(h, _), _| *h >= floor);
+}
+
+fn prune_floor(max_height: u64, window: u64) -> Option<u64> {
+    Some(max_height.saturating_sub(window)).filter(|&floor| floor > 0)
 }
 
 #[cfg(test)]
@@ -432,5 +464,25 @@ mod tests {
 
         retain_live(&mut sessions, start + window + 1, window);
         assert!(sessions.is_empty());
+    }
+
+    /// The router's round covers every attempt of a height, so a later attempt must not
+    /// restart the node's clock and trace for a session that is already over.
+    #[test]
+    fn every_attempt_of_a_height_shares_the_first_attempts_deadline() {
+        let mut deadlines = HashMap::new();
+        let first = Instant::now();
+        let deadline = height_deadline(&mut deadlines, 7, first, ROUND_TIMEOUT);
+        assert_eq!(deadline, first + ROUND_TIMEOUT);
+
+        let later = first + ROUND_TIMEOUT / 2;
+        assert_eq!(
+            height_deadline(&mut deadlines, 7, later, ROUND_TIMEOUT),
+            deadline
+        );
+        assert_eq!(
+            height_deadline(&mut deadlines, 8, later, ROUND_TIMEOUT),
+            later + ROUND_TIMEOUT
+        );
     }
 }
