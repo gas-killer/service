@@ -11,7 +11,7 @@
 //! without holding up tasks for other targets.
 
 use crate::height_metrics::HeightObserver;
-use crate::metrics::MetricsCollector;
+use crate::metrics::{MetricsCollector, operator_labels};
 use crate::schnorr_coordinator::{SchnorrCoordinator, SessionOutcome, clock_tip};
 use crate::schnorr_submitter::SchnorrSubmitter;
 use crate::sequencer::{DispatchedTask, QueuedTask, TaskDispatcher, TaskQueue};
@@ -282,10 +282,24 @@ where
             );
             return false;
         };
-        if matches!(outcome, SessionOutcome::Signed { .. }) {
+        if let SessionOutcome::Signed {
+            non_signers,
+            straggler_wait,
+            ..
+        } = &outcome
+        {
             self.metrics
                 .p2p_round_trip_seconds
                 .observe(started.elapsed().as_secs_f64());
+            self.metrics
+                .straggler_wait_seconds
+                .observe(straggler_wait.as_secs_f64());
+            for operator in non_signers {
+                self.metrics
+                    .non_signers
+                    .get_or_create(&operator_labels(*operator))
+                    .inc();
+            }
         }
         let settled = self
             .submitter

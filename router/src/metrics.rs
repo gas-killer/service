@@ -1,3 +1,4 @@
+use alloy_primitives::Address;
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
 use commonware_runtime::telemetry::metrics::raw::{Counter, Family, Gauge, Histogram};
 use commonware_runtime::telemetry::metrics::registry::Registry;
@@ -32,6 +33,17 @@ pub type PerChainGauge = Family<ChainLabels, Gauge<i64, AtomicI64>>;
 /// The label set naming `chain`, for indexing a [`PerChainGauge`].
 pub fn chain_labels(chain: ChainRole) -> ChainLabels {
     [("chain", chain.name().to_string())]
+}
+
+/// Label set scoping a counter to one operator, by its registry identity address.
+type OperatorLabels = [(&'static str, String); 1];
+
+/// A counter broken down by operator. Cardinality is the operator set.
+pub type PerOperatorCounter = Family<OperatorLabels, Counter<u64, AtomicU64>>;
+
+/// The label set naming `operator`, for indexing a [`PerOperatorCounter`].
+pub fn operator_labels(operator: Address) -> OperatorLabels {
+    [("operator", operator.to_string())]
 }
 
 /// Label set scoping a counter to one per-height disposition, rendered as `outcome="ready"`.
@@ -161,6 +173,12 @@ pub struct MetricsCollector {
     pub height_age_seconds: Gauge<i64, AtomicI64>,
     /// How assigned heights ended, by disposition.
     pub height_outcomes: PerOutcomeCounter,
+    /// Signed sessions each operator was left out of. An operator that keeps appearing is
+    /// slower than the straggler margin allows, or down.
+    pub non_signers: PerOperatorCounter,
+    /// How long a signed session's commit stage ran past its quorum, waiting for the remaining
+    /// operators. The latency the straggler margin costs.
+    pub straggler_wait_seconds: Histogram,
     /// Terminal-state transitions the store refused because the task had already settled. A
     /// nonzero value means a task was settled twice and its row may carry another task's
     /// payload, so it is never expected in a healthy deployment.
@@ -394,6 +412,21 @@ impl MetricsCollector {
             height_outcomes.clone(),
         );
 
+        let non_signers = Family::default();
+        registry.register(
+            "gas_killer_non_signers",
+            "Total signed sessions each operator was left out of, by operator address",
+            non_signers.clone(),
+        );
+
+        let straggler_wait_seconds =
+            Histogram::new([0.1, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0]);
+        registry.register(
+            "gas_killer_straggler_wait_seconds",
+            "Time a signed session's commit stage ran past its quorum, waiting for the remaining operators",
+            straggler_wait_seconds.clone(),
+        );
+
         let settlement_conflicts = Counter::default();
         registry.register(
             "gas_killer_settlement_conflicts",
@@ -432,6 +465,8 @@ impl MetricsCollector {
             highest_assigned_height,
             height_age_seconds,
             height_outcomes,
+            non_signers,
+            straggler_wait_seconds,
             settlement_conflicts,
         }
     }
@@ -563,6 +598,23 @@ mod tests {
         assert!(output.contains("gas_killer_height_outcomes_total{outcome=\"failed\"} 1"));
         assert!(output.contains("gas_killer_height_outcomes_total{outcome=\"timed_out\"} 1"));
         assert!(output.contains("gas_killer_height_outcomes_total{outcome=\"trace_failed\"} 1"));
+    }
+
+    #[test]
+    fn non_signers_are_counted_per_operator() {
+        let metrics = MetricsCollector::new();
+        let slow = Address::repeat_byte(0x33);
+        for _ in 0..2 {
+            metrics
+                .non_signers
+                .get_or_create(&operator_labels(slow))
+                .inc();
+        }
+
+        let output = metrics.encode();
+        assert!(output.contains(&format!(
+            "gas_killer_non_signers_total{{operator=\"{slow}\"}} 2"
+        )));
     }
 
     #[test]

@@ -25,8 +25,8 @@ use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, IngressStalenessWindow,
     SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint, load_key_from_file,
     max_in_flight_tasks, p2p_message_backlog, quorum_threshold_fraction, rebroadcast_interval,
-    round_timeout, schnorr_messages_per_second, schnorr_stage_timeout, schnorr_trace_timeout,
-    storage_directory, task_ttl,
+    round_timeout, schnorr_messages_per_second, schnorr_stage_timeout,
+    schnorr_straggler_margin_percent, schnorr_trace_timeout, storage_directory, task_ttl,
 };
 use gas_killer_router::expiry::run_expiry_sweeper;
 use gas_killer_router::factories::{
@@ -420,6 +420,7 @@ fn main() {
             schnorr_stage_timeout(),
             schnorr_trace_timeout(),
             round_timeout(),
+            schnorr_straggler_margin_percent(),
             rebroadcast_interval(),
         );
 

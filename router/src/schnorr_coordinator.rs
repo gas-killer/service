@@ -10,9 +10,10 @@
 //!   CommitRequest{h,a,task}  → all operators, re-sent every REBROADCAST_INTERVAL to the
 //!     operators that have not committed yet
 //!   collect Commit{…, digest} (each node commits once it has traced the task) until
-//!     all reply or the trace timeout, cut to one stage timeout once some digest has
-//!     ceil(N·num/den) commits; verify each commit's pubkey point maps to the sender's
-//!     operator address
+//!     all reply or the trace timeout; once some digest has ceil(N·num/den) commits, the
+//!     rest get until the router's own trace finishes plus SCHNORR_STRAGGLER_MARGIN_PERCENT
+//!     of its duration (at least one stage timeout); verify each commit's pubkey point maps to
+//!     the sender's operator address
 //!   the largest digest group reaches ceil(N·num/den)?  else next attempt
 //!   build_context → SignRequest{h,a, digest, signer points, R aggregates} → subset of that group
 //!   collect PartialSig from exactly the subset until the sign stage timeout; each
@@ -94,6 +95,48 @@ fn agreed_digest<'a>(
     (count >= min_signers).then_some(digest)
 }
 
+/// When a quorum that agreed at `quorum_at` stops waiting for the operators still tracing.
+///
+/// Until the router's own trace finishes (`trace_finished_at`), there is no yardstick and the
+/// wait runs to `trace_deadline`. After it, a straggler has `margin_percent` of the router's
+/// trace duration, and never less than one `stage_timeout` past either the quorum or the
+/// router's trace, so a quick task still gives the rest a round trip to catch up.
+fn straggler_deadline(
+    started: Instant,
+    quorum_at: Instant,
+    trace_finished_at: Option<Instant>,
+    stage_timeout: Duration,
+    margin_percent: u32,
+    trace_deadline: Instant,
+) -> Instant {
+    let Some(finished) = trace_finished_at else {
+        return trace_deadline;
+    };
+    let traced = finished.saturating_duration_since(started);
+    let margin = traced
+        .mul_f64(f64::from(margin_percent) / 100.0)
+        .max(stage_timeout);
+    (quorum_at + stage_timeout)
+        .max(finished + margin)
+        .min(trace_deadline)
+}
+
+/// A signing attempt that assembled a signature.
+struct Signing {
+    signature: AggregateSignature,
+    non_signers: Vec<Address>,
+    digest: [u8; 32],
+    straggler_wait: Duration,
+}
+
+/// The router's own trace as the commit stage paces against it.
+struct RouterPace {
+    trace: RouterTrace,
+    /// When the session started, which is when every participant started tracing.
+    started: Instant,
+    finished_at: Option<Instant>,
+}
+
 /// The height a router life starts at: Unix time in milliseconds.
 ///
 /// Heights only name sessions (neither the task digest nor the chain sees them), so a start far
@@ -125,6 +168,8 @@ pub enum SessionOutcome {
         /// Operator identity addresses that did NOT sign, strictly ascending — the exact
         /// list `SchnorrStakeRegistry.isValidSignature` subtracts on-chain.
         non_signers: Vec<Address>,
+        /// How long the signing attempt's commit stage ran past its quorum.
+        straggler_wait: Duration,
     },
     /// No attempt assembled a signature before `ROUND_TIMEOUT`.
     TimedOut,
@@ -161,6 +206,9 @@ where
     /// has to cover a full cold trace.
     trace_timeout: Duration,
     round_timeout: Duration,
+    /// How far past the router's own trace, as a percent of its duration, an operator may take
+    /// to commit once a quorum agrees (`SCHNORR_STRAGGLER_MARGIN_PERCENT`).
+    straggler_margin_percent: u32,
     /// How often an unanswered `CommitRequest` is re-sent. A lost request would otherwise
     /// cost the whole trace budget before the next attempt asks again.
     resend_interval: Duration,
@@ -180,6 +228,7 @@ where
         stage_timeout: Duration,
         trace_timeout: Duration,
         round_timeout: Duration,
+        straggler_margin_percent: u32,
         resend_interval: Duration,
     ) -> Self {
         let operator_keys: Vec<PublicKey> = operators.iter().map(|(k, _)| k.clone()).collect();
@@ -199,6 +248,7 @@ where
             stage_timeout,
             trace_timeout,
             round_timeout,
+            straggler_margin_percent,
             resend_interval,
         };
         info!(
@@ -206,6 +256,7 @@ where
             min_signers = coordinator.min_signers(),
             stage_timeout_secs = stage_timeout.as_secs_f64(),
             trace_timeout_secs = trace_timeout.as_secs_f64(),
+            straggler_margin_percent,
             "schnorr coordinator running"
         );
         coordinator
@@ -237,6 +288,11 @@ where
             return None;
         };
         let mut sender = self.sender.clone();
+        let mut pace = RouterPace {
+            trace: trace.clone(),
+            started: Instant::now(),
+            finished_at: None,
+        };
         let trace = trace.clone();
         let trace_failed = async move {
             match trace.wait().await {
@@ -269,9 +325,11 @@ where
                     return Some(SessionOutcome::TraceFailed(reason));
                 }
                 outcome = self.run_attempt(
-                    &mut sender, &mut inbox, height, attempt, task, &mut suspects, deadline,
+                    &mut sender, &mut inbox, &mut pace, height, attempt, task, &mut suspects,
+                    deadline,
                 ) => {
-                    let Some((signature, non_signers, digest)) = outcome else {
+                    let Some(Signing { signature, non_signers, digest, straggler_wait }) = outcome
+                    else {
                         debug!(height, attempt, "signing attempt failed; retrying");
                         continue;
                     };
@@ -285,6 +343,7 @@ where
                         digest,
                         signature,
                         non_signers,
+                        straggler_wait,
                     });
                 }
             }
@@ -299,6 +358,22 @@ where
         Some(SessionOutcome::TimedOut)
     }
 
+    fn straggler_deadline(
+        &self,
+        pace: &RouterPace,
+        quorum_at: Instant,
+        trace_deadline: Instant,
+    ) -> Instant {
+        straggler_deadline(
+            pace.started,
+            quorum_at,
+            pace.finished_at,
+            self.stage_timeout,
+            self.straggler_margin_percent,
+            trace_deadline,
+        )
+    }
+
     /// One full two-round attempt. Returns the verified signature, the sorted non-signer
     /// list and the digest signed, or `None` (reasons logged; `suspects` updated).
     #[allow(clippy::too_many_arguments)]
@@ -306,12 +381,13 @@ where
         &self,
         sender: &mut S,
         inbox: &mut Inbox,
+        pace: &mut RouterPace,
         height: u64,
         attempt: u32,
         task: &GasKillerTaskData,
         suspects: &mut HashSet<Address>,
         deadline: Instant,
-    ) -> Option<(AggregateSignature, Vec<Address>, [u8; 32])> {
+    ) -> Option<Signing> {
         // Round 1: fresh nonces from everyone (suspects included — flapping nodes
         // recover here; they are filtered at subset selection below).
         let request = SchnorrMsg::CommitRequest {
@@ -332,8 +408,19 @@ where
         let mut commits: HashMap<Address, (schnorr::PublicKey, PubNonce, [u8; 32])> =
             HashMap::new();
         let mut next_resend = Instant::now() + self.resend_interval;
+        let mut quorum_at = None;
         while commits.len() < self.operator_keys.len() {
-            let Some(msg) = inbox.recv_until(stage_deadline.min(next_resend)).await else {
+            let received = tokio::select! {
+                received = inbox.recv_until(stage_deadline.min(next_resend)) => received,
+                _ = pace.trace.wait(), if pace.finished_at.is_none() => {
+                    pace.finished_at = Some(Instant::now());
+                    if let Some(quorum_at) = quorum_at {
+                        stage_deadline = self.straggler_deadline(pace, quorum_at, trace_deadline);
+                    }
+                    continue;
+                }
+            };
+            let Some(msg) = received else {
                 if inbox.closed() || Instant::now() >= stage_deadline {
                     break;
                 }
@@ -375,16 +462,19 @@ where
                     continue;
                 }
                 commits.insert(peer_addr, (pubkey, nonce, digest));
-                // Once a digest can be signed, the operators still tracing get one round trip
-                // to catch up rather than the rest of the trace budget.
-                if stage_deadline == trace_deadline
+                // Once a digest can be signed, the operators still tracing are waited for only
+                // as long as the router's own trace gives them, not the rest of the trace budget.
+                if quorum_at.is_none()
                     && agreed_digest(commits.values().map(|(_, _, d)| d), min_signers).is_some()
                 {
-                    stage_deadline = (Instant::now() + self.stage_timeout).min(trace_deadline);
+                    let now = Instant::now();
+                    quorum_at = Some(now);
+                    stage_deadline = self.straggler_deadline(pace, now, trace_deadline);
                 }
             }
         }
 
+        let straggler_wait = quorum_at.map_or(Duration::ZERO, |at| at.elapsed());
         let Some(message) = agreed_digest(commits.values().map(|(_, _, d)| d), min_signers) else {
             debug!(
                 height,
@@ -508,7 +598,12 @@ where
             .copied()
             .collect();
         non_signers.sort();
-        Some((signature, non_signers, message))
+        Some(Signing {
+            signature,
+            non_signers,
+            digest: message,
+            straggler_wait,
+        })
     }
 }
 
@@ -601,6 +696,7 @@ pub(crate) mod testing {
             Duration::from_secs(5),
             Duration::from_secs(60),
             Duration::from_secs(120),
+            20,
             Duration::from_millis(10),
         )
     }
@@ -673,6 +769,378 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         assert!(clock_tip() > highest);
+    }
+
+    /// In-process operators behind a loopback channel 2: each commits `delay` after a request,
+    /// with a real nonce, and signs whatever context it is asked to.
+    mod loopback {
+        use super::*;
+        use commonware_actor::{Feedback, Unreliable};
+        use commonware_avs_core::bn254::Bn254;
+        use commonware_codec::DecodeExt;
+        use commonware_cryptography::Signer as _;
+        use commonware_p2p::{CheckedSender, LimitedSender, Message};
+        use commonware_runtime::{IoBuf, IoBufs};
+        use gas_killer_common::schnorr::PrivateKey;
+        use gas_killer_common::schnorr::musig::{SecNonce, SigningContext, partial_sign};
+        use rand::TryRngCore;
+        use std::sync::{Arc, Mutex};
+        use tokio::sync::mpsc;
+
+        pub(super) const DIGEST: [u8; 32] = [7; 32];
+
+        /// Each operator's unused secret nonce per session attempt.
+        type Nonces = HashMap<(PublicKey, u64, u32), SecNonce>;
+
+        #[derive(Clone)]
+        pub(super) struct LoopbackSender(mpsc::UnboundedSender<(PublicKey, IoBuf)>);
+
+        pub(super) struct LoopbackChecked {
+            recipients: Vec<PublicKey>,
+            wire: mpsc::UnboundedSender<(PublicKey, IoBuf)>,
+        }
+
+        impl CheckedSender for LoopbackChecked {
+            type PublicKey = PublicKey;
+
+            fn recipients(&self) -> Vec<PublicKey> {
+                self.recipients.clone()
+            }
+
+            fn send(
+                self,
+                message: impl Into<IoBufs> + Send,
+                _priority: bool,
+            ) -> Unreliable<Feedback> {
+                let bytes = message.into().coalesce();
+                for peer in self.recipients {
+                    let _ = self.wire.send((peer, bytes.clone()));
+                }
+                Unreliable::new(Feedback::Ok)
+            }
+        }
+
+        impl LimitedSender for LoopbackSender {
+            type PublicKey = PublicKey;
+            type Checked<'a>
+                = LoopbackChecked
+            where
+                Self: 'a;
+
+            fn check(
+                &mut self,
+                recipients: Recipients<PublicKey>,
+            ) -> Result<LoopbackChecked, SystemTime> {
+                let recipients = match recipients {
+                    Recipients::Some(peers) => peers,
+                    Recipients::One(peer) => vec![peer],
+                    Recipients::All => Vec::new(),
+                };
+                Ok(LoopbackChecked {
+                    recipients,
+                    wire: self.0.clone(),
+                })
+            }
+        }
+
+        #[derive(Debug)]
+        pub(super) struct LoopbackReceiver(mpsc::UnboundedReceiver<Message<PublicKey>>);
+
+        impl Receiver for LoopbackReceiver {
+            type Error = std::io::Error;
+            type PublicKey = PublicKey;
+
+            async fn recv(&mut self) -> Result<Message<PublicKey>, Self::Error> {
+                self.0
+                    .recv()
+                    .await
+                    .ok_or_else(|| std::io::Error::other("channel closed"))
+            }
+        }
+
+        /// A coordinator over operators that each commit after their own delay.
+        pub(super) fn network(
+            delays: &[Duration],
+            stage_timeout: Duration,
+        ) -> SchnorrCoordinator<LoopbackSender> {
+            let (to_nodes, mut at_nodes) = mpsc::unbounded_channel::<(PublicKey, IoBuf)>();
+            let (to_router, at_router) = mpsc::unbounded_channel::<Message<PublicKey>>();
+            let nodes: Vec<(PublicKey, PrivateKey, Duration)> = delays
+                .iter()
+                .enumerate()
+                .map(|(i, delay)| {
+                    let seed = i as u64;
+                    (
+                        Bn254::from_seed(seed).public_key(),
+                        PrivateKey::from_seed(100 + seed),
+                        *delay,
+                    )
+                })
+                .collect();
+            let operators = nodes
+                .iter()
+                .map(|(peer, key, _)| (peer.clone(), key.public_key().eth_address()))
+                .collect();
+
+            let nonces: Arc<Mutex<Nonces>> = Arc::default();
+            tokio::spawn(async move {
+                while let Some((peer, bytes)) = at_nodes.recv().await {
+                    let Some((_, key, delay)) = nodes.iter().find(|(p, _, _)| *p == peer) else {
+                        continue;
+                    };
+                    let (key, delay) = (key.clone(), *delay);
+                    match SchnorrMsg::decode(bytes).unwrap() {
+                        SchnorrMsg::CommitRequest {
+                            height, attempt, ..
+                        } => {
+                            let (nonces, to_router) = (Arc::clone(&nonces), to_router.clone());
+                            tokio::spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                let (sec, nonce) = gas_killer_common::schnorr::musig::gen_nonce(
+                                    &mut |b: &mut [u8]| {
+                                        rand::rngs::OsRng.try_fill_bytes(b).unwrap()
+                                    },
+                                );
+                                let fresh = nonces
+                                    .lock()
+                                    .unwrap()
+                                    .insert((peer.clone(), height, attempt), sec)
+                                    .is_none();
+                                if fresh {
+                                    let commit = SchnorrMsg::Commit {
+                                        height,
+                                        attempt,
+                                        pubkey: key.public_key(),
+                                        nonce,
+                                        digest: DIGEST,
+                                    };
+                                    let _ = to_router.send((peer, commit.encode().into()));
+                                }
+                            });
+                        }
+                        SchnorrMsg::SignRequest(request) => {
+                            let Some(sec) = nonces.lock().unwrap().remove(&(
+                                peer.clone(),
+                                request.height,
+                                request.attempt,
+                            )) else {
+                                continue;
+                            };
+                            let x_agg =
+                                schnorr::PublicKey::aggregate(request.signers.iter()).unwrap();
+                            let ctx = SigningContext::from_wire(
+                                x_agg,
+                                &request.agg_nonces,
+                                request.r_addr,
+                                request.message,
+                            );
+                            let partial = partial_sign(sec, &key, &ctx).unwrap();
+                            let reply = SchnorrMsg::PartialSig {
+                                height: request.height,
+                                attempt: request.attempt,
+                                partial,
+                            };
+                            let _ = to_router.send((peer, reply.encode().into()));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            SchnorrCoordinator::new(
+                LoopbackSender(to_nodes),
+                LoopbackReceiver(at_router),
+                operators,
+                (2, 3),
+                stage_timeout,
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+                20,
+                Duration::from_secs(1),
+            )
+        }
+    }
+
+    /// The router's own trace, finishing after `after`.
+    fn trace_taking(after: Duration) -> RouterTrace {
+        RouterTrace::spawn(async move {
+            tokio::time::sleep(after).await;
+            Ok(alloy_primitives::Bytes::new())
+        })
+    }
+
+    /// The signed session's non-signer count and how long it waited past its quorum.
+    fn signed(outcome: Option<SessionOutcome>) -> (usize, Duration) {
+        match outcome {
+            Some(SessionOutcome::Signed {
+                digest,
+                non_signers,
+                straggler_wait,
+                ..
+            }) => {
+                assert_eq!(digest, loopback::DIGEST);
+                (non_signers.len(), straggler_wait)
+            }
+            other => panic!("session did not sign: {other:?}"),
+        }
+    }
+
+    /// Two operators agree at once; the third commits after the router's 500ms trace but
+    /// inside its 20% margin, long after a one-round-trip cut would have left it out.
+    #[tokio::test]
+    async fn a_node_slightly_slower_than_the_router_still_signs() {
+        let coordinator = loopback::network(
+            &[Duration::ZERO, Duration::ZERO, Duration::from_millis(540)],
+            Duration::from_millis(50),
+        );
+        let outcome = coordinator
+            .drive_height(
+                1,
+                &GasKillerTaskData::default(),
+                &trace_taking(Duration::from_millis(500)),
+            )
+            .await;
+        let (non_signers, waited) = signed(outcome);
+        assert_eq!(non_signers, 0);
+        assert!(
+            waited >= Duration::from_millis(450) && waited < Duration::from_millis(1000),
+            "waited {waited:?} past the quorum for a node committing at 540ms"
+        );
+    }
+
+    /// A node that never catches up costs the session only the margin past the router's trace.
+    #[tokio::test]
+    async fn a_stuck_node_is_signed_without_once_the_margin_passes() {
+        let coordinator = loopback::network(
+            &[Duration::ZERO, Duration::ZERO, Duration::from_secs(3)],
+            Duration::from_millis(50),
+        );
+        let started = Instant::now();
+        let outcome = coordinator
+            .drive_height(
+                1,
+                &GasKillerTaskData::default(),
+                &trace_taking(Duration::from_millis(500)),
+            )
+            .await;
+        let (non_signers, waited) = signed(outcome);
+        assert_eq!(non_signers, 1);
+        assert!(
+            waited >= Duration::from_millis(550),
+            "waited only {waited:?}, short of the router's 500ms trace plus its margin"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "the session waited {:?} for a stuck node",
+            started.elapsed()
+        );
+    }
+
+    fn secs(start: Instant, s: f64) -> Instant {
+        start + Duration::from_secs_f64(s)
+    }
+
+    const STAGE: Duration = Duration::from_secs(5);
+    const MARGIN: u32 = 20;
+
+    /// The testnet run that motivated the margin: two nodes agreed at 368s, while the third
+    /// finished tracing alongside the router at 701s and was signed without.
+    #[test]
+    fn a_node_tracing_as_long_as_the_router_is_waited_for() {
+        let start = Instant::now();
+        let deadline = straggler_deadline(
+            start,
+            secs(start, 368.0),
+            Some(secs(start, 701.0)),
+            STAGE,
+            MARGIN,
+            secs(start, 1200.0),
+        );
+        assert!(deadline > secs(start, 701.0));
+        assert_eq!(deadline, secs(start, 701.0 + 701.0 / 5.0));
+    }
+
+    #[test]
+    fn the_margin_scales_with_its_setting() {
+        let start = Instant::now();
+        let at = |margin| {
+            straggler_deadline(
+                start,
+                secs(start, 368.0),
+                Some(secs(start, 600.0)),
+                STAGE,
+                margin,
+                secs(start, 1200.0),
+            )
+        };
+        assert_eq!(at(50), secs(start, 900.0));
+        assert_eq!(
+            at(0),
+            secs(start, 600.0) + STAGE,
+            "never less than one round trip"
+        );
+    }
+
+    /// Until the router's own trace finishes there is nothing to measure a straggler against,
+    /// and the session could not render yet anyway.
+    #[test]
+    fn stragglers_are_waited_for_while_the_router_still_traces() {
+        let start = Instant::now();
+        let trace_deadline = secs(start, 1200.0);
+        assert_eq!(
+            straggler_deadline(
+                start,
+                secs(start, 30.0),
+                None,
+                STAGE,
+                MARGIN,
+                trace_deadline
+            ),
+            trace_deadline
+        );
+    }
+
+    #[test]
+    fn a_quick_task_gives_stragglers_one_round_trip() {
+        let start = Instant::now();
+        let deadline = straggler_deadline(
+            start,
+            secs(start, 1.0),
+            Some(secs(start, 0.5)),
+            STAGE,
+            MARGIN,
+            secs(start, 1200.0),
+        );
+        assert_eq!(deadline, secs(start, 1.0) + STAGE);
+    }
+
+    #[test]
+    fn a_quorum_later_than_the_router_trace_still_gives_one_round_trip() {
+        let start = Instant::now();
+        let deadline = straggler_deadline(
+            start,
+            secs(start, 400.0),
+            Some(secs(start, 300.0)),
+            STAGE,
+            MARGIN,
+            secs(start, 1200.0),
+        );
+        assert_eq!(deadline, secs(start, 400.0) + STAGE);
+    }
+
+    #[test]
+    fn the_margin_never_outlasts_the_trace_budget() {
+        let start = Instant::now();
+        let trace_deadline = secs(start, 1200.0);
+        let deadline = straggler_deadline(
+            start,
+            secs(start, 1100.0),
+            Some(secs(start, 1150.0)),
+            STAGE,
+            MARGIN,
+            trace_deadline,
+        );
+        assert_eq!(deadline, trace_deadline);
     }
 
     #[test]

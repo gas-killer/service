@@ -380,6 +380,10 @@ spec:
             - name: SCHNORR_TRACE_TIMEOUT_SECS
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.schnorr.stragglerMarginPercent }}
+            - name: SCHNORR_STRAGGLER_MARGIN_PERCENT
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.schnorr.messagesPerSecond }}
             - name: P2P_SCHNORR_MESSAGES_PER_SECOND
               value: {{ . | quote }}
