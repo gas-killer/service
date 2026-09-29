@@ -11,8 +11,8 @@
 //!     operators that have not committed yet
 //!   collect Commit{…, digest} (each node commits once it has traced the task) until
 //!     all reply or the trace timeout; once some digest has ceil(N·num/den) commits, the
-//!     rest get until the router's own trace finishes plus STRAGGLER_MARGIN of its
-//!     duration (at least one stage timeout); verify each commit's pubkey point maps to
+//!     rest get until the router's own trace finishes plus SCHNORR_STRAGGLER_MARGIN_PERCENT
+//!     of its duration (at least one stage timeout); verify each commit's pubkey point maps to
 //!     the sender's operator address
 //!   the largest digest group reaches ceil(N·num/den)?  else next attempt
 //!   build_context → SignRequest{h,a, digest, signer points, R aggregates} → subset of that group
@@ -95,35 +95,27 @@ fn agreed_digest<'a>(
     (count >= min_signers).then_some(digest)
 }
 
-/// Extra time a node may take over the router's own trace, as a fraction of that trace's
-/// duration, before a quorum signs without it.
-///
-/// A non-signer costs the operator its participation (and, once slashing lands, a penalty), and
-/// makes `verifyAndUpdate` dearer to settle, so a node slower than the router but still working
-/// is worth waiting for. The router's trace is the yardstick because the session cannot render
-/// before it finishes anyway: waiting up to it costs nothing, and the margin past it is the
-/// only latency this buys.
-const STRAGGLER_MARGIN: (u32, u32) = (1, 5);
-
 /// When a quorum that agreed at `quorum_at` stops waiting for the operators still tracing.
 ///
 /// Until the router's own trace finishes (`trace_finished_at`), there is no yardstick and the
-/// wait runs to `trace_deadline`. After it, a straggler has the router's trace duration times
-/// [`STRAGGLER_MARGIN`], and never less than one `stage_timeout` past either the quorum or the
+/// wait runs to `trace_deadline`. After it, a straggler has `margin_percent` of the router's
+/// trace duration, and never less than one `stage_timeout` past either the quorum or the
 /// router's trace, so a quick task still gives the rest a round trip to catch up.
 fn straggler_deadline(
     started: Instant,
     quorum_at: Instant,
     trace_finished_at: Option<Instant>,
     stage_timeout: Duration,
+    margin_percent: u32,
     trace_deadline: Instant,
 ) -> Instant {
     let Some(finished) = trace_finished_at else {
         return trace_deadline;
     };
     let traced = finished.saturating_duration_since(started);
-    let (num, den) = STRAGGLER_MARGIN;
-    let margin = (traced * num / den).max(stage_timeout);
+    let margin = traced
+        .mul_f64(f64::from(margin_percent) / 100.0)
+        .max(stage_timeout);
     (quorum_at + stage_timeout)
         .max(finished + margin)
         .min(trace_deadline)
@@ -204,6 +196,9 @@ where
     /// has to cover a full cold trace.
     trace_timeout: Duration,
     round_timeout: Duration,
+    /// How far past the router's own trace, as a percent of its duration, an operator may take
+    /// to commit once a quorum agrees (`SCHNORR_STRAGGLER_MARGIN_PERCENT`).
+    straggler_margin_percent: u32,
     /// How often an unanswered `CommitRequest` is re-sent. A lost request would otherwise
     /// cost the whole trace budget before the next attempt asks again.
     resend_interval: Duration,
@@ -223,6 +218,7 @@ where
         stage_timeout: Duration,
         trace_timeout: Duration,
         round_timeout: Duration,
+        straggler_margin_percent: u32,
         resend_interval: Duration,
     ) -> Self {
         let operator_keys: Vec<PublicKey> = operators.iter().map(|(k, _)| k.clone()).collect();
@@ -242,6 +238,7 @@ where
             stage_timeout,
             trace_timeout,
             round_timeout,
+            straggler_margin_percent,
             resend_interval,
         };
         info!(
@@ -249,6 +246,7 @@ where
             min_signers = coordinator.min_signers(),
             stage_timeout_secs = stage_timeout.as_secs_f64(),
             trace_timeout_secs = trace_timeout.as_secs_f64(),
+            straggler_margin_percent,
             "schnorr coordinator running"
         );
         coordinator
@@ -359,6 +357,7 @@ where
             quorum_at,
             pace.finished_at,
             self.stage_timeout,
+            self.straggler_margin_percent,
             trace_deadline,
         )
     }
@@ -679,6 +678,7 @@ pub(crate) mod testing {
             Duration::from_secs(5),
             Duration::from_secs(60),
             Duration::from_secs(120),
+            20,
             Duration::from_millis(10),
         )
     }
@@ -937,6 +937,7 @@ mod tests {
                 stage_timeout,
                 Duration::from_secs(5),
                 Duration::from_secs(10),
+                20,
                 Duration::from_secs(1),
             )
         }
@@ -1010,6 +1011,7 @@ mod tests {
     }
 
     const STAGE: Duration = Duration::from_secs(5);
+    const MARGIN: u32 = 20;
 
     /// The testnet run that motivated the margin: two nodes agreed at 368s, while the third
     /// finished tracing alongside the router at 701s and was signed without.
@@ -1021,10 +1023,32 @@ mod tests {
             secs(start, 368.0),
             Some(secs(start, 701.0)),
             STAGE,
+            MARGIN,
             secs(start, 1200.0),
         );
         assert!(deadline > secs(start, 701.0));
         assert_eq!(deadline, secs(start, 701.0 + 701.0 / 5.0));
+    }
+
+    #[test]
+    fn the_margin_scales_with_its_setting() {
+        let start = Instant::now();
+        let at = |margin| {
+            straggler_deadline(
+                start,
+                secs(start, 368.0),
+                Some(secs(start, 600.0)),
+                STAGE,
+                margin,
+                secs(start, 1200.0),
+            )
+        };
+        assert_eq!(at(50), secs(start, 900.0));
+        assert_eq!(
+            at(0),
+            secs(start, 600.0) + STAGE,
+            "never less than one round trip"
+        );
     }
 
     /// Until the router's own trace finishes there is nothing to measure a straggler against,
@@ -1034,7 +1058,14 @@ mod tests {
         let start = Instant::now();
         let trace_deadline = secs(start, 1200.0);
         assert_eq!(
-            straggler_deadline(start, secs(start, 30.0), None, STAGE, trace_deadline),
+            straggler_deadline(
+                start,
+                secs(start, 30.0),
+                None,
+                STAGE,
+                MARGIN,
+                trace_deadline
+            ),
             trace_deadline
         );
     }
@@ -1047,6 +1078,7 @@ mod tests {
             secs(start, 1.0),
             Some(secs(start, 0.5)),
             STAGE,
+            MARGIN,
             secs(start, 1200.0),
         );
         assert_eq!(deadline, secs(start, 1.0) + STAGE);
@@ -1060,6 +1092,7 @@ mod tests {
             secs(start, 400.0),
             Some(secs(start, 300.0)),
             STAGE,
+            MARGIN,
             secs(start, 1200.0),
         );
         assert_eq!(deadline, secs(start, 400.0) + STAGE);
@@ -1074,6 +1107,7 @@ mod tests {
             secs(start, 1100.0),
             Some(secs(start, 1150.0)),
             STAGE,
+            MARGIN,
             trace_deadline,
         );
         assert_eq!(deadline, trace_deadline);

@@ -675,6 +675,32 @@ fn schnorr_trace_timeout_from(
     }
 }
 
+/// Default for [`schnorr_straggler_margin_percent`].
+pub const DEFAULT_SCHNORR_STRAGGLER_MARGIN_PERCENT: u32 = 20;
+
+/// Reads how much longer than the router's own trace an operator may take to commit, once a
+/// quorum already agrees, from `SCHNORR_STRAGGLER_MARGIN_PERCENT` (a whole percent of the
+/// router's trace duration), defaulting to [`DEFAULT_SCHNORR_STRAGGLER_MARGIN_PERCENT`].
+/// Unparseable values fall back to the default.
+///
+/// A non-signer costs its operator its participation (and, once slashing lands, a penalty), and
+/// makes `verifyAndUpdate` dearer to settle, so an operator slower than the router but still
+/// working is worth waiting for. The router's trace is the yardstick because a session cannot
+/// render before it finishes anyway: waiting up to it costs nothing, and the margin past it is
+/// the only latency this buys. The wait is never less than [`schnorr_stage_timeout`] and never
+/// runs past [`schnorr_trace_timeout`], so `0` means one stage timeout past the router's trace.
+pub fn schnorr_straggler_margin_percent() -> u32 {
+    schnorr_straggler_margin_percent_from(
+        env::var("SCHNORR_STRAGGLER_MARGIN_PERCENT").ok().as_deref(),
+    )
+}
+
+fn schnorr_straggler_margin_percent_from(value: Option<&str>) -> u32 {
+    value
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_SCHNORR_STRAGGLER_MARGIN_PERCENT)
+}
+
 /// Default per-peer message rate for the Schnorr protocol channel, in messages
 /// per second.
 pub const DEFAULT_SCHNORR_MESSAGES_PER_SECOND: u32 = 64;
@@ -1213,6 +1239,15 @@ mod tests {
 
     fn fingerprint(inputs: (&'static str, &'static str, &'static [u8], u32, Duration)) -> String {
         fingerprint_of(inputs.0, inputs.1, inputs.2, inputs.3, inputs.4)
+    }
+
+    #[test]
+    fn the_straggler_margin_defaults_to_twenty_percent_and_accepts_zero() {
+        assert_eq!(schnorr_straggler_margin_percent_from(None), 20);
+        assert_eq!(schnorr_straggler_margin_percent_from(Some(" 50 ")), 50);
+        assert_eq!(schnorr_straggler_margin_percent_from(Some("0")), 0);
+        assert_eq!(schnorr_straggler_margin_percent_from(Some("-5")), 20);
+        assert_eq!(schnorr_straggler_margin_percent_from(Some("lots")), 20);
     }
 
     #[test]

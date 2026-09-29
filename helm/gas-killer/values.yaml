@@ -605,8 +605,8 @@ schnorr:
 
   # Round-trip timeout for the coordinator's stages that hold no node compute, in seconds:
   # partial-signature collection, and the least the remaining operators get to commit once
-  # enough agree on a digest (they get until the router's own trace finishes plus 20% of its
-  # duration when that is longer). Empty uses the binary's default of
+  # enough agree on a digest (they get until the router's own trace finishes plus
+  # stragglerMarginPercent of its duration when that is longer). Empty uses the binary's default of
   # min(5, ROUND_TIMEOUT/6), so several attempts fit inside one round-timeout window, and a short
   # deadline is what lets the coordinator drop an unresponsive operator quickly.
   stageTimeoutSecs: ""
@@ -619,6 +619,14 @@ schnorr:
   # while a retry after the stage ran to its deadline queues behind the first attempt's trace,
   # which is still running.
   traceTimeoutSecs: ""
+
+  # How much longer than the router's own trace an operator may take to commit once a quorum
+  # already agrees, as a whole percent of the router's trace duration. Empty uses the binary's
+  # default of 20. A non-signer costs its operator its participation (and, once slashing lands, a
+  # penalty) and makes verifyAndUpdate dearer to settle, and the session cannot render before the
+  # router's trace finishes anyway, so only the margin past it adds latency. The wait is at least
+  # one stageTimeoutSecs and never runs past traceTimeoutSecs; "0" gives just that round trip.
+  stragglerMarginPercent: ""
 
   # Per-peer message rate for the schnorr protocol channel. Empty uses the binary's default of
   # 64. Size it generously: the p2p sender SILENTLY DROPS messages beyond the rate, and a dropped
