@@ -19,6 +19,7 @@ pub use config::{
     rate_limit_rpm, rebroadcast_interval, round_timeout, rpc_failure_threshold,
     schnorr_messages_per_second, schnorr_notice_window, schnorr_stage_timeout,
     schnorr_straggler_margin_percent, schnorr_trace_timeout, storage_directory, task_ttl,
+    validation_concurrency,
 };
 pub use metrics::ConfigMetrics;
 pub use payload::{BundleProof, PayloadView, TaskBundle};

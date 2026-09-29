@@ -2,12 +2,12 @@ use alloy_provider::Provider;
 use anyhow::Result;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
-use commonware_runtime::telemetry::metrics::raw::{Counter, Family, Histogram};
+use commonware_runtime::telemetry::metrics::raw::{Counter, Family, Gauge, Histogram};
 use commonware_runtime::telemetry::metrics::registry::Registry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -169,6 +169,12 @@ pub struct ValidatorMetrics {
     /// Digest-cache outcomes. A hit skips the entire analysis, so the phase histograms cannot be
     /// interpreted without knowing how often that happened.
     pub digest_cache: PerCacheResultCounter,
+    /// Traces waiting for a validation slot. Only a node bounds its traces, so this stays zero
+    /// on the router.
+    pub validation_queue_depth: Gauge<i64, AtomicI64>,
+    /// How long each trace waited for a validation slot. Read with the phase histograms: a slow
+    /// task that mostly queued needs a higher limit or more CPU, not a faster trace RPC.
+    pub validation_queue_wait_seconds: Histogram,
 }
 
 impl ValidatorMetrics {
@@ -235,6 +241,22 @@ impl ValidatorMetrics {
             digest_cache.clone(),
         );
 
+        let validation_queue_depth = Gauge::default();
+        registry.register(
+            "gas_killer_validation_queue_depth",
+            "Task traces waiting for a validation slot (GK_VALIDATION_CONCURRENCY)",
+            validation_queue_depth.clone(),
+        );
+
+        let validation_queue_wait_seconds = Histogram::new([
+            0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0,
+        ]);
+        registry.register(
+            "gas_killer_validation_queue_wait_seconds",
+            "Time a task trace waited for a validation slot",
+            validation_queue_wait_seconds.clone(),
+        );
+
         Self {
             registry,
             evmsketch_duration_seconds,
@@ -245,6 +267,8 @@ impl ValidatorMetrics {
             revm_estimate_seconds,
             executor_cache,
             digest_cache,
+            validation_queue_depth,
+            validation_queue_wait_seconds,
         }
     }
 
@@ -862,6 +886,13 @@ impl GasKillerValidator {
         let _permit = flight.lock().lock().await;
 
         self.resolve_digest_uncached(task_data, &cache_key).await
+    }
+
+    /// The digest already computed for `task`, if any, without tracing it.
+    ///
+    /// Lets a caller that bounds its traces skip the queue for work that is already done.
+    pub async fn cached_digest_for_task(&self, task: &GasKillerTaskData) -> Option<Digest> {
+        self.cached_digest(&digest_cache_key(task)).await
     }
 
     /// Reads a digest already in the cache, counting the lookup.

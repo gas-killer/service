@@ -8,6 +8,7 @@
 
 mod digest;
 mod schnorr_participant;
+mod trace_pool;
 
 use ::tokio::net::TcpListener;
 use axum::{
@@ -26,7 +27,7 @@ use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, OrchestratorConfig,
     SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint, get_operator_states,
     load_key_from_file, load_orchestrator_config, p2p_message_backlog, round_timeout,
-    schnorr_messages_per_second, storage_directory,
+    schnorr_messages_per_second, storage_directory, validation_concurrency,
 };
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -36,6 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::digest::DigestResolver;
+use crate::trace_pool::TraceRuntime;
 
 /// P2P channel carrying the interactive Schnorr signing rounds.
 const SCHNORR_CHANNEL: u64 = 2;
@@ -139,15 +141,50 @@ fn configure_orchestrator(matches: &clap::ArgMatches) -> OrchestratorConfig {
     load_orchestrator_config(orchestrator_file)
 }
 
+fn serve_health(addr: SocketAddr, state: HealthState) {
+    let runtime = match ::tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            tracing::error!("failed to build the healthz runtime: {}", e);
+            return;
+        }
+    };
+    runtime.block_on(async move {
+        let app = Router::new()
+            .route("/healthz", get(healthz_handler))
+            .route("/readyz", get(readyz_handler))
+            .route("/metrics", get(metrics_handler))
+            .with_state(state);
+        match TcpListener::bind(addr).await {
+            Ok(listener) => {
+                tracing::info!(healthz_addr = %addr, "healthz server running");
+                if let Err(e) = axum::serve(listener, app).await {
+                    tracing::error!("healthz server error: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::error!(healthz_addr = %addr, "failed to bind healthz server: {}", e);
+            }
+        }
+    });
+}
+
 fn main() {
     // The runtime otherwise defaults to a random per-process temp dir.
     let storage_dir = storage_directory();
     let runtime_cfg = tokio::Config::default()
-        // 2026.5.0 defaults to 2 worker threads; the node runs p2p, the Schnorr participant,
-        // EVMSketch validation, and the healthz server concurrently.
+        // 2026.5.0 defaults to 2 worker threads; the node runs p2p and the Schnorr participant
+        // concurrently. Traces and healthz run elsewhere (see `TraceRuntime`, `serve_health`).
         .with_worker_threads(4)
         .with_storage_directory(storage_dir.clone());
     let runner = tokio::Runner::new(runtime_cfg);
+    // Built out here so it is dropped outside the node's runtime, which it must be.
+    let concurrency = validation_concurrency();
+    let trace_runtime = TraceRuntime::new(concurrency).expect("failed to build the trace runtime");
+    let traces = trace_runtime.pool();
 
     // Parse arguments
     let matches = Command::new("gas-killer-node")
@@ -452,7 +489,12 @@ fn main() {
             network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
 
         // EVMSketch validation of each requested task's expected digest.
-        let resolver = DigestResolver::new(Arc::clone(&validator), round_timeout());
+        tracing::info!(concurrency, "task traces run on their own runtime");
+        let resolver = DigestResolver::new(
+            Arc::clone(&validator),
+            traces.with_metrics(Arc::clone(&validator_metrics)),
+            round_timeout(),
+        );
         let operator_addresses: HashSet<_> = operators.iter().map(|o| o.address).collect();
         let router_key = orchestrator_pub_key.clone();
         let participant_ctx = context.child("schnorr_participant");
@@ -489,24 +531,12 @@ fn main() {
             validator_metrics,
             config_metrics: Arc::new(ConfigMetrics::new(&fingerprint)),
         };
-        context.child("healthz").spawn(move |_| async move {
-            let app = Router::new()
-                .route("/healthz", get(healthz_handler))
-                .route("/readyz", get(readyz_handler))
-                .route("/metrics", get(metrics_handler))
-                .with_state(health_state);
-            match TcpListener::bind(healthz_addr).await {
-                Ok(listener) => {
-                    tracing::info!(%healthz_addr, "healthz server running");
-                    if let Err(e) = axum::serve(listener, app).await {
-                        tracing::error!("healthz server error: {}", e);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(%healthz_addr, "failed to bind healthz server: {}", e);
-                }
-            }
-        });
+        // A thread of its own: a liveness probe that queues behind application work gets the pod
+        // killed exactly when it is busiest.
+        std::thread::Builder::new()
+            .name("gk-healthz".into())
+            .spawn(move || serve_health(healthz_addr, health_state))
+            .expect("failed to spawn the healthz thread");
 
         // Key loaded and signing path spawned — node is ready to participate
         ready.store(true, Ordering::Relaxed);

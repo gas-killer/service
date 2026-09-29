@@ -349,6 +349,12 @@ node:
   # The router waits nodeCount * startupDelaySecsPerNode. Set to 0 to disable.
   # Remove once the operator-state disk cache (service#275) is implemented.
   startupDelaySecsPerNode: 5
+  # Task traces a node runs at once (GK_VALIDATION_CONCURRENCY); empty follows
+  # router.maxInFlightTasks. Past the limit, traces queue in arrival order rather than
+  # sharing the CPU and the trace RPC and all finishing late. Lower it when
+  # gas_killer_non_signers_total shows an operator finishing its tasks last; watch
+  # gas_killer_validation_queue_wait_seconds for what the queue costs.
+  validationConcurrency: ""
   resources:
     requests:
       memory: "256Mi"
