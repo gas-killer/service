@@ -1,17 +1,13 @@
-//! Schnorr coordinator actor: the router's side of the two-round MuSig2 aggregate
-//! signing protocol (p2p channel 2).
+//! Schnorr coordinator: the router's side of the two-round MuSig2 aggregate signing protocol
+//! (p2p channel 2). The scheduler hands it one session at a time — a height and its task — and
+//! gets back how the session ended.
 //!
-//! The upstream sequencer assigns one height at a time into
-//! [`SharedAssignments`], polls its [`CertIndex`] for a certificate, and waits for
-//! the submitter's resolution. This actor supplies both ends: it watches the
-//! assignments map, drives signing sessions over channel 2, and emits
-//! [`SchnorrCertified`] observations to the schnorr submitter.
-//!
-//! # Session flow (per assigned height)
+//! # Session flow
 //!
 //! ```text
 //! attempt = 1, 2, … (fresh nonces each — a nonce is bound to one session):
-//!   CommitRequest{h,a}  → all operators
+//!   CommitRequest{h,a,task}  → all operators, re-sent every REBROADCAST_INTERVAL to the
+//!     operators that have not committed yet
 //!   collect Commit{…, digest} (each node commits once it has traced the task) until
 //!     all reply or the trace timeout, cut to one stage timeout once some digest has
 //!     ceil(N·num/den) commits; verify each commit's pubkey point maps to the sender's
@@ -22,17 +18,14 @@
 //!     partial is verified against the signer's own nonce commitment (bad partials
 //!     are attributed and the signer is excluded from the next attempt, and the
 //!     attempt is abandoned at once rather than waiting out a stage it cannot win)
-//!   all partials → assemble (self-verifies) → Certified{h, digest, sig, nonSigners}
-//! deadline (ROUND_TIMEOUT from first sight of the assignment), or the router's own trace
-//! of the task failing →
-//!   Certified{h, skip_digest(h), no signature} — the sequencer's own deadline is
-//!   broadcasting Skip{h} on channel 1 by then; nothing downstream consumes skip
-//!   proofs, so no skip signing session is run.
+//!   all partials → assemble (self-verifies) → Signed{digest, sig, nonSigners}
+//! ROUND_TIMEOUT from the session's start → TimedOut
+//! the router's own trace of the task failing → TraceFailed
 //! ```
 //!
 //! The router never waits on its own trace to sign: the digest comes from the nodes'
 //! commits, and the render gate checks it against the router trace before anything is
-//! handed out. A router trace that fails ends the height at once, so a task every node
+//! handed out. A router trace that fails ends the session at once, so a task every node
 //! would also fail to trace does not hold the pipeline for a whole round.
 //!
 //! # p2p identity vs signing identity
@@ -44,35 +37,19 @@
 //! (the committed point's address must equal the sender's registered address) and
 //! (b) address round-2 `SignRequest`s to the p2p keys of a subset chosen by
 //! address.
-//!
-//! The certified log lives in memory only (no journal), and each router life starts
-//! its heights at the wall clock in milliseconds ([`clock_tip`]). Node TipReports
-//! cannot recover the height here: a node reports only directives below the highest
-//! height it has seen, and a router restarting from 0 re-announces exactly that
-//! height, which the node's TaskBook drops as a conflict.
 
-use crate::sequencer::{InFlightTask, in_flight_trace};
+use crate::sequencer::RouterTrace;
 use alloy_primitives::Address;
 use commonware_avs_core::bn254::PublicKey;
-use commonware_avs_core::consensus::PRUNE_SLACK;
-use commonware_avs_core::wire::skip_digest;
-use commonware_avs_router::reporter::CertIndex;
-use commonware_avs_router::sequencer::{Assignment, SharedAssignments};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::sha256::Digest;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use gas_killer_common::schnorr::musig::{Coordinator, PubNonce};
 use gas_killer_common::schnorr::wire::{SchnorrMsg, SignRequest};
 use gas_killer_common::schnorr::{self, AggregateSignature};
 use gas_killer_common::task_data::GasKillerTaskData;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, info, warn};
-
-/// How often the actor re-checks the assignments map for new work.
-const ASSIGNMENT_POLL: Duration = Duration::from_millis(250);
 
 /// Which invited signers to hold against the next attempt after round 2 came up short.
 ///
@@ -117,14 +94,14 @@ fn agreed_digest<'a>(
 
 /// The height a router life starts at: Unix time in milliseconds.
 ///
-/// Heights are an internal sequence (neither the task digest nor the chain sees them) and
-/// nodes resolve passed-over heights as skips, so a start far above the last height costs
-/// nothing. A previous life started at its own boot time and advanced one height per
-/// resolved task, and no task resolves within a millisecond (two p2p signing rounds), so it
-/// never reached the current clock: the margin is that life's whole uptime. The wall clock is
-/// not monotonic, so a backward step larger than that uptime would re-announce recorded
-/// heights and wedge signing; restarting the nodes clears their TaskBooks.
-fn clock_tip() -> u64 {
+/// Heights only name sessions (neither the task digest nor the chain sees them), so a start far
+/// above the last height costs nothing. What matters is never reusing one: a node keys its
+/// nonce sessions by `(height, attempt)` and never signs twice for the same key. The scheduler
+/// never hands out a height above the clock, so a previous life's heights are all below the
+/// clock when the next life starts. The wall clock is not monotonic, so a backward step across
+/// a restart would reuse recorded heights and the nodes would refuse those sessions until
+/// restarted.
+pub fn clock_tip() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_millis() as u64,
         Err(_) => {
@@ -134,87 +111,31 @@ fn clock_tip() -> u64 {
     }
 }
 
-/// An aggregate-signature observation handed to the schnorr submitter.
+/// How a signing session ended.
 #[derive(Debug, Clone)]
-pub struct SchnorrCertified {
-    pub height: u64,
-    /// The digest the quorum signed — or [`skip_digest`] when the round deadline
-    /// passed without a signature (in which case `signature` is `None`).
-    pub digest: Digest,
-    /// The verified aggregate signature (`None` only for skips).
-    pub signature: Option<AggregateSignature>,
-    /// Operator identity addresses that did NOT sign, strictly ascending — the
-    /// exact list `SchnorrStakeRegistry.isValidSignature` subtracts on-chain.
-    pub non_signers: Vec<Address>,
+pub enum SessionOutcome {
+    /// A quorum signed `digest`.
+    Signed {
+        /// The digest the quorum signed: the one a quorum of commits carried.
+        digest: [u8; 32],
+        /// The verified aggregate signature.
+        signature: AggregateSignature,
+        /// Operator identity addresses that did NOT sign, strictly ascending — the exact
+        /// list `SchnorrStakeRegistry.isValidSignature` subtracts on-chain.
+        non_signers: Vec<Address>,
+    },
+    /// No attempt assembled a signature before `ROUND_TIMEOUT`.
+    TimedOut,
+    /// The router's own trace of the task failed, so the session could never render.
+    TraceFailed(String),
 }
 
-pub type SchnorrCertifiedSender = UnboundedSender<SchnorrCertified>;
-pub type SchnorrCertifiedReceiver = UnboundedReceiver<SchnorrCertified>;
-
-pub fn schnorr_certified_channel() -> (SchnorrCertifiedSender, SchnorrCertifiedReceiver) {
-    unbounded_channel()
-}
-
-/// Shared certified log answering the sequencer's [`CertIndex`] queries.
-#[derive(Default)]
-struct CertLog {
-    certified: BTreeMap<u64, Digest>,
-    tip: u64,
-}
-
-/// Cheap-to-clone handle over the coordinator's certified log.
-#[derive(Clone)]
-pub struct SchnorrCoordinatorMailbox {
-    log: Arc<RwLock<CertLog>>,
-}
-
-impl CertIndex for SchnorrCoordinatorMailbox {
-    async fn get_tip(&self) -> u64 {
-        self.log.read().expect("cert log lock").tip
-    }
-
-    async fn get(&self, height: u64) -> Option<Digest> {
-        self.log
-            .read()
-            .expect("cert log lock")
-            .certified
-            .get(&height)
-            .copied()
-    }
-}
-
-impl SchnorrCoordinatorMailbox {
-    fn starting_at(tip: u64) -> Self {
-        Self {
-            log: Arc::new(RwLock::new(CertLog {
-                certified: BTreeMap::new(),
-                tip,
-            })),
-        }
-    }
-
-    /// Records a certified height and advances the tip, pruning old entries.
-    fn record(&self, height: u64, digest: Digest) {
-        let mut log = self.log.write().expect("cert log lock");
-        log.certified.insert(height, digest);
-        log.tip = log.tip.max(height + 1);
-        let floor = log.tip.saturating_sub(PRUNE_SLACK);
-        if floor > 0 {
-            log.certified = log.certified.split_off(&floor);
-        }
-    }
-}
-
-/// The coordinator actor. Owns the channel-2 endpoints; single-threaded per
-/// height (the sequencer only keeps one assignment in flight).
+/// The coordinator. Owns the channel-2 endpoints and drives one session at a time.
 pub struct SchnorrCoordinator<S, R>
 where
     S: Sender<PublicKey = PublicKey>,
     R: Receiver<PublicKey = PublicKey>,
 {
-    assignments: SharedAssignments<GasKillerTaskData>,
-    mailbox: SchnorrCoordinatorMailbox,
-    certified_out: SchnorrCertifiedSender,
     sender: S,
     receiver: R,
     /// Operator p2p keys, the round-1 `CommitRequest` recipients.
@@ -227,9 +148,6 @@ where
     address_to_peer: HashMap<Address, PublicKey>,
     /// All operator identity addresses (the non-signer complement is drawn from here).
     operator_addresses: HashSet<Address>,
-    /// Application namespace mixed into the skip digest; kept in lockstep with the
-    /// node's `APPLICATION_NAMESPACE`.
-    namespace: Vec<u8>,
     /// Local participation floor `num/den` before a signing round is attempted
     /// (the authoritative stake check is the on-chain registry threshold).
     threshold: (u64, u64),
@@ -240,8 +158,12 @@ where
     /// has to cover a full cold trace.
     trace_timeout: Duration,
     round_timeout: Duration,
-    /// The router's own trace of the in-flight task.
-    in_flight: InFlightTask,
+    /// How often an unanswered `CommitRequest` is re-sent. A lost request would otherwise
+    /// cost the whole trace budget before the next attempt asks again.
+    resend_interval: Duration,
+    /// Set once the channel-2 receiver has closed: the network is shutting down, so no session
+    /// can finish and waiting out its deadlines would only spin.
+    closed: bool,
 }
 
 impl<S, R> SchnorrCoordinator<S, R>
@@ -251,46 +173,42 @@ where
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        assignments: SharedAssignments<GasKillerTaskData>,
-        certified_out: SchnorrCertifiedSender,
         sender: S,
         receiver: R,
         operators: Vec<(PublicKey, Address)>,
-        namespace: Vec<u8>,
         threshold: (u64, u64),
         stage_timeout: Duration,
         trace_timeout: Duration,
         round_timeout: Duration,
-        in_flight: InFlightTask,
-    ) -> (Self, SchnorrCoordinatorMailbox) {
-        let tip = clock_tip();
-        info!(tip, "schnorr heights start at the clock");
-        let mailbox = SchnorrCoordinatorMailbox::starting_at(tip);
+        resend_interval: Duration,
+    ) -> Self {
         let operator_keys: Vec<PublicKey> = operators.iter().map(|(k, _)| k.clone()).collect();
         let peer_to_address: HashMap<PublicKey, Address> = operators.iter().cloned().collect();
         let address_to_peer: HashMap<Address, PublicKey> =
             operators.iter().map(|(k, a)| (*a, k.clone())).collect();
         let operator_addresses: HashSet<Address> = operators.iter().map(|(_, a)| *a).collect();
-        (
-            Self {
-                assignments,
-                mailbox: mailbox.clone(),
-                certified_out,
-                sender,
-                receiver,
-                operator_keys,
-                peer_to_address,
-                address_to_peer,
-                operator_addresses,
-                namespace,
-                threshold,
-                stage_timeout,
-                trace_timeout,
-                round_timeout,
-                in_flight,
-            },
-            mailbox,
-        )
+        let coordinator = Self {
+            sender,
+            receiver,
+            operator_keys,
+            peer_to_address,
+            address_to_peer,
+            operator_addresses,
+            threshold,
+            stage_timeout,
+            trace_timeout,
+            round_timeout,
+            resend_interval,
+            closed: false,
+        };
+        info!(
+            operators = coordinator.operator_keys.len(),
+            min_signers = coordinator.min_signers(),
+            stage_timeout_secs = stage_timeout.as_secs_f64(),
+            trace_timeout_secs = trace_timeout.as_secs_f64(),
+            "schnorr coordinator running"
+        );
+        coordinator
     }
 
     /// The minimum number of signers worth running a round for:
@@ -303,50 +221,21 @@ where
         (n.saturating_mul(num).div_ceil(den)).max(1) as usize
     }
 
-    pub async fn run(mut self) {
-        info!(
-            operators = self.operator_keys.len(),
-            min_signers = self.min_signers(),
-            stage_timeout_secs = self.stage_timeout.as_secs_f64(),
-            trace_timeout_secs = self.trace_timeout.as_secs_f64(),
-            "schnorr coordinator running"
-        );
-        loop {
-            let Some((height, assignment)) = self.next_assignment().await else {
-                // Assignments lock poisoned — the process is on its way down.
-                return;
-            };
-            self.drive_height(height, assignment).await;
-        }
-    }
-
-    /// Waits for an unprocessed assignment at or above the tip.
-    async fn next_assignment(&self) -> Option<(u64, Assignment<GasKillerTaskData>)> {
-        loop {
-            {
-                let tip = self.mailbox.get_tip().await;
-                let assignments = self.assignments.read().ok()?;
-                if let Some((&height, assignment)) = assignments.iter().find(|(h, _)| **h >= tip) {
-                    return Some((height, assignment.clone()));
-                }
-            }
-            tokio::time::sleep(ASSIGNMENT_POLL).await;
-        }
-    }
-
-    /// Runs signing attempts for a height until success, the round deadline, or the router's
-    /// own trace failing, then records the outcome (task certificate or skip) and notifies
-    /// the submitter.
-    async fn drive_height(&mut self, height: u64, assignment: Assignment<GasKillerTaskData>) {
+    /// Runs signing attempts for `task` at `height` until one assembles a signature, the round
+    /// deadline passes, or the router's own trace fails. `None` means the channel closed, so the
+    /// session could not run to an outcome.
+    pub async fn drive_height(
+        &mut self,
+        height: u64,
+        task: &GasKillerTaskData,
+        trace: &RouterTrace,
+    ) -> Option<SessionOutcome> {
         let deadline = Instant::now() + self.round_timeout;
-        let trace = in_flight_trace(&self.in_flight, &assignment.task);
+        let trace = trace.clone();
         let trace_failed = async move {
-            match trace {
-                Some(trace) => match trace.wait().await {
-                    Err(reason) => reason,
-                    Ok(_) => std::future::pending().await,
-                },
-                None => std::future::pending().await,
+            match trace.wait().await {
+                Err(reason) => reason,
+                Ok(_) => std::future::pending().await,
             }
         };
         tokio::pin!(trace_failed);
@@ -359,19 +248,22 @@ where
 
         let mut attempt: u32 = 0;
         while Instant::now() < deadline {
+            if self.closed {
+                warn!(height, "schnorr channel closed; abandoning session");
+                return None;
+            }
             attempt += 1;
-            // Biased toward the trace: a height whose router trace has failed cannot render, so
-            // when both are ready it resolves as a skip rather than as a certified round that
-            // fails at the render gate.
+            // Biased toward the trace: a session whose router trace has failed cannot render,
+            // so when both are ready it ends as a trace failure rather than as a signed round
+            // that fails at the render gate.
             tokio::select! {
                 biased;
                 reason = &mut trace_failed => {
-                    warn!(height, %reason, "router trace failed, skipping height");
-                    self.skip(height);
-                    return;
+                    warn!(height, %reason, "router trace failed, abandoning session");
+                    return Some(SessionOutcome::TraceFailed(reason));
                 }
-                outcome = self.run_attempt(height, attempt, &mut suspects, deadline) => {
-                    let Some((signature, non_signers, message)) = outcome else {
+                outcome = self.run_attempt(height, attempt, task, &mut suspects, deadline) => {
+                    let Some((signature, non_signers, digest)) = outcome else {
                         debug!(height, attempt, "signing attempt failed; retrying");
                         continue;
                     };
@@ -381,15 +273,11 @@ where
                         non_signers = non_signers.len(),
                         "aggregate schnorr signature assembled"
                     );
-                    let digest = Digest::from(message);
-                    self.mailbox.record(height, digest);
-                    let _ = self.certified_out.send(SchnorrCertified {
-                        height,
+                    return Some(SessionOutcome::Signed {
                         digest,
-                        signature: Some(signature),
+                        signature,
                         non_signers,
                     });
-                    return;
                 }
             }
         }
@@ -398,24 +286,9 @@ where
             height,
             attempts = attempt,
             timeout_secs = self.round_timeout.as_secs_f64(),
-            "no aggregate signature before round timeout, skipping height"
+            "no aggregate signature before round timeout, abandoning session"
         );
-        self.skip(height);
-    }
-
-    /// Resolves the height as skipped so the pipeline advances (the sequencer is
-    /// broadcasting Skip{h} on channel 1 by then, or stops driving the height once the
-    /// submitter reports the skip). No skip signature is assembled — nothing downstream
-    /// consumes skip proofs.
-    fn skip(&self, height: u64) {
-        let skip = skip_digest(&self.namespace, height);
-        self.mailbox.record(height, skip);
-        let _ = self.certified_out.send(SchnorrCertified {
-            height,
-            digest: skip,
-            signature: None,
-            non_signers: Vec::new(),
-        });
+        Some(SessionOutcome::TimedOut)
     }
 
     /// One full two-round attempt. Returns the verified signature, the sorted non-signer
@@ -424,24 +297,52 @@ where
         &mut self,
         height: u64,
         attempt: u32,
+        task: &GasKillerTaskData,
         suspects: &mut HashSet<Address>,
         deadline: Instant,
     ) -> Option<(AggregateSignature, Vec<Address>, [u8; 32])> {
         // Round 1: fresh nonces from everyone (suspects included — flapping nodes
         // recover here; they are filtered at subset selection below).
-        let request = SchnorrMsg::CommitRequest { height, attempt }.encode();
-        let _ = self
-            .sender
-            .send(Recipients::Some(self.operator_keys.clone()), request, true);
+        let request = SchnorrMsg::CommitRequest {
+            height,
+            attempt,
+            task: task.clone(),
+        }
+        .encode();
+        let _ = self.sender.send(
+            Recipients::Some(self.operator_keys.clone()),
+            request.clone(),
+            true,
+        );
 
         let min_signers = self.min_signers();
         let trace_deadline = (Instant::now() + self.trace_timeout).min(deadline);
         let mut stage_deadline = trace_deadline;
         let mut commits: HashMap<Address, (schnorr::PublicKey, PubNonce, [u8; 32])> =
             HashMap::new();
+        let mut next_resend = Instant::now() + self.resend_interval;
         while commits.len() < self.operator_keys.len() {
-            let Some(msg) = self.recv_until(stage_deadline).await else {
-                break;
+            let Some(msg) = self.recv_until(stage_deadline.min(next_resend)).await else {
+                if self.closed || Instant::now() >= stage_deadline {
+                    break;
+                }
+                // A node dedupes by session, so the ones already tracing just ignore it.
+                let silent: Vec<PublicKey> = self
+                    .operator_keys
+                    .iter()
+                    .filter(|key| {
+                        !self
+                            .peer_to_address
+                            .get(*key)
+                            .is_some_and(|addr| commits.contains_key(addr))
+                    })
+                    .cloned()
+                    .collect();
+                let _ = self
+                    .sender
+                    .send(Recipients::Some(silent), request.clone(), true);
+                next_resend = Instant::now() + self.resend_interval;
+                continue;
             };
             let (peer, msg) = msg;
             if let SchnorrMsg::Commit {
@@ -603,15 +504,18 @@ where
         Some((signature, non_signers, message))
     }
 
-    /// Receives the next channel-2 message before `deadline`, or `None` on
-    /// timeout / channel close. Non-operator senders are dropped.
+    /// Receives the next channel-2 message before `deadline`, or `None` on timeout or channel
+    /// close (which also sets [`Self::closed`]). Non-operator senders are dropped.
     async fn recv_until(&mut self, deadline: Instant) -> Option<(PublicKey, SchnorrMsg)> {
         loop {
             let remaining = deadline.checked_duration_since(Instant::now())?;
             let received = tokio::time::timeout(remaining, self.receiver.recv())
                 .await
                 .ok()?;
-            let (peer, bytes) = received.ok()?;
+            let Ok((peer, bytes)) = received else {
+                self.closed = true;
+                return None;
+            };
             if !self.peer_to_address.contains_key(&peer) {
                 warn!(peer = %peer, "schnorr message from unknown peer; ignored");
                 continue;
@@ -628,11 +532,132 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
+    use commonware_actor::{Feedback, Unreliable};
+    use commonware_avs_core::bn254::Bn254;
+    use commonware_cryptography::Signer as _;
+    use commonware_p2p::{CheckedSender, LimitedSender, Message};
+    use commonware_runtime::IoBufs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A channel-2 receiver whose network has already shut down.
+    #[derive(Debug)]
+    pub(crate) struct ClosedReceiver;
+
+    impl Receiver for ClosedReceiver {
+        type Error = std::io::Error;
+        type PublicKey = PublicKey;
+
+        async fn recv(&mut self) -> Result<Message<PublicKey>, Self::Error> {
+            Err(std::io::Error::other("channel closed"))
+        }
+    }
+
+    /// A channel-2 sender that delivers to every recipient and counts its sends.
+    #[derive(Clone, Default)]
+    pub(crate) struct CountingSender {
+        pub(crate) sends: Arc<AtomicUsize>,
+    }
+
+    pub(crate) struct CountingChecked {
+        recipients: Vec<PublicKey>,
+        sends: Arc<AtomicUsize>,
+    }
+
+    impl CheckedSender for CountingChecked {
+        type PublicKey = PublicKey;
+
+        fn recipients(&self) -> Vec<PublicKey> {
+            self.recipients.clone()
+        }
+
+        fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Unreliable<Feedback> {
+            self.sends.fetch_add(1, Ordering::Relaxed);
+            Unreliable::new(Feedback::Ok)
+        }
+    }
+
+    impl LimitedSender for CountingSender {
+        type PublicKey = PublicKey;
+        type Checked<'a>
+            = CountingChecked
+        where
+            Self: 'a;
+
+        fn check(
+            &mut self,
+            recipients: Recipients<PublicKey>,
+        ) -> Result<CountingChecked, SystemTime> {
+            let recipients = match recipients {
+                Recipients::Some(peers) => peers,
+                Recipients::One(peer) => vec![peer],
+                Recipients::All => Vec::new(),
+            };
+            Ok(CountingChecked {
+                recipients,
+                sends: Arc::clone(&self.sends),
+            })
+        }
+    }
+
+    /// A coordinator over three operators whose channel-2 receiver is already closed.
+    pub(crate) fn closed_coordinator(
+        sender: CountingSender,
+    ) -> SchnorrCoordinator<CountingSender, ClosedReceiver> {
+        let operators = (0..3u8)
+            .map(|i| {
+                (
+                    Bn254::from_seed(u64::from(i)).public_key(),
+                    Address::from([i + 1; 20]),
+                )
+            })
+            .collect();
+        SchnorrCoordinator::new(
+            sender,
+            ClosedReceiver,
+            operators,
+            (2, 3),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            Duration::from_secs(120),
+            Duration::from_millis(10),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{CountingSender, closed_coordinator};
+    use super::*;
+    use std::sync::atomic::Ordering;
 
     fn addr(n: u8) -> Address {
         Address::from([n; 20])
+    }
+
+    /// A closed channel ends the session at once instead of re-sending in a hot loop until the
+    /// trace and round deadlines run out.
+    #[tokio::test]
+    async fn a_closed_channel_ends_the_session_without_spinning() {
+        let sender = CountingSender::default();
+        let mut coordinator = closed_coordinator(sender.clone());
+        let trace = RouterTrace::spawn(std::future::pending());
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            coordinator.drive_height(1, &GasKillerTaskData::default(), &trace),
+        )
+        .await
+        .expect("a closed channel must not hold the session until its deadlines");
+
+        assert!(outcome.is_none());
+        assert_eq!(
+            sender.sends.load(Ordering::Relaxed),
+            1,
+            "only the first request goes out"
+        );
     }
 
     /// A stage that ran its course blames everyone who stayed silent, which is what keeps a
@@ -659,18 +684,15 @@ mod tests {
         assert!(silent_signers(&subset, &partials, true).is_empty());
     }
 
-    /// The nodes keep the first directive they record per height, so a restarted router must
-    /// start above every height its previous life announced, the in-flight one included.
+    /// The nodes never sign twice for one session key, so a restarted router must start above
+    /// every height its previous life used, the in-flight one included.
     #[tokio::test]
     async fn a_restarted_router_starts_above_every_height_its_previous_life_announced() {
-        let previous = SchnorrCoordinatorMailbox::starting_at(clock_tip());
-        let first = previous.get_tip().await;
-        previous.record(first, Digest::from([1; 32]));
-        previous.record(first + 1, Digest::from([2; 32]));
-        let in_flight = previous.get_tip().await;
+        let first = clock_tip();
+        let highest = first + 2;
         tokio::time::sleep(Duration::from_millis(5)).await;
 
-        assert!(clock_tip() > in_flight);
+        assert!(clock_tip() > highest);
     }
 
     #[test]

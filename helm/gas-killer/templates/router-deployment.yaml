@@ -348,8 +348,6 @@ spec:
               value: {{ .Values.router.healthzPort | quote }}
             - name: P2P_MESSAGE_BACKLOG
               value: {{ .Values.router.p2pMessageBacklog | quote }}
-            - name: P2P_MESSAGES_PER_SECOND
-              value: {{ .Values.router.p2pMessagesPerSecond | quote }}
             # Runtime storage shares the persistent router-data volume with the SQLite store
             # (DATA_DIR).
             - name: STORAGE_DIR

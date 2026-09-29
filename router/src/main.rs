@@ -1,8 +1,8 @@
-//! Gas Killer router: task sequencer + aggregate-Schnorr coordinator + payload renderer.
+//! Gas Killer router: task scheduler + aggregate-Schnorr coordinator + payload renderer.
 //!
-//! The router is NOT a signing participant. Task flow: HTTP ingress → sequencer (assigns heights,
-//! broadcasts `TaskDirective`s on channel 1) → the Schnorr coordinator runs the two-round MuSig2
-//! session with the operators on channel 2 → the submitter renders `verifyAndUpdate` for the
+//! The router is NOT a signing participant. Task flow: HTTP ingress → scheduler (one session per
+//! task) → the Schnorr coordinator runs the two-round MuSig2 session with the operators on
+//! channel 2, the first round carrying the task → the submitter renders `verifyAndUpdate` for the
 //! client to submit.
 
 use ::tokio::net::TcpListener;
@@ -10,9 +10,6 @@ use ark_bn254::G2Affine;
 use ark_serialize::CanonicalDeserialize;
 use clap::{Arg, Command};
 use commonware_avs_core::bn254::{PublicKey, get_signer};
-use commonware_avs_router::sequencer::{
-    DispatchTime, Sequencer, TipReports, ingest_tip_reports, resolution_channel, shared_assignments,
-};
 use commonware_cryptography::Signer as _;
 use commonware_p2p::authenticated::lookup::{self, Network};
 use commonware_p2p::{Address, AddressableManager as _};
@@ -21,17 +18,16 @@ use commonware_runtime::{
     tokio::{self},
 };
 use commonware_utils::NZU32;
-use commonware_utils::ordered::{Map, Set};
+use commonware_utils::ordered::Map;
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::get_operator_states;
 use gas_killer_common::{
-    APPLICATION_NAMESPACE, ConfigMetrics, GasKillerTaskData, GasKillerValidator,
-    IngressStalenessWindow, SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint,
-    load_key_from_file, p2p_message_backlog, p2p_quota_period, quorum_threshold_fraction,
-    rebroadcast_interval, round_timeout, schnorr_messages_per_second, schnorr_stage_timeout,
-    schnorr_trace_timeout, storage_directory, task_ttl,
+    APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, IngressStalenessWindow,
+    SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint, load_key_from_file,
+    p2p_message_backlog, quorum_threshold_fraction, rebroadcast_interval, round_timeout,
+    schnorr_messages_per_second, schnorr_stage_timeout, schnorr_trace_timeout, storage_directory,
+    task_ttl,
 };
-use gas_killer_router::directive_metrics::CountingSender;
 use gas_killer_router::expiry::run_expiry_sweeper;
 use gas_killer_router::factories::{
     create_ingress, create_schnorr_submitter, requeue_incomplete_tasks,
@@ -39,22 +35,19 @@ use gas_killer_router::factories::{
 use gas_killer_router::height_metrics::{HeightObserver, SAMPLE_INTERVAL};
 use gas_killer_router::metrics::MetricsCollector;
 use gas_killer_router::operator_http::{HealthState, build_operator_app};
-use gas_killer_router::schnorr_coordinator::{SchnorrCoordinator, schnorr_certified_channel};
-use gas_killer_router::sequencer::{GasKillerTaskSource, in_flight_task};
-use std::collections::{HashMap, HashSet};
+use gas_killer_router::scheduler::Scheduler;
+use gas_killer_router::schnorr_coordinator::SchnorrCoordinator;
+use gas_killer_router::sequencer::GasKillerTaskSource;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Maximum p2p message size. `TaskDirective::Announce` is
-/// bounded by the 128 KB combined calldata/storage-updates limit — 1 MB is
-/// generous headroom (`Sender::send` panics above this).
+/// Maximum p2p message size. A `CommitRequest` carries the task, which is bounded by the 128 KB
+/// calldata limit — 1 MB is generous headroom (`Sender::send` panics above this).
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
 
-/// P2p channel on which the router broadcasts `TaskDirective`s to the nodes.
-const DIRECTIVE_CHANNEL: u64 = 1;
 /// P2p channel carrying the interactive Schnorr signing rounds.
 const SCHNORR_CHANNEL: u64 = 2;
 
@@ -317,27 +310,17 @@ fn main() {
         if operators.is_empty() {
             panic!("Please provide at least one contributor");
         }
-        let participants: Set<PublicKey> = Set::from_iter_dedup(operators.iter().map(|operator| {
+        for operator in operators {
             let keys = operator.pub_keys.as_ref().expect("operator has BN254 keys");
             tracing::info!(key = ?keys.g2_pub_key, "registered contributor");
-            keys.g2_pub_key.clone()
-        }));
+        }
 
-        // All channels must be registered before network.start(). The router sends directives on
-        // channel 1 and receives the nodes' rate-limited TipReport replies on the same channel;
-        // the Schnorr rounds run on channel 2, registered below.
+        // All channels must be registered before network.start(); the Schnorr rounds run on
+        // channel 2, registered below.
         let p2p_backlog = p2p_message_backlog();
-        let p2p_quota = Quota::with_period(p2p_quota_period())
-            .expect("p2p_quota_period always returns a non-zero duration");
-        let (directive_sender, directive_receiver) =
-            network.register(DIRECTIVE_CHANNEL, p2p_quota, p2p_backlog);
 
-        // Custom Prometheus metrics — shared by ingress, sequencer, and submitter.
+        // Custom Prometheus metrics — shared by ingress, scheduler, and submitter.
         let metrics = Arc::new(MetricsCollector::new());
-
-        // The sequencer's broadcast loop is upstream and can only report a directive that
-        // reached nobody; wrapping the sender is what makes a partial drop visible.
-        let directive_sender = CountingSender::new(directive_sender, Arc::clone(&metrics));
 
         // Shared validator: the task source uses it for the router's own EVMSketch trace; its
         // speculative pre-build loop warms the executor cache off the hot path.
@@ -359,21 +342,13 @@ fn main() {
             });
         }
 
-        // State shared across sequencer / signing path / submitter.
-        let assignments = shared_assignments::<GasKillerTaskData>();
-        let dispatch_time: DispatchTime = Arc::new(Mutex::new(HashMap::new()));
-
-        // Resolutions run submitter -> observer -> sequencer rather than straight through, so
-        // every height's outcome is counted before the sequencer can act on it. The observer
-        // relies on that ordering to tell an abandoned height from a resolved one.
-        let (resolution_sender, observed_resolutions) = resolution_channel();
-        let (observer_sender, resolution_receiver) = resolution_channel();
+        // Session window and outcomes, published as the scheduler reports each session.
         let height_observer = HeightObserver::new(Arc::clone(&metrics));
         {
             let height_observer = height_observer.clone();
-            context.child("height_outcomes").spawn(move |_| {
-                height_observer.forward_resolutions(observed_resolutions, observer_sender)
-            });
+            context
+                .child("window_sampler")
+                .spawn(move |_| height_observer.sample_forever(SAMPLE_INTERVAL));
         }
 
         // HTTP ingress (env-gated, unchanged endpoints). The returned sender is
@@ -411,49 +386,6 @@ fn main() {
         }
         let _task_sender = ingress.sender;
 
-        // Shared with the executor: the id of the task currently dispatched
-        // through the sequencer, so a certified height's execution result can be
-        // attributed back to its task. See `InFlightTask`.
-        let in_flight = in_flight_task();
-
-        // Node tip reports (channel 1, node → router): if this router lost its
-        // journal and assigns heights the nodes are already past, their reports
-        // fast-forward the sequencer instead of wedging on a dead height.
-        let tip_reports = TipReports::<PublicKey>::new(participants.len());
-        {
-            let participant_keys: HashSet<PublicKey> = participants.iter().cloned().collect();
-            let tip_reports = tip_reports.clone();
-            context.child("tip_reports").spawn(move |_| async move {
-                ingest_tip_reports::<GasKillerTaskData, _, _>(
-                    directive_receiver,
-                    participant_keys,
-                    tip_reports,
-                )
-                .await;
-            });
-        }
-
-        // Window sampler: publishes the live height range, the oldest waiting height's age, and
-        // the tip floor from the operators' reports. Reads the same shared state the sequencer
-        // drives, so a stalled window is visible without touching the height loop.
-        {
-            let height_observer = height_observer.clone();
-            let assignments = Arc::clone(&assignments);
-            let dispatch_time = Arc::clone(&dispatch_time);
-            let tip_reports = tip_reports.clone();
-            context.child("window_sampler").spawn(move |_| {
-                height_observer.sample_forever(
-                    assignments,
-                    dispatch_time,
-                    tip_reports,
-                    SAMPLE_INTERVAL,
-                )
-            });
-        }
-
-        // Directive recipients: the explicit operator keys (see Sequencer::broadcast).
-        let directive_recipients: Vec<PublicKey> = participants.iter().cloned().collect();
-
         // Task source: dequeues ingress tasks, resolves them for the sequencer, and starts
         // the router's own trace of each.
         let task_source = GasKillerTaskSource::new(
@@ -462,7 +394,6 @@ fn main() {
             validator,
             Some(Arc::clone(&metrics)),
             ingress.store.clone(),
-            in_flight.clone(),
         );
 
         // The Schnorr rounds are request/response, but a dropped message costs a whole retry
@@ -471,12 +402,9 @@ fn main() {
         let (schnorr_sender, schnorr_receiver) =
             network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
 
-        let (certified_sender, certified_receiver) = schnorr_certified_channel();
-
-        // Coordinator: drives the two-round signing sessions per assigned
-        // height and doubles as the sequencer's certificate index. It needs
-        // both the p2p key and the operator address of each operator (the
-        // registry binds them at registration).
+        // Coordinator: drives the two-round signing session for each task. It needs both the
+        // p2p key and the operator address of each operator (the registry binds them at
+        // registration).
         let operators_with_addresses: Vec<_> = operators
             .iter()
             .map(|operator| {
@@ -484,55 +412,30 @@ fn main() {
                 (keys.g2_pub_key.clone(), operator.address)
             })
             .collect();
-        let (coordinator, coordinator_mailbox) = SchnorrCoordinator::new(
-            assignments.clone(),
-            certified_sender,
+        let coordinator = SchnorrCoordinator::new(
             schnorr_sender,
             schnorr_receiver,
             operators_with_addresses,
-            APPLICATION_NAMESPACE.to_vec(),
             quorum_threshold_fraction(),
             schnorr_stage_timeout(),
             schnorr_trace_timeout(),
             round_timeout(),
-            in_flight.clone(),
-        );
-        context
-            .child("schnorr_coordinator")
-            .spawn(move |_| coordinator.run());
-
-        // On-chain submitter: consumes aggregate signatures, resolves heights.
-        let submitter = create_schnorr_submitter(
-            assignments.clone(),
-            certified_receiver,
-            resolution_sender,
-            Arc::clone(&metrics),
-            Arc::clone(&dispatch_time),
-            APPLICATION_NAMESPACE.to_vec(),
-            ingress.store.clone(),
-            in_flight.clone(),
-        )
-        .await
-        .expect("Failed to create schnorr submitter");
-        context
-            .child("schnorr_submitter")
-            .spawn(move |_| submitter.run());
-
-        // Sequencer: unchanged behavior; its certificate observations come
-        // from the coordinator's mailbox instead of the engine reporter.
-        let sequencer = Sequencer::new(
-            task_source,
-            dispatch_time,
-            assignments,
-            coordinator_mailbox,
-            resolution_receiver,
-            directive_sender,
-            directive_recipients,
-            tip_reports,
-            round_timeout(),
             rebroadcast_interval(),
         );
-        context.child("sequencer").spawn(move |_| sequencer.run());
+
+        // Submitter: renders each signed session's payload and settles its task.
+        let submitter = create_schnorr_submitter(Arc::clone(&metrics), ingress.store.clone())
+            .await
+            .expect("Failed to create schnorr submitter");
+
+        let scheduler = Scheduler::new(
+            task_source,
+            coordinator,
+            submitter,
+            height_observer,
+            Arc::clone(&metrics),
+        );
+        context.child("scheduler").spawn(move |_| scheduler.run());
 
         // Readiness flag: set to true after everything is spawned and the network is starting
         let ready = Arc::new(AtomicBool::new(false));
@@ -567,7 +470,7 @@ fn main() {
             }
         });
 
-        // Key loaded, coordinator + sequencer + submitter spawned — router is ready to sign.
+        // Key loaded, scheduler spawned — router is ready to sign.
         ready.store(true, Ordering::Relaxed);
 
         // Run the network; blocks the root future (and thus the process) until

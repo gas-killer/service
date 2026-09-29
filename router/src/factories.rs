@@ -9,11 +9,9 @@ use crate::ingress::{
 use crate::metrics::MetricsCollector;
 use crate::rate_limit::KeyRateLimiter;
 use crate::rpc_health::RpcHealth;
-use crate::schnorr_coordinator::SchnorrCertifiedReceiver;
 use crate::schnorr_submitter::SchnorrSubmitter;
 use crate::sequencer::{
-    InFlightTask, QueuedTask, TaskQueueDepth, TaskReceiver, TaskSender, task_channel,
-    task_queue_depth,
+    QueuedTask, TaskQueueDepth, TaskReceiver, TaskSender, task_channel, task_queue_depth,
 };
 use crate::store::{SqliteStore, TaskCursor};
 use alloy::network::{Ethereum, EthereumWallet};
@@ -28,11 +26,9 @@ use alloy_provider::{
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
 use commonware_avs_eigenlayer::AvsDeployment;
-use commonware_avs_router::sequencer::{DispatchTime, ResolutionSender, SharedAssignments};
 use gas_killer_common::avs_contracts::{
     self, ContractsConfig, ResolvedContracts, SCHNORR_STAKE_REGISTRY_KEY,
 };
-use gas_killer_common::task_data::GasKillerTaskData;
 use gas_killer_common::{ChainRole, GasKillerValidator};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -597,9 +593,7 @@ async fn create_wallet_provider_for_chain(
 /// when the target contract lives there.
 async fn create_handler_parts(
     metrics: Arc<MetricsCollector>,
-    dispatch_time: DispatchTime,
     store: Option<SqliteStore>,
-    in_flight: InFlightTask,
 ) -> Result<(
     gas_killer_common::bindings::ReadOnlyProvider,
     GasKillerHandler<SimpleWalletProvider>,
@@ -681,15 +675,12 @@ async fn create_handler_parts(
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
 
-    // Create handler with multi-chain providers. The store and in-flight task slot
-    // let a settled height advance its task's terminal status; the slot is shared
-    // with the task source (see `GasKillerTaskSource`).
+    // Create handler with multi-chain providers. The store lets a settled session advance its
+    // task's terminal status.
     let mut gas_killer_handler = GasKillerHandler::with_providers(providers)
         .with_chain_roles(chain_roles)
         .with_metrics(metrics)
-        .with_dispatch_time(dispatch_time)
         .with_receipt_timeout(receipt_timeout_override)
-        .with_in_flight_task(in_flight)
         .with_payload_block_buffer(gas_killer_common::payload_block_buffer());
     if let Some(store) = store {
         gas_killer_handler = gas_killer_handler.with_store(store);
@@ -700,26 +691,14 @@ async fn create_handler_parts(
 
 /// Creates the [`SchnorrSubmitter`]. The registry is read on chain by the target contract
 /// itself, so the submitter needs no operator-state contracts.
-#[allow(clippy::too_many_arguments)]
 pub async fn create_schnorr_submitter(
-    assignments: SharedAssignments<GasKillerTaskData>,
-    certified: SchnorrCertifiedReceiver,
-    resolutions: ResolutionSender,
     metrics: Arc<MetricsCollector>,
-    dispatch_time: DispatchTime,
-    namespace: Vec<u8>,
     store: Option<SqliteStore>,
-    in_flight: InFlightTask,
 ) -> Result<SchnorrSubmitter> {
-    let (view_only_provider, gas_killer_handler) =
-        create_handler_parts(metrics, dispatch_time, store, in_flight).await?;
+    let (view_only_provider, gas_killer_handler) = create_handler_parts(metrics, store).await?;
     Ok(SchnorrSubmitter::new(
         view_only_provider,
         gas_killer_handler,
-        assignments,
-        certified,
-        resolutions,
-        namespace,
     ))
 }
 

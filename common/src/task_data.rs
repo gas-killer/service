@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 /// Task data specific to the gas killer use case
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct GasKillerTaskData {
     /// Encoded storage updates to be applied.
     ///

@@ -11,14 +11,14 @@ pub mod validator;
 
 // Re-export commonly used types
 pub use config::{
-    APPLICATION_NAMESPACE, ChainRole, DEFAULT_PAYLOAD_BLOCK_BUFFER, DIRECTIVE_WIRE_VERSION,
-    IngressStalenessWindow, KeyConfig, OrchestratorConfig, SpeculativePrebuildConfig, agg_window,
+    APPLICATION_NAMESPACE, ChainRole, DEFAULT_PAYLOAD_BLOCK_BUFFER, IngressStalenessWindow,
+    KeyConfig, OrchestratorConfig, SCHNORR_WIRE_VERSION, SpeculativePrebuildConfig,
     block_stale_measure, config_fingerprint, detect_chain_for_address, get_operator_states,
     ingress_staleness_window, load_key_from_file, load_orchestrator_config, max_queue_depth,
-    p2p_message_backlog, p2p_quota_period, payload_block_buffer, quorum_threshold_fraction,
-    rate_limit_rpm, rebroadcast_interval, round_timeout, rpc_failure_threshold,
-    schnorr_messages_per_second, schnorr_notice_window, schnorr_stage_timeout,
-    schnorr_trace_timeout, storage_directory, task_ttl,
+    p2p_message_backlog, payload_block_buffer, quorum_threshold_fraction, rate_limit_rpm,
+    rebroadcast_interval, round_timeout, rpc_failure_threshold, schnorr_messages_per_second,
+    schnorr_notice_window, schnorr_stage_timeout, schnorr_trace_timeout, storage_directory,
+    task_ttl,
 };
 pub use metrics::ConfigMetrics;
 pub use payload::{BundleProof, PayloadView, TaskBundle};

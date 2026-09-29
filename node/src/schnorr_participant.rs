@@ -1,14 +1,13 @@
 //! Schnorr participant actor: the node's side of the two-round MuSig2 aggregate
 //! signing protocol (p2p channel 2).
 //!
-//! The router announces tasks on channel 1 and the TaskBook resolves heights; the node then
-//! answers the router coordinator's session messages:
+//! The node answers the router coordinator's session messages:
 //!
-//! 1. `CommitRequest{h, a}`: derive the digest for `h` LOCALLY (TaskBook + EVMSketch, via
+//! 1. `CommitRequest{h, a, task}`: derive the task's digest LOCALLY (EVMSketch, via
 //!    [`DigestResolver`]), then commit a fresh nonce pair together with that digest. The
 //!    coordinator signs the digest a quorum of commits agrees on, so the node's trace is what
-//!    the round waits for, not the router's. A height that resolves to its skip digest gets no
-//!    commit: the coordinator never signs skips.
+//!    the round waits for, not the router's. A task whose digest cannot be derived gets no
+//!    commit.
 //! 2. `SignRequest{h, a, …}`: refuse unless the message equals the digest this session
 //!    committed to, authenticate the signer set (every point must map to a known operator
 //!    address — the identity the on-chain registry binds with a proof of possession),
@@ -36,18 +35,19 @@ use commonware_runtime::{Spawner, Supervisor, tokio};
 use gas_killer_common::schnorr::musig::{Participant, PubNonce, SigningContext};
 use gas_killer_common::schnorr::wire::{SchnorrMsg, SignRequest, partial_from_bytes};
 use gas_killer_common::schnorr::{self, PrivateKey};
+use gas_killer_common::task_data::GasKillerTaskData;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::digest::DigestResolver;
 
-/// Sessions for heights this far below the highest height seen are pruned. Far
-/// smaller than the directive log's `PRUNE_SLACK`: a session is useless the moment
-/// the coordinator moves on (it will never ask for that `(height, attempt)` again).
+/// Sessions for heights this far below the highest height seen are pruned: a session is
+/// useless the moment the coordinator moves on (it will never ask for that
+/// `(height, attempt)` again). It must stay above the number of sessions the router runs at
+/// once, or a live session is pruned under a newer one.
 const SESSION_SLACK: u64 = 64;
 
 /// Per-session signing state. See the module docs for the nonce-safety rules each
@@ -93,7 +93,6 @@ pub(crate) async fn run<R, S>(
     router: PublicKey,
     operator_addresses: HashSet<Address>,
     resolver: DigestResolver,
-    engine_tip: Arc<AtomicU64>,
     mut receiver: R,
     sender: S,
 ) where
@@ -135,18 +134,20 @@ pub(crate) async fn run<R, S>(
             }
         };
 
-        // Track the highest height the coordinator is working on: it feeds the
-        // channel-1 TipReport recovery (`engine_tip`) and bounds session storage.
+        // Track the highest height the coordinator is working on: it bounds session storage.
         let height = msg.height();
         if height > max_height {
             max_height = height;
-            engine_tip.store(max_height, Ordering::Relaxed);
             prune_sessions(&shared, max_height);
         }
 
         match msg {
-            SchnorrMsg::CommitRequest { height, attempt } => {
-                handle_commit_request(&context, &shared, &sender, &router, height, attempt);
+            SchnorrMsg::CommitRequest {
+                height,
+                attempt,
+                task,
+            } => {
+                handle_commit_request(&context, &shared, &sender, &router, height, attempt, task);
             }
             SchnorrMsg::SignRequest(request) => {
                 handle_sign_request(&shared, &sender, &router, request);
@@ -168,6 +169,7 @@ fn handle_commit_request<S>(
     router: &PublicKey,
     height: u64,
     attempt: u32,
+    task: GasKillerTaskData,
 ) where
     S: Sender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
 {
@@ -188,7 +190,7 @@ fn handle_commit_request<S>(
             Some(_) => {
                 debug!(
                     height,
-                    attempt, "nonce request for a session in progress or consumed; ignored"
+                    attempt, "commit request for a session in progress or consumed; ignored"
                 );
                 return;
             }
@@ -199,19 +201,13 @@ fn handle_commit_request<S>(
     let sender = sender.clone();
     let router = router.clone();
     drop(context.child("commit").spawn(move |_| async move {
-        let digest = match shared.resolver.resolve(height).await {
-            Some(digest) if digest != shared.resolver.skip_digest(height) => digest,
-            resolved => {
-                if resolved.is_some() {
-                    debug!(height, attempt, "height resolves to skip; no commit sent");
-                }
-                shared
-                    .sessions
-                    .lock()
-                    .expect("sessions lock")
-                    .insert((height, attempt), Session::Refused);
-                return;
-            }
+        let Some(digest) = shared.resolver.resolve(height, &task).await else {
+            shared
+                .sessions
+                .lock()
+                .expect("sessions lock")
+                .insert((height, attempt), Session::Refused);
+            return;
         };
         let digest: [u8; 32] = digest
             .as_ref()
@@ -401,43 +397,4 @@ fn prune_sessions(shared: &Shared, max_height: u64) {
         .lock()
         .expect("sessions lock")
         .retain(|(h, _), _| *h >= floor);
-}
-
-#[cfg(test)]
-mod tests {
-    use commonware_avs_core::wire::TaskDirective;
-    use commonware_avs_node::task_book::{Resolution, TaskBook};
-    use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-    use gas_killer_common::task_data::GasKillerTaskData;
-
-    fn announce(height: u64, transition_index: u64) -> TaskDirective<GasKillerTaskData> {
-        TaskDirective::Announce {
-            height,
-            task: GasKillerTaskData {
-                transition_index,
-                ..Default::default()
-            },
-        }
-    }
-
-    /// A restarted router starts its heights at the clock, far past this node's window. The
-    /// directive still has to reach the TaskBook, or `sign` cannot resolve the digest and every
-    /// node refuses the round the restart fix exists to unblock.
-    #[test]
-    fn a_directive_at_a_restarted_routers_clock_height_resolves_to_its_task() {
-        deterministic::Runner::default().start(|context| async move {
-            let (task_book, mailbox) =
-                TaskBook::<GasKillerTaskData>::new(context.child("task_book"));
-            context.child("actor").spawn(move |_| task_book.run());
-
-            mailbox.deliver(announce(3, 1));
-            let clock_height = 1_790_000_000_000;
-            mailbox.deliver(announce(clock_height, 2));
-
-            assert!(matches!(
-                mailbox.subscribe(clock_height).await.unwrap(),
-                Resolution::Announce(task) if task.transition_index == 2
-            ));
-        });
-    }
 }

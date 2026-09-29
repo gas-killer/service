@@ -1,35 +1,25 @@
-//! Schnorr submitter: turns aggregate-signature observations into on-chain
-//! `verifyAndUpdate` calls.
+//! Schnorr submitter: settles each finished signing session's task.
 //!
-//! Consumes the schnorr coordinator's [`SchnorrCertified`] observations. Dispositions:
-//!
-//! - `skip_digest(height)`: the coordinator gave up on the height — log and
-//!   notify the sequencer ([`ResolutionKind::Skipped`]); nothing goes on-chain.
-//! - No assignment: [`ResolutionKind::Foreign`].
-//! - Task digest: render the single aggregate signature `(s, Raddr)` plus the strictly
-//!   ascending non-signer list through [`GasKillerHandler::handle_schnorr_verification`],
-//!   with bounded retries. The digest comes from the nodes' commits, not the assignment;
-//!   the handler checks it against the router's own trace before rendering.
+//! A signed session renders the single aggregate signature `(s, Raddr)` plus the strictly
+//! ascending non-signer list through [`GasKillerHandler::handle_schnorr_verification`], with
+//! bounded retries; the handler checks the signed digest against the router's own trace before
+//! rendering. A session that timed out or whose router trace failed settles its task `failed`.
 //!
 //! The proof arguments are constant-size regardless of signer count — that is the
 //! entire point of the aggregate scheme.
 
 use crate::executor::GasKillerHandler;
 use crate::factories::SimpleWalletProvider;
-use crate::schnorr_coordinator::{SchnorrCertified, SchnorrCertifiedReceiver};
+use crate::metrics::HeightOutcome;
+use crate::schnorr_coordinator::SessionOutcome;
+use crate::sequencer::DispatchedTask;
 use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_provider::Provider;
 use anyhow::Result;
-use commonware_avs_core::wire::skip_digest;
 use commonware_avs_router::executor::ExecutionResult;
-use commonware_avs_router::sequencer::{
-    Resolution, ResolutionKind, ResolutionSender, SharedAssignments,
-};
-use commonware_cryptography::sha256::Digest;
 use gas_killer_common::bindings::ReadOnlyProvider;
 use gas_killer_common::schnorr::AggregateSignature;
-use gas_killer_common::task_data::GasKillerTaskData;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 /// Retries after the first failed submission attempt.
@@ -38,120 +28,95 @@ const MAX_RETRIES: u32 = 2;
 /// Delay before the first retry; doubles per attempt.
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
-/// Consumes aggregate-signature observations and drives the on-chain submission.
+/// Settles finished signing sessions.
 pub struct SchnorrSubmitter {
     /// L1 read-side provider: supplies the reference block for the registry's
     /// aggregate-key/weight snapshot check (operator state lives on L1 only).
     view_only_provider: ReadOnlyProvider,
-    /// Executes the final `verifyAndUpdate` transaction (multi-chain write side).
+    /// Renders the final `verifyAndUpdate` payload (multi-chain write side).
     handler: GasKillerHandler<SimpleWalletProvider>,
-    /// Height → expected digest + task, written by the sequencer.
-    assignments: SharedAssignments<GasKillerTaskData>,
-    /// Verified aggregate signatures from the coordinator.
-    certified: SchnorrCertifiedReceiver,
-    /// Final dispositions back to the sequencer.
-    resolutions: ResolutionSender,
-    /// Application namespace mixed into the skip digest; kept in lockstep with the
-    /// coordinator's namespace so a coordinator skip is recognized here.
-    namespace: Vec<u8>,
 }
 
 impl SchnorrSubmitter {
     pub fn new(
         view_only_provider: ReadOnlyProvider,
         handler: GasKillerHandler<SimpleWalletProvider>,
-        assignments: SharedAssignments<GasKillerTaskData>,
-        certified: SchnorrCertifiedReceiver,
-        resolutions: ResolutionSender,
-        namespace: Vec<u8>,
     ) -> Self {
         Self {
             view_only_provider,
             handler,
-            assignments,
-            certified,
-            resolutions,
-            namespace,
         }
     }
 
-    /// Runs until the coordinator side of the certified channel closes.
-    pub async fn run(mut self) {
-        while let Some(certified) = self.certified.recv().await {
-            self.handle_certified(certified).await;
-        }
-        info!("schnorr certified channel closed; submitter exiting");
-    }
-
-    /// Notifies the sequencer of a height's final disposition.
-    fn notify(&self, height: u64, kind: ResolutionKind) {
-        if self.resolutions.send(Resolution { height, kind }).is_err() {
-            // The sequencer is gone; the process is shutting down.
-            warn!(height, "resolution channel closed");
-        }
-    }
-
-    async fn handle_certified(&mut self, certified: SchnorrCertified) {
-        let SchnorrCertified {
-            height,
-            digest,
-            signature,
-            non_signers,
-        } = certified;
-
-        // Skip observation: the coordinator abandoned the height.
-        if digest == skip_digest(&self.namespace, height) {
-            info!(height, "skip observed; nothing to submit");
-            self.notify(height, ResolutionKind::Skipped);
-            return;
-        }
-        let Some(signature) = signature else {
-            // A task digest without a signature is a coordinator bug — never
-            // submit, release the height as failed.
-            error!(height, "certified task digest without a signature (BUG)");
-            self.notify(height, ResolutionKind::Executed { success: false });
-            return;
-        };
-
-        // Look up the sequencer's assignment for this height.
-        let assignment = match self.assignments.read() {
-            Ok(assignments) => assignments.get(&height).cloned(),
-            Err(_) => {
-                error!(height, "assignments lock poisoned; treating as unassigned");
-                None
+    /// Settles `dispatched`'s task from how its session ended, which began at `started`.
+    pub async fn settle(
+        &mut self,
+        height: u64,
+        dispatched: &DispatchedTask,
+        started: Instant,
+        outcome: SessionOutcome,
+    ) -> HeightOutcome {
+        match outcome {
+            SessionOutcome::Signed {
+                digest,
+                signature,
+                non_signers,
+            } => {
+                self.render(
+                    height,
+                    dispatched,
+                    started,
+                    digest,
+                    &signature,
+                    &non_signers,
+                )
+                .await
             }
-        };
-        let Some(assignment) = assignment else {
-            info!(
-                height,
-                digest = %digest,
-                "signature for unassigned height; nothing to submit"
-            );
-            self.notify(height, ResolutionKind::Foreign);
-            return;
-        };
-        // Submit with bounded retries — transient RPC errors recover,
-        // deterministic rejections release the height as failed after the budget. Only the
-        // last failure settles the task, so every retry still has the task's router trace.
+            SessionOutcome::TimedOut => {
+                self.handler
+                    .settle_failed(
+                        dispatched,
+                        "no aggregate signature before the round timeout",
+                    )
+                    .await;
+                HeightOutcome::TimedOut
+            }
+            SessionOutcome::TraceFailed(reason) => {
+                self.handler
+                    .settle_failed(dispatched, &format!("task enrichment failed: {reason}"))
+                    .await;
+                HeightOutcome::TraceFailed
+            }
+        }
+    }
+
+    /// Renders a signed session with bounded retries — transient RPC errors recover,
+    /// deterministic rejections fail the task after the budget. Only the last failure settles
+    /// the task, so every retry can still render it.
+    async fn render(
+        &mut self,
+        height: u64,
+        dispatched: &DispatchedTask,
+        started: Instant,
+        digest: [u8; 32],
+        signature: &AggregateSignature,
+        non_signers: &[Address],
+    ) -> HeightOutcome {
         let mut backoff = INITIAL_RETRY_BACKOFF;
         let mut attempt = 0u32;
         loop {
             attempt += 1;
             match self
-                .submit(height, digest, &signature, &non_signers, &assignment.task)
+                .submit(height, dispatched, started, digest, signature, non_signers)
                 .await
             {
-                Ok(result) => {
+                Ok(_) => {
                     info!(
                         height,
-                        tx = %result.transaction_hash,
-                        block = ?result.block_number,
-                        status = ?result.status,
-                        "schnorr verifyAndUpdate submitted"
+                        task_id = dispatched.task_id,
+                        "schnorr payload rendered"
                     );
-                    let success = result.status.unwrap_or(true);
-                    self.notify(height, ResolutionKind::Executed { success });
-                    return;
+                    return HeightOutcome::Ready;
                 }
                 Err(error) if attempt <= MAX_RETRIES => {
                     warn!(
@@ -170,26 +135,28 @@ impl SchnorrSubmitter {
                         height,
                         attempts = attempt,
                         %error,
-                        "submission failed after retries; releasing height"
+                        "submission failed after retries; failing task"
                     );
-                    self.handler.settle_failed(height, &error).await;
-                    self.notify(height, ResolutionKind::Executed { success: false });
-                    return;
+                    self.handler
+                        .settle_render_failed(dispatched, &format!("verification failed: {error}"))
+                        .await;
+                    return HeightOutcome::Failed;
                 }
             }
         }
     }
 
-    /// One end-to-end submission attempt for a certified task digest.
+    /// One end-to-end render attempt for a signed digest.
     async fn submit(
         &mut self,
         height: u64,
-        digest: Digest,
+        dispatched: &DispatchedTask,
+        started: Instant,
+        digest: [u8; 32],
         signature: &AggregateSignature,
         non_signers: &[Address],
-        task: &GasKillerTaskData,
     ) -> Result<ExecutionResult> {
-        let msg_hash = FixedBytes::<32>::from_slice(digest.as_ref());
+        let msg_hash = FixedBytes::<32>::from(digest);
 
         // `(s, Raddr)` in the registry's calldata shape: the 52-byte wire encoding
         // is `s (32 BE) ‖ Raddr (20)`.
@@ -217,7 +184,8 @@ impl SchnorrSubmitter {
 
         self.handler
             .handle_schnorr_verification(
-                height,
+                dispatched,
+                started,
                 msg_hash,
                 current_block_number
                     .try_into()
@@ -225,7 +193,6 @@ impl SchnorrSubmitter {
                 s,
                 r_addr,
                 non_signers.to_vec(),
-                Some(task),
             )
             .await
     }
