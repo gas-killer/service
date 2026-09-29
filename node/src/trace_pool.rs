@@ -66,7 +66,8 @@ impl TracePool {
     ///
     /// Dropping the returned future aborts `work`, queued or running, so a caller that gives up
     /// never leaves a trace burning CPU for nobody. The slot is released when `work` stops, not
-    /// when the caller returns.
+    /// when the caller returns. The abort is cooperative: it lands at `work`'s next `.await`, so a
+    /// synchronous stretch of CPU holds its slot until it yields.
     pub async fn run<F>(&self, work: F) -> F::Output
     where
         F: Future + Send + 'static,
