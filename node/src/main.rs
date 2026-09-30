@@ -538,7 +538,6 @@ fn main() {
         let resolver = DigestResolver::new(
             Arc::clone(&validator),
             traces.with_metrics(Arc::clone(&validator_metrics)),
-            round_timeout(),
         );
         let operator_addresses: HashSet<_> = operators.iter().map(|o| o.address).collect();
         let router_key = orchestrator_pub_key.clone();
