@@ -313,6 +313,7 @@ helm upgrade --install gas-killer ./helm/gas-killer \
   --set monitoring.grafana.ingress.host=grafana-testnet.gaskiller.xyz \
   --set kube-prometheus-stack.grafana.adminPassword="..." \
   --set secrets.privateKey="0x..." \
+  --set secrets.adminKey="..." \
   ...
 ```
 
@@ -386,11 +387,19 @@ helm upgrade --install gas-killer ./helm/gas-killer \
   --set secrets.privateKey=0x... \
   --set secrets.fundedKey=0x... \
   --set secrets.httpRpc=https://... \
+  --set secrets.adminKey=<admin-key> \
   --set router.image.tag=router-<sha> \
   --set node.image.tag=node-<sha> \
   --set kube-prometheus-stack.grafana.adminPassword=<password> \
   --wait --timeout 15m
 ```
+
+Pass the current `secrets.adminKey` on every testnet upgrade. An upgrade that supplies any values
+starts from the chart defaults rather than the last release's, and the chart has no default for the
+key, so leaving it out fails the render instead of keeping the deployed one. gaskiller.xyz mints
+user API keys with it, so the value must match the site's `ADMIN_KEY`. `helm rollback` restores the
+target revision's stored values, including its admin key: after a rotation, roll back by upgrading
+the older chart with the current key rather than rolling back past the rotation.
 
 `--wait` fails the release when a workload does not become ready, rather than reporting success in
 front of a pod the cluster refuses to schedule. See the note in `testnet-overrides.yaml` for what
