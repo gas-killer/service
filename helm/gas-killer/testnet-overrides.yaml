@@ -131,6 +131,9 @@ router:
   # payloadBlockBuffer, so at 250 the accepted anchor window is 50 blocks and a task anchored more
   # than ~10 min back is refused with 400 STALE_BLOCK.
   payloadBlockBuffer: "250"
+  # Two sessions at once, on distinct targets. The sim node's tracing slots are sized to it
+  # (helm/sim-node: 2 x (1 + operators) x sessions = 16 at 3 operators); raise both together.
+  maxInFlightTasks: "2"
   ingress:
     timeoutMs: "0"
     # Equal to the payload's own validity window (payloadBlockBuffer x 12s), so a task can never
