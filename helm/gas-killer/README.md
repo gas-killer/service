@@ -333,6 +333,11 @@ ClusterIP Service, `kubectl port-forward svc/<release>-router 8080:8080`, or
 `kubectl exec` into the router pod. This keeps admin behind cluster access **in addition** to
 `ADMIN_KEY`. Add a path to `ingress.publicPaths` only if it genuinely must be internet-facing.
 
+`testnet-overrides.yaml` adds `/admin/keys` so gaskiller.xyz can mint user API keys. The
+ingress routes by path prefix, so on testnet every admin method (mint, list, revoke) is
+internet-facing and guarded by `ADMIN_KEY` alone. Hardening is tracked in #485 (a mint-only
+credential with a capped lifetime) and gas-killer/infra#10 (Cloudflare edge rules).
+
 ## Monitoring (Prometheus + Grafana)
 
 Metrics are exposed at `/metrics` on port 8081 of the router and node pods. The monitoring stack

@@ -105,6 +105,13 @@ ingress:
     # infinite loop. grafana-testnet.gaskiller.xyz is DNS-only and reaches the origin
     # over HTTPS, so it is unaffected.
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  # gaskiller.xyz (Vercel, no static egress IPs) mints user API keys, so /admin/keys is
+  # internet-facing on testnet and guarded by ADMIN_KEY alone; see #485 and gas-killer/infra#10.
+  publicPaths:
+    - /tasks
+    - /avs-metadata
+    - /healthz
+    - /admin/keys
 
 monitoring:
   enabled: true
