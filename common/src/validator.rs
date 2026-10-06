@@ -16,6 +16,7 @@ use alloy_primitives::{Address, U256};
 
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
+use crate::nested::{NestedSpec, TreeTrace, build_tree_trace};
 use crate::task_data::GasKillerTaskData;
 
 use alloy::rpc::types::TransactionRequest;
@@ -28,10 +29,10 @@ use alloy::rpc::types::TransactionRequest;
 /// is a *per-contract* counter, so keying on `(transition_index, block_height)` alone
 /// would collide two tasks for *different* contracts that share the same index and
 /// block — returning the wrong contract's digest. The key covers every field the
-/// digest depends on.
-type DigestCacheKey = (u64, u64, Address, Address, U256, Vec<u8>);
+/// digest depends on, including the nested expiry, which a tree's root signs.
+type DigestCacheKey = (u64, u64, Address, Address, U256, Vec<u8>, Option<u64>);
 
-fn digest_cache_key(task: &GasKillerTaskData) -> DigestCacheKey {
+fn digest_cache_key(task: &GasKillerTaskData, nested: Option<&NestedSpec>) -> DigestCacheKey {
     (
         task.transition_index,
         task.block_height,
@@ -39,6 +40,7 @@ fn digest_cache_key(task: &GasKillerTaskData) -> DigestCacheKey {
         task.from_address,
         task.value,
         task.call_data.clone(),
+        nested.map(|spec| spec.expiry_block),
     )
 }
 
@@ -97,7 +99,7 @@ impl Drop for DigestFlight {
 
 use gas_analyzer::{
     EncodePhaseTimings, EvmSketchExecutorCache, Extraction,
-    call_to_encoded_state_updates_with_evmsketch_profiled,
+    call_to_encoded_state_updates_with_evmsketch_profiled, call_to_frame_tree_with_evmsketch,
 };
 
 /// Label set scoping a phase histogram to the extractor that ran, rendered as
@@ -645,6 +647,44 @@ impl GasKillerValidator {
             .map_err(|_| anyhow::anyhow!("stateTransitionCount overflow"))
     }
 
+    /// `stateTransitionCount()` of `address` as of `block`, on a known chain.
+    ///
+    /// A trace taken at `block` only describes the contract's present state while this equals
+    /// the count at head; comparing the two is how a task traced against old state is caught
+    /// before it is signed.
+    pub async fn state_transition_count_at(
+        &self,
+        address: Address,
+        chain_id: ChainRole,
+        block: u64,
+    ) -> Result<u64> {
+        use crate::bindings::gaskillersdk::GasKillerSDK;
+
+        let provider = self
+            .providers
+            .get(&chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?
+            .clone();
+        let count = GasKillerSDK::new(address, provider)
+            .stateTransitionCount()
+            .block(alloy::eips::BlockId::number(block))
+            .call()
+            .await
+            .map_err(|e| anyhow::anyhow!("stateTransitionCount call at {block} failed: {}", e))?;
+        count
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("stateTransitionCount overflow"))
+    }
+
+    /// The current head of `chain_id`.
+    pub async fn chain_head(&self, chain_id: ChainRole) -> Result<u64> {
+        let provider = self
+            .providers
+            .get(&chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?;
+        Ok(provider.get_block_number().await?)
+    }
+
     /// Fetches the current `stateTransitionCount()` from the contract.
     ///
     /// Detects which chain the contract lives on, then calls the view function.
@@ -663,7 +703,7 @@ impl GasKillerValidator {
     #[cfg(test)]
     async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
         let digest = task_data.build_payload_hash(storage_updates);
-        let cache_key = digest_cache_key(task_data);
+        let cache_key = digest_cache_key(task_data, None);
         let mut cache = self.digest_cache.lock().await;
         cache.insert(cache_key, digest);
         debug!(
@@ -876,6 +916,51 @@ impl GasKillerValidator {
         Ok(result.storage_updates)
     }
 
+    /// Traces `task` as a nested tree under `spec`: the frames, the contracts it pins, and the
+    /// digest the quorum signs. Shared by the router and every node so they split the trace
+    /// the same way.
+    pub async fn trace_tree(&self, task: &GasKillerTaskData, spec: &NestedSpec) -> Result<TreeTrace> {
+        if task.block_height == 0 {
+            return Err(anyhow::anyhow!("block_height is required for validation"));
+        }
+        let chain = self.detect_chain_for_address(task.target_address).await?;
+        let rpc_url = self
+            .sim_rpc_url_for_chain(chain)
+            .ok_or_else(|| anyhow::anyhow!("No RPC URL configured for chain: {}", chain))?;
+        let tx_request = TransactionRequest::default()
+            .from(task.from_address)
+            .to(task.target_address)
+            .value(task.value)
+            .input(alloy::primitives::Bytes::copy_from_slice(&task.call_data).into());
+
+        let started = Instant::now();
+        let tree = call_to_frame_tree_with_evmsketch(
+            &self.executor_cache,
+            rpc_url,
+            tx_request,
+            task.block_height,
+            self.state_encoding,
+            self.sim_profile,
+            &gas_analyzer::nested::NESTING_COST_MODEL_V1,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+        if let Some(metrics) = &self.validator_metrics {
+            metrics
+                .evmsketch_duration_seconds
+                .observe(started.elapsed().as_secs_f64());
+            metrics.observe_analysis(&AnalysisPhases {
+                extraction: tree.extraction,
+                executor_cache_hit: tree.executor_cache_hit,
+                timings: tree.timings,
+            });
+        }
+
+        let update_count: usize = tree.frames.iter().map(|f| f.updates.len()).sum();
+        ensure_program_applies_something(update_count, task.target_address, task.block_height)?;
+        build_tree_trace(task, tree.frames, tree.counter_moves, spec)
+    }
+
     /// Validates a task and returns the digest a correct node is expected to sign for it.
     ///
     /// This is the single place where storage updates are recomputed (via EVMSketch at
@@ -889,11 +974,20 @@ impl GasKillerValidator {
     /// computation once. Errors are NOT cached: transient RPC failures surface to the caller,
     /// which retries with backoff (deterministic failures are the caller's cue to skip).
     pub async fn expected_digest_for_task(&self, task: &GasKillerTaskData) -> Result<Digest> {
-        let task_data = task;
+        self.expected_digest_for(task, None).await
+    }
 
-        match self.claim_digest(task_data).await {
+    /// [`Self::expected_digest_for_task`] for a task that may settle as a nested tree: with
+    /// `nested`, the digest is the tree's root when the call reaches other consumers, and
+    /// today's digest when it does not.
+    pub async fn expected_digest_for(
+        &self,
+        task: &GasKillerTaskData,
+        nested: Option<&NestedSpec>,
+    ) -> Result<Digest> {
+        match self.claim_digest_for(task, nested).await {
             DigestClaim::Known(digest) => Ok(digest),
-            DigestClaim::Trace(turn) => self.trace_digest(task_data, turn).await,
+            DigestClaim::Trace(turn) => self.trace_digest(task, turn).await,
         }
     }
 
@@ -905,7 +999,16 @@ impl GasKillerValidator {
     /// first, not on that queue. Errors are not shared, so waiters behind a failed trace each
     /// take the turn and retry it in turn rather than together.
     pub async fn claim_digest(&self, task: &GasKillerTaskData) -> DigestClaim {
-        let key = digest_cache_key(task);
+        self.claim_digest_for(task, None).await
+    }
+
+    /// [`Self::claim_digest`] for a task signed under `nested`, when it is.
+    pub async fn claim_digest_for(
+        &self,
+        task: &GasKillerTaskData,
+        nested: Option<&NestedSpec>,
+    ) -> DigestClaim {
+        let key = digest_cache_key(task, nested);
         if let Some(cached) = self.cached_digest(&key).await {
             return DigestClaim::Known(cached);
         }
@@ -931,7 +1034,7 @@ impl GasKillerValidator {
         turn: Box<DigestTurn>,
     ) -> Result<Digest> {
         debug_assert!(
-            turn.key == digest_cache_key(task_data),
+            turn.key.0 == task_data.transition_index && turn.key.5 == task_data.call_data,
             "turn is for another task"
         );
         self.resolve_digest_uncached(task_data, &turn.key).await
@@ -962,11 +1065,18 @@ impl GasKillerValidator {
             metrics.observe_digest_cache(false);
         }
 
-        // Not cached — compute storage updates (the expensive EVMSketch path)
-        let storage_updates = self.compute_storage_updates(task_data).await?;
-
-        // Build expected payload hash using computed storage updates
-        let payload_hash = task_data.build_payload_hash(&storage_updates);
+        // Not cached — trace the task (the expensive EVMSketch path) and hash what it signs.
+        let payload_hash = match cache_key.6 {
+            Some(expiry_block) => {
+                self.trace_tree(task_data, &NestedSpec { expiry_block })
+                    .await?
+                    .digest
+            }
+            None => {
+                let storage_updates = self.compute_storage_updates(task_data).await?;
+                task_data.build_payload_hash(&storage_updates)
+            }
+        };
 
         // Store in cache for subsequent calls with the same round
         {
@@ -1029,16 +1139,33 @@ mod tests {
         let a = create_test_task_data();
         let mut b = a.clone();
         b.target_address = Address::from([9u8; 20]);
-        assert_ne!(digest_cache_key(&a), digest_cache_key(&b));
+        assert_ne!(digest_cache_key(&a, None), digest_cache_key(&b, None));
 
         // Differing call_data (same contract) must also key distinctly, since it
         // changes the computed storage updates and therefore the digest.
         let mut c = a.clone();
         c.call_data = vec![0xde, 0xad, 0xbe, 0xef];
-        assert_ne!(digest_cache_key(&a), digest_cache_key(&c));
+        assert_ne!(digest_cache_key(&a, None), digest_cache_key(&c, None));
 
         // Identical task identity keys identically (cache hit is intended here).
-        assert_eq!(digest_cache_key(&a), digest_cache_key(&a.clone()));
+        assert_eq!(digest_cache_key(&a, None), digest_cache_key(&a.clone(), None));
+    }
+
+    /// A tree's root signs its expiry, so the same task signed flat or under two expiries
+    /// yields three different digests and must never share a cache entry.
+    #[test]
+    fn digest_cache_key_distinguishes_nested_expiries() {
+        let task = create_test_task_data();
+        let early = NestedSpec { expiry_block: 10 };
+        let late = NestedSpec { expiry_block: 11 };
+        assert_ne!(
+            digest_cache_key(&task, None),
+            digest_cache_key(&task, Some(&early))
+        );
+        assert_ne!(
+            digest_cache_key(&task, Some(&early)),
+            digest_cache_key(&task, Some(&late))
+        );
     }
 
     #[test]
@@ -1077,10 +1204,10 @@ mod tests {
     #[tokio::test]
     async fn callers_for_one_key_queue_behind_a_single_flight() {
         let validator = GasKillerValidator::with_rpc_url("https://example.com");
-        let key = digest_cache_key(&create_test_task_data());
+        let key = digest_cache_key(&create_test_task_data(), None);
         let mut other_task = create_test_task_data();
         other_task.block_height += 1;
-        let other_key = digest_cache_key(&other_task);
+        let other_key = digest_cache_key(&other_task, None);
 
         let first = validator.acquire_digest_flight(&key);
         let second = validator.acquire_digest_flight(&key);
@@ -1151,7 +1278,7 @@ mod tests {
     #[tokio::test]
     async fn a_finished_flight_leaves_no_entry_behind() {
         let validator = GasKillerValidator::with_rpc_url("https://example.com");
-        let key = digest_cache_key(&create_test_task_data());
+        let key = digest_cache_key(&create_test_task_data(), None);
 
         drop(validator.acquire_digest_flight(&key));
 
@@ -1164,7 +1291,7 @@ mod tests {
     #[tokio::test]
     async fn a_flight_still_held_by_a_waiter_survives_release() {
         let validator = GasKillerValidator::with_rpc_url("https://example.com");
-        let key = digest_cache_key(&create_test_task_data());
+        let key = digest_cache_key(&create_test_task_data(), None);
 
         let leader = validator.acquire_digest_flight(&key);
         let waiter = validator.acquire_digest_flight(&key);
@@ -1187,7 +1314,7 @@ mod tests {
             "http://127.0.0.1:1/unreachable",
         ));
         let task_data = create_test_task_data();
-        let key = digest_cache_key(&task_data);
+        let key = digest_cache_key(&task_data, None);
 
         let leader = validator.acquire_digest_flight(&key);
         let permit = leader.lock().lock().await;
@@ -1220,7 +1347,7 @@ mod tests {
         ));
         let task_data = create_test_task_data();
         let storage_updates = vec![0x01, 0x02, 0x03, 0x04];
-        let key = digest_cache_key(&task_data);
+        let key = digest_cache_key(&task_data, None);
 
         // Stand in for a trace already running: hold the key's flight.
         let flight = validator.acquire_digest_flight(&key);

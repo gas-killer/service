@@ -8,7 +8,7 @@
 //! changes the digest value.
 
 use commonware_cryptography::sha256::Digest;
-use gas_killer_common::{DigestClaim, GasKillerTaskData, GasKillerValidator};
+use gas_killer_common::{DigestClaim, GasKillerTaskData, GasKillerValidator, NestedSpec};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -35,6 +35,34 @@ impl DigestResolver {
         Self { validator, traces }
     }
 
+    /// Whether a nested request's expiry is one this node will sign: no further ahead of its own
+    /// chain head than `NESTED_MAX_EXPIRY_BLOCKS`. A head that cannot be read declines too,
+    /// since the bound cannot be checked.
+    pub async fn expiry_within_bound(&self, task: &GasKillerTaskData, spec: &NestedSpec) -> bool {
+        let bound = gas_killer_common::nested_max_expiry_blocks();
+        let head = async {
+            let chain = self
+                .validator
+                .detect_chain_for_address(task.target_address)
+                .await?;
+            self.validator.chain_head(chain).await
+        };
+        match head.await {
+            Ok(head) if spec.expiry_block <= head.saturating_add(bound) => true,
+            Ok(head) => {
+                warn!(
+                    expiry_block = spec.expiry_block,
+                    head, bound, "nested expiry beyond this node's bound; declining to commit"
+                );
+                false
+            }
+            Err(error) => {
+                warn!(%error, "cannot read the chain head to bound a nested expiry; declining to commit");
+                false
+            }
+        }
+    }
+
     /// The digest this node vouches for `task` at `height`, or `None` when it cannot be
     /// derived by `deadline` or the task is deterministically invalid. A trace still running at
     /// the deadline is aborted. Every attempt of a session must share one deadline, the end of
@@ -49,6 +77,7 @@ impl DigestResolver {
         &self,
         height: u64,
         task: &GasKillerTaskData,
+        nested: Option<NestedSpec>,
         deadline: Instant,
     ) -> Option<Digest> {
         if task.block_height == 0 {
@@ -65,7 +94,7 @@ impl DigestResolver {
             // whose first trace is still queued or running waits for that trace, not behind
             // unrelated ones, and never holds a slot to do nothing.
             let outcome = ::tokio::time::timeout_at(deadline, async {
-                let turn = match self.validator.claim_digest(task).await {
+                let turn = match self.validator.claim_digest_for(task, nested.as_ref()).await {
                     DigestClaim::Known(digest) => return Some(Ok(digest)),
                     DigestClaim::Trace(turn) => turn,
                 };
@@ -146,7 +175,7 @@ mod tests {
         };
         let deadline = Instant::now() + Duration::from_secs(600);
         let resolved =
-            tokio::time::timeout(Duration::from_secs(1), resolver.resolve(7, &task, deadline))
+            tokio::time::timeout(Duration::from_secs(1), resolver.resolve(7, &task, None, deadline))
                 .await
                 .expect("declining must not wait out the deadline");
         assert!(resolved.is_none());
@@ -181,7 +210,7 @@ mod tests {
 
         let resolve = |task: GasKillerTaskData| {
             let resolver = resolver.clone();
-            tokio::spawn(async move { resolver.resolve(7, &task, deadline).await })
+            tokio::spawn(async move { resolver.resolve(7, &task, None, deadline).await })
         };
         let leader = resolve(task.clone());
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -235,7 +264,7 @@ mod tests {
         let started = Instant::now();
         let resolved = tokio::time::timeout(
             Duration::from_secs(5),
-            resolver.resolve(7, &task, started + Duration::from_millis(300)),
+            resolver.resolve(7, &task, None, started + Duration::from_millis(300)),
         )
         .await
         .expect("the deadline must bound a trace that never answers");
@@ -267,7 +296,7 @@ mod tests {
         };
 
         let over = Instant::now() - Duration::from_millis(1);
-        assert!(resolver.resolve(7, &task, over).await.is_none());
+        assert!(resolver.resolve(7, &task, None, over).await.is_none());
         assert_eq!(slots_requested(&metrics), None);
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))
@@ -305,12 +334,12 @@ mod tests {
 
         let first = tokio::spawn({
             let (resolver, task) = (resolver.clone(), task.clone());
-            async move { resolver.resolve(7, &task, round_ends).await }
+            async move { resolver.resolve(7, &task, None, round_ends).await }
         });
         tokio::time::sleep(Duration::from_millis(150)).await;
         let later = tokio::spawn({
             let (resolver, task) = (resolver.clone(), task.clone());
-            async move { resolver.resolve(7, &task, round_ends).await }
+            async move { resolver.resolve(7, &task, None, round_ends).await }
         });
 
         assert!(first.await.unwrap().is_none());
