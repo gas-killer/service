@@ -442,6 +442,9 @@ fn main() {
             Arc::clone(&metrics),
             max_in_flight_tasks(),
         );
+        if let Some(store) = &ingress.store {
+            scheduler.restore_held_locks(store).await;
+        }
         context.child("scheduler").spawn(move |_| scheduler.run());
 
         // Readiness flag: set to true after everything is spawned and the network is starting

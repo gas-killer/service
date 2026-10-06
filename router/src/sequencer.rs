@@ -546,6 +546,15 @@ impl TaskDispatcher {
             }
         };
 
+        if reanchor
+            && let Some(store) = &self.store
+            && let Err(e) = store
+                .set_task_block_height(&task_id, resolved.block_height)
+                .await
+        {
+            error!(task_id, error = %e, "failed to record the re-anchored block height");
+        }
+
         // Operators get the task WITHOUT storage_updates: they independently recompute them
         // with EVMSketch (that is the whole trust model — see
         // GasKillerValidator::expected_digest_for_task), and the router's own come from the

@@ -19,11 +19,12 @@ use crate::metrics::{MetricsCollector, operator_labels};
 use crate::schnorr_coordinator::{Permit, SchnorrCoordinator, SessionOutcome, SignGate, clock_tip};
 use crate::schnorr_submitter::SchnorrSubmitter;
 use crate::sequencer::{DispatchedTask, QueuedTask, TaskDispatcher, TaskQueue, Traced};
+use crate::store::SqliteStore;
 use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use commonware_avs_core::bn254::PublicKey;
 use commonware_p2p::Sender;
-use gas_killer_common::{ChainRole, GasKillerValidator};
+use gas_killer_common::{ChainRole, GasKillerValidator, TaskBundle};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
@@ -34,6 +35,10 @@ use tracing::{error, info, warn};
 
 /// How often a rendered task's locks check whether its payload landed or expired.
 const LOCK_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How far back a restart looks for rendered tasks whose locks it restores. Far longer than any
+/// payload's validity window; older tasks are certain to have landed or expired.
+const RESTORE_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Longest the scheduler waits for the clock to reach the next height. Only a burst of sessions
 /// that each start within a millisecond waits at all; a gap this large means the wall clock
@@ -302,6 +307,70 @@ where
         }
     }
 
+    /// Re-takes the locks of tasks a previous router life rendered whose payloads may still
+    /// land, so no new task traces against state one of them is about to change. Run before
+    /// [`Self::run`].
+    pub async fn restore_held_locks(&self, store: &SqliteStore) {
+        let bundles = match store.recent_ready_bundles(RESTORE_WINDOW).await {
+            Ok(bundles) => bundles,
+            Err(e) => {
+                error!(error = %e, "could not read rendered tasks; their locks are not restored");
+                return;
+            }
+        };
+        let validator = Arc::clone(self.sessions.dispatcher.validator());
+        let mut restored = 0usize;
+        for (task_id, bundle) in bundles {
+            let bundle: TaskBundle = match serde_json::from_str(&bundle) {
+                Ok(bundle) => bundle,
+                Err(e) => {
+                    warn!(task_id, error = %e, "unreadable bundle; its locks are not restored");
+                    continue;
+                }
+            };
+            let chain = match validator
+                .detect_chain_for_address(bundle.target_address)
+                .await
+            {
+                Ok(chain) => chain,
+                Err(e) => {
+                    warn!(task_id, error = %e, "unknown chain; its locks are not restored");
+                    continue;
+                }
+            };
+            let (pinned, until) = bundle_hold(&bundle);
+            if validator
+                .chain_head(chain)
+                .await
+                .is_ok_and(|head| head > until)
+            {
+                continue;
+            }
+            // Rendered tasks pinned disjoint sets when they were signed, so this only fails for
+            // a set a later task already took, which then holds the newer state anyway.
+            if !self.sessions.locks.try_take(&task_id, &pinned) {
+                continue;
+            }
+            tokio::spawn(hold_until_landed(
+                Held {
+                    locks: self.sessions.locks.clone(),
+                    validator: Arc::clone(&validator),
+                    task_id,
+                    root: bundle.target_address,
+                    chain,
+                    transition_index: bundle.transition_index,
+                    until,
+                },
+                LOCK_POLL_INTERVAL,
+            ));
+            restored += 1;
+        }
+        info!(
+            restored,
+            "restored the locks of rendered tasks from a previous router life"
+        );
+    }
+
     /// Runs sessions until the ingress side of the task channel closes.
     pub async fn run(self) {
         let sessions = self.sessions;
@@ -453,11 +522,16 @@ where
             .nested
             .map_or(valid_until, |spec| spec.expiry_block.max(valid_until));
         tokio::spawn(hold_until_landed(
-            gate,
-            LandingWatch {
+            Held {
+                locks: gate.locks,
+                validator: gate.validator,
+                task_id: gate.task_id,
+                root: gate.root,
+                chain: gate.chain,
+                transition_index: gate.transition_index,
                 until,
-                poll: LOCK_POLL_INTERVAL,
             },
+            LOCK_POLL_INTERVAL,
         ));
         SessionEnd {
             holds_locks: true,
@@ -524,40 +598,57 @@ impl TaskGate {
     }
 }
 
-/// When a rendered task's locks may go: once its payload can no longer land.
-struct LandingWatch {
+/// A rendered task's locks, held until its payload can no longer land.
+struct Held {
+    locks: Locks,
+    validator: Arc<GasKillerValidator>,
+    task_id: String,
+    root: Address,
+    chain: ChainRole,
+    transition_index: u64,
+    /// The last block the payload can land in.
     until: u64,
-    poll: Duration,
 }
 
-/// Holds `gate`'s locks until the root's count passes the task's transition (it landed) or the
+/// Holds `held`'s locks until the root's count passes the task's transition (it landed) or the
 /// chain passes `until` (it never will). A failed read just waits for the next poll: releasing
 /// early is what would let a second task trace against state the first is about to change.
-async fn hold_until_landed(gate: TaskGate, watch: LandingWatch) {
+async fn hold_until_landed(held: Held, poll: Duration) {
     loop {
-        tokio::time::sleep(watch.poll).await;
+        tokio::time::sleep(poll).await;
         let (count, head) = tokio::join!(
-            gate.validator
-                .get_state_transition_count_on_chain(gate.root, gate.chain),
-            gate.validator.chain_head(gate.chain),
+            held.validator
+                .get_state_transition_count_on_chain(held.root, held.chain),
+            held.validator.chain_head(held.chain),
         );
-        if count.is_ok_and(|count| count > gate.transition_index) {
+        if count.is_ok_and(|count| count > held.transition_index) {
             info!(
-                task_id = gate.task_id,
+                task_id = held.task_id,
                 "payload landed; releasing its locks"
             );
             break;
         }
-        if head.is_ok_and(|head| head > watch.until) {
+        if head.is_ok_and(|head| head > held.until) {
             info!(
-                task_id = gate.task_id,
-                until = watch.until,
+                task_id = held.task_id,
+                until = held.until,
                 "payload expired; releasing its locks"
             );
             break;
         }
     }
-    gate.locks.release(&gate.task_id);
+    held.locks.release(&held.task_id);
+}
+
+/// The contracts a rendered bundle pins, and the last block its payload can land in.
+fn bundle_hold(bundle: &TaskBundle) -> (BTreeSet<Address>, u64) {
+    let mut pinned = BTreeSet::from([bundle.target_address]);
+    let mut until = bundle.valid_until_block;
+    if let Some(nested) = &bundle.nested {
+        pinned.extend(nested.frames.iter().map(|frame| frame.contract));
+        until = until.max(nested.expiry_block);
+    }
+    (pinned, until)
 }
 
 #[cfg(test)]
@@ -770,6 +861,40 @@ mod tests {
 
     fn contracts(bytes: &[u8]) -> BTreeSet<Address> {
         bytes.iter().map(|b| Address::from([*b; 20])).collect()
+    }
+
+    #[test]
+    fn a_restored_tree_holds_every_frame_until_its_signed_expiry() {
+        use gas_killer_common::{BundleProof, NestedBundle, NestedFrame};
+
+        let mut bundle = TaskBundle {
+            msg_hash: alloy_primitives::B256::ZERO,
+            reference_block_number: 99,
+            transition_index: 3,
+            target_address: Address::from([1; 20]),
+            target_function: alloy_primitives::FixedBytes::ZERO,
+            storage_updates: alloy_primitives::Bytes::new(),
+            chain_id: 1,
+            value: U256::ZERO,
+            valid_until_block: 119,
+            proof: BundleProof::Retired,
+            nested: None,
+        };
+        assert_eq!(bundle_hold(&bundle), (contracts(&[1]), 119));
+
+        bundle.nested = Some(NestedBundle {
+            expiry_block: 140,
+            expiry_proof: vec![],
+            proof: vec![],
+            children: vec![],
+            frames: [1, 2, 3]
+                .map(|b| NestedFrame {
+                    contract: Address::from([b; 20]),
+                    transition_index: 0,
+                })
+                .to_vec(),
+        });
+        assert_eq!(bundle_hold(&bundle), (contracts(&[1, 2, 3]), 140));
     }
 
     #[test]
