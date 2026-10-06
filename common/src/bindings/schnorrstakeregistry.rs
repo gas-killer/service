@@ -12,5 +12,11 @@ sol! {
         /// change is scheduled. A settlement is safe from set-mutation invalidation while the block
         /// it lands in is below this value.
         function nextPossibleMutationBlock() external view returns (uint256);
+
+        /// Raised from a nested tree's `verifyAndApprove`, so they surface through the root's
+        /// `verifyAndUpdateTree` estimate.
+        error ApprovalExpired(uint256 expiryBlock);
+        error InvalidExpiryProof();
+        error InvalidApprovalSignature();
     }
 }

@@ -6,6 +6,10 @@ pub use commonware_avs_bindings::{ReadOnlyProvider, WalletProvider};
 /// this ID before the router submits `verifyAndUpdate`.
 pub const GAS_KILLER_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0x82, 0xb3, 0x5a, 0x01]);
 
+/// ERC-165 interface ID for `IGasKillerNested`. A root reporting it can settle a nested tree
+/// through `verifyAndUpdateTree`, and a callee reporting it can apply its own frame.
+pub const GAS_KILLER_NESTED_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0x78, 0x48, 0x18, 0x74]);
+
 /// The compiled ABI the [`gaskillersdk`] bindings are generated from, exposed so callers can
 /// enumerate what the SDK declares rather than restating it. Consumers that map SDK errors to
 /// their own data check themselves against this, so an error added upstream cannot go unnoticed.

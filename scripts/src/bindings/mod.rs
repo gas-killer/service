@@ -62,4 +62,27 @@ mod tests {
         .expect("router declaration must decode the artifact's return");
         assert_eq!(decoded, U256::MAX);
     }
+
+    /// The registry errors the router explains are declared by hand alongside
+    /// `nextPossibleMutationBlock`; pinning their selectors keeps a rename from turning a reason
+    /// back into raw revert data.
+    #[test]
+    fn router_registry_errors_match_the_deploy_artifact() {
+        use crate::bindings::schnorrstakeregistry::SchnorrStakeRegistry as Artifact;
+        use alloy::sol_types::SolError;
+        use gas_killer_common::bindings::schnorrstakeregistry::ISchnorrStakeRegistry as Router;
+
+        assert_eq!(
+            Router::ApprovalExpired::SELECTOR,
+            Artifact::ApprovalExpired::SELECTOR
+        );
+        assert_eq!(
+            Router::InvalidExpiryProof::SELECTOR,
+            Artifact::InvalidExpiryProof::SELECTOR
+        );
+        assert_eq!(
+            Router::InvalidApprovalSignature::SELECTOR,
+            Artifact::InvalidApprovalSignature::SELECTOR
+        );
+    }
 }
