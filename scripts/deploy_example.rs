@@ -1225,7 +1225,10 @@ fn resolve_artifact_roots(flags: &[PathBuf]) -> Vec<PathBuf> {
     let sdk_out = std::env::var("SDK_DIR")
         .ok()
         .filter(|d| !d.trim().is_empty())
-        .map_or_else(|| checkout.join(SDK_OUT_SUBDIR), |d| PathBuf::from(d).join("out"));
+        .map_or_else(
+            || checkout.join(SDK_OUT_SUBDIR),
+            |d| PathBuf::from(d).join("out"),
+        );
     vec![checkout.join("out"), sdk_out]
 }
 
