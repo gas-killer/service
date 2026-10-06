@@ -39,6 +39,17 @@ E2E_PARALLEL_CHOICE="${E2E_PARALLEL:-false}"
 if [ "$E2E_PARALLEL_CHOICE" = "true" ]; then
     export MAX_IN_FLIGHT_TASKS=2
 fi
+# nested-chain and nested-cycle deploy the SDK's nested settlement examples, which need SDK_DIR
+# (see scripts/examples/fetch_examples.sh) and STATE_ENCODING=canonical. With
+# NESTED_SETTLEMENT=true the router settles them as trees, and the run asserts it did; without it
+# they settle flat. E2E_NESTED_SHARED=true (nested-chain only) then submits two tasks whose roots
+# share the chain's vault and ledger at once, which the router must settle one after the other.
+NESTED_SETTLEMENT_CHOICE="${NESTED_SETTLEMENT:-false}"
+export NESTED_SETTLEMENT="$NESTED_SETTLEMENT_CHOICE"
+E2E_NESTED_SHARED_CHOICE="${E2E_NESTED_SHARED:-false}"
+if [ "$E2E_NESTED_SHARED_CHOICE" = "true" ]; then
+    export MAX_IN_FLIGHT_TASKS=2
+fi
 echo "State encoding: $STATE_ENCODING_CHOICE | e2e example: $E2E_EXAMPLE_CHOICE | sim profile: $GK_SIM_PROFILE_CHOICE | parallel: $E2E_PARALLEL_CHOICE"
 
 # Track if test passed
@@ -184,6 +195,7 @@ source ../.env
 export STATE_ENCODING="$STATE_ENCODING_CHOICE"
 export E2E_EXAMPLE="$E2E_EXAMPLE_CHOICE"
 export GK_SIM_PROFILE="$GK_SIM_PROFILE_CHOICE"
+export NESTED_SETTLEMENT="$NESTED_SETTLEMENT_CHOICE"
 export AVS_DEPLOYMENT_PATH="../config/.nodes/avs_deploy.json"
 
 if [ ! -f "$AVS_DEPLOYMENT_PATH" ]; then
@@ -196,6 +208,8 @@ case "$E2E_EXAMPLE" in
     array-summation)                  MANIFEST_EXAMPLE="arraySummation" ;;
     reentrant|reentrant-checkpoint)   MANIFEST_EXAMPLE="reentrantCheckpoint" ;;
     onchain-life|onchainlife)         MANIFEST_EXAMPLE="onchainLife" ;;
+    nested-chain)                     MANIFEST_EXAMPLE="nestedChain" ;;
+    nested-cycle)                     MANIFEST_EXAMPLE="nestedCycle" ;;
     *)
         echo -e "${RED}Unknown E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
         exit 1
@@ -442,6 +456,21 @@ if [ $TRIGGER_STATUS -eq 0 ]; then
         echo -e "${GREEN}✅ Re-entrancy verified: observer confirmed the canonical intermediate state${NC}"
     fi
 
+    # A nested example settles whether or not it settled as a tree; only the router's trace says
+    # which. Every frame of the chain (router, vault, ledger) and of the cycle (start, relay,
+    # finish) is its own SDK frame, so either tree has three.
+    if [ "$NESTED_SETTLEMENT_CHOICE" = "true" ] && [[ "$MANIFEST_EXAMPLE" == nested* ]]; then
+        # The router's own formatter may color field names, which would split `frames=3`.
+        if ! docker compose logs --no-color router 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' \
+            | grep "Sequencer computed frame tree" | grep -q "frames=3"; then
+            echo -e "${RED}❌ $MANIFEST_EXAMPLE settled, but not as a three-frame tree${NC}"
+            docker compose logs --tail=100 router || true
+            exit 1
+        fi
+        echo -e "${GREEN}✅ $MANIFEST_EXAMPLE settled as a nested tree${NC}"
+    fi
+
     # Step 10b (unbounded profile only): close the claim step 7a opened. The transition that
     # could not be executed directly in a block has landed as one small verifyAndUpdate, so the
     # receipt's gasUsed is the on-chain cost of an above-block-limit computation.
@@ -522,6 +551,44 @@ if [ "$E2E_PARALLEL_CHOICE" = "true" ]; then
         exit 1
     fi
     echo -e "${GREEN}✅ Two targets signed concurrently ($MAX_LIVE sessions live at once)${NC}"
+fi
+
+# Step 12 (nested-chain, E2E_NESTED_SHARED only): two roots whose trees share the chain's vault
+# and ledger, submitted together. Each tree pins the same callees, so the router must hold the
+# second until the first lands and then trace it against the state the first left; both must
+# land with no InvalidTransitionIndex.
+if [ "$E2E_NESTED_SHARED_CHOICE" = "true" ]; then
+    echo -e "${YELLOW}Step 12: Settling two trees that share callees...${NC}"
+    [ "$MANIFEST_EXAMPLE" = "nestedChain" ] \
+        || { echo -e "${RED}E2E_NESTED_SHARED needs the nested-chain example${NC}"; exit 1; }
+    run_from_root --bin deploy_example -- --example nestedChainPeer \
+        || { echo -e "${RED}nestedChainPeer deployment failed${NC}"; exit 1; }
+    cast rpc evm_mine --rpc-url http://localhost:8545 >/dev/null \
+        || { echo -e "${RED}could not mine a block after deploying${NC}"; exit 1; }
+
+    DEPLOY_JSON="$PROJECT_ROOT/config/.nodes/avs_deploy.json"
+    SHARED_SCENARIO="$(mktemp -d)/shared.toml"
+    {
+        printf 'router_url = "http://localhost:8080"\nhttp_rpc   = "$HTTP_RPC"\n\n'
+        printf '[[scenarios]]\nname = "shared_callees"\nmode = "parallel"\n'
+        for example in nestedChain nestedChainPeer; do
+            target=$(jq -r ".addresses.$example // empty" "$DEPLOY_JSON")
+            call_data=$(sed -nE 's/^[[:space:]]*call_data[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' \
+                "$PROJECT_ROOT/scripts/scenarios/generated/$example.toml" | head -1)
+            [ -n "$target" ] && [ -n "$call_data" ] \
+                || { echo -e "${RED}could not resolve $example's target or call data${NC}"; exit 1; }
+            printf '\n  [[scenarios.requests]]\n  target_address = "%s"\n  call_data      = "%s"\n' "$target" "$call_data"
+            printf '  from_address   = "local"\n  submit         = true\n  verify         = true\n'
+        done
+    } > "$SHARED_SCENARIO"
+
+    run_from_root --bin run_scenario -- "$SHARED_SCENARIO" \
+        || { echo -e "${RED}❌ Trees sharing callees did not both settle${NC}"; docker compose logs --tail=100 router || true; exit 1; }
+    if docker compose logs --no-color router 2>/dev/null | grep -q "InvalidTransitionIndex"; then
+        echo -e "${RED}❌ A shared-callee task collided on a transition index${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Two trees sharing callees settled in turn${NC}"
 fi
 
 # Show recent router logs for confirmation
