@@ -21,7 +21,7 @@ use crate::schnorr_submitter::SchnorrSubmitter;
 use crate::sequencer::{DispatchedTask, QueuedTask, TaskDispatcher, TaskQueue, Traced};
 use crate::store::SqliteStore;
 use alloy_primitives::Address;
-use anyhow::{Result, bail};
+use anyhow::Result;
 use commonware_avs_core::bn254::PublicKey;
 use commonware_p2p::Sender;
 use gas_killer_common::{ChainRole, GasKillerValidator, TaskBundle};
@@ -183,17 +183,29 @@ impl Waiting {
         self.tasks.push_back(task);
     }
 
+    /// A deferred task goes ahead of everything that arrived after it.
+    fn hold_first(&mut self, task: QueuedTask) {
+        self.tasks.push_front(task);
+    }
+
     /// The oldest waiting task whose starting locks are all free, taking them. A task passed
     /// over is marked to re-anchor: by the time it starts, its client's block may predate
     /// whatever the task ahead of it settled.
+    ///
+    /// A contract an older waiting task wants is off limits to younger ones, or a tree pinning
+    /// several contracts would rarely find them all free at once behind a stream of tasks that
+    /// each want one of them.
     fn next_ready(&mut self, locks: &Locks) -> Option<QueuedTask> {
         let mut table = locks.table.lock().expect("lock table poisoned");
+        let mut reserved = BTreeSet::new();
         for index in 0..self.tasks.len() {
             let task = &mut self.tasks[index];
-            if table.try_take(&task.task_id, &task.starting_locks()) {
+            let wanted = task.starting_locks();
+            if wanted.is_disjoint(&reserved) && table.try_take(&task.task_id, &wanted) {
                 return self.tasks.remove(index);
             }
             task.reanchor = true;
+            reserved.extend(wanted);
         }
         None
     }
@@ -247,7 +259,7 @@ where
                 }
                 if let Some(task) = end.requeue {
                     queue.requeued();
-                    waiting.hold(task);
+                    waiting.hold_first(task);
                 }
                 let keep_going = end.keep_going;
                 if !keep_going && !channel_closed {
@@ -559,8 +571,13 @@ impl SignGate for TaskGate {
             return Permit::Deferred(pinned);
         }
         match self.check_fresh(&pinned).await {
-            Ok(()) => Permit::Granted,
-            Err(e) => Permit::Refused(e.to_string()),
+            Ok(Ok(())) => Permit::Granted,
+            Ok(Err(stale)) => Permit::Refused(stale),
+            // Nothing was learned about the task, so it is tried again rather than failed.
+            Err(e) => {
+                warn!(task_id = self.task_id, error = %e, "could not check the trace is current; deferring");
+                Permit::Deferred(pinned)
+            }
         }
     }
 }
@@ -571,7 +588,8 @@ impl TaskGate {
     /// each contract's count at head does the program describe what settling would change.
     ///
     /// Run with every lock held, so no task this router signs can move a count in between.
-    async fn check_fresh(&self, pinned: &BTreeSet<Address>) -> Result<()> {
+    /// The outer error is a failed read; the inner one is a trace that is no longer current.
+    async fn check_fresh(&self, pinned: &BTreeSet<Address>) -> Result<Result<(), String>> {
         for &contract in pinned {
             let (traced_at, head) = tokio::try_join!(
                 self.validator
@@ -580,21 +598,21 @@ impl TaskGate {
                     .get_state_transition_count_on_chain(contract, self.chain),
             )?;
             if traced_at != head {
-                bail!(
+                return Ok(Err(format!(
                     "{contract} settled {} transition(s) after block {}, which the task was \
                      traced at; resubmit the task at a later block",
                     head.saturating_sub(traced_at),
                     self.block_height
-                );
+                )));
             }
             if contract == self.root && traced_at != self.transition_index {
-                bail!(
+                return Ok(Err(format!(
                     "the target is at transition {traced_at}, but the task settles transition {}",
                     self.transition_index
-                );
+                )));
             }
         }
-        Ok(())
+        Ok(Ok(()))
     }
 }
 
@@ -616,11 +634,16 @@ struct Held {
 async fn hold_until_landed(held: Held, poll: Duration) {
     loop {
         tokio::time::sleep(poll).await;
-        let (count, head) = tokio::join!(
-            held.validator
-                .get_state_transition_count_on_chain(held.root, held.chain),
-            held.validator.chain_head(held.chain),
-        );
+        let Ok(head) = held.validator.chain_head(held.chain).await else {
+            continue;
+        };
+        // Read at the block a waiting task would be re-anchored to, not at head: a payload that
+        // landed in the head block is not yet visible there, and releasing on it would trace
+        // the next task against the state before the landing.
+        let count = held
+            .validator
+            .state_transition_count_at(held.root, held.chain, head.saturating_sub(1))
+            .await;
         if count.is_ok_and(|count| count > held.transition_index) {
             info!(
                 task_id = held.task_id,
@@ -628,7 +651,7 @@ async fn hold_until_landed(held: Held, poll: Duration) {
             );
             break;
         }
-        if head.is_ok_and(|head| head > held.until) {
+        if head > held.until {
             info!(
                 task_id = held.task_id,
                 until = held.until,
@@ -948,6 +971,23 @@ mod tests {
         assert_eq!(*harness.reanchored.lock().unwrap(), ["a1"]);
     }
 
+    /// Once a tree waits for two contracts, a younger task wanting one of them waits behind it
+    /// instead of taking it the moment it frees.
+    #[tokio::test]
+    async fn a_waiting_tree_is_not_overtaken_on_the_contracts_it_needs() {
+        let harness = Harness::default();
+        let (sender, queue, _) = ingress(&[queued("a1", 1), queued("b1", 2)]);
+        harness.schedule(queue, 3);
+
+        harness.assert_started(&["a1", "b1"]).await;
+        harness.end("a1", Ending::Deferred(&[1, 2]));
+        sender.send(queued("a2", 1)).unwrap();
+        harness.assert_started(&["a1", "b1"]).await;
+
+        harness.end("b1", Ending::Settled);
+        harness.assert_started(&["a1", "b1", "a1"]).await;
+    }
+
     /// Two tasks whose trees each pin the other's root both defer once, then settle one after
     /// the other instead of deferring each other forever.
     #[tokio::test]
@@ -958,11 +998,13 @@ mod tests {
 
         harness.assert_started(&["a1", "b1"]).await;
         harness.end("a1", Ending::Deferred(&[1, 2]));
+        harness.assert_started(&["a1", "b1"]).await;
+        // The most recently deferred task goes first; either order settles both.
         harness.end("b1", Ending::Deferred(&[1, 2]));
-        harness.assert_started(&["a1", "b1", "a1"]).await;
+        harness.assert_started(&["a1", "b1", "b1"]).await;
 
-        harness.end("a1", Ending::Settled);
-        harness.assert_started(&["a1", "b1", "a1", "b1"]).await;
+        harness.end("b1", Ending::Settled);
+        harness.assert_started(&["a1", "b1", "b1", "a1"]).await;
     }
 
     /// Queues `tasks` as the ingress would, counting each toward the queue depth.

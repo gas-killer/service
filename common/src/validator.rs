@@ -718,9 +718,14 @@ impl GasKillerValidator {
             .await?;
         let measure = u64::try_from(measure).unwrap_or(u64::MAX);
         let horizon = u64::try_from(horizon).unwrap_or(u64::MAX);
-        Ok(Some(NestedSpec {
-            expiry_block: nested_expiry(head, buffer, measure, horizon),
-        }))
+        let expiry_block = nested_expiry(head, buffer, measure, horizon);
+        if expiry_block <= head {
+            anyhow::bail!(
+                "the operator set can change at block {horizon}, before a tree announced at \
+                 {head} could settle; resubmit once the change applies"
+            );
+        }
+        Ok(Some(NestedSpec { expiry_block }))
     }
 
     /// The current head of `chain_id`.
