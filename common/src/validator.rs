@@ -16,7 +16,7 @@ use alloy_primitives::{Address, U256};
 
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
-use crate::nested::{NestedSpec, TreeTrace, build_tree_trace};
+use crate::nested::{NestedSpec, TreeTrace, build_tree_trace, nested_expiry};
 use crate::task_data::GasKillerTaskData;
 
 use alloy::rpc::types::TransactionRequest;
@@ -676,6 +676,53 @@ impl GasKillerValidator {
             .map_err(|_| anyhow::anyhow!("stateTransitionCount overflow"))
     }
 
+    /// The nested spec for a task rooted at `root`, or `None` when the root cannot settle a tree.
+    ///
+    /// The expiry is fixed before anything is traced: head plus `buffer`, kept inside the root's
+    /// `blockStaleMeasure()` so a payload referencing the block before head stays fresh for its
+    /// whole life, and below the registry's mutation horizon so the set that signs it still
+    /// verifies it.
+    pub async fn nested_spec_for(
+        &self,
+        root: Address,
+        chain_id: ChainRole,
+        buffer: u64,
+    ) -> Result<Option<NestedSpec>> {
+        use crate::bindings::GAS_KILLER_NESTED_INTERFACE_ID;
+        use crate::bindings::gaskillersdk::GasKillerSDK;
+        use crate::bindings::schnorrstakeregistry::ISchnorrStakeRegistry;
+
+        let provider = self
+            .providers
+            .get(&chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No provider for chain {}", chain_id))?
+            .clone();
+        let sdk = GasKillerSDK::new(root, provider.clone());
+        // A contract without ERC-165, or one on an older SDK, settles flat; neither is an error.
+        if !sdk
+            .supportsInterface(GAS_KILLER_NESTED_INTERFACE_ID)
+            .call()
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        let (head, measure, registry) = tokio::try_join!(
+            async { Ok::<_, anyhow::Error>(provider.get_block_number().await?) },
+            async { Ok(sdk.blockStaleMeasure().call().await?) },
+            async { Ok(sdk.schnorrRegistry().call().await?) },
+        )?;
+        let horizon = ISchnorrStakeRegistry::new(registry, provider)
+            .nextPossibleMutationBlock()
+            .call()
+            .await?;
+        let measure = u64::try_from(measure).unwrap_or(u64::MAX);
+        let horizon = u64::try_from(horizon).unwrap_or(u64::MAX);
+        Ok(Some(NestedSpec {
+            expiry_block: nested_expiry(head, buffer, measure, horizon),
+        }))
+    }
+
     /// The current head of `chain_id`.
     pub async fn chain_head(&self, chain_id: ChainRole) -> Result<u64> {
         let provider = self
@@ -919,7 +966,11 @@ impl GasKillerValidator {
     /// Traces `task` as a nested tree under `spec`: the frames, the contracts it pins, and the
     /// digest the quorum signs. Shared by the router and every node so they split the trace
     /// the same way.
-    pub async fn trace_tree(&self, task: &GasKillerTaskData, spec: &NestedSpec) -> Result<TreeTrace> {
+    pub async fn trace_tree(
+        &self,
+        task: &GasKillerTaskData,
+        spec: &NestedSpec,
+    ) -> Result<TreeTrace> {
         if task.block_height == 0 {
             return Err(anyhow::anyhow!("block_height is required for validation"));
         }
@@ -1148,7 +1199,10 @@ mod tests {
         assert_ne!(digest_cache_key(&a, None), digest_cache_key(&c, None));
 
         // Identical task identity keys identically (cache hit is intended here).
-        assert_eq!(digest_cache_key(&a, None), digest_cache_key(&a.clone(), None));
+        assert_eq!(
+            digest_cache_key(&a, None),
+            digest_cache_key(&a.clone(), None)
+        );
     }
 
     /// A tree's root signs its expiry, so the same task signed flat or under two expiries

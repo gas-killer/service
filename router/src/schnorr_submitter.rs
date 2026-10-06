@@ -16,7 +16,6 @@ use crate::sequencer::DispatchedTask;
 use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_provider::Provider;
 use anyhow::Result;
-use commonware_avs_router::executor::ExecutionResult;
 use gas_killer_common::bindings::ReadOnlyProvider;
 use gas_killer_common::schnorr::AggregateSignature;
 use std::time::{Duration, Instant};
@@ -49,14 +48,17 @@ impl SchnorrSubmitter {
         }
     }
 
-    /// Settles `dispatched`'s task from how its session ended, which began at `started`.
+    /// Settles `dispatched`'s task from how its session ended, which began at `started`. A
+    /// rendered payload also reports the last block it can land in.
+    ///
+    /// A deferred session is not settled: its task goes back to the queue.
     pub async fn settle(
         &mut self,
         height: u64,
         dispatched: &DispatchedTask,
         started: Instant,
         outcome: SessionOutcome,
-    ) -> HeightOutcome {
+    ) -> (HeightOutcome, Option<u64>) {
         match outcome {
             SessionOutcome::Signed {
                 digest,
@@ -81,14 +83,19 @@ impl SchnorrSubmitter {
                         "no aggregate signature before the round timeout",
                     )
                     .await;
-                HeightOutcome::TimedOut
+                (HeightOutcome::TimedOut, None)
             }
             SessionOutcome::TraceFailed(reason) => {
                 self.handler
                     .settle_failed(dispatched, &format!("task enrichment failed: {reason}"))
                     .await;
-                HeightOutcome::TraceFailed
+                (HeightOutcome::TraceFailed, None)
             }
+            SessionOutcome::Refused(reason) => {
+                self.handler.settle_failed(dispatched, &reason).await;
+                (HeightOutcome::Refused, None)
+            }
+            SessionOutcome::Deferred(_) => (HeightOutcome::Deferred, None),
         }
     }
 
@@ -103,7 +110,7 @@ impl SchnorrSubmitter {
         digest: [u8; 32],
         signature: &AggregateSignature,
         non_signers: &[Address],
-    ) -> HeightOutcome {
+    ) -> (HeightOutcome, Option<u64>) {
         let mut backoff = INITIAL_RETRY_BACKOFF;
         let mut attempt = 0u32;
         loop {
@@ -112,13 +119,14 @@ impl SchnorrSubmitter {
                 .submit(height, dispatched, started, digest, signature, non_signers)
                 .await
             {
-                Ok(_) => {
+                Ok(valid_until_block) => {
                     info!(
                         height,
                         task_id = dispatched.task_id,
+                        valid_until_block,
                         "schnorr payload rendered"
                     );
-                    return HeightOutcome::Ready;
+                    return (HeightOutcome::Ready, Some(valid_until_block));
                 }
                 Err(error) if attempt <= MAX_RETRIES => {
                     warn!(
@@ -142,7 +150,7 @@ impl SchnorrSubmitter {
                     self.handler
                         .settle_render_failed(dispatched, &format!("verification failed: {error}"))
                         .await;
-                    return HeightOutcome::Failed;
+                    return (HeightOutcome::Failed, None);
                 }
             }
         }
@@ -157,7 +165,7 @@ impl SchnorrSubmitter {
         digest: [u8; 32],
         signature: &AggregateSignature,
         non_signers: &[Address],
-    ) -> Result<ExecutionResult> {
+    ) -> Result<u64> {
         let msg_hash = FixedBytes::<32>::from(digest);
 
         // `(s, Raddr)` in the registry's calldata shape: the 52-byte wire encoding

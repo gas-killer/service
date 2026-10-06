@@ -1,6 +1,6 @@
 use crate::metrics::MetricsCollector;
 use crate::payload_revert::PayloadRevert;
-use crate::sequencer::{DispatchedTask, set_task_failed, set_task_ready};
+use crate::sequencer::{DispatchedTask, Traced, set_task_failed, set_task_ready};
 use crate::store::SqliteStore;
 use crate::task_data::GasKillerTaskData;
 use alloy::network::Ethereum;
@@ -9,10 +9,13 @@ use alloy_provider::Provider;
 use anyhow::{Result, bail};
 use commonware_avs_router::executor::ExecutionResult;
 use gas_killer_common::ChainRole;
-use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::bindings::schnorrstakeregistry::ISchnorrStakeRegistry;
-use gas_killer_common::{BundleProof, PayloadView, TaskBundle};
+use gas_killer_common::bindings::{GAS_KILLER_INTERFACE_ID, GAS_KILLER_NESTED_INTERFACE_ID};
+use gas_killer_common::{
+    BundleProof, NestedBundle, NestedFrame, NestedSpec, PayloadView, TaskBundle, TreeTrace,
+};
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,20 +39,6 @@ const DEFAULT_RECEIPT_TIMEOUT_L2_SECS: u64 = 30;
 /// It never stands in for a call that executed and reverted: those fail the round outright, so a
 /// payload carrying this estimate is one whose landability is unknown, not one known to fail.
 const PAYLOAD_GAS_ESTIMATE_FALLBACK: u64 = 10_000_000;
-
-/// The [`ExecutionResult`] a completion handler returns for a rendered (non-broadcast) round.
-///
-/// A rendered round persists the payload/bundle and submits no transaction, so there is no
-/// receipt to report; the submitter only needs an `Ok` to mark the height settled.
-fn rendered_execution_result() -> ExecutionResult {
-    ExecutionResult {
-        transaction_hash: String::new(),
-        block_number: None,
-        gas_used: None,
-        status: None,
-        contract_address: None,
-    }
-}
 
 /// Resolved inputs for a `verifyAndUpdate` call, assembled once by
 /// [`GasKillerHandler::prepare_schnorr`] and consumed by either the render path or the retained
@@ -76,6 +65,23 @@ struct RenderedRound {
     bundle: TaskBundle,
 }
 
+/// The quorum signature's arguments as every render shapes them.
+struct QuorumProof {
+    msg_hash: FixedBytes<32>,
+    current_block_number: u32,
+    s: U256,
+    r_addr: Address,
+    non_signers: Vec<Address>,
+}
+
+/// What every frame contract of a tree must agree on before the tree is rendered.
+struct TreePreflight {
+    registry: Address,
+    /// The smallest `blockStaleMeasure()` in the tree: the frame that goes stale first bounds
+    /// how long the payload can land.
+    min_stale_measure: u64,
+}
+
 /// Bound a rendered payload's validity so it expires before the operator set can change.
 ///
 /// A payload is submittable until `valid_until_block`, but a Schnorr settlement only verifies while
@@ -95,6 +101,14 @@ fn clamp_to_mutation_horizon(valid_until_block: u64, horizon: Option<U256>) -> u
     // Saturating: an unscheduled horizon is `type(uint256).max`, far beyond u64.
     let horizon = u64::try_from(horizon).unwrap_or(u64::MAX);
     valid_until_block.min(horizon.saturating_sub(1))
+}
+
+/// The last block a tree referencing `reference` can land in: within the payload buffer, before
+/// the stalest frame's `blockStaleMeasure` lapses, and no later than the signed expiry.
+fn tree_valid_until(reference: u64, buffer: u64, min_stale_measure: u64, expiry_block: u64) -> u64 {
+    reference
+        .saturating_add(buffer.min(min_stale_measure))
+        .min(expiry_block)
 }
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
@@ -530,7 +544,11 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 return None;
             }
         };
+        self.registry_horizon(provider, registry_addr).await
+    }
 
+    /// [`Self::schnorr_mutation_horizon`] for a registry already read.
+    async fn registry_horizon(&self, provider: P, registry_addr: Address) -> Option<U256> {
         let registry = ISchnorrStakeRegistry::new(registry_addr, provider);
         match registry.nextPossibleMutationBlock().call().await {
             Ok(horizon) => Some(horizon),
@@ -645,30 +663,233 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 r_addr,
                 non_signers,
             },
+            nested: None,
         };
         Ok(RenderedRound { payload, bundle })
     }
 
-    /// The certified task with the router's own storage updates, from the trace that started
-    /// alongside the session. The payload hash preflight then checks them against the digest the
-    /// quorum signed, so the quorum's digest is never rendered unchecked.
-    async fn traced_task(&self, dispatched: &DispatchedTask) -> Result<GasKillerTaskData> {
-        let storage_updates = dispatched
+    /// Renders a signed nested tree as `verifyAndUpdateTree`, after checking the router's own
+    /// tree hashes to the signed root and that every frame contract can apply its frame.
+    async fn render_tree_payload(
+        &self,
+        task: &GasKillerTaskData,
+        tree: &TreeTrace,
+        spec: NestedSpec,
+        proof: QuorumProof,
+    ) -> Result<RenderedRound> {
+        let QuorumProof {
+            msg_hash,
+            current_block_number,
+            s,
+            r_addr,
+            non_signers,
+        } = proof;
+        let encoded = tree
+            .encoded
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("a one-frame trace settles flat"))?;
+        let local_root = FixedBytes::<32>::from(encoded.root.0);
+        if local_root != msg_hash {
+            warn!(
+                offchain_msg_hash = %msg_hash,
+                local_root = %local_root,
+                target_address = %task.target_address,
+                "Tree root mismatch between aggregation and local computation"
+            );
+            bail!("Message hash mismatch: aggregation {msg_hash} != local {local_root}");
+        }
+
+        let chain_id = task.chain_id;
+        let provider = self
+            .get_provider(chain_id)
+            .ok_or_else(|| anyhow::anyhow!("No provider configured for chain: {}", chain_id))?
+            .clone();
+        let contracts: BTreeSet<Address> = tree.frames.iter().map(|f| f.target).collect();
+        let preflight = self
+            .preflight_tree(&provider, task.target_address, &contracts)
+            .await?;
+
+        let reference_block_number = current_block_number.saturating_sub(1);
+        let target_function = task.function_selector();
+        let submission = GasKillerSDK::TreeSubmission {
+            root: msg_hash,
+            expiryBlock: U256::from(spec.expiry_block),
+            expiryProof: encoded.expiry_proof.clone(),
+            sig: GasKillerSDK::QuorumSignature {
+                s,
+                Raddr: r_addr,
+                nonSigners: non_signers.clone(),
+                refBlock: U256::from(reference_block_number),
+            },
+            transitionIndex: U256::from(task.transition_index),
+            targetFunction: target_function,
+            storageUpdates: tree.root_program.clone(),
+            proof: encoded.root_proof.clone(),
+            children: encoded.root_children.clone(),
+        };
+
+        let value = U256::ZERO;
+        let sdk = GasKillerSDK::new(task.target_address, provider);
+        let call = sdk
+            .verifyAndUpdateTree(submission)
+            .from(task.from_address)
+            .value(value);
+        let data = call.calldata().clone();
+        let estimated_gas =
+            self.resolve_payload_gas(call.estimate_gas().await, task.target_address)?;
+
+        let reference = reference_block_number as u64;
+        let unclamped_valid_until = tree_valid_until(
+            reference,
+            self.payload_block_buffer,
+            preflight.min_stale_measure,
+            spec.expiry_block,
+        );
+        let horizon = self
+            .registry_horizon(sdk.provider().clone(), preflight.registry)
+            .await;
+        let valid_until_block = clamp_to_mutation_horizon(unclamped_valid_until, horizon);
+
+        let payload = PayloadView {
+            to: task.target_address,
+            data,
+            value,
+            chain_id,
+            estimated_gas,
+            valid_until_block,
+        };
+        let bundle = TaskBundle {
+            msg_hash,
+            reference_block_number,
+            transition_index: task.transition_index,
+            target_address: task.target_address,
+            target_function,
+            storage_updates: tree.root_program.clone(),
+            chain_id,
+            value,
+            valid_until_block,
+            proof: BundleProof::Schnorr {
+                s,
+                r_addr,
+                non_signers,
+            },
+            nested: Some(NestedBundle {
+                expiry_block: spec.expiry_block,
+                expiry_proof: encoded.expiry_proof.clone(),
+                proof: encoded.root_proof.clone(),
+                children: encoded.root_children.clone(),
+                frames: tree
+                    .frames
+                    .iter()
+                    .map(|frame| NestedFrame {
+                        contract: frame.target,
+                        transition_index: frame
+                            .transition_index
+                            .and_then(|i| u64::try_from(i).ok())
+                            .unwrap_or_default(),
+                    })
+                    .collect(),
+            }),
+        };
+        Ok(RenderedRound { payload, bundle })
+    }
+
+    /// Checks every frame contract reports the nested interface and shares the root's registry,
+    /// whose approval is the only one a nested frame will find.
+    async fn preflight_tree(
+        &self,
+        provider: &P,
+        root: Address,
+        contracts: &BTreeSet<Address>,
+    ) -> Result<TreePreflight> {
+        let root_registry = GasKillerSDK::new(root, provider.clone())
+            .schnorrRegistry()
+            .call()
+            .await
+            .map_err(|e| anyhow::anyhow!("schnorrRegistry call on {root} failed: {e}"))?;
+        let mut min_stale_measure = u64::MAX;
+        for &contract in contracts {
+            let sdk = GasKillerSDK::new(contract, provider.clone());
+            let supported = sdk
+                .supportsInterface(GAS_KILLER_NESTED_INTERFACE_ID)
+                .call()
+                .await
+                .map_err(|e| anyhow::anyhow!("supportsInterface call on {contract} failed: {e}"))?;
+            if !supported {
+                bail!(
+                    "frame contract {contract} does not support the nested Gas Killer interface \
+                     ({GAS_KILLER_NESTED_INTERFACE_ID})"
+                );
+            }
+            let registry =
+                sdk.schnorrRegistry().call().await.map_err(|e| {
+                    anyhow::anyhow!("schnorrRegistry call on {contract} failed: {e}")
+                })?;
+            if registry != root_registry {
+                bail!(
+                    "frame contract {contract} uses schnorrRegistry {registry}, but the root \
+                     {root} uses {root_registry}"
+                );
+            }
+            let measure =
+                sdk.blockStaleMeasure().call().await.map_err(|e| {
+                    anyhow::anyhow!("blockStaleMeasure call on {contract} failed: {e}")
+                })?;
+            min_stale_measure = min_stale_measure.min(u64::try_from(measure).unwrap_or(u64::MAX));
+        }
+        Ok(TreePreflight {
+            registry: root_registry,
+            min_stale_measure,
+        })
+    }
+
+    /// The certified task with the router's own trace, which started alongside the session.
+    /// Rendering checks the trace against the digest the quorum signed, so the quorum's digest
+    /// is never rendered unchecked.
+    async fn traced_task(
+        &self,
+        dispatched: &DispatchedTask,
+    ) -> Result<(GasKillerTaskData, Traced)> {
+        let traced = dispatched
             .trace
             .wait()
             .await
             .map_err(|e| anyhow::anyhow!("task enrichment failed: {e}"))?;
-        let traced = GasKillerTaskData {
-            storage_updates,
+        let task = GasKillerTaskData {
+            storage_updates: traced.flat_program().cloned().unwrap_or_default(),
             ..dispatched.task.clone()
         };
-        traced.validate()?;
-        Ok(traced)
+        task.validate()?;
+        Ok((task, traced))
     }
 
-    /// Renders `verifyAndUpdate` for a signed session, settling its task `ready` on success.
-    /// Called by [`crate::schnorr_submitter::SchnorrSubmitter`] once per attempt; `started` is
-    /// when the session began, for the round-latency measurement.
+    async fn render(
+        &self,
+        dispatched: &DispatchedTask,
+        proof: QuorumProof,
+    ) -> Result<RenderedRound> {
+        let (task, traced) = self.traced_task(dispatched).await?;
+        match (&traced, dispatched.nested) {
+            (Traced::Tree(tree), Some(spec)) if tree.is_nested() => {
+                self.render_tree_payload(&task, tree, spec, proof).await
+            }
+            _ => {
+                self.render_schnorr_payload(
+                    proof.msg_hash,
+                    proof.current_block_number,
+                    proof.s,
+                    proof.r_addr,
+                    proof.non_signers,
+                    Some(&task),
+                )
+                .await
+            }
+        }
+    }
+
+    /// Renders a signed session's payload, settling its task `ready` on success and returning
+    /// the payload's last valid block. Called by [`crate::schnorr_submitter::SchnorrSubmitter`]
+    /// once per attempt; `started` is when the session began, for the round-latency measurement.
     ///
     /// A failed attempt leaves the task untouched so a retry can still render it; the
     /// submitter settles the failure through [`Self::settle_failed`] once it stops retrying.
@@ -682,23 +903,21 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         s: U256,
         r_addr: Address,
         non_signers: Vec<Address>,
-    ) -> Result<ExecutionResult> {
+    ) -> Result<u64> {
         let exec_start = Instant::now();
 
-        let result = match self.traced_task(dispatched).await {
-            Ok(traced) => {
-                self.render_schnorr_payload(
+        let result = self
+            .render(
+                dispatched,
+                QuorumProof {
                     msg_hash,
                     current_block_number,
                     s,
                     r_addr,
                     non_signers,
-                    Some(&traced),
-                )
-                .await
-            }
-            Err(e) => Err(e),
-        };
+                },
+            )
+            .await;
 
         if let Some(m) = &self.metrics {
             m.execution_duration_seconds
@@ -724,7 +943,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             .await;
         }
 
-        Ok(rendered_execution_result())
+        Ok(rendered.payload.valid_until_block)
     }
 
     /// Settles a signed session's task `failed` once its render attempts are exhausted.
@@ -959,7 +1178,9 @@ mod tests {
                 storage_updates: Bytes::new(),
                 ..task_data.clone()
             },
-            trace: RouterTrace::finished(trace),
+            nested: None,
+            chain: gas_killer_common::ChainRole::L1,
+            trace: RouterTrace::finished(trace.map(Traced::Flat)),
         }
     }
 
@@ -1365,5 +1586,147 @@ mod tests {
         let error = settled.error.expect("a failure reason should be recorded");
         assert!(error.contains("InvalidQuorumSignature()"), "{error}");
         assert!(error.contains("schnorrRegistry"), "{error}");
+    }
+
+    // -- nested trees --
+
+    use gas_analyzer::nested::{FrameProgram, IStateUpdateTypes, StateUpdate};
+
+    const REGISTRY: Address = Address::repeat_byte(0x77);
+    const CALLEE: Address = Address::repeat_byte(0xbb);
+
+    /// A root at [`matching_task_data`]'s target whose only frame op nests [`CALLEE`].
+    fn two_frame_tree(task_data: &GasKillerTaskData, spec: &NestedSpec) -> TreeTrace {
+        let frame = |target, caller, updates| FrameProgram {
+            target,
+            caller,
+            value: U256::ZERO,
+            calldata_hash: alloy_primitives::B256::ZERO,
+            transition_index: Some(U256::ZERO),
+            updates,
+            children: Vec::new(),
+        };
+        let nest = StateUpdate::Nested(IStateUpdateTypes::Nested {
+            target: CALLEE,
+            value: U256::ZERO,
+            childLeaf: alloy_primitives::B256::ZERO,
+        });
+        let mut root = frame(task_data.target_address, Address::ZERO, vec![nest]);
+        root.children = vec![1];
+        let callee = frame(CALLEE, task_data.target_address, Vec::new());
+        gas_killer_common::build_tree_trace(
+            task_data,
+            vec![root, callee],
+            BTreeSet::from([task_data.target_address, CALLEE]),
+            spec,
+        )
+        .unwrap()
+    }
+
+    /// Answers the tree preflight: the root's registry, then each frame contract in address
+    /// order with its interface support, registry and `blockStaleMeasure`.
+    fn push_tree_preflight(asserter: &Asserter, frames: &[(Address, u64)]) {
+        asserter.push_success(&Bytes::from(REGISTRY.abi_encode()));
+        for (registry, measure) in frames {
+            push_supports_interface(asserter, true);
+            asserter.push_success(&Bytes::from(registry.abi_encode()));
+            asserter.push_success(&Bytes::from(U256::from(*measure).abi_encode()));
+        }
+    }
+
+    async fn render_tree(
+        frames: &[(Address, u64)],
+    ) -> (Result<u64>, SqliteStore, String, TreeTrace) {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request_body()).await.unwrap();
+        let (task_data, _) = matching_task_data();
+        let spec = NestedSpec { expiry_block: 140 };
+        let tree = two_frame_tree(&task_data, &spec);
+        let session = DispatchedTask {
+            nested: Some(spec),
+            trace: RouterTrace::finished(Ok(Traced::Tree(Arc::new(tree.clone())))),
+            ..dispatched(&task.id, &task_data, Ok(Bytes::new()))
+        };
+
+        let asserter = Asserter::new();
+        push_tree_preflight(&asserter, frames);
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let mut handler = GasKillerHandler::new(1, provider)
+            .with_store(store.clone())
+            .with_payload_block_buffer(50);
+        let result = handler
+            .handle_schnorr_verification(
+                &session,
+                Instant::now(),
+                FixedBytes::from(tree.digest.0),
+                100,
+                U256::from(42u64),
+                Address::from([0x44; 20]),
+                vec![],
+            )
+            .await;
+        (result, store, task.id, tree)
+    }
+
+    #[tokio::test]
+    async fn a_signed_tree_renders_verify_and_update_tree() {
+        use alloy::sol_types::SolCall;
+
+        let (result, store, task_id, tree) = render_tree(&[(REGISTRY, 300), (REGISTRY, 300)]).await;
+        assert_eq!(
+            result.unwrap(),
+            140,
+            "the signed expiry caps reference + buffer"
+        );
+
+        let settled = store.get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(settled.status, TaskStatus::Ready);
+        let payload: PayloadView =
+            serde_json::from_str(settled.payload.as_deref().unwrap()).unwrap();
+        let call = GasKillerSDK::verifyAndUpdateTreeCall::abi_decode(payload.data.as_ref())
+            .expect("a tree renders verifyAndUpdateTree");
+        let encoded = tree.encoded.as_ref().unwrap();
+        assert_eq!(call.submission.root, encoded.root);
+        assert_eq!(call.submission.expiryBlock, U256::from(140));
+        assert_eq!(call.submission.sig.refBlock, U256::from(99));
+        assert_eq!(call.submission.storageUpdates, tree.root_program);
+        assert_eq!(call.submission.children, encoded.root_children);
+
+        let bundle: TaskBundle = serde_json::from_str(settled.bundle.as_deref().unwrap()).unwrap();
+        let nested = bundle
+            .nested
+            .expect("a tree bundle carries its nested arguments");
+        assert_eq!(nested.expiry_block, 140);
+        assert_eq!(
+            nested.frames.iter().map(|f| f.contract).collect::<Vec<_>>(),
+            [matching_task_data().0.target_address, CALLEE]
+        );
+    }
+
+    /// The signed expiry is fixed; a frame contract that goes stale sooner shortens only how
+    /// long the rendered payload is offered for.
+    #[tokio::test]
+    async fn the_stalest_frame_bounds_the_rendered_validity() {
+        let (result, _, _, _) = render_tree(&[(REGISTRY, 300), (REGISTRY, 20)]).await;
+        assert_eq!(result.unwrap(), 99 + 20);
+    }
+
+    #[tokio::test]
+    async fn a_callee_on_another_registry_fails_the_render_with_its_cause() {
+        let (result, _, _, _) =
+            render_tree(&[(REGISTRY, 300), (Address::repeat_byte(0x99), 300)]).await;
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("{CALLEE} uses schnorrRegistry")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn tree_validity_never_outlasts_the_signed_expiry() {
+        assert_eq!(tree_valid_until(99, 50, 300, 140), 140);
+        assert_eq!(tree_valid_until(99, 50, 20, 140), 119);
+        assert_eq!(tree_valid_until(99, 10, 300, 140), 109);
     }
 }

@@ -428,9 +428,11 @@ pub async fn requeue_incomplete_tasks(
                 }
             }
 
+            // A task carried over a restart may have been overtaken by transitions that landed
+            // meanwhile, so it is traced at head like any task that waited.
             let queued = QueuedTask {
-                task_id: task_id.clone(),
-                request: GasKillerTaskRequest { body: task.request },
+                reanchor: true,
+                ..QueuedTask::new(task_id.clone(), GasKillerTaskRequest { body: task.request })
             };
             if sender.send(queued).is_err() {
                 error!(

@@ -48,6 +48,14 @@ impl EncodeSize for NestedSpec {
     }
 }
 
+/// The last block a tree announced at `head` may settle in: `buffer` blocks out, but never so far
+/// that a payload referencing the block before head goes stale under the root's
+/// `blockStaleMeasure`, and never on or past the registry's next possible set change.
+pub fn nested_expiry(head: u64, buffer: u64, stale_measure: u64, horizon: u64) -> u64 {
+    head.saturating_add(buffer.min(stale_measure.saturating_sub(1)))
+        .min(horizon.saturating_sub(1))
+}
+
 /// A task's trace split into frames, with what signing and settling it need.
 #[derive(Debug, Clone)]
 pub struct TreeTrace {
@@ -155,6 +163,13 @@ mod tests {
             chain_id: 1,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn expiry_stays_inside_the_buffer_the_stale_measure_and_the_horizon() {
+        assert_eq!(nested_expiry(1000, 50, 300, u64::MAX), 1050);
+        assert_eq!(nested_expiry(1000, 50, 20, u64::MAX), 1019);
+        assert_eq!(nested_expiry(1000, 50, 300, 1010), 1009);
     }
 
     #[test]

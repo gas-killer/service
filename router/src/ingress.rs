@@ -1109,10 +1109,7 @@ pub async fn submit_task_handler(
         duration_ms = elapsed_ms(started),
         "Task accepted"
     );
-    let queued = QueuedTask {
-        task_id: task.id.clone(),
-        request,
-    };
+    let queued = QueuedTask::new(task.id.clone(), request);
     if state.sender.send(queued).is_err() {
         tracing::error!(
             key_id = %key.id,
@@ -3883,6 +3880,7 @@ mod tests {
                     r_addr: Address::ZERO,
                     non_signers: vec![],
                 },
+                nested: None,
             }
         }
 

@@ -174,10 +174,12 @@ mod tests {
             ..Default::default()
         };
         let deadline = Instant::now() + Duration::from_secs(600);
-        let resolved =
-            tokio::time::timeout(Duration::from_secs(1), resolver.resolve(7, &task, None, deadline))
-                .await
-                .expect("declining must not wait out the deadline");
+        let resolved = tokio::time::timeout(
+            Duration::from_secs(1),
+            resolver.resolve(7, &task, None, deadline),
+        )
+        .await
+        .expect("declining must not wait out the deadline");
         assert!(resolved.is_none());
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))

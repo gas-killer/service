@@ -32,10 +32,10 @@ use commonware_avs_core::bn254::PublicKey;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Spawner, Supervisor, tokio};
+use gas_killer_common::NestedSpec;
 use gas_killer_common::schnorr::musig::{Participant, PubNonce, SigningContext};
 use gas_killer_common::schnorr::wire::{SchnorrMsg, SignRequest, partial_from_bytes};
 use gas_killer_common::schnorr::{self, PrivateKey};
-use gas_killer_common::NestedSpec;
 use gas_killer_common::task_data::GasKillerTaskData;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
@@ -255,7 +255,11 @@ fn handle_commit_request<S>(
                 .insert((height, attempt), Session::Refused);
             return;
         }
-        let Some(digest) = shared.resolver.resolve(height, &task, nested, deadline).await else {
+        let Some(digest) = shared
+            .resolver
+            .resolve(height, &task, nested, deadline)
+            .await
+        else {
             shared
                 .sessions
                 .lock()

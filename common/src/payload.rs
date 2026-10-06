@@ -82,6 +82,30 @@ pub struct TaskBundle {
     pub valid_until_block: u64,
     /// Scheme-specific proof material.
     pub proof: BundleProof,
+    /// Present when the round settles as a nested tree through `verifyAndUpdateTree`, in which
+    /// case `msg_hash` is the tree's root and `storage_updates` the root frame's program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested: Option<NestedBundle>,
+}
+
+/// The tree-only arguments of `verifyAndUpdateTree`, plus the contracts the tree pins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NestedBundle {
+    /// Last block the tree may settle in, signed as the tree's expiry leaf.
+    pub expiry_block: u64,
+    pub expiry_proof: Vec<B256>,
+    /// The root frame's membership proof.
+    pub proof: Vec<B256>,
+    /// `abi.encode(Witness)` for each child the root frame's NESTED ops apply, in order.
+    pub children: Vec<Bytes>,
+    /// Every frame's contract and the transition index it settles, root first.
+    pub frames: Vec<NestedFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NestedFrame {
+    pub contract: Address,
+    pub transition_index: u64,
 }
 
 #[cfg(test)]
@@ -162,6 +186,7 @@ mod tests {
                 r_addr: Address::from([0x44; 20]),
                 non_signers: vec![Address::from([0x55; 20]), Address::from([0x66; 20])],
             },
+            nested: None,
         };
         let json = serde_json::to_value(&bundle).unwrap();
         assert_eq!(json["proof"]["scheme"], "schnorr");
