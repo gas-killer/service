@@ -59,6 +59,10 @@ struct PreparedSchnorr<P> {
     chain_id: u64,
     target_addr: Address,
     from_address: Address,
+    /// The task's `msg.value`. The rendered payload carries it, so a call that brought ETH in
+    /// settles with that ETH; the broadcast path ignores it, since the router's wallet must never
+    /// fund a task.
+    value: U256,
     msg_hash: FixedBytes<32>,
     reference_block_number: u32,
     storage_updates: Bytes,
@@ -317,6 +321,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let target_function = task_data.function_selector();
         let target_addr = task_data.target_address;
         let from_address = task_data.from_address;
+        let value = task_data.value;
 
         // The payload-hash preflight and the ERC-165 interface check are
         // independent, so run them concurrently. Once the interface result is
@@ -370,6 +375,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             chain_id,
             target_addr,
             from_address,
+            value,
             msg_hash,
             reference_block_number: current_block_number.saturating_sub(1),
             storage_updates,
@@ -551,8 +557,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// `data` is the full `verifyAndUpdate` calldata; `estimated_gas` comes from
     /// `eth_estimateGas` simulated as the requesting account, via
     /// [`Self::resolve_payload_gas`] — which also fails the round if that call reverts. `value` is
-    /// fixed at zero and kept server-controlled, so a future on-chain fee is a server change, not
-    /// an integrator client-code change.
+    /// the task's own `msg.value`, so a call that brought ETH in (a deposit) is estimated and
+    /// settled with that ETH: a consumer that checks it at settlement would otherwise revert. It
+    /// stays server-controlled, so a future on-chain fee is a server change, not an integrator
+    /// client-code change.
     #[allow(clippy::too_many_arguments)]
     async fn render_schnorr_payload(
         &self,
@@ -578,6 +586,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             chain_id,
             target_addr,
             from_address,
+            value,
             msg_hash,
             reference_block_number,
             storage_updates,
@@ -588,7 +597,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             non_signers,
         } = prepared;
 
-        let value = U256::ZERO;
         let sdk = GasKillerSDK::new(target_addr, provider);
         let call = sdk
             .verifyAndUpdate(
@@ -1058,6 +1066,51 @@ mod tests {
             let settled = store.get_task(id).await.unwrap().unwrap();
             assert_eq!(settled.status, TaskStatus::Failed);
         }
+    }
+
+    /// A task sent with ETH (a deposit) renders a payload that carries that ETH, so the
+    /// settlement brings it and a consumer that checks it at settlement does not revert.
+    #[tokio::test]
+    async fn a_task_with_value_renders_a_payload_carrying_it() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let deposit = U256::from(10u64).pow(U256::from(16u64));
+        let body = crate::ingress::GasKillerTaskRequestBody {
+            value: deposit,
+            ..request_body()
+        };
+        let task = store.create_task(&key, &body).await.unwrap();
+        let (task_data, msg_hash) = matching_task_data();
+        let task_data = GasKillerTaskData {
+            value: deposit,
+            ..task_data
+        };
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        push_supports_interface(&asserter, true);
+        let mut handler = GasKillerHandler::new(1, provider).with_store(store.clone());
+
+        handler
+            .handle_schnorr_verification(
+                &traced(&task.id, &task_data),
+                Instant::now(),
+                msg_hash,
+                100,
+                U256::from(42u64),
+                Address::from([0x44; 20]),
+                vec![],
+            )
+            .await
+            .expect("the round renders");
+
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        let payload: PayloadView =
+            serde_json::from_str(settled.payload.as_deref().expect("payload persisted")).unwrap();
+        assert_eq!(
+            payload.value, deposit,
+            "the settlement carries the task's ETH"
+        );
     }
 
     #[tokio::test]
