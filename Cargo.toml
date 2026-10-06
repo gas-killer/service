@@ -47,7 +47,8 @@ eigen-services-operatorsinfo = "2.0.0"
 eigen-utils = "2.0.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
-gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch" }
+# TEST BRANCH ONLY: pinned to gas-killer/gas-analyzer#210 (cherry-picked onto the commit main locks).
+gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", rev = "5897a881279de7c8f60bae12939982d968173d37", package = "gas-analyzer-evmsketch" }
 gas-killer-common = { path = "common" }
 governor = "0.10.4"
 hex = "0.4"

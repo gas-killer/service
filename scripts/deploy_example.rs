@@ -220,6 +220,9 @@ struct ExerciseSpec {
     /// Whether the generated request polls `stateTransitionCount()` afterwards.
     #[serde(default = "default_true")]
     verify: bool,
+    /// Wei the task is simulated with and its settlement must carry, decimal or `0x`-prefixed.
+    #[serde(default)]
+    value: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -643,6 +646,7 @@ struct ScenarioRequest {
     label: String,
     call_data: Bytes,
     verify: bool,
+    value: U256,
 }
 
 /// Renders a `run_scenario` config that drives the deployed target.
@@ -680,6 +684,9 @@ fn render_scenario(name: &str, router_url: &str, requests: &[ScenarioRequest]) -
             toml_string(&format!("0x{}", alloy::hex::encode(&request.call_data)))
         ));
         out.push_str("  from_address   = \"local\"\n");
+        if !request.value.is_zero() {
+            out.push_str(&format!("  value          = \"{}\"\n", request.value));
+        }
         // The router renders a payload rather than broadcasting it, so a scenario that wants
         // to observe an on-chain effect has to submit that payload itself.
         out.push_str("  submit         = true\n");
@@ -954,6 +961,10 @@ async fn deploy_one(
                 label: ex.label.clone().unwrap_or_else(|| example.name.clone()),
                 call_data: encode_call(&ex.sig, &args)?,
                 verify: ex.verify,
+                value: match &ex.value {
+                    Some(raw) => parse_wei(raw)?,
+                    None => U256::ZERO,
+                },
             })
         })
         .collect::<Result<Vec<ScenarioRequest>, DynError>>()?;
@@ -1727,6 +1738,7 @@ mod tests {
                 label: "life_step_1".to_string(),
                 call_data: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
                 verify: true,
+                value: U256::ZERO,
             }],
         );
 
@@ -1741,6 +1753,30 @@ mod tests {
     }
 
     #[test]
+    fn an_exercise_with_value_renders_it_and_one_without_omits_it() {
+        let rendered = render_scenario(
+            "backedDeposit",
+            "http://localhost:8080",
+            &[
+                ScenarioRequest {
+                    label: "deposit".to_string(),
+                    call_data: Bytes::from(vec![0xd0, 0xe3, 0x0d, 0xb0]),
+                    verify: true,
+                    value: U256::from(10_000_000_000_000_000u64),
+                },
+                ScenarioRequest {
+                    label: "plain".to_string(),
+                    call_data: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
+                    verify: true,
+                    value: U256::ZERO,
+                },
+            ],
+        );
+        assert_eq!(rendered.matches("value          = ").count(), 1);
+        assert!(rendered.contains(r#"value          = "10000000000000000""#));
+    }
+
+    #[test]
     fn generated_scenario_round_trips_through_the_toml_parser() {
         let rendered = render_scenario(
             "guardedVault",
@@ -1750,11 +1786,13 @@ mod tests {
                     label: "settle_two".to_string(),
                     call_data: Bytes::from(vec![0x01, 0x02, 0x03, 0x04]),
                     verify: true,
+                    value: U256::ZERO,
                 },
                 ScenarioRequest {
                     label: "settle_again".to_string(),
                     call_data: Bytes::from(vec![0x05, 0x06, 0x07, 0x08]),
                     verify: false,
+                    value: U256::ZERO,
                 },
             ],
         );

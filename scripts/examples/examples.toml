@@ -239,3 +239,19 @@ alias = "gasKillerTarget"
   label = "reentrant_advance"
   sig   = "advance()"
   args  = []
+
+# TEST BRANCH ONLY (gas-killer/service#489, gas-killer/gas-analyzer#210): a task sent with ETH.
+# BackedDeposit's deposit() ends with a self-call the diff records, which reverts unless the
+# settlement brings the deposit's ETH, so this settles only if the analysis estimates with the
+# task's value and the router renders the payload with it.
+[[examples]]
+name      = "backedDeposit"
+alias     = "gasKillerTarget"
+artifact  = "BackedDeposit.sol:BackedDeposit"
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry"]
+
+  [[examples.exercise]]
+  label = "backed_deposit"
+  sig   = "deposit()"
+  args  = []
+  value = "10000000000000000"

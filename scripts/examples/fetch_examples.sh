@@ -19,7 +19,8 @@
 set -euo pipefail
 
 EXAMPLES_REPO="${EXAMPLES_REPO:-https://github.com/gas-killer/example-contracts}"
-EXAMPLES_REF="${EXAMPLES_REF:-4159838a67b4e3bda0c7e4183def2f34f1551a24}"
+# TEST BRANCH ONLY: example-contracts test/backed-deposit-value, which adds BackedDeposit.
+EXAMPLES_REF="${EXAMPLES_REF:-94916e98ff3c0f0c256279b919ba496323287566}"
 EXAMPLES_DIR="${EXAMPLES_DIR:-.examples/example-contracts}"
 
 # The Gas Killer SDK is a submodule of the examples repo, and it carries its own examples
@@ -33,6 +34,7 @@ EXPECTED_ARTIFACTS=(
   "OnchainLife.sol/OnchainLife.json"
   "GuardedVault.sol/GuardedVault.json"
   "SortedOracle.sol/SortedOracle.json"
+  "BackedDeposit.sol/BackedDeposit.json"
 )
 EXPECTED_SDK_ARTIFACTS=(
   "ArraySummation.sol/ArraySummation.json"

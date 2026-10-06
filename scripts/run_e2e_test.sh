@@ -196,6 +196,7 @@ case "$E2E_EXAMPLE" in
     array-summation)                  MANIFEST_EXAMPLE="arraySummation" ;;
     reentrant|reentrant-checkpoint)   MANIFEST_EXAMPLE="reentrantCheckpoint" ;;
     onchain-life|onchainlife)         MANIFEST_EXAMPLE="onchainLife" ;;
+    backed-deposit)                   MANIFEST_EXAMPLE="backedDeposit" ;;
     *)
         echo -e "${RED}Unknown E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
         exit 1
@@ -401,6 +402,24 @@ USER_TX_HASH=$(grep -oE 'landed: tx 0x[a-fA-F0-9]{64}' "$TRIGGER_LOG" | sed -E '
 
 if [ $TRIGGER_STATUS -eq 0 ]; then
     echo -e "${GREEN}✅ Transition settled successfully - state was updated!${NC}"
+
+    # A task sent with ETH: the settlement must have brought it. BackedDeposit's backing check
+    # already reverts a settlement without it; this confirms the ETH is where the ledger says.
+    if [ "$MANIFEST_EXAMPLE" = "backedDeposit" ]; then
+        EXPECTED_DEPOSIT=10000000000000000
+        HELD=$(cast balance "$TARGET_ADDRESS" --rpc-url http://localhost:8545)
+        OWED=$(cast call "$TARGET_ADDRESS" "owed()(uint256)" --rpc-url http://localhost:8545 | awk '{print $1}')
+        echo "BackedDeposit holds $HELD wei and owes $OWED wei (expected $EXPECTED_DEPOSIT)"
+        if [ "$HELD" != "$EXPECTED_DEPOSIT" ] || [ "$OWED" != "$EXPECTED_DEPOSIT" ]; then
+            echo -e "${RED}❌ The deposit's ETH did not arrive with the settlement${NC}"
+            exit 1
+        fi
+        if [ -n "$USER_TX_HASH" ]; then
+            TX_VALUE=$(cast tx "$USER_TX_HASH" value --rpc-url http://localhost:8545)
+            echo "verifyAndUpdate carried $TX_VALUE wei"
+        fi
+        echo -e "${GREEN}✅ The deposit settled through Gas Killer with its ETH${NC}"
+    fi
 
     # A settled transition does not by itself prove the re-entrancy example did its job: the
     # target's counter advances whether or not the mid-transition call into the observer executed.

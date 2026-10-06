@@ -41,19 +41,13 @@ jobs:
         #     receipt used a small fraction of one. Needs prestate-net (a struct-log trace of
         #     that call exhausts the container) and an anvil whose execution cap is lifted.
         include:
+          # TEST BRANCH ONLY: the baseline, plus a task sent with ETH under both trace encodings.
           - state_encoding: legacy
             e2e_example: array-summation
           - state_encoding: legacy
-            e2e_example: array-summation
-            parallel: true
-          - state_encoding: canonical
-            e2e_example: reentrant
+            e2e_example: backed-deposit
           - state_encoding: prestate-net
-            e2e_example: array-summation
-          - state_encoding: prestate-net
-            e2e_example: onchain-life
-            sim_profile: unbounded
-            anvil_extra_args: --disable-block-gas-limit
+            e2e_example: backed-deposit
 
     steps:
       - name: Checkout code
