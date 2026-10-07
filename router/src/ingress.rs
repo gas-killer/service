@@ -777,6 +777,8 @@ impl<'a> QueueSlot<'a> {
     /// resulting depth. Returns `Err(current_depth)` when already at capacity, taking no slot.
     fn reserve(state: &'a IngressState) -> Result<(Self, usize), usize> {
         let max = state.max_queue_depth;
+        // Renamed `try_update` in Rust 1.99; kept until no supported toolchain predates it.
+        #[allow(deprecated)]
         match state
             .queue_depth
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {

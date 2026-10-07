@@ -290,6 +290,8 @@ impl TaskQueue {
 
     /// Records that a dequeued task has left the queue for a session.
     pub fn started(&self) {
+        // Renamed `try_update` in Rust 1.99; kept until no supported toolchain predates it.
+        #[allow(deprecated)]
         let depth = self
             .queue_depth
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {

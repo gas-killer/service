@@ -277,6 +277,8 @@ pub async fn create_ingress(metrics: Arc<MetricsCollector>) -> Result<IngressHan
 }
 
 /// Reads a target contract's current `stateTransitionCount()`.
+// async_trait marks the boxed future it returns `#[must_use]`, which it already is.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait TransitionCountReader: Send + Sync {
     async fn state_transition_count(&self, target: Address) -> Result<u64>;
