@@ -232,7 +232,7 @@ struct ResolvedTask {
     /// Simulation RPC the trace runs against.
     sim_rpc_url: String,
     chain_role: ChainRole,
-    /// The block the call is traced at: the client's, or the one before head once re-anchored.
+    /// The block the call is traced at: the client's, or head once re-anchored.
     block_height: u64,
     nested: Option<NestedSpec>,
 }
@@ -382,8 +382,8 @@ impl TaskDispatcher {
         };
         let (chain_id, transition_index) = tokio::try_join!(chain_id_fut, count_fut)?;
 
-        // A task that waited behind a lock is traced at the block before head, where every
-        // transition that settled while it waited is visible. One whose client fixed its index
+        // A task that waited behind a lock is traced at head, where every transition that
+        // settled while it waited is visible. One whose client fixed its index
         // cannot follow the count forward, so if that index was used meanwhile it fails here.
         let block_height = if reanchor {
             let head = self.validator.chain_head(chain_role).await?;
@@ -399,7 +399,7 @@ impl TaskDispatcher {
                     );
                 }
             }
-            head.saturating_sub(1)
+            head
         } else {
             task.body.block_height
         };

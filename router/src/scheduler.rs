@@ -637,12 +637,12 @@ async fn hold_until_landed(held: Held, poll: Duration) {
         let Ok(head) = held.validator.chain_head(held.chain).await else {
             continue;
         };
-        // Read at the block a waiting task would be re-anchored to, not at head: a payload that
-        // landed in the head block is not yet visible there, and releasing on it would trace
-        // the next task against the state before the landing.
+        // Read at head, the block a waiting task is re-anchored to, so a release is never ahead
+        // of what that task's trace can see. A chain that mines only on demand may not produce
+        // another block for a while, so waiting for a later one could hold the lock forever.
         let count = held
             .validator
-            .state_transition_count_at(held.root, held.chain, head.saturating_sub(1))
+            .state_transition_count_at(held.root, held.chain, head)
             .await;
         if count.is_ok_and(|count| count > held.transition_index) {
             info!(
