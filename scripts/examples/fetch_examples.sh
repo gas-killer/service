@@ -11,6 +11,12 @@
 #
 #   EXAMPLES_REF=hudsonhrh/gas-killer-foundry-examples ./scripts/examples/fetch_examples.sh
 #
+# SDK_DIR points at a local Gas Killer SDK checkout to build its examples from instead of the
+# submodule, for SDK changes not yet pinned by the examples repo. deploy_example reads the same
+# variable, so both agree on which tree the SDK artifacts come from:
+#
+#   SDK_DIR=../solidity-sdk ./scripts/examples/fetch_examples.sh
+#
 # The example contracts resolve the Gas Killer SDK, EigenLayer, and OpenZeppelin through
 # nested submodules, so the recursive clone pulls a few hundred MB on a cold run.
 #
@@ -38,6 +44,14 @@ EXPECTED_SDK_ARTIFACTS=(
   "ArraySummation.sol/ArraySummation.json"
   "ReentrantCheckpoint.sol/ReentrantCheckpoint.json"
   "ReentrantObserver.sol/ReentrantObserver.json"
+)
+# Only an SDK with nested settlement carries these; checked when SDK_DIR selects one.
+NESTED_SDK_ARTIFACTS=(
+  "NestedLedger.sol/NestedLedger.json"
+  "NestedVault.sol/NestedVault.json"
+  "NestedRouter.sol/NestedRouter.json"
+  "CycleRoot.sol/CycleRoot.json"
+  "CycleRelay.sol/CycleRelay.json"
 )
 
 if ! command -v forge >/dev/null 2>&1; then
@@ -69,8 +83,9 @@ git -C "$EXAMPLES_DIR" submodule update --init --recursive
 echo "🔨 building the example contracts"
 (cd "$EXAMPLES_DIR" && forge build)
 
-echo "🔨 building the SDK's own examples ($SDK_SUBDIR)"
-(cd "$EXAMPLES_DIR/$SDK_SUBDIR" && forge build)
+SDK_TREE="${SDK_DIR:-$EXAMPLES_DIR/$SDK_SUBDIR}"
+echo "🔨 building the SDK's own examples ($SDK_TREE)"
+(cd "$SDK_TREE" && forge build)
 
 missing=0
 check_artifacts() {
@@ -83,19 +98,22 @@ check_artifacts() {
   done
 }
 check_artifacts "$EXAMPLES_DIR/out" "${EXPECTED_ARTIFACTS[@]}"
-check_artifacts "$EXAMPLES_DIR/$SDK_SUBDIR/out" "${EXPECTED_SDK_ARTIFACTS[@]}"
+check_artifacts "$SDK_TREE/out" "${EXPECTED_SDK_ARTIFACTS[@]}"
+if [ -n "${SDK_DIR:-}" ]; then
+  check_artifacts "$SDK_TREE/out" "${NESTED_SDK_ARTIFACTS[@]}"
+fi
 if [ "$missing" -ne 0 ]; then
   echo "The manifest at scripts/examples/examples.toml may be out of date with the checkout." >&2
   exit 1
 fi
 
 resolved="$(git -C "$EXAMPLES_DIR" rev-parse HEAD)"
-sdk_resolved="$(git -C "$EXAMPLES_DIR/$SDK_SUBDIR" rev-parse HEAD)"
+sdk_resolved="$(git -C "$SDK_TREE" rev-parse HEAD)"
 echo
 echo "✅ example contracts built at $resolved"
 echo "   artifacts: $EXAMPLES_DIR/out"
 echo "✅ SDK examples built at $sdk_resolved"
-echo "   artifacts: $EXAMPLES_DIR/$SDK_SUBDIR/out"
+echo "   artifacts: $SDK_TREE/out"
 echo
 echo "Next:"
 echo "   cargo run -p scripts --bin deploy_example -- --dry-run"

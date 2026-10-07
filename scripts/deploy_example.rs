@@ -65,7 +65,7 @@ struct Cli {
 
     /// Foundry `out/` tree to search for artifacts; repeatable, searched in order. Passing any
     /// replaces the defaults, which are `$EXAMPLES_DIR/out` followed by the SDK submodule's
-    /// `lib/solidity-sdk/out` (both trees the fetch script builds).
+    /// `lib/solidity-sdk/out`, or `$SDK_DIR/out` when set (the trees the fetch script builds).
     #[arg(long = "artifacts")]
     artifacts: Vec<PathBuf>,
 
@@ -206,6 +206,10 @@ struct CallSpec {
     /// Wei to attach, decimal or `0x`-prefixed.
     #[serde(default)]
     value: Option<String>,
+    /// Contract to call instead of the target, typically `$deployed:<label>`: wiring a pair
+    /// that each need the other's address happens on whichever was deployed first.
+    #[serde(default)]
+    to: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -759,6 +763,9 @@ async fn run_setup_call(
     call: &CallSpec,
     resolver: &Resolver,
 ) -> Result<(), DynError> {
+    let target = call
+        .recipient(target, resolver)
+        .map_err(|e| format!("setup call `{}`: {e}", call.sig))?;
     let args = call
         .setup_args(resolver)
         .map_err(|e| format!("setup call `{}`: {e}", call.sig))?;
@@ -794,6 +801,17 @@ async fn run_setup_call(
 impl CallSpec {
     fn setup_args(&self, resolver: &Resolver) -> Result<Vec<ArgValue>, DynError> {
         self.args.iter().map(|a| resolve_arg(resolver, a)).collect()
+    }
+
+    /// The contract this call goes to: `to` when given, else the example's target.
+    fn recipient(&self, target: Address, resolver: &Resolver) -> Result<Address, DynError> {
+        let Some(raw) = &self.to else {
+            return Ok(target);
+        };
+        let resolved = resolver.resolve(raw)?;
+        resolved.parse().map_err(|e| {
+            format!("`to = {raw}` resolved to `{resolved}`, not an address: {e}").into()
+        })
     }
 }
 
@@ -1204,7 +1222,14 @@ fn resolve_artifact_roots(flags: &[PathBuf]) -> Vec<PathBuf> {
         .filter(|d| !d.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".examples/example-contracts"));
-    vec![checkout.join("out"), checkout.join(SDK_OUT_SUBDIR)]
+    let sdk_out = std::env::var("SDK_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .map_or_else(
+            || checkout.join(SDK_OUT_SUBDIR),
+            |d| PathBuf::from(d).join("out"),
+        );
+    vec![checkout.join("out"), sdk_out]
 }
 
 fn resolve_deploy_json(flag: Option<PathBuf>) -> PathBuf {
@@ -1272,6 +1297,35 @@ mod tests {
         // verify defaults to true so a generated scenario asserts an on-chain effect.
         assert!(example.exercise[0].verify);
         assert!(matches!(example.exercise[0].args[0], ArgValue::List(ref v) if v.len() == 2));
+    }
+
+    #[test]
+    fn a_setup_call_goes_to_its_named_contract_or_else_the_target() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+            [[examples]]
+            name = "cycle"
+            artifact = "CycleRoot.sol:CycleRoot"
+
+              [[examples.setup]]
+              sig = "setRoot(address)"
+              args = ["$deployed:cycle"]
+              to = "$deployed:relay"
+
+              [[examples.setup]]
+              sig = "start()"
+            "#,
+        )
+        .unwrap();
+        let target = Address::repeat_byte(0x11);
+        let relay = Address::repeat_byte(0x22);
+        let mut resolver = Resolver::default();
+        resolver.deployed.insert("relay".into(), relay);
+        resolver.deployed.insert("cycle".into(), target);
+
+        let setup = &manifest.examples[0].setup;
+        assert_eq!(setup[0].recipient(target, &resolver).unwrap(), relay);
+        assert_eq!(setup[1].recipient(target, &resolver).unwrap(), target);
     }
 
     // ---- contract sequence (single vs multi form) ----

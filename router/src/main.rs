@@ -393,8 +393,12 @@ fn main() {
             ingress.queue_depth,
             Some(Arc::clone(&metrics)),
         );
-        let dispatcher =
+        let mut dispatcher =
             TaskDispatcher::new(validator, Some(Arc::clone(&metrics)), ingress.store.clone());
+        if gas_killer_common::nested_settlement() {
+            tracing::info!(payload_block_buffer, "nested settlement enabled");
+            dispatcher = dispatcher.with_nested_settlement(payload_block_buffer);
+        }
 
         // The Schnorr rounds are request/response, but a dropped message costs a whole retry
         // attempt, so the quota is generous.
@@ -438,6 +442,9 @@ fn main() {
             Arc::clone(&metrics),
             max_in_flight_tasks(),
         );
+        if let Some(store) = &ingress.store {
+            scheduler.restore_held_locks(store).await;
+        }
         context.child("scheduler").spawn(move |_| scheduler.run());
 
         // Readiness flag: set to true after everything is spawned and the network is starting

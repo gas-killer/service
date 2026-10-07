@@ -7,13 +7,14 @@
 use crate::ingress::GasKillerTaskRequest;
 use crate::metrics::MetricsCollector;
 use crate::store::SqliteStore;
-use gas_killer_common::GasKillerValidator;
 use gas_killer_common::task_data::GasKillerTaskData;
+use gas_killer_common::{ChainRole, GasKillerValidator, NestedSpec, TreeTrace};
 use gas_killer_common::{PayloadView, TaskBundle};
 
-use alloy_primitives::Bytes;
-use anyhow::Result;
+use alloy_primitives::{Address, Bytes};
+use anyhow::{Result, bail};
 use commonware_cryptography::{Hasher, Sha256};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,6 +29,34 @@ use tracing::{error, info};
 pub struct QueuedTask {
     pub task_id: String,
     pub request: GasKillerTaskRequest,
+    /// Every contract the task must hold before it starts, recorded when a round found one of
+    /// them busy. Empty for a task that has never been deferred: it starts holding its root.
+    pub lock_set: BTreeSet<Address>,
+    /// Set once the task has waited behind a lock: its client's block may predate whatever
+    /// settled meanwhile, so it is traced at head instead.
+    pub reanchor: bool,
+}
+
+impl QueuedTask {
+    pub fn new(task_id: String, request: GasKillerTaskRequest) -> Self {
+        Self {
+            task_id,
+            request,
+            lock_set: BTreeSet::new(),
+            reanchor: false,
+        }
+    }
+
+    pub fn root(&self) -> Address {
+        self.request.body.target_address
+    }
+
+    /// The contracts the task needs free to start.
+    pub fn starting_locks(&self) -> BTreeSet<Address> {
+        let mut locks = self.lock_set.clone();
+        locks.insert(self.root());
+        locks
+    }
 }
 
 pub type TaskSender = UnboundedSender<QueuedTask>;
@@ -44,6 +73,36 @@ pub fn task_queue_depth() -> TaskQueueDepth {
     Arc::new(AtomicUsize::new(0))
 }
 
+/// What the router's own trace of a task produced.
+#[derive(Debug, Clone)]
+pub enum Traced {
+    /// A flat program for `verifyAndUpdate`.
+    Flat(Bytes),
+    /// The task split into frames; a single-frame tree still settles through `verifyAndUpdate`.
+    Tree(Arc<TreeTrace>),
+}
+
+impl Traced {
+    /// The program `verifyAndUpdate` applies, when the task settles flat.
+    pub fn flat_program(&self) -> Option<&Bytes> {
+        match self {
+            Self::Flat(program) => Some(program),
+            Self::Tree(tree) if !tree.is_nested() => Some(&tree.root_program),
+            Self::Tree(_) => None,
+        }
+    }
+
+    /// Every contract whose transition counter settling the task moves, `root` included.
+    pub fn counter_moves(&self, root: Address) -> BTreeSet<Address> {
+        let mut moved = match self {
+            Self::Flat(_) => BTreeSet::new(),
+            Self::Tree(tree) => tree.counter_moves.clone(),
+        };
+        moved.insert(root);
+        moved
+    }
+}
+
 /// The router's own EVMSketch trace for a dispatched task, running alongside the signing
 /// round rather than ahead of it.
 ///
@@ -53,14 +112,14 @@ pub fn task_queue_depth() -> TaskQueueDepth {
 /// of the quorum. The trace runs in its own task, so it outlives whatever future awaited it.
 #[derive(Clone)]
 pub struct RouterTrace {
-    result: watch::Receiver<Option<Result<Bytes, String>>>,
+    result: watch::Receiver<Option<Result<Traced, String>>>,
 }
 
 impl RouterTrace {
     /// Spawns `trace` and returns a handle every consumer can await.
     pub fn spawn<F>(trace: F) -> Self
     where
-        F: Future<Output = Result<Bytes>> + Send + 'static,
+        F: Future<Output = Result<Traced>> + Send + 'static,
     {
         let (tx, result) = watch::channel(None);
         tokio::spawn(async move {
@@ -71,13 +130,13 @@ impl RouterTrace {
     }
 
     /// A trace that has already finished, for callers that hold the result up front.
-    pub fn finished(outcome: Result<Bytes, String>) -> Self {
+    pub fn finished(outcome: Result<Traced, String>) -> Self {
         let (_, result) = watch::channel(Some(outcome));
         Self { result }
     }
 
-    /// Waits for the trace: the storage updates, or why they could not be computed.
-    pub async fn wait(&self) -> Result<Bytes, String> {
+    /// Waits for the trace: what it produced, or why it could not be computed.
+    pub async fn wait(&self) -> Result<Traced, String> {
         let mut result = self.result.clone();
         match result.wait_for(Option::is_some).await {
             Ok(outcome) => outcome.clone().expect("waited for a result"),
@@ -172,6 +231,10 @@ struct ResolvedTask {
     chain_id: u64,
     /// Simulation RPC the trace runs against.
     sim_rpc_url: String,
+    chain_role: ChainRole,
+    /// The block the call is traced at: the client's, or head once re-anchored.
+    block_height: u64,
+    nested: Option<NestedSpec>,
 }
 
 impl ResolvedTask {
@@ -183,7 +246,7 @@ impl ResolvedTask {
             call_data: self.task.body.call_data.clone(),
             from_address: self.task.body.from_address,
             value: self.task.body.value,
-            block_height: self.task.body.block_height,
+            block_height: self.block_height,
             chain_id: self.chain_id,
         }
     }
@@ -217,8 +280,18 @@ impl TaskQueue {
         self.receiver.recv().await
     }
 
+    /// Records that a task whose session was deferred is waiting again.
+    pub fn requeued(&self) {
+        let depth = self.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(m) = &self.metrics {
+            m.task_queue_depth.set(depth as i64);
+        }
+    }
+
     /// Records that a dequeued task has left the queue for a session.
     pub fn started(&self) {
+        // Renamed `try_update` in Rust 1.99; kept until no supported toolchain predates it.
+        #[allow(deprecated)]
         let depth = self
             .queue_depth
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -240,6 +313,8 @@ pub struct TaskDispatcher {
     /// Durable store used to advance task status as work progresses. `None` in
     /// store-less test/dev harnesses, where status transitions are simply skipped.
     store: Option<SqliteStore>,
+    /// Blocks a nested tree may stay settleable for; see [`GasKillerValidator::nested_spec_for`].
+    nested_buffer: Option<u64>,
 }
 
 impl TaskDispatcher {
@@ -252,13 +327,25 @@ impl TaskDispatcher {
             validator,
             metrics,
             store,
+            nested_buffer: None,
         }
+    }
+
+    /// Settles tasks whose root supports it as nested trees, each payload expiring within
+    /// `buffer` blocks of its announcement.
+    pub fn with_nested_settlement(mut self, buffer: u64) -> Self {
+        self.nested_buffer = Some(buffer);
+        self
+    }
+
+    pub fn validator(&self) -> &Arc<GasKillerValidator> {
+        &self.validator
     }
 
     /// Resolves what the announce needs for a dequeued task: its chain, its transition index
     /// and its chain id. Cheap RPC reads only, so a task that cannot be routed never reaches a
     /// height.
-    async fn resolve(&self, task: GasKillerTaskRequest) -> Result<ResolvedTask> {
+    async fn resolve(&self, task: GasKillerTaskRequest, reanchor: bool) -> Result<ResolvedTask> {
         info!(
             target = format!("{:?}", task.body.target_address),
             from = format!("{:?}", task.body.from_address),
@@ -297,6 +384,37 @@ impl TaskDispatcher {
         };
         let (chain_id, transition_index) = tokio::try_join!(chain_id_fut, count_fut)?;
 
+        // A task that waited behind a lock is traced at head, where every transition that
+        // settled while it waited is visible. One whose client fixed its index
+        // cannot follow the count forward, so if that index was used meanwhile it fails here.
+        let block_height = if reanchor {
+            let head = self.validator.chain_head(chain_role).await?;
+            if task.body.transition_index.is_some() {
+                let current = self
+                    .validator
+                    .get_state_transition_count_on_chain(task.body.target_address, chain_role)
+                    .await?;
+                if current != transition_index {
+                    bail!(
+                        "transition index {transition_index} was used while the task waited \
+                         (the target is at {current}); resubmit the task"
+                    );
+                }
+            }
+            head
+        } else {
+            task.body.block_height
+        };
+
+        let nested = match self.nested_buffer {
+            Some(buffer) => {
+                self.validator
+                    .nested_spec_for(task.body.target_address, chain_role, buffer)
+                    .await?
+            }
+            None => None,
+        };
+
         info!(
             target_address = %task.body.target_address,
             chain = %chain_role,
@@ -310,6 +428,9 @@ impl TaskDispatcher {
             transition_index,
             chain_id,
             sim_rpc_url,
+            chain_role,
+            block_height,
+            nested,
         })
     }
 
@@ -319,6 +440,27 @@ impl TaskDispatcher {
         let metrics = self.metrics.clone();
         let traced = resolved.task_data();
         let rpc_url = resolved.sim_rpc_url.clone();
+        if let Some(spec) = resolved.nested {
+            return RouterTrace::spawn(async move {
+                let start = Instant::now();
+                let tree = validator.trace_tree(&traced, &spec).await?;
+                if let Some(m) = &metrics {
+                    m.storage_computation_seconds
+                        .observe(start.elapsed().as_secs_f64());
+                }
+                info!(
+                    frames = tree.frames.len(),
+                    counter_moves = tree.counter_moves.len(),
+                    digest = %hex::encode(&tree.digest.as_ref()[..8]),
+                    block_height = traced.block_height,
+                    transition_index = traced.transition_index,
+                    target_address = %traced.target_address,
+                    expiry_block = spec.expiry_block,
+                    "Sequencer computed frame tree"
+                );
+                Ok(Traced::Tree(Arc::new(tree)))
+            });
+        }
         RouterTrace::spawn(async move {
             let start = Instant::now();
             let analysis = validator
@@ -351,7 +493,7 @@ impl TaskDispatcher {
                 chain_id = traced.chain_id,
                 "Sequencer computed storage updates"
             );
-            Ok(storage_updates.into())
+            Ok(Traced::Flat(storage_updates.into()))
         })
     }
 }
@@ -362,6 +504,9 @@ pub struct DispatchedTask {
     pub task_id: String,
     /// The task as announced to the operators, without storage updates.
     pub task: GasKillerTaskData,
+    /// Announced with the task when it may settle as a nested tree.
+    pub nested: Option<NestedSpec>,
+    pub chain: ChainRole,
     pub trace: RouterTrace,
 }
 
@@ -370,7 +515,12 @@ impl TaskDispatcher {
     /// going to a session: it settled while it waited (the expiry sweep), or it could not be
     /// resolved and is settled as `failed` here.
     pub async fn dispatch(&self, queued: QueuedTask) -> Option<DispatchedTask> {
-        let QueuedTask { task_id, request } = queued;
+        let QueuedTask {
+            task_id,
+            request,
+            reanchor,
+            ..
+        } = queued;
 
         // A task the expiry sweep settled while it waited is dropped rather than aggregated: its
         // pinned block is stale enough that the round could not produce a submittable payload.
@@ -381,7 +531,7 @@ impl TaskDispatcher {
             return None;
         }
 
-        let resolved = match self.resolve(request).await {
+        let resolved = match self.resolve(request, reanchor).await {
             Ok(resolved) => resolved,
             Err(e) => {
                 error!(error = %e, task_id, "failed to enrich task, dropping request");
@@ -398,6 +548,15 @@ impl TaskDispatcher {
             }
         };
 
+        if reanchor
+            && let Some(store) = &self.store
+            && let Err(e) = store
+                .set_task_block_height(&task_id, resolved.block_height)
+                .await
+        {
+            error!(task_id, error = %e, "failed to record the re-anchored block height");
+        }
+
         // Operators get the task WITHOUT storage_updates: they independently recompute them
         // with EVMSketch (that is the whole trust model — see
         // GasKillerValidator::expected_digest_for_task), and the router's own come from the
@@ -407,6 +566,8 @@ impl TaskDispatcher {
         Some(DispatchedTask {
             task_id,
             task,
+            nested: resolved.nested,
+            chain: resolved.chain_role,
             trace,
         })
     }
@@ -435,10 +596,7 @@ mod tests {
     #[tokio::test]
     async fn test_channel_send_recv() {
         let (sender, mut receiver) = task_channel();
-        let queued = QueuedTask {
-            task_id: "task-1".to_string(),
-            request: sample_request(Some(1)),
-        };
+        let queued = QueuedTask::new("task-1".to_string(), sample_request(Some(1)));
 
         sender.send(queued.clone()).unwrap();
         let received = receiver.try_recv().unwrap();
@@ -454,6 +612,9 @@ mod tests {
             transition_index: 42,
             chain_id: 1u64,
             sim_rpc_url: "http://localhost:8545".to_owned(),
+            chain_role: ChainRole::L1,
+            block_height: 12345,
+            nested: None,
         };
         let task_data = resolved.task_data();
 
@@ -469,14 +630,17 @@ mod tests {
         let (release, released) = tokio::sync::oneshot::channel::<()>();
         let trace = RouterTrace::spawn(async move {
             released.await.ok();
-            Ok(Bytes::from(vec![7u8]))
+            Ok(Traced::Flat(Bytes::from(vec![7u8])))
         });
 
         let first_wait = tokio::time::timeout(std::time::Duration::from_millis(20), trace.wait());
         assert!(first_wait.await.is_err(), "the trace is still running");
 
         release.send(()).unwrap();
-        assert_eq!(trace.wait().await.unwrap(), Bytes::from(vec![7u8]));
+        assert_eq!(
+            trace.wait().await.unwrap().flat_program(),
+            Some(&Bytes::from(vec![7u8]))
+        );
     }
 
     // -- task lifecycle transitions --
@@ -533,6 +697,7 @@ mod tests {
                 r_addr: Address::ZERO,
                 non_signers: vec![],
             },
+            nested: None,
         }
     }
 
@@ -613,12 +778,12 @@ mod tests {
         let task = store.create_task(&key, &request_body()).await.unwrap();
 
         let dispatcher = TaskDispatcher::new(unreachable_validator(), None, Some(store.clone()));
-        let queued = QueuedTask {
-            task_id: task.id.clone(),
-            request: GasKillerTaskRequest {
+        let queued = QueuedTask::new(
+            task.id.clone(),
+            GasKillerTaskRequest {
                 body: request_body(),
             },
-        };
+        );
 
         assert!(dispatcher.dispatch(queued).await.is_none());
 
@@ -667,12 +832,12 @@ mod tests {
             .unwrap();
 
         let dispatcher = TaskDispatcher::new(unreachable_validator(), None, Some(store.clone()));
-        let queued = QueuedTask {
-            task_id: task.id.clone(),
-            request: GasKillerTaskRequest {
+        let queued = QueuedTask::new(
+            task.id.clone(),
+            GasKillerTaskRequest {
                 body: request_body(),
             },
-        };
+        );
 
         assert!(dispatcher.dispatch(queued).await.is_none());
 

@@ -521,6 +521,37 @@ impl SqliteStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// `(id, bundle)` of every `ready` task settled within `window`, the ones whose payloads a
+    /// restarted router may still have to wait on.
+    pub async fn recent_ready_bundles(
+        &self,
+        window: std::time::Duration,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        sqlx::query_as(
+            "SELECT id, bundle FROM tasks WHERE status = 'ready' AND bundle IS NOT NULL \
+             AND updated_at >= unixepoch() - ?1",
+        )
+        .bind(window.as_secs() as i64)
+        .fetch_all(self.pool())
+        .await
+        .context("listing recently rendered tasks")
+    }
+
+    /// Records the block a re-anchored task is traced at, so the task reports the state its
+    /// payload was built against rather than the one its client submitted.
+    pub async fn set_task_block_height(&self, id: &str, block_height: u64) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE tasks SET block_height = ?2, updated_at = unixepoch() WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(block_height as i64)
+        .execute(self.pool())
+        .await
+        .context("recording a re-anchored block height")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Settles a task as [`TaskStatus::Ready`], recording its executable payload and stamping
     /// `updated_at`. Returns `true` if a task with that id existed.
     pub async fn mark_task_ready(&self, id: &str, payload: &str) -> anyhow::Result<bool> {
@@ -949,6 +980,46 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_ready_bundles_lists_only_rendered_tasks() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let ready = store.create_task(&key, &request()).await.unwrap();
+        store.create_task(&key, &request()).await.unwrap();
+        store
+            .mark_task_ready_with_bundle(&ready.id, "{}", "{\"b\":1}")
+            .await
+            .unwrap();
+
+        let listed = store
+            .recent_ready_bundles(std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(listed, vec![(ready.id, "{\"b\":1}".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn a_reanchored_block_height_replaces_the_clients() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request()).await.unwrap();
+
+        assert!(
+            store
+                .set_task_block_height(&task.id, 21_000_500)
+                .await
+                .unwrap()
+        );
+        let fetched = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.request.block_height, 21_000_500);
+        assert!(
+            !store
+                .set_task_block_height("no-such-task", 1)
+                .await
+                .unwrap()
         );
     }
 

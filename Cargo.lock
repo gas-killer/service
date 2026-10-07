@@ -4034,7 +4034,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#3cbd54f802da8c6a25572e42145aedd51cb9a95e"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=nested-settlement#0296e97c4a183ef23a748e3c53e0e473b675ab97"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -4043,13 +4043,14 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tracing",
 ]
 
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#3cbd54f802da8c6a25572e42145aedd51cb9a95e"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=nested-settlement#0296e97c4a183ef23a748e3c53e0e473b675ab97"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -4065,7 +4066,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#3cbd54f802da8c6a25572e42145aedd51cb9a95e"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=nested-settlement#0296e97c4a183ef23a748e3c53e0e473b675ab97"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -4090,7 +4091,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#3cbd54f802da8c6a25572e42145aedd51cb9a95e"
+source = "git+https://github.com/gas-killer/gas-analyzer?branch=nested-settlement#0296e97c4a183ef23a748e3c53e0e473b675ab97"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -8827,7 +8828,7 @@ dependencies = [
 [[package]]
 name = "sp1-cc-client-executor"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/sp1-contract-call?branch=cancun-v1#b634853416e2d1ee4973e2c7d52ad9853eee1e9b"
+source = "git+https://github.com/BreadchainCoop/sp1-contract-call?rev=1f04b99f89df07a54e5c1f7e3b816dff75803850#1f04b99f89df07a54e5c1f7e3b816dff75803850"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8862,7 +8863,7 @@ dependencies = [
 [[package]]
 name = "sp1-cc-host-executor"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/sp1-contract-call?branch=cancun-v1#b634853416e2d1ee4973e2c7d52ad9853eee1e9b"
+source = "git+https://github.com/BreadchainCoop/sp1-contract-call?rev=1f04b99f89df07a54e5c1f7e3b816dff75803850#1f04b99f89df07a54e5c1f7e3b816dff75803850"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",

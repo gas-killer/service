@@ -194,6 +194,9 @@ services:
       - STATE_ENCODING=${STATE_ENCODING:-legacy}
       - GK_SIM_PROFILE=${GK_SIM_PROFILE:-chain}
       - MAX_IN_FLIGHT_TASKS=${MAX_IN_FLIGHT_TASKS:-1}
+      # Settle tasks whose target supports it as nested trees (router-only; nodes always parse
+      # nested requests).
+      - NESTED_SETTLEMENT=${NESTED_SETTLEMENT:-false}
     volumes:
       - ./config/.nodes:/app/.nodes:ro
       - ./config/router_orchestrator.dev.json:/app/router_orchestrator.json:ro

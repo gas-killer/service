@@ -32,6 +32,7 @@ use commonware_avs_core::bn254::PublicKey;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Spawner, Supervisor, tokio};
+use gas_killer_common::NestedSpec;
 use gas_killer_common::schnorr::musig::{Participant, PubNonce, SigningContext};
 use gas_killer_common::schnorr::wire::{SchnorrMsg, SignRequest, partial_from_bytes};
 use gas_killer_common::schnorr::{self, PrivateKey};
@@ -163,7 +164,26 @@ pub(crate) async fn run<R, S>(
                 attempt,
                 task,
             } => {
-                handle_commit_request(&context, &shared, &sender, &router, height, attempt, task);
+                handle_commit_request(
+                    &context, &shared, &sender, &router, height, attempt, task, None,
+                );
+            }
+            SchnorrMsg::NestedCommitRequest {
+                height,
+                attempt,
+                task,
+                nested,
+            } => {
+                handle_commit_request(
+                    &context,
+                    &shared,
+                    &sender,
+                    &router,
+                    height,
+                    attempt,
+                    task,
+                    Some(nested),
+                );
             }
             SchnorrMsg::SignRequest(request) => {
                 handle_sign_request(&shared, &sender, &router, request);
@@ -177,7 +197,8 @@ pub(crate) async fn run<R, S>(
 }
 
 /// Resolves the session's digest and commits a fresh nonce for it, or re-sends the
-/// commit a duplicate request is asking for.
+/// commit a duplicate request is asking for. `nested` asks for the task's tree root.
+#[allow(clippy::too_many_arguments)]
 fn handle_commit_request<S>(
     context: &tokio::Context,
     shared: &Arc<Shared>,
@@ -186,6 +207,7 @@ fn handle_commit_request<S>(
     height: u64,
     attempt: u32,
     task: GasKillerTaskData,
+    nested: Option<NestedSpec>,
 ) where
     S: Sender<PublicKey = PublicKey> + Clone + Send + Sync + 'static,
 {
@@ -223,7 +245,21 @@ fn handle_commit_request<S>(
     let sender = sender.clone();
     let router = router.clone();
     drop(context.child("commit").spawn(move |_| async move {
-        let Some(digest) = shared.resolver.resolve(height, &task, deadline).await else {
+        if let Some(spec) = nested
+            && !shared.resolver.expiry_within_bound(&task, &spec).await
+        {
+            shared
+                .sessions
+                .lock()
+                .expect("sessions lock")
+                .insert((height, attempt), Session::Refused);
+            return;
+        }
+        let Some(digest) = shared
+            .resolver
+            .resolve(height, &task, nested, deadline)
+            .await
+        else {
             shared
                 .sessions
                 .lock()

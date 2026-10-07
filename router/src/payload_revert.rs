@@ -14,6 +14,7 @@ use alloy::rpc::json_rpc::ErrorPayload;
 use alloy::sol_types::{GenericContractError, SolError, SolInterface};
 use alloy_primitives::{Bytes, FixedBytes, hex};
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
+use gas_killer_common::bindings::schnorrstakeregistry::ISchnorrStakeRegistry;
 use std::fmt;
 
 /// JSON-RPC error code a node returns for a call that executed and reverted. Every standard
@@ -111,6 +112,49 @@ const KNOWN_REVERTS: &[KnownRevert] = &[
     known_revert!(
         GasKillerSDK::BlockStaleMeasureOverflow,
         "the target's configured blockStaleMeasure overflows when added to the reference block"
+    ),
+    known_revert!(
+        GasKillerSDK::NotApproved,
+        "a nested callee found no live quorum approval for the tree's root in its schnorrRegistry; \
+         every contract in the tree must share the root's registry"
+    ),
+    known_revert!(
+        GasKillerSDK::LeafMismatch,
+        "a nested frame's caller, value, or calldata differs from what the tree signed for it"
+    ),
+    known_revert!(
+        GasKillerSDK::NotPendingChild,
+        "a nested frame was applied by a caller that was not replaying the NESTED op for it"
+    ),
+    known_revert!(
+        GasKillerSDK::NotTreeMember,
+        "a frame's leaf is not in the signed tree; a contract's transition index has moved since \
+         the tree was traced"
+    ),
+    known_revert!(
+        GasKillerSDK::NestedOutsideTree,
+        "a NESTED update appeared in a program settled outside a nested tree"
+    ),
+    known_revert!(
+        GasKillerSDK::MissingWitness,
+        "a NESTED update had no child witness left to apply"
+    ),
+    known_revert!(
+        GasKillerSDK::UnconsumedWitnesses,
+        "a frame was handed more child witnesses than its NESTED updates applied"
+    ),
+    known_revert!(
+        ISchnorrStakeRegistry::ApprovalExpired,
+        "the nested tree's signed expiry block has passed; request a fresh payload"
+    ),
+    known_revert!(
+        ISchnorrStakeRegistry::InvalidExpiryProof,
+        "the expiry block is not the one signed into the tree"
+    ),
+    known_revert!(
+        ISchnorrStakeRegistry::InvalidApprovalSignature,
+        "the aggregate Schnorr signature does not verify the tree's root against the root \
+         contract's schnorrRegistry at the reference block"
     ),
 ];
 
