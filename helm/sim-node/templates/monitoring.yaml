@@ -54,6 +54,24 @@ spec:
             summary: "sim-node metrics are unreachable"
             description: "Prometheus cannot scrape reth, so SimNodeHeadStalled cannot fire."
 
+        # A reth upgrade that renames these leaves SimNodeHeadStalled summing nothing, so it never
+        # fires while up stays 1. Only series registered at startup qualify: the download and
+        # execution counters may not exist until their stage first runs.
+        - alert: SimNodeHeadMetricsMissing
+          expr: |
+            (
+              label_replace(absent(reth_blockchain_tree_canonical_chain_height{job="{{ include "sim-node.name" . }}-headless"}), "metric", "reth_blockchain_tree_canonical_chain_height", "", "")
+              or
+              label_replace(absent(reth_sync_checkpoint{job="{{ include "sim-node.name" . }}-headless"}), "metric", "reth_sync_checkpoint", "", "")
+            )
+            and on () (up{job="{{ include "sim-node.name" . }}-headless"} == 1)
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "sim-node is scraped but {{ "{{" }} $labels.metric {{ "}}" }} is missing"
+            description: "SimNodeHeadStalled depends on {{ "{{" }} $labels.metric {{ "}}" }} and cannot fire without it. Check reth's /metrics for a renamed series after an upgrade."
+
         - alert: SimNodeCrashLooping
           expr: |
             rate(kube_pod_container_status_restarts_total{
