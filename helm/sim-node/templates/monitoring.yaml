@@ -12,6 +12,8 @@ spec:
   endpoints:
     - port: metrics
       interval: 30s
+{{- /* At replicas=0 (snapshot restore) the downtime is deliberate and absent() would page for it. */}}
+{{- if gt (int .Values.replicas) 0 }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -61,4 +63,5 @@ spec:
           annotations:
             summary: "sim-node {{ "{{" }} $labels.pod {{ "}}" }}/{{ "{{" }} $labels.container {{ "}}" }} is crash-looping"
             description: "The container has restarted in the last 15 minutes."
+{{- end }}
 {{- end }}
