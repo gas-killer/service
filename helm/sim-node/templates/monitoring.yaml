@@ -1,0 +1,88 @@
+{{- /* Skipped where the Prometheus Operator CRDs are absent, so a bare install still succeeds. */}}
+{{- if and .Values.monitoring.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "sim-node.name" . }}
+  labels:
+    {{- include "sim-node.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "sim-node.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: 30s
+{{- /* At replicas=0 (snapshot restore) the downtime is deliberate and absent() would page for it. */}}
+{{- if and (gt (int .Values.replicas) 0) (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "sim-node.name" . }}
+  labels:
+    {{- include "sim-node.labels" . | nindent 4 }}
+    {{- toYaml .Values.monitoring.ruleLabels | nindent 4 }}
+spec:
+  groups:
+    - name: sim-node
+      interval: 30s
+      rules:
+        # No single series moves through every phase: stage checkpoints commit only per large batch
+        # (flat for the whole Execution stage), the download counters move only in Headers/Bodies,
+        # executed blocks only in Execution, the canonical height only once live. Stalled means
+        # none of them changed. label_replace keeps the series distinct once changes() drops names.
+        - alert: SimNodeHeadStalled
+          expr: |
+            sum by (pod) (changes(label_replace(
+              {job="{{ include "sim-node.name" . }}-headless", __name__=~"reth_sync_checkpoint|reth_sync_entities_processed|reth_sync_execution_execution_histogram_count|reth_downloaders_(headers|bodies)_total_downloaded|reth_blockchain_tree_canonical_chain_height"},
+              "metric", "$1", "__name__", "(.+)"
+            )[{{ .Values.monitoring.headStalledWindow }}:30s])) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "sim-node {{ "{{" }} $labels.pod {{ "}}" }} head has stopped advancing"
+            description: "reth has made no sync or import progress in {{ .Values.monitoring.headStalledWindow }}, so the fleet is simulating against stale state. Check both clients' logs; a client that predates a scheduled hard fork stalls at the fork block."
+
+        - alert: SimNodeMetricsDown
+          expr: up{job="{{ include "sim-node.name" . }}-headless"} == 0 or absent(up{job="{{ include "sim-node.name" . }}-headless"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "sim-node metrics are unreachable"
+            description: "Prometheus cannot scrape reth, so SimNodeHeadStalled cannot fire."
+
+        # A reth upgrade that renames these leaves SimNodeHeadStalled summing nothing, so it never
+        # fires while up stays 1. Only series registered at startup qualify: the download and
+        # execution counters may not exist until their stage first runs.
+        - alert: SimNodeHeadMetricsMissing
+          expr: |
+            (
+              label_replace(absent(reth_blockchain_tree_canonical_chain_height{job="{{ include "sim-node.name" . }}-headless"}), "metric", "reth_blockchain_tree_canonical_chain_height", "", "")
+              or
+              label_replace(absent(reth_sync_checkpoint{job="{{ include "sim-node.name" . }}-headless"}), "metric", "reth_sync_checkpoint", "", "")
+            )
+            and on () (up{job="{{ include "sim-node.name" . }}-headless"} == 1)
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "sim-node is scraped but {{ "{{" }} $labels.metric {{ "}}" }} is missing"
+            description: "SimNodeHeadStalled depends on {{ "{{" }} $labels.metric {{ "}}" }} and cannot fire without it. Check reth's /metrics for a renamed series after an upgrade."
+
+        - alert: SimNodeCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{
+              namespace="{{ .Release.Namespace }}",
+              pod=~"{{ include "sim-node.name" . }}-[0-9]+"
+            }[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "sim-node {{ "{{" }} $labels.pod {{ "}}" }}/{{ "{{" }} $labels.container {{ "}}" }} is crash-looping"
+            description: "The container has restarted in the last 15 minutes."
+{{- end }}
+{{- end }}
