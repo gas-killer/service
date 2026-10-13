@@ -12,7 +12,7 @@ network: sepolia
 reth:
   image:
     repository: ghcr.io/paradigmxyz/reth
-    tag: v2.5.2
+    tag: v2.7.0
     pullPolicy: IfNotPresent
   # --full keeps recent state only; tasks anchor at the head and PAYLOAD_EXPIRED closes the
   # window at ~50 blocks, so the pruned history is never asked for.
@@ -52,7 +52,7 @@ reth:
 lighthouse:
   image:
     repository: sigp/lighthouse
-    tag: v8.2.2
+    tag: v8.3.0-rc.0
     pullPolicy: IfNotPresent
   # Checkpoint sync: minutes to a live head instead of days from genesis.
   checkpointSyncUrl: https://sepolia.checkpoint-sync.ethpandaops.io
