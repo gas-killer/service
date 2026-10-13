@@ -29,13 +29,14 @@ spec:
       interval: 30s
       rules:
         # No single series moves through every phase: stage checkpoints commit only per large batch
-        # (flat for the whole Execution stage), the download counters move only in Headers/Bodies,
-        # executed blocks only in Execution, the canonical height only once live. Stalled means
-        # none of them changed. label_replace keeps the series distinct once changes() drops names.
+        # (flat for the whole Execution and Merkle stages), the download counters move only in
+        # Headers/Bodies, executed blocks only in Execution, trie work in Merkle, the canonical height
+        # only once live. Stalled means none of them changed. label_replace keeps the series distinct
+        # once changes() drops names.
         - alert: SimNodeHeadStalled
           expr: |
             sum by (pod) (changes(label_replace(
-              {job="{{ include "sim-node.name" . }}-headless", __name__=~"reth_sync_checkpoint|reth_sync_entities_processed|reth_sync_execution_execution_histogram_count|reth_downloaders_(headers|bodies)_total_downloaded|reth_blockchain_tree_canonical_chain_height"},
+              {job="{{ include "sim-node.name" . }}-headless", __name__=~"reth_sync_checkpoint|reth_sync_entities_processed|reth_sync_execution_execution_histogram_count|reth_downloaders_(headers|bodies)_total_downloaded|reth_trie_duration_seconds_count|reth_blockchain_tree_canonical_chain_height"},
               "metric", "$1", "__name__", "(.+)"
             )[{{ .Values.monitoring.headStalledWindow }}:30s])) == 0
           for: 5m
