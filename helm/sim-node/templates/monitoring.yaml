@@ -25,13 +25,14 @@ spec:
     - name: sim-node
       interval: 30s
       rules:
-        # canonical_chain_height tracks the head once live; the Finish checkpoint tracks it while
-        # the pipeline is catching up and canonical_chain_height still reads 0.
+        # Executed blocks count catch-up progress; the canonical height counts live imports. The
+        # pipeline's stage checkpoints won't do: they move only when a large batch commits, so a
+        # multi-hour catch-up would page as a stall.
         - alert: SimNodeHeadStalled
           expr: |
-            max by (pod) (
-              delta({__name__=~"reth_blockchain_tree_canonical_chain_height|reth_sync_checkpoint", stage=~"|Finish", job="{{ include "sim-node.name" . }}-headless"}[{{ .Values.monitoring.headStalledWindow }}])
-            ) <= 0
+            max by (pod) (increase(reth_sync_execution_execution_histogram_count{job="{{ include "sim-node.name" . }}-headless"}[{{ .Values.monitoring.headStalledWindow }}])) <= 0
+            and on (pod)
+            max by (pod) (delta(reth_blockchain_tree_canonical_chain_height{job="{{ include "sim-node.name" . }}-headless"}[{{ .Values.monitoring.headStalledWindow }}])) <= 0
           for: 5m
           labels:
             severity: critical
