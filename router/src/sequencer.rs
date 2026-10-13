@@ -221,7 +221,7 @@ impl TaskQueue {
     pub fn started(&self) {
         let depth = self
             .queue_depth
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_sub(1))
             })
             .unwrap_or(0)
