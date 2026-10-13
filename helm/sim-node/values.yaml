@@ -102,6 +102,17 @@ service:
   httpPort: 8545
   wsPort: 8546
 
+# Scrapes reth and alerts when the head stops advancing. The liveness probe cannot catch that: a
+# node stuck at a hard fork it does not support still accepts connections, and restarting it does
+# not help. Needs the Prometheus Operator CRDs from the gas-killer release's monitoring stack.
+monitoring:
+  enabled: true
+  # Labels the Prometheus ruleSelector matches on.
+  ruleLabels:
+    release: gas-killer
+  # Sepolia produces ~75 blocks in this window; none means the node is stalled.
+  headStalledWindow: 15m
+
 # Keep the node off the pool the fleet runs on: it is CPU- and IO-heavy during sync and a
 # 2^40-gas trace is CPU-bound afterwards.
 nodeSelector:

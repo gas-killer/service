@@ -1,0 +1,63 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "sim-node.name" . }}
+  labels:
+    {{- include "sim-node.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "sim-node.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "sim-node.name" . }}
+  labels:
+    {{- include "sim-node.labels" . | nindent 4 }}
+    {{- toYaml .Values.monitoring.ruleLabels | nindent 4 }}
+spec:
+  groups:
+    - name: sim-node
+      interval: 30s
+      rules:
+        # canonical_chain_height tracks the head once live; the Finish checkpoint tracks it while
+        # the pipeline is catching up and canonical_chain_height still reads 0.
+        - alert: SimNodeHeadStalled
+          expr: |
+            max by (pod) (
+              delta({__name__=~"reth_blockchain_tree_canonical_chain_height|reth_sync_checkpoint", stage=~"|Finish", job="{{ include "sim-node.name" . }}-headless"}[{{ .Values.monitoring.headStalledWindow }}])
+            ) <= 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "sim-node {{ "{{" }} $labels.pod {{ "}}" }} head has stopped advancing"
+            description: "reth has not imported a block in {{ .Values.monitoring.headStalledWindow }}, so the fleet is simulating against stale state. Check both clients' logs; a client that predates a scheduled hard fork stalls at the fork block."
+
+        - alert: SimNodeMetricsDown
+          expr: up{job="{{ include "sim-node.name" . }}-headless"} == 0 or absent(up{job="{{ include "sim-node.name" . }}-headless"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "sim-node metrics are unreachable"
+            description: "Prometheus cannot scrape reth, so SimNodeHeadStalled cannot fire."
+
+        - alert: SimNodeCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{
+              namespace="{{ .Release.Namespace }}",
+              pod=~"{{ include "sim-node.name" . }}-[0-9]+"
+            }[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "sim-node {{ "{{" }} $labels.pod {{ "}}" }}/{{ "{{" }} $labels.container {{ "}}" }} is crash-looping"
+            description: "The container has restarted in the last 15 minutes."
+{{- end }}
