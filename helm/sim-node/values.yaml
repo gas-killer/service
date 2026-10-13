@@ -104,7 +104,8 @@ service:
 
 # Scrapes reth and alerts when the head stops advancing. The liveness probe cannot catch that: a
 # node stuck at a hard fork it does not support still accepts connections, and restarting it does
-# not help. Needs the Prometheus Operator CRDs from the gas-killer release's monitoring stack.
+# not help. Renders only where the Prometheus Operator CRDs exist (the gas-killer release with
+# monitoring.enabled=true); elsewhere it is skipped.
 monitoring:
   enabled: true
   # Labels the Prometheus ruleSelector matches on.

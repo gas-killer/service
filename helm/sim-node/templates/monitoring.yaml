@@ -1,4 +1,5 @@
-{{- if .Values.monitoring.enabled }}
+{{- /* Skipped where the Prometheus Operator CRDs are absent, so a bare install still succeeds. */}}
+{{- if and .Values.monitoring.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -13,7 +14,7 @@ spec:
     - port: metrics
       interval: 30s
 {{- /* At replicas=0 (snapshot restore) the downtime is deliberate and absent() would page for it. */}}
-{{- if gt (int .Values.replicas) 0 }}
+{{- if and (gt (int .Values.replicas) 0) (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
