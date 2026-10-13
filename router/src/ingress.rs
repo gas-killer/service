@@ -779,7 +779,7 @@ impl<'a> QueueSlot<'a> {
         let max = state.max_queue_depth;
         match state
             .queue_depth
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n < max).then_some(n + 1)
             }) {
             Ok(prev) => {
