@@ -50,7 +50,13 @@
         "internalType": "bytes"
       }
     ],
-    "outputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
     "stateMutability": "payable"
   },
   {
@@ -617,6 +623,22 @@
         "name": "index",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NestedNotApplied",
+    "inputs": [
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "target",
+        "type": "address",
+        "internalType": "address"
       }
     ]
   },

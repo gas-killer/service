@@ -127,6 +127,11 @@ const KNOWN_REVERTS: &[KnownRevert] = &[
         "a nested frame was applied by a caller that was not replaying the NESTED op for it"
     ),
     known_revert!(
+        GasKillerSDK::NestedNotApplied,
+        "a NESTED update's call succeeded without the callee acknowledging its frame; the callee \
+         has no code or no longer runs a GasKillerSDK with nested settlement"
+    ),
+    known_revert!(
         GasKillerSDK::NotTreeMember,
         "a frame's leaf is not in the signed tree; a contract's transition index has moved since \
          the tree was traced"
