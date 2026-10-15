@@ -63,7 +63,8 @@ pub struct TreeTrace {
     /// Every contract whose transition counter the call moves: the contracts the settlement
     /// pins, and so the ones the router locks.
     pub counter_moves: BTreeSet<Address>,
-    /// The root frame's encoded program, which is the whole program for a one-frame tree.
+    /// The root frame's encoded program, which is the whole program for a one-frame tree. In a
+    /// tree its `NESTED` ops name their children's leaves, as the signed root leaf hashes it.
     pub root_program: Bytes,
     /// The tree the quorum signs; `None` when the trace yielded a single frame.
     pub encoded: Option<EncodedTree>,
@@ -119,6 +120,9 @@ pub fn build_tree_trace(
         spec.expiry_block,
     )?;
     let digest = Digest::from(encoded.root.0);
+    // The frames' NESTED ops carry no child leaf until encoding fills them in; the root contract
+    // recomputes its leaf from the submitted program, so it must be the encoded one.
+    let root_program = encoded.programs[0].clone();
     Ok(TreeTrace {
         frames,
         counter_moves,
@@ -210,6 +214,33 @@ mod tests {
         let encoded = trace.encoded.as_ref().expect("nested");
         assert_eq!(trace.digest, Digest::from(encoded.root.0));
         assert_ne!(trace.digest, t.build_payload_hash(&trace.root_program));
+    }
+
+    /// The root contract hashes the submitted program into its leaf, so the rendered program
+    /// must be the one the tree signed, child leaves filled in.
+    #[test]
+    fn a_trees_root_program_hashes_to_its_signed_leaf() {
+        let t = task(4);
+        let mut root = frame(t.target_address, 4, vec![1]);
+        root.updates.push(nested_op(Address::repeat_byte(0xbb)));
+        let child = frame(Address::repeat_byte(0xbb), 0, vec![]);
+        let trace = build_tree_trace(
+            &t,
+            vec![root, child],
+            BTreeSet::new(),
+            &NestedSpec { expiry_block: 99 },
+        )
+        .unwrap();
+        let encoded = trace.encoded.as_ref().expect("nested");
+        assert_eq!(
+            gas_analyzer::nested::root_leaf(
+                U256::from(4),
+                t.target_address,
+                t.function_selector(),
+                &trace.root_program
+            ),
+            encoded.frame_leaves[0]
+        );
     }
 
     #[test]
