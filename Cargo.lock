@@ -4034,7 +4034,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=nested-settlement#0296e97c4a183ef23a748e3c53e0e473b675ab97"
+source = "git+https://github.com/gas-killer/gas-analyzer#c1d45eed93f878cf69ed3c9c5229cbe9b64b38db"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -4050,7 +4050,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=nested-settlement#0296e97c4a183ef23a748e3c53e0e473b675ab97"
+source = "git+https://github.com/gas-killer/gas-analyzer#c1d45eed93f878cf69ed3c9c5229cbe9b64b38db"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -4066,15 +4066,17 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=nested-settlement#0296e97c4a183ef23a748e3c53e0e473b675ab97"
+source = "git+https://github.com/gas-killer/gas-analyzer#c1d45eed93f878cf69ed3c9c5229cbe9b64b38db"
 dependencies = [
  "alloy",
  "alloy-eips",
  "alloy-evm 0.25.3",
  "alloy-genesis",
  "alloy-hardforks",
+ "alloy-json-rpc",
  "alloy-provider",
  "anyhow",
+ "futures",
  "gas-analyzer-core",
  "gas-analyzer-estimator",
  "gas-analyzer-rpc",
@@ -4091,7 +4093,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer?branch=nested-settlement#0296e97c4a183ef23a748e3c53e0e473b675ab97"
+source = "git+https://github.com/gas-killer/gas-analyzer#c1d45eed93f878cf69ed3c9c5229cbe9b64b38db"
 dependencies = [
  "alloy",
  "alloy-eips",
