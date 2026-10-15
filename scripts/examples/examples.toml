@@ -259,7 +259,7 @@ alias = "gasKillerTarget"
   [[examples.contracts]]
   label     = "nestedLedger"
   artifact  = "NestedLedger.sol:NestedLedger"
-  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "300"]
+  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "1000"]
 
   [[examples.contracts]]
   label     = "nestedVault"
@@ -303,7 +303,9 @@ alias = "gasKillerTarget"
 
   [[examples.contracts]]
   artifact  = "CycleRoot.sol:CycleRoot"
-  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "$deployed:cycleRelay"]
+  # rounds: `finish` hashes this many times, enough that the re-entered frame, and with it the
+  # relay, is worth nesting.
+  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "$deployed:cycleRelay", "1000"]
 
   [[examples.setup]]
   sig  = "setRoot(address)"
@@ -325,7 +327,7 @@ alias     = "gasKillerTarget"
 artifact  = "DepositGateway.sol:DepositGateway"
 # (avs, schnorrStakeRegistry, receiptRounds): enough receipt hashing per deposit that applying
 # the vault's frame beats running it, so the vault nests rather than replaying as a CALL.
-ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "300"]
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "1000"]
 
   [[examples.exercise]]
   label = "nested_deposit"
