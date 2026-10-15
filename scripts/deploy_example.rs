@@ -224,6 +224,9 @@ struct ExerciseSpec {
     /// Whether the generated request polls `stateTransitionCount()` afterwards.
     #[serde(default = "default_true")]
     verify: bool,
+    /// Wei the task is sent with, decimal or `0x`-prefixed; the rendered payload carries it.
+    #[serde(default)]
+    value: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -647,6 +650,7 @@ struct ScenarioRequest {
     label: String,
     call_data: Bytes,
     verify: bool,
+    value: U256,
 }
 
 /// Renders a `run_scenario` config that drives the deployed target.
@@ -684,6 +688,9 @@ fn render_scenario(name: &str, router_url: &str, requests: &[ScenarioRequest]) -
             toml_string(&format!("0x{}", alloy::hex::encode(&request.call_data)))
         ));
         out.push_str("  from_address   = \"local\"\n");
+        if !request.value.is_zero() {
+            out.push_str(&format!("  value          = \"{}\"\n", request.value));
+        }
         // The router renders a payload rather than broadcasting it, so a scenario that wants
         // to observe an on-chain effect has to submit that payload itself.
         out.push_str("  submit         = true\n");
@@ -972,6 +979,12 @@ async fn deploy_one(
                 label: ex.label.clone().unwrap_or_else(|| example.name.clone()),
                 call_data: encode_call(&ex.sig, &args)?,
                 verify: ex.verify,
+                value: ex
+                    .value
+                    .as_deref()
+                    .map(parse_wei)
+                    .transpose()?
+                    .unwrap_or_default(),
             })
         })
         .collect::<Result<Vec<ScenarioRequest>, DynError>>()?;
@@ -1781,6 +1794,7 @@ mod tests {
                 label: "life_step_1".to_string(),
                 call_data: Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
                 verify: true,
+                value: U256::ZERO,
             }],
         );
 
@@ -1789,6 +1803,10 @@ mod tests {
         assert!(rendered.contains(r#"call_data      = "0xdeadbeef""#));
         assert!(rendered.contains("submit         = true"));
         assert!(rendered.contains("verify         = true"));
+        assert!(
+            !rendered.contains("value"),
+            "a zero-value request omits value"
+        );
         assert!(rendered.contains(r#"http_rpc   = "$HTTP_RPC""#));
         // api_key is intentionally absent: run_scenario falls back to GAS_KILLER_API_KEY.
         assert!(!rendered.contains("api_key"));
@@ -1804,11 +1822,13 @@ mod tests {
                     label: "settle_two".to_string(),
                     call_data: Bytes::from(vec![0x01, 0x02, 0x03, 0x04]),
                     verify: true,
+                    value: U256::ZERO,
                 },
                 ScenarioRequest {
                     label: "settle_again".to_string(),
                     call_data: Bytes::from(vec![0x05, 0x06, 0x07, 0x08]),
                     verify: false,
+                    value: U256::from(10_000_000_000_000_000u64),
                 },
             ],
         );
@@ -1821,6 +1841,8 @@ mod tests {
         let requests = parsed["scenarios"][0]["requests"].as_array().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1]["verify"].as_bool(), Some(false));
+        assert!(requests[0].get("value").is_none());
+        assert_eq!(requests[1]["value"].as_str(), Some("10000000000000000"));
     }
 
     #[test]

@@ -52,6 +52,8 @@ NESTED_SDK_ARTIFACTS=(
   "NestedRouter.sol/NestedRouter.json"
   "CycleRoot.sol/CycleRoot.json"
   "CycleRelay.sol/CycleRelay.json"
+  "DepositGateway.sol/DepositGateway.json"
+  "DepositVault.sol/DepositVault.json"
 )
 
 if ! command -v forge >/dev/null 2>&1; then

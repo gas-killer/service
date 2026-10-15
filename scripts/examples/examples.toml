@@ -314,3 +314,21 @@ alias = "gasKillerTarget"
   label = "nested_cycle_start"
   sig   = "start()"
   args  = []
+
+# ── NestedDeposit ────────────────────────────────────────────────────────────────────────
+# gateway → vault with ETH: the task is sent with value, the rendered payload carries it, and the
+# tree's NESTED op forwards it into the vault's frame. The gateway deploys its vault, so there is
+# nothing to wire.
+[[examples]]
+name      = "nestedDeposit"
+alias     = "gasKillerTarget"
+artifact  = "DepositGateway.sol:DepositGateway"
+# (avs, schnorrStakeRegistry, receiptRounds): enough receipt hashing per deposit that applying
+# the vault's frame beats running it, so the vault nests rather than replaying as a CALL.
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "300"]
+
+  [[examples.exercise]]
+  label = "nested_deposit"
+  sig   = "deposit(address)"
+  args  = ["$signer:1"]
+  value = "10000000000000000"

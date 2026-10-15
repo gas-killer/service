@@ -728,7 +728,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             children: encoded.root_children.clone(),
         };
 
-        let value = U256::ZERO;
+        // The task's ETH funds the root frame, so a NESTED op forwarding it (a deposit routed
+        // to a vault) is estimated and settled with it rather than reverting under-funded.
+        let value = task.value;
         let sdk = GasKillerSDK::new(task.target_address, provider);
         let call = sdk
             .verifyAndUpdateTree(submission)
@@ -1637,10 +1639,24 @@ mod tests {
     async fn render_tree(
         frames: &[(Address, u64)],
     ) -> (Result<u64>, SqliteStore, String, TreeTrace) {
+        render_tree_with_value(frames, U256::ZERO).await
+    }
+
+    async fn render_tree_with_value(
+        frames: &[(Address, u64)],
+        value: U256,
+    ) -> (Result<u64>, SqliteStore, String, TreeTrace) {
         let store = store().await;
         let key = key_id(&store).await;
-        let task = store.create_task(&key, &request_body()).await.unwrap();
-        let (task_data, _) = matching_task_data();
+        let body = crate::ingress::GasKillerTaskRequestBody {
+            value,
+            ..request_body()
+        };
+        let task = store.create_task(&key, &body).await.unwrap();
+        let task_data = GasKillerTaskData {
+            value,
+            ..matching_task_data().0
+        };
         let spec = NestedSpec { expiry_block: 140 };
         let tree = two_frame_tree(&task_data, &spec);
         let session = DispatchedTask {
@@ -1701,6 +1717,23 @@ mod tests {
         assert_eq!(
             nested.frames.iter().map(|f| f.contract).collect::<Vec<_>>(),
             [matching_task_data().0.target_address, CALLEE]
+        );
+    }
+
+    /// A tree task sent with ETH renders a payload carrying it, since the root frame funds any
+    /// NESTED op that forwards the ETH from its own balance.
+    #[tokio::test]
+    async fn a_tree_task_with_value_renders_a_payload_carrying_it() {
+        let deposit = U256::from(10u64).pow(U256::from(16u64));
+        let (result, store, task_id, _) =
+            render_tree_with_value(&[(REGISTRY, 300), (REGISTRY, 300)], deposit).await;
+        result.unwrap();
+        let settled = store.get_task(&task_id).await.unwrap().unwrap();
+        let payload: PayloadView =
+            serde_json::from_str(settled.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            payload.value, deposit,
+            "the settlement carries the task's ETH"
         );
     }
 

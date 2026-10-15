@@ -39,7 +39,7 @@ E2E_PARALLEL_CHOICE="${E2E_PARALLEL:-false}"
 if [ "$E2E_PARALLEL_CHOICE" = "true" ]; then
     export MAX_IN_FLIGHT_TASKS=2
 fi
-# nested-chain and nested-cycle deploy the SDK's nested settlement examples, which need SDK_DIR
+# nested-chain, nested-cycle and nested-deposit deploy the SDK's nested settlement examples, which need SDK_DIR
 # (see scripts/examples/fetch_examples.sh) and STATE_ENCODING=canonical. With
 # NESTED_SETTLEMENT=true the router settles them as trees, and the run asserts it did; without it
 # they settle flat. E2E_NESTED_SHARED=true (nested-chain only) then submits two tasks whose roots
@@ -210,6 +210,7 @@ case "$E2E_EXAMPLE" in
     onchain-life|onchainlife)         MANIFEST_EXAMPLE="onchainLife" ;;
     nested-chain)                     MANIFEST_EXAMPLE="nestedChain" ;;
     nested-cycle)                     MANIFEST_EXAMPLE="nestedCycle" ;;
+    nested-deposit)                   MANIFEST_EXAMPLE="nestedDeposit" ;;
     *)
         echo -e "${RED}Unknown E2E_EXAMPLE '$E2E_EXAMPLE'${NC}"
         exit 1
@@ -458,17 +459,35 @@ if [ $TRIGGER_STATUS -eq 0 ]; then
 
     # A nested example settles whether or not it settled as a tree; only the router's trace says
     # which. Every frame of the chain (router, vault, ledger) and of the cycle (start, relay,
-    # finish) is its own SDK frame, so either tree has three.
+    # finish) is its own SDK frame, so either tree has three; the deposit tree (gateway, vault)
+    # has two.
     if [ "$NESTED_SETTLEMENT_CHOICE" = "true" ] && [[ "$MANIFEST_EXAMPLE" == nested* ]]; then
-        # The router's own formatter may color field names, which would split `frames=3`.
+        EXPECTED_FRAMES=3
+        [ "$MANIFEST_EXAMPLE" = "nestedDeposit" ] && EXPECTED_FRAMES=2
+        # The router's own formatter may color field names, which would split `frames=N`.
         if ! docker compose logs --no-color router 2>/dev/null \
             | sed 's/\x1b\[[0-9;]*m//g' \
-            | grep "Sequencer computed frame tree" | grep -q "frames=3"; then
-            echo -e "${RED}❌ $MANIFEST_EXAMPLE settled, but not as a three-frame tree${NC}"
+            | grep "Sequencer computed frame tree" | grep -q "frames=$EXPECTED_FRAMES"; then
+            echo -e "${RED}❌ $MANIFEST_EXAMPLE settled, but not as a $EXPECTED_FRAMES-frame tree${NC}"
             docker compose logs --tail=100 router || true
             exit 1
         fi
         echo -e "${GREEN}✅ $MANIFEST_EXAMPLE settled as a nested tree${NC}"
+    fi
+
+    # The deposit's ETH must reach the vault whichever way it settled: as a tree, the payload's
+    # value funds the gateway frame and its NESTED op forwards it; flat, the replayed CALL does.
+    if [ "$MANIFEST_EXAMPLE" = "nestedDeposit" ]; then
+        DEPOSIT_WEI=10000000000000000
+        VAULT_ADDRESS=$(cast call "$TARGET_ADDRESS" 'vault()(address)' --rpc-url http://localhost:8545)
+        VAULT_WEI=$(cast balance "$VAULT_ADDRESS" --rpc-url http://localhost:8545)
+        GATEWAY_WEI=$(cast balance "$TARGET_ADDRESS" --rpc-url http://localhost:8545)
+        echo "  vault=$VAULT_ADDRESS balance=$VAULT_WEI gateway balance=$GATEWAY_WEI"
+        if [ "$VAULT_WEI" != "$DEPOSIT_WEI" ] || [ "$GATEWAY_WEI" != "0" ]; then
+            echo -e "${RED}❌ expected the vault to hold the $DEPOSIT_WEI wei deposit and the gateway none${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}✅ The deposit's ETH reached the vault${NC}"
     fi
 
     # Step 10b (unbounded profile only): close the claim step 7a opened. The transition that
