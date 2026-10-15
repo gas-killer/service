@@ -19,6 +19,8 @@ scripts/target
 # Example contracts checkout (fetched by scripts/examples/fetch_examples.sh) and the
 # scenario files deploy_example generates from it.
 /.examples
+# The SDK checkout the nested e2e legs build their examples from (SDK_DIR).
+/.sdk
 scripts/scenarios/generated/
 
 # Helm chart dependencies (fetch via `helm dependency update`)
