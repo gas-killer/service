@@ -16,7 +16,7 @@ on:
 env:
   # solidity-sdk commit the nested legs build their examples from, until the examples repo pins
   # an SDK with nested settlement and they can drop SDK_DIR.
-  NESTED_SDK_REF: 4637ae38f653d230dce23d172e64b911582e3796
+  NESTED_SDK_REF: a3973693d0c076e42bbf3ba83c58e2fbb3f089a5
 
 jobs:
   e2e-test:
@@ -86,7 +86,7 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           submodules: recursive
 
-      - name: Checkout the nested-settlement SDK
+      - name: Checkout the nested SDK
         if: matrix.nested_sdk
         uses: actions/checkout@v4
         with:

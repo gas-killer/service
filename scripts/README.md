@@ -261,7 +261,9 @@ To be settleable, a contract must inherit `GasKillerSDK` and pass the AVS servic
 the `SchnorrStakeRegistry` to its constructor. `deploy_example` asserts this after deploying — it
 checks the same ERC-165 interface the router gates on, plus `stateTransitionCount()` and
 `getMessageHash()` — so a mis-wired or SDK-mismatched target fails at deploy time instead of
-mid-round.
+mid-round. To settle as part of a nested tree it must inherit `GasKillerNestedSDK` instead, and
+its registry must report `ISchnorrApprovalRegistry`; otherwise it reports no nested interface
+and settles flat.
 
 ### Deploying against a testnet
 
