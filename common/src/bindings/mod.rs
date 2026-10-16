@@ -13,6 +13,8 @@ pub const GAS_KILLER_NESTED_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0x78,
 /// The compiled ABI the [`gaskillersdk`] bindings are generated from, exposed so callers can
 /// enumerate what the SDK declares rather than restating it. Consumers that map SDK errors to
 /// their own data check themselves against this, so an error added upstream cannot go unnoticed.
+/// Refresh it from solidity-sdk's `GasKillerNestedSDK` artifact, a superset of `GasKillerSDK`'s:
+/// the base artifact lacks the tree entrypoints and errors the router calls and decodes.
 pub const GAS_KILLER_SDK_ABI: &str = include_str!("abis/GasKillerSDK.json");
 
 #[allow(
