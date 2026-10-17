@@ -9,10 +9,10 @@
 //! of them. A settlement pins every contract whose transition counter it moves: the target, and
 //! for a nested tree every frame contract. A task starts holding its target; its session's sign
 //! gate takes the rest once the router's trace names them, all or nothing, and defers the task
-//! when one is busy. A rendered task keeps its locks until its payload lands or can no longer
-//! land, so the next task touching any of those contracts is traced against the state the first
-//! one leaves behind. A task that waited for a lock is traced at head rather than at its
-//! client's block.
+//! when one is busy. A flat task frees its locks once rendered; a rendered tree keeps them until
+//! its payload lands or can no longer land, so the next task touching any of its contracts is
+//! traced against the state the tree leaves behind. A task that waited for a lock is traced at
+//! head rather than at its client's block.
 
 use crate::height_metrics::HeightObserver;
 use crate::metrics::{MetricsCollector, operator_labels};
@@ -24,7 +24,7 @@ use alloy_primitives::Address;
 use anyhow::Result;
 use commonware_avs_core::bn254::PublicKey;
 use commonware_p2p::Sender;
-use gas_killer_common::{ChainRole, GasKillerValidator, TaskBundle};
+use gas_killer_common::{ChainRole, GasKillerValidator, NestedSpec, TaskBundle};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
@@ -32,6 +32,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
+
+/// Sessions a task may lose to a transition count the sign gate cannot read before it fails.
+const MAX_FRESHNESS_READ_FAILURES: u32 = 5;
+
+/// Wait before retrying a task whose freshness read failed, doubling with each failure.
+const FRESHNESS_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 /// How often a rendered task's locks check whether its payload landed or expired.
 const LOCK_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -195,13 +201,17 @@ impl Waiting {
     /// A contract an older waiting task wants is off limits to younger ones, or a tree pinning
     /// several contracts would rarely find them all free at once behind a stream of tasks that
     /// each want one of them.
+    ///
+    /// A task backing off after a failed freshness read keeps its contracts reserved too.
     fn next_ready(&mut self, locks: &Locks) -> Option<QueuedTask> {
+        let now = tokio::time::Instant::now();
         let mut table = locks.table.lock().expect("lock table poisoned");
         let mut reserved = BTreeSet::new();
         for index in 0..self.tasks.len() {
             let task = &mut self.tasks[index];
             let wanted = task.starting_locks();
-            if wanted.is_disjoint(&reserved) && table.try_take(&task.task_id, &wanted) {
+            let due = task.not_before.is_none_or(|at| at <= now);
+            if due && wanted.is_disjoint(&reserved) && table.try_take(&task.task_id, &wanted) {
                 return self.tasks.remove(index);
             }
             task.reanchor = true;
@@ -209,6 +219,21 @@ impl Waiting {
         }
         None
     }
+
+    /// When the next backing-off task becomes due.
+    fn next_due(&self) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
+        self.tasks
+            .iter()
+            .filter_map(|task| task.not_before)
+            .filter(|&at| at > now)
+            .min()
+    }
+}
+
+/// How long a task waits after its `failures`-th failed freshness read.
+fn freshness_retry_backoff(failures: u32) -> Duration {
+    FRESHNESS_RETRY_BACKOFF.saturating_mul(1 << failures.saturating_sub(1).min(16))
 }
 
 /// Runs `session` for each task from `queue`, at most `max_in_flight` at once and never two
@@ -233,6 +258,7 @@ where
             queue.started();
             owners.insert(live.spawn(session(task.clone())).id(), task.task_id);
         }
+        let wake = waiting.next_due();
         if live.is_empty() && (channel_closed || !ingress_open) {
             if channel_closed {
                 info!("schnorr channel closed; scheduler exiting");
@@ -277,6 +303,7 @@ where
             }
             // A watcher let go of a landed task's locks; something waiting may start now.
             _ = locks.released.notified() => {}
+            _ = tokio::time::sleep_until(wake.unwrap_or_else(tokio::time::Instant::now)), if wake.is_some() => {}
         }
     }
 }
@@ -319,7 +346,7 @@ where
         }
     }
 
-    /// Re-takes the locks of tasks a previous router life rendered whose payloads may still
+    /// Re-takes the locks of trees a previous router life rendered whose payloads may still
     /// land, so no new task traces against state one of them is about to change. Run before
     /// [`Self::run`].
     pub async fn restore_held_locks(&self, store: &SqliteStore) {
@@ -340,6 +367,9 @@ where
                     continue;
                 }
             };
+            if bundle.nested.is_none() {
+                continue;
+            }
             let chain = match validator
                 .detect_chain_for_address(bundle.target_address)
                 .await
@@ -351,15 +381,21 @@ where
                 }
             };
             let (pinned, until) = bundle_hold(&bundle);
-            if validator
-                .chain_head(chain)
-                .await
-                .is_ok_and(|head| head > until)
-            {
+            let head = validator.chain_head(chain).await.ok();
+            let count = match head {
+                Some(head) => validator
+                    .state_transition_count_at(bundle.target_address, chain, head)
+                    .await
+                    .ok(),
+                None => None,
+            };
+            // A landed task holding its old locks would shut out a later task for the same
+            // contracts whose payload is still pending, then release them on its first poll.
+            if !may_still_land(bundle.transition_index, until, head, count) {
                 continue;
             }
-            // Rendered tasks pinned disjoint sets when they were signed, so this only fails for
-            // a set a later task already took, which then holds the newer state anyway.
+            // Visited newest first, so this only fails for an older task whose sets overlap
+            // a newer one's, and the newer one holds the newer state.
             if !self.sessions.locks.try_take(&task_id, &pinned) {
                 continue;
             }
@@ -461,6 +497,8 @@ where
             chain: dispatched.chain,
             block_height: dispatched.task.block_height,
             transition_index: dispatched.task.transition_index,
+            read_failures: queued.read_failures,
+            read_failed: false,
         };
         let Some(outcome) = self
             .coordinator
@@ -516,10 +554,16 @@ where
         self.observer.finish(height, settled);
 
         if let Some(lock_set) = deferred {
+            let read_failures = queued.read_failures + u32::from(gate.read_failed);
+            let not_before = gate
+                .read_failed
+                .then(|| tokio::time::Instant::now() + freshness_retry_backoff(read_failures));
             return SessionEnd {
                 requeue: Some(QueuedTask {
                     lock_set,
                     reanchor: true,
+                    read_failures,
+                    not_before,
                     ..queued
                 }),
                 ..SessionEnd::settled()
@@ -528,11 +572,10 @@ where
         let Some(valid_until) = valid_until else {
             return SessionEnd::settled();
         };
-        // A submitter picks the reference block, so a tree can land until its signed expiry
-        // even after the rendered validity a payload that keeps its reference block observes.
-        let until = dispatched
-            .nested
-            .map_or(valid_until, |spec| spec.expiry_block.max(valid_until));
+        let traced = dispatched.trace.wait().await;
+        let Some(until) = tree_hold_until(dispatched.nested, &traced, valid_until) else {
+            return SessionEnd::settled();
+        };
         tokio::spawn(hold_until_landed(
             Held {
                 locks: gate.locks,
@@ -552,6 +595,22 @@ where
     }
 }
 
+/// The last block a rendered payload's locks are held to, or `None` when they go at render.
+///
+/// Only a tree holds: a flat payload's later tasks are kept off the state it moves by the sign
+/// gate's freshness check, and holding until landing would let a requester who never submits
+/// throttle the target for the whole payload window. A submitter picks the reference block, so a
+/// tree can land until its signed expiry even past the validity it was rendered with.
+fn tree_hold_until(
+    nested: Option<NestedSpec>,
+    traced: &Result<Traced, String>,
+    valid_until: u64,
+) -> Option<u64> {
+    let spec = nested?;
+    matches!(traced, Ok(Traced::Tree(tree)) if tree.is_nested())
+        .then(|| spec.expiry_block.max(valid_until))
+}
+
 /// A session's sign gate: takes every contract the router's trace says the settlement pins,
 /// then checks the trace still describes each one's state.
 struct TaskGate {
@@ -562,6 +621,10 @@ struct TaskGate {
     chain: ChainRole,
     block_height: u64,
     transition_index: u64,
+    /// Sessions the task already lost to an unreadable transition count.
+    read_failures: u32,
+    /// Set when this session's freshness read failed, so its retry backs off.
+    read_failed: bool,
 }
 
 impl SignGate for TaskGate {
@@ -573,9 +636,18 @@ impl SignGate for TaskGate {
         match self.check_fresh(&pinned).await {
             Ok(Ok(())) => Permit::Granted,
             Ok(Err(stale)) => Permit::Refused(stale),
-            // Nothing was learned about the task, so it is tried again rather than failed.
+            // Nothing was learned about the task, so it is tried again rather than failed, but
+            // only so often: each retry re-traces it on the router and every operator.
             Err(e) => {
-                warn!(task_id = self.task_id, error = %e, "could not check the trace is current; deferring");
+                let failures = self.read_failures + 1;
+                if failures >= MAX_FRESHNESS_READ_FAILURES {
+                    return Permit::Refused(format!(
+                        "could not read the transition counts to check the trace is current \
+                         ({failures} attempts): {e}"
+                    ));
+                }
+                warn!(task_id = self.task_id, failures, error = %e, "could not check the trace is current; deferring");
+                self.read_failed = true;
                 Permit::Deferred(pinned)
             }
         }
@@ -663,15 +735,29 @@ async fn hold_until_landed(held: Held, poll: Duration) {
     held.locks.release(&held.task_id);
 }
 
-/// The contracts a rendered bundle pins, and the last block its payload can land in.
+/// The contracts a rendered bundle pins, and the last block its payload can land in. A bundle
+/// stored before its pinned set was recorded falls back to its target and frames.
 fn bundle_hold(bundle: &TaskBundle) -> (BTreeSet<Address>, u64) {
-    let mut pinned = BTreeSet::from([bundle.target_address]);
+    let mut pinned = bundle.pinned.clone();
+    pinned.insert(bundle.target_address);
     let mut until = bundle.valid_until_block;
     if let Some(nested) = &bundle.nested {
         pinned.extend(nested.frames.iter().map(|frame| frame.contract));
         until = until.max(nested.expiry_block);
     }
     (pinned, until)
+}
+
+/// Whether a rendered payload can still land, given the chain's `head` and the root's
+/// transition `count` at head: neither past its transition nor past `until`. A read that failed
+/// counts as landable, since holding a lock too long only delays the next task.
+fn may_still_land(
+    transition_index: u64,
+    until: u64,
+    head: Option<u64>,
+    count: Option<u64>,
+) -> bool {
+    head.is_none_or(|head| head <= until) && count.is_none_or(|count| count <= transition_index)
 }
 
 #[cfg(test)]
@@ -785,6 +871,8 @@ mod tests {
         Holding,
         /// Deferred, to start again once every contract in the set is free.
         Deferred(&'static [u8]),
+        /// Deferred after a failed freshness read, not to start again for this long.
+        ReadFailed(Duration),
     }
 
     /// Fake sessions for [`schedule`]: each records that it started, then runs until the test
@@ -832,6 +920,15 @@ mod tests {
                             requeue: Some(QueuedTask {
                                 lock_set: set.iter().map(|b| Address::from([*b; 20])).collect(),
                                 reanchor: true,
+                                ..task
+                            }),
+                            ..SessionEnd::settled()
+                        },
+                        Ok(Ending::ReadFailed(backoff)) => SessionEnd {
+                            requeue: Some(QueuedTask {
+                                reanchor: true,
+                                read_failures: task.read_failures + 1,
+                                not_before: Some(tokio::time::Instant::now() + backoff),
                                 ..task
                             }),
                             ..SessionEnd::settled()
@@ -902,6 +999,7 @@ mod tests {
             valid_until_block: 119,
             proof: BundleProof::Retired,
             nested: None,
+            pinned: BTreeSet::new(),
         };
         assert_eq!(bundle_hold(&bundle), (contracts(&[1]), 119));
 
@@ -918,6 +1016,75 @@ mod tests {
                 .to_vec(),
         });
         assert_eq!(bundle_hold(&bundle), (contracts(&[1, 2, 3]), 140));
+
+        bundle.pinned = contracts(&[1, 4]);
+        assert_eq!(
+            bundle_hold(&bundle),
+            (contracts(&[1, 2, 3, 4]), 140),
+            "a callee run natively stays pinned across a restart"
+        );
+    }
+
+    #[test]
+    fn only_a_rendered_tree_holds_its_locks_past_render() {
+        use gas_analyzer::nested::{FrameProgram, IStateUpdateTypes, StateUpdate};
+        use gas_killer_common::{GasKillerTaskData, build_tree_trace};
+
+        let task = GasKillerTaskData {
+            transition_index: 4,
+            target_address: Address::from([1; 20]),
+            ..Default::default()
+        };
+        let frame = |target, children| FrameProgram {
+            target,
+            caller: Address::ZERO,
+            value: U256::ZERO,
+            calldata_hash: alloy_primitives::B256::ZERO,
+            transition_index: Some(U256::from(4)),
+            updates: Vec::new(),
+            children,
+        };
+        let spec = NestedSpec { expiry_block: 140 };
+        let traced = |frames| {
+            Ok(Traced::Tree(Arc::new(
+                build_tree_trace(&task, frames, BTreeSet::new(), &spec).unwrap(),
+            )))
+        };
+        let callee = Address::from([2; 20]);
+        let mut root = frame(task.target_address, vec![1]);
+        root.updates
+            .push(StateUpdate::Nested(IStateUpdateTypes::Nested {
+                target: callee,
+                value: U256::ZERO,
+                childLeaf: alloy_primitives::B256::ZERO,
+            }));
+        let tree = traced(vec![root, frame(callee, vec![])]);
+        let one_frame = traced(vec![frame(task.target_address, vec![])]);
+        let flat = Ok(Traced::Flat(alloy_primitives::Bytes::new()));
+
+        assert_eq!(tree_hold_until(Some(spec), &tree, 119), Some(140));
+        assert_eq!(tree_hold_until(Some(spec), &tree, 150), Some(150));
+        assert_eq!(
+            tree_hold_until(Some(spec), &one_frame, 119),
+            None,
+            "a one-frame tree renders flat"
+        );
+        assert_eq!(tree_hold_until(None, &flat, 119), None, "flag off");
+    }
+
+    #[test]
+    fn a_restart_skips_payloads_that_landed_or_expired() {
+        assert!(may_still_land(3, 119, Some(110), Some(3)));
+        assert!(
+            !may_still_land(3, 119, Some(110), Some(4)),
+            "landed: the root moved past its transition"
+        );
+        assert!(!may_still_land(3, 119, Some(120), Some(3)), "expired");
+        assert!(
+            may_still_land(3, 119, Some(110), None),
+            "an unread count holds the locks"
+        );
+        assert!(may_still_land(3, 119, None, None));
     }
 
     #[test]
@@ -969,6 +1136,59 @@ mod tests {
         harness.end("b1", Ending::Settled);
         harness.assert_started(&["a1", "b1", "a1"]).await;
         assert_eq!(*harness.reanchored.lock().unwrap(), ["a1"]);
+    }
+
+    /// A task whose freshness read failed starts again only once its backoff passes, even with
+    /// its contract free, and a younger task for that contract does not take it meanwhile.
+    #[tokio::test]
+    async fn a_failed_freshness_read_backs_off_before_the_retry() {
+        let harness = Harness::default();
+        let (_sender, queue, _) = ingress(&[queued("a1", 1), queued("a2", 1), queued("b1", 2)]);
+        harness.schedule(queue, 3);
+
+        harness.assert_started(&["a1", "b1"]).await;
+        harness.end("a1", Ending::ReadFailed(Duration::from_millis(300)));
+        harness.assert_started(&["a1", "b1"]).await;
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        harness.assert_started(&["a1", "b1", "a1"]).await;
+    }
+
+    #[test]
+    fn freshness_retries_back_off_exponentially() {
+        assert_eq!(freshness_retry_backoff(1), Duration::from_secs(2));
+        assert_eq!(freshness_retry_backoff(2), Duration::from_secs(4));
+        assert_eq!(freshness_retry_backoff(4), Duration::from_secs(16));
+    }
+
+    /// An unreadable count defers the task and marks the retry to back off, until the cap, where
+    /// the task is refused and so fails.
+    #[tokio::test]
+    async fn the_gate_refuses_once_freshness_reads_keep_failing() {
+        let unreachable = GasKillerValidator::with_rpc_url("http://127.0.0.1:1/unreachable");
+        let gate = |read_failures| TaskGate {
+            locks: Locks::default(),
+            validator: Arc::new(unreachable.clone()),
+            task_id: "t".to_owned(),
+            root: Address::from([1; 20]),
+            chain: ChainRole::L1,
+            block_height: 100,
+            transition_index: 3,
+            read_failures,
+            read_failed: false,
+        };
+        let traced = Traced::Flat(alloy_primitives::Bytes::new());
+
+        let mut first = gate(0);
+        assert_eq!(
+            first.permit(&traced).await,
+            Permit::Deferred(contracts(&[1]))
+        );
+        assert!(first.read_failed);
+
+        let mut last = gate(MAX_FRESHNESS_READ_FAILURES - 1);
+        assert!(matches!(last.permit(&traced).await, Permit::Refused(_)));
+        assert!(!last.read_failed);
     }
 
     /// Once a tree waits for two contracts, a younger task wanting one of them waits behind it

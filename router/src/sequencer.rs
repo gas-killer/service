@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tracing::{error, info};
@@ -35,6 +35,10 @@ pub struct QueuedTask {
     /// Set once the task has waited behind a lock: its client's block may predate whatever
     /// settled meanwhile, so it is traced at head instead.
     pub reanchor: bool,
+    /// Sessions this task lost to a transition count the sign gate could not read.
+    pub read_failures: u32,
+    /// Held back until then after such a session, so a failing RPC is not retried back to back.
+    pub not_before: Option<tokio::time::Instant>,
 }
 
 impl QueuedTask {
@@ -44,6 +48,8 @@ impl QueuedTask {
             request,
             lock_set: BTreeSet::new(),
             reanchor: false,
+            read_failures: 0,
+            not_before: None,
         }
     }
 
@@ -58,6 +64,10 @@ impl QueuedTask {
         locks
     }
 }
+
+/// Longest a re-anchored task waits for the simulation endpoint to import the head it is traced
+/// at: two L1 blocks with margin. An endpoint further behind is stalled, not lagging.
+const SIM_CATCH_UP: Duration = Duration::from_secs(30);
 
 pub type TaskSender = UnboundedSender<QueuedTask>;
 pub type TaskReceiver = UnboundedReceiver<QueuedTask>;
@@ -401,6 +411,10 @@ impl TaskDispatcher {
                     );
                 }
             }
+            // Anchoring lower would miss the landing that freed the task's locks.
+            self.validator
+                .wait_for_sim_block(chain_role, head, SIM_CATCH_UP)
+                .await?;
             head
         } else {
             task.body.block_height
@@ -698,6 +712,7 @@ mod tests {
                 non_signers: vec![],
             },
             nested: None,
+            pinned: BTreeSet::new(),
         }
     }
 

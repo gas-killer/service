@@ -522,14 +522,14 @@ impl SqliteStore {
     }
 
     /// `(id, bundle)` of every `ready` task settled within `window`, the ones whose payloads a
-    /// restarted router may still have to wait on.
+    /// restarted router may still have to wait on, newest first.
     pub async fn recent_ready_bundles(
         &self,
         window: std::time::Duration,
     ) -> anyhow::Result<Vec<(String, String)>> {
         sqlx::query_as(
             "SELECT id, bundle FROM tasks WHERE status = 'ready' AND bundle IS NOT NULL \
-             AND updated_at >= unixepoch() - ?1",
+             AND updated_at >= unixepoch() - ?1 ORDER BY updated_at DESC, rowid DESC",
         )
         .bind(window.as_secs() as i64)
         .fetch_all(self.pool())
@@ -999,6 +999,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed, vec![(ready.id, "{\"b\":1}".to_owned())]);
+    }
+
+    /// A restart restores locks newest first, so where two rendered tasks overlap the one
+    /// holding the newer state wins.
+    #[tokio::test]
+    async fn recent_ready_bundles_lists_the_newest_first() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let older = store.create_task(&key, &request()).await.unwrap();
+        let newer = store.create_task(&key, &request()).await.unwrap();
+        for (task, bundle) in [(&older, "{\"b\":1}"), (&newer, "{\"b\":2}")] {
+            store
+                .mark_task_ready_with_bundle(&task.id, "{}", bundle)
+                .await
+                .unwrap();
+        }
+
+        let listed = store
+            .recent_ready_bundles(std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let ids: Vec<_> = listed.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, [newer.id, older.id]);
     }
 
     #[tokio::test]

@@ -664,6 +664,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 non_signers,
             },
             nested: None,
+            pinned: BTreeSet::new(),
         };
         Ok(RenderedRound { payload, bundle })
     }
@@ -792,6 +793,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                     })
                     .collect(),
             }),
+            pinned: BTreeSet::new(),
         };
         Ok(RenderedRound { payload, bundle })
     }
@@ -873,7 +875,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let (task, traced) = self.traced_task(dispatched).await?;
         match (&traced, dispatched.nested) {
             (Traced::Tree(tree), Some(spec)) if tree.is_nested() => {
-                self.render_tree_payload(&task, tree, spec, proof).await
+                let mut rendered = self.render_tree_payload(&task, tree, spec, proof).await?;
+                rendered.bundle.pinned = traced.counter_moves(task.target_address);
+                Ok(rendered)
             }
             _ => {
                 self.render_schnorr_payload(

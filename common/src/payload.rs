@@ -6,6 +6,8 @@
 //! unit: the payload is one rendering of it, so the retained on-chain broadcast path (future
 //! auto-execute / AA tier) can consume the same bundle to submit the transaction directly.
 
+use std::collections::BTreeSet;
+
 use alloy_primitives::{Address, B256, Bytes, FixedBytes, U256};
 use serde::{Deserialize, Serialize};
 
@@ -86,6 +88,12 @@ pub struct TaskBundle {
     /// case `msg_hash` is the tree's root and `storage_updates` the root frame's program.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nested: Option<NestedBundle>,
+    /// For a tree, every contract whose transition counter settling it moves, target included:
+    /// the locks its session held, which a restarted router re-takes until the payload lands.
+    /// Can exceed the target and the frames, since a callee run natively moves its own counter.
+    /// Empty for a flat round, whose locks go at render, and in bundles stored before it.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub pinned: BTreeSet<Address>,
 }
 
 /// The tree-only arguments of `verifyAndUpdateTree`, plus the contracts the tree pins.
@@ -187,6 +195,7 @@ mod tests {
                 non_signers: vec![Address::from([0x55; 20]), Address::from([0x66; 20])],
             },
             nested: None,
+            pinned: BTreeSet::from([Address::from([0x33; 20]), Address::from([0x77; 20])]),
         };
         let json = serde_json::to_value(&bundle).unwrap();
         assert_eq!(json["proof"]["scheme"], "schnorr");

@@ -3883,6 +3883,7 @@ mod tests {
                     non_signers: vec![],
                 },
                 nested: None,
+                pinned: Default::default(),
             }
         }
 

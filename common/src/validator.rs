@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicI64, AtomicU64};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::{debug, info, warn};
 
@@ -737,6 +737,30 @@ impl GasKillerValidator {
         Ok(provider.get_block_number().await?)
     }
 
+    /// Waits up to `timeout` for the simulation endpoint of `chain_id` to import `block`.
+    ///
+    /// A trace at a block the endpoint lacks fails outright ("header not found"), and a separate
+    /// simulation node can trail the chain RPC that [`Self::chain_head`] reads.
+    pub async fn wait_for_sim_block(
+        &self,
+        chain_id: ChainRole,
+        block: u64,
+        timeout: Duration,
+    ) -> Result<()> {
+        let Some(sim_url) = self.sim_rpc_url_for_chain(chain_id) else {
+            return Ok(());
+        };
+        if self
+            .chain_rpc_urls
+            .get(&chain_id)
+            .is_some_and(|url| url == sim_url)
+        {
+            return Ok(());
+        }
+        let provider = alloy_provider::ProviderBuilder::new().connect_http(sim_url.parse()?);
+        wait_for_block(&provider, block, timeout, SIM_BLOCK_POLL).await
+    }
+
     /// Fetches the current `stateTransitionCount()` from the contract.
     ///
     /// Detects which chain the contract lives on, then calls the view function.
@@ -1162,11 +1186,86 @@ impl GasKillerValidator {
     }
 }
 
+/// How often [`GasKillerValidator::wait_for_sim_block`] re-reads the simulation endpoint's head.
+const SIM_BLOCK_POLL: Duration = Duration::from_millis(500);
+
+/// Polls `provider` until its head reaches `block`, failing once `timeout` passes. A failed read
+/// is retried like a lagging head, since either can clear within the wait.
+async fn wait_for_block(
+    provider: &impl Provider,
+    block: u64,
+    timeout: Duration,
+    poll: Duration,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let head = provider.get_block_number().await;
+        if let Ok(head) = head
+            && head >= block
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(match head {
+                Ok(head) => anyhow::anyhow!(
+                    "the simulation endpoint is at block {head}, {} behind block {block} the task \
+                     is traced at",
+                    block - head
+                ),
+                Err(e) => anyhow::anyhow!("cannot read the simulation endpoint's head: {e}"),
+            });
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy::primitives::{Address, U256};
-    use std::time::Duration;
+    use alloy_provider::{ProviderBuilder, mock::Asserter};
+
+    fn heads(blocks: &[u64]) -> impl Provider {
+        let asserter = Asserter::new();
+        for block in blocks {
+            asserter.push_success(&alloy::primitives::U64::from(*block));
+        }
+        ProviderBuilder::new().connect_mocked_client(asserter)
+    }
+
+    #[tokio::test]
+    async fn a_lagging_sim_endpoint_is_waited_for_until_it_imports_the_block() {
+        let provider = heads(&[98, 99, 100]);
+        wait_for_block(&provider, 100, Duration::from_secs(5), Duration::ZERO)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sim_endpoint_still_behind_at_the_timeout_names_the_lag() {
+        let provider = heads(&[97, 97, 97, 97, 97, 97, 97, 97, 97, 97]);
+        let error = wait_for_block(
+            &provider,
+            100,
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("3 behind block 100"), "{error}");
+    }
+
+    /// Without `SIM_HTTP_RPC` the trace reads the chain RPC itself, which has every block its own
+    /// head names, so nothing is read.
+    #[tokio::test]
+    async fn a_sim_endpoint_that_is_the_chain_rpc_is_not_waited_for() {
+        let validator = GasKillerValidator::with_rpc_url("http://127.0.0.1:1/unreachable");
+        validator
+            .wait_for_sim_block(ChainRole::L1, u64::MAX, Duration::from_secs(5))
+            .await
+            .unwrap();
+    }
 
     fn create_test_task_data() -> GasKillerTaskData {
         GasKillerTaskData {
