@@ -13,6 +13,11 @@ on:
       - staging
   workflow_dispatch:
 
+env:
+  # solidity-sdk commit the nested legs build their examples from, until the examples repo pins
+  # an SDK with nested settlement and they can drop SDK_DIR.
+  NESTED_SDK_REF: a3973693d0c076e42bbf3ba83c58e2fbb3f089a5
+
 jobs:
   e2e-test:
     runs-on: ubuntu-latest
@@ -40,6 +45,9 @@ jobs:
         #     exceeds the block limit, step 10b that the same transition's verifyAndUpdate
         #     receipt used a small fraction of one. Needs prestate-net (a struct-log trace of
         #     that call exhausts the container) and an anvil whose execution cap is lifted.
+        #   - NESTED settlement, built from the SDK at NESTED_SDK_REF: the chain with a second
+        #     root sharing its callees, the cycle, and the deposit whose NESTED op forwards ETH,
+        #     each asserted to settle as a tree; then the chain with the flag off, settling flat.
         include:
           - state_encoding: legacy
             e2e_example: array-summation
@@ -54,12 +62,37 @@ jobs:
             e2e_example: onchain-life
             sim_profile: unbounded
             anvil_extra_args: --disable-block-gas-limit
+          - state_encoding: canonical
+            e2e_example: nested-chain
+            nested_sdk: true
+            nested_settlement: true
+            nested_shared: true
+          - state_encoding: canonical
+            e2e_example: nested-cycle
+            nested_sdk: true
+            nested_settlement: true
+          - state_encoding: canonical
+            e2e_example: nested-deposit
+            nested_sdk: true
+            nested_settlement: true
+          - state_encoding: canonical
+            e2e_example: nested-chain
+            nested_sdk: true
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT }}
+          submodules: recursive
+
+      - name: Checkout the nested SDK
+        if: matrix.nested_sdk
+        uses: actions/checkout@v4
+        with:
+          repository: gas-killer/solidity-sdk
+          ref: ${{ env.NESTED_SDK_REF }}
+          path: .sdk/solidity-sdk
           submodules: recursive
 
       - name: Set up Rust
@@ -108,6 +141,9 @@ jobs:
           GK_SIM_PROFILE: ${{ matrix.sim_profile || 'chain' }}
           ANVIL_EXTRA_ARGS: ${{ matrix.anvil_extra_args }}
           E2E_PARALLEL: ${{ matrix.parallel || 'false' }}
+          NESTED_SETTLEMENT: ${{ matrix.nested_settlement || 'false' }}
+          E2E_NESTED_SHARED: ${{ matrix.nested_shared || 'false' }}
+          SDK_DIR: ${{ matrix.nested_sdk && format('{0}/.sdk/solidity-sdk', github.workspace) || '' }}
         run: bash ./scripts/run_e2e_test.sh 2>&1 | tee e2e-test-output.log; exit ${PIPESTATUS[0]}
 
       - name: Show router logs
@@ -120,6 +156,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-test-output-${{ matrix.state_encoding }}-${{ matrix.e2e_example }}${{ matrix.parallel && '-parallel' || '' }}
+          name: e2e-test-output-${{ matrix.state_encoding }}-${{ matrix.e2e_example }}${{ matrix.parallel && '-parallel' || '' }}${{ matrix.nested_sdk && (matrix.nested_settlement && '-nested' || '-flat') || '' }}${{ matrix.nested_shared && '-shared' || '' }}
           path: e2e-test-output.log
           retention-days: 1

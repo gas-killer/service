@@ -239,3 +239,98 @@ alias = "gasKillerTarget"
   label = "reentrant_advance"
   sig   = "advance()"
   args  = []
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Nested settlement examples. Only an SDK with nested settlement ships these, so they build
+# from SDK_DIR (see fetch_examples.sh) until the examples repo pins one. Settled nested only
+# with NESTED_SETTLEMENT=true on the router and STATE_ENCODING=canonical; otherwise they settle
+# flat, every callee replayed as a plain CALL.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+# ── NestedChain ──────────────────────────────────────────────────────────────────────────
+# router → vault → ledger, all three SDK consumers sharing one registry: one task settles as a
+# three-frame tree, each contract applying its own frame.
+[[examples]]
+name  = "nestedChain"
+alias = "gasKillerTarget"
+
+  # rounds: the ledger hashes this many times per entry, enough that applying its frame beats
+  # running it.
+  [[examples.contracts]]
+  label     = "nestedLedger"
+  artifact  = "NestedLedger.sol:NestedLedger"
+  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "1000"]
+
+  [[examples.contracts]]
+  label     = "nestedVault"
+  artifact  = "NestedVault.sol:NestedVault"
+  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "$deployed:nestedLedger"]
+
+  [[examples.contracts]]
+  artifact  = "NestedRouter.sol:NestedRouter"
+  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "$deployed:nestedVault"]
+
+  [[examples.exercise]]
+  label = "nested_chain_process"
+  sig   = "process(address,uint256[])"
+  args  = ["$signer:1", ["17", "230", "411", "958", "64", "702", "333", "1", "845", "520"]]
+
+# ── NestedChainPeer ──────────────────────────────────────────────────────────────────────
+# A second router over nestedChain's vault, so two tasks with different roots pin the same
+# callees: the router must settle them one after the other. Deploy after nestedChain, in a
+# separate run, since it reads the vault from the deployment JSON.
+[[examples]]
+name      = "nestedChainPeer"
+artifact  = "NestedRouter.sol:NestedRouter"
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "$deploy:nestedVault"]
+
+  [[examples.exercise]]
+  label = "nested_chain_peer_process"
+  sig   = "process(address,uint256[])"
+  args  = ["$signer:2", ["5", "910", "48", "377", "660", "12", "799", "251", "86", "430"]]
+
+# ── NestedCycle ──────────────────────────────────────────────────────────────────────────
+# root → relay → root: the root applies two frames of one tree, the second re-entering while
+# the first is still applying. The relay is deployed first and pointed at the root afterwards.
+[[examples]]
+name  = "nestedCycle"
+alias = "gasKillerTarget"
+
+  [[examples.contracts]]
+  label     = "cycleRelay"
+  artifact  = "CycleRelay.sol:CycleRelay"
+  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry"]
+
+  [[examples.contracts]]
+  artifact  = "CycleRoot.sol:CycleRoot"
+  # rounds: `finish` hashes this many times, enough that the re-entered frame, and with it the
+  # relay, is worth nesting.
+  ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "$deployed:cycleRelay", "1000"]
+
+  [[examples.setup]]
+  sig  = "setRoot(address)"
+  args = ["$deployed:nestedCycle"]
+  to   = "$deployed:cycleRelay"
+
+  [[examples.exercise]]
+  label = "nested_cycle_start"
+  sig   = "start()"
+  args  = []
+
+# ── NestedDeposit ────────────────────────────────────────────────────────────────────────
+# gateway → vault with ETH: the task is sent with value, the rendered payload carries it, and the
+# tree's NESTED op forwards it into the vault's frame. The gateway deploys its vault, so there is
+# nothing to wire.
+[[examples]]
+name      = "nestedDeposit"
+alias     = "gasKillerTarget"
+artifact  = "DepositGateway.sol:DepositGateway"
+# (avs, schnorrStakeRegistry, receiptRounds): enough receipt hashing per deposit that applying
+# the vault's frame beats running it, so the vault nests rather than replaying as a CALL.
+ctor_args = ["$avs", "$deploy:schnorrStakeRegistry", "1000"]
+
+  [[examples.exercise]]
+  label = "nested_deposit"
+  sig   = "deposit(address)"
+  args  = ["$signer:1"]
+  value = "10000000000000000"

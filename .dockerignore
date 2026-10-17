@@ -9,6 +9,8 @@ scripts/scenarios/
 # Host-side checkout of gas-killer/example-contracts, fetched by scripts/examples/fetch_examples.sh
 # with its nested submodules. Hundreds of MB, and the images never read it.
 .examples/
+# The SDK checkout the nested e2e legs build their examples from (SDK_DIR).
+.sdk/
 
 # Compiled artifacts. The builder stage compiles inside a BuildKit cache mount, so a host
 # target/ directory in the context is dead weight.

@@ -35,6 +35,7 @@ use k256::elliptic_curve::PrimeField;
 
 use super::musig::PubNonce;
 use super::{MESSAGE_LEN, PublicKey};
+use crate::nested::NestedSpec;
 use crate::task_data::GasKillerTaskData;
 
 /// Tags of first-round requests from older protocols: before a commit carried the node's
@@ -46,6 +47,10 @@ const TAG_RETIRED_NONCE_COMMIT: u8 = 1;
 const TAG_RETIRED_COMMIT_REQUEST: u8 = 4;
 /// Wire tag for [`SchnorrMsg::CommitRequest`].
 const TAG_COMMIT_REQUEST: u8 = 6;
+/// Wire tag for [`SchnorrMsg::NestedCommitRequest`]. A separate tag rather than a field on the
+/// flat request, so a node that predates nested settlement still parses every flat task and
+/// rejects only the nested ones.
+const TAG_NESTED_COMMIT_REQUEST: u8 = 7;
 /// Wire tag for [`SchnorrMsg::Commit`].
 const TAG_COMMIT: u8 = 5;
 /// Wire tag for [`SchnorrMsg::SignRequest`].
@@ -105,6 +110,15 @@ pub enum SchnorrMsg {
         attempt: u32,
         task: GasKillerTaskData,
     },
+    /// Router → operators: as [`SchnorrMsg::CommitRequest`], for a task that settles as a
+    /// nested tree when its call reaches other consumers. `nested` is part of what the quorum
+    /// signs, so the router fixes it before any node traces.
+    NestedCommitRequest {
+        height: u64,
+        attempt: u32,
+        task: GasKillerTaskData,
+        nested: NestedSpec,
+    },
     /// Node → router: a fresh public nonce pair bound to the task digest the node derived
     /// for the height, plus its public key so the router learns the point behind the p2p
     /// address. The coordinator signs the digest a quorum agrees on, so
@@ -131,6 +145,7 @@ impl SchnorrMsg {
     pub fn height(&self) -> u64 {
         match self {
             SchnorrMsg::CommitRequest { height, .. } => *height,
+            SchnorrMsg::NestedCommitRequest { height, .. } => *height,
             SchnorrMsg::Commit { height, .. } => *height,
             SchnorrMsg::SignRequest(r) => r.height,
             SchnorrMsg::PartialSig { height, .. } => *height,
@@ -141,6 +156,7 @@ impl SchnorrMsg {
     pub fn attempt(&self) -> u32 {
         match self {
             SchnorrMsg::CommitRequest { attempt, .. } => *attempt,
+            SchnorrMsg::NestedCommitRequest { attempt, .. } => *attempt,
             SchnorrMsg::Commit { attempt, .. } => *attempt,
             SchnorrMsg::SignRequest(r) => r.attempt,
             SchnorrMsg::PartialSig { attempt, .. } => *attempt,
@@ -194,6 +210,18 @@ impl Write for SchnorrMsg {
                 UInt(*height).write(buf);
                 attempt.write(buf);
                 task.write(buf);
+            }
+            SchnorrMsg::NestedCommitRequest {
+                height,
+                attempt,
+                task,
+                nested,
+            } => {
+                TAG_NESTED_COMMIT_REQUEST.write(buf);
+                UInt(*height).write(buf);
+                attempt.write(buf);
+                task.write(buf);
+                nested.write(buf);
             }
             SchnorrMsg::Commit {
                 height,
@@ -254,6 +282,12 @@ impl Read for SchnorrMsg {
                 attempt,
                 task: GasKillerTaskData::read(buf)?,
             }),
+            TAG_NESTED_COMMIT_REQUEST => Ok(SchnorrMsg::NestedCommitRequest {
+                height,
+                attempt,
+                task: GasKillerTaskData::read(buf)?,
+                nested: NestedSpec::read(buf)?,
+            }),
             TAG_COMMIT => {
                 let pubkey = read_pubkey(buf)?;
                 let nonce = read_pubnonce(buf)?;
@@ -310,6 +344,9 @@ impl EncodeSize for SchnorrMsg {
         let header = 1 + UInt(self.height()).encode_size() + self.attempt().encode_size();
         match self {
             SchnorrMsg::CommitRequest { task, .. } => header + task.encode_size(),
+            SchnorrMsg::NestedCommitRequest { task, nested, .. } => {
+                header + task.encode_size() + nested.encode_size()
+            }
             SchnorrMsg::Commit { .. } => header + 33 + 66 + MESSAGE_LEN,
             SchnorrMsg::SignRequest(r) => header + MESSAGE_LEN + 4 + r.signers.len() * 33 + 66 + 20,
             SchnorrMsg::PartialSig { .. } => header + 32,
@@ -353,6 +390,48 @@ mod tests {
         let encoded = original.encode();
         assert_eq!(encoded.len(), original.encode_size());
         assert_eq!(SchnorrMsg::decode(encoded).unwrap(), original);
+    }
+
+    #[test]
+    fn nested_commit_request_roundtrip() {
+        let original = SchnorrMsg::NestedCommitRequest {
+            height: 5,
+            attempt: 2,
+            task: task(),
+            nested: NestedSpec { expiry_block: 1060 },
+        };
+        let encoded = original.encode();
+        assert_eq!(encoded.len(), original.encode_size());
+        assert_eq!(SchnorrMsg::decode(encoded).unwrap(), original);
+    }
+
+    /// Flat requests keep their bytes, so a node that predates nested settlement signs flat
+    /// tasks as before while the fleet upgrades.
+    #[test]
+    fn a_flat_request_is_byte_identical_to_the_pre_nested_format() {
+        let request = SchnorrMsg::CommitRequest {
+            height: 9,
+            attempt: 1,
+            task: task(),
+        };
+        let mut expected = vec![TAG_COMMIT_REQUEST];
+        UInt(9u64).write(&mut expected);
+        1u32.write(&mut expected);
+        task().write(&mut expected);
+        assert_eq!(request.encode().to_vec(), expected);
+    }
+
+    #[test]
+    fn a_nested_request_is_distinguishable_from_a_flat_one() {
+        let nested = SchnorrMsg::NestedCommitRequest {
+            height: 9,
+            attempt: 1,
+            task: task(),
+            nested: NestedSpec { expiry_block: 1 },
+        }
+        .encode();
+        assert_eq!(nested[0], TAG_NESTED_COMMIT_REQUEST);
+        assert_ne!(TAG_NESTED_COMMIT_REQUEST, TAG_COMMIT_REQUEST);
     }
 
     #[test]

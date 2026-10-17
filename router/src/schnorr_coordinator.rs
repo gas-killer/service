@@ -15,6 +15,8 @@
 //!     of its duration (at least one stage timeout); verify each commit's pubkey point maps to
 //!     the sender's operator address
 //!   the largest digest group reaches ceil(N·num/den)?  else next attempt
+//!   first attempt to get here: wait for the router's own trace, then ask the sign gate
+//!     (locks, freshness) → Refused / Deferred end the session before any partial exists
 //!   build_context → SignRequest{h,a, digest, signer points, R aggregates} → subset of that group
 //!   collect PartialSig from exactly the subset until the sign stage timeout; each
 //!     partial is verified against the signer's own nonce commitment (bad partials
@@ -25,10 +27,11 @@
 //! the router's own trace of the task failing → TraceFailed
 //! ```
 //!
-//! The router never waits on its own trace to sign: the digest comes from the nodes'
-//! commits, and the render gate checks it against the router trace before anything is
-//! handed out. A router trace that fails ends the session at once, so a task every node
-//! would also fail to trace does not hold the pipeline for a whole round.
+//! The digest comes from the nodes' commits, and the render gate checks it against the router
+//! trace before anything is handed out. The router's trace still gates the signing round: it
+//! names every contract the settlement pins, and those must all be held and current before a
+//! partial signature exists. A router trace that fails ends the session at once, so a task
+//! every node would also fail to trace does not hold the pipeline for a whole round.
 //!
 //! # p2p identity vs signing identity
 //!
@@ -40,17 +43,19 @@
 //! (b) address round-2 `SignRequest`s to the p2p keys of a subset chosen by
 //! address.
 
-use crate::sequencer::RouterTrace;
+use crate::sequencer::{RouterTrace, Traced};
 use crate::session_inboxes::{Inbox, SessionInboxes};
 use alloy_primitives::Address;
 use commonware_avs_core::bn254::PublicKey;
 use commonware_codec::Encode;
 use commonware_p2p::{Receiver, Recipients, Sender};
+use gas_killer_common::NestedSpec;
 use gas_killer_common::schnorr::musig::{Coordinator, PubNonce};
 use gas_killer_common::schnorr::wire::{SchnorrMsg, SignRequest};
 use gas_killer_common::schnorr::{self, AggregateSignature};
 use gas_killer_common::task_data::GasKillerTaskData;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::future::Future;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
@@ -121,6 +126,41 @@ fn straggler_deadline(
         .min(trace_deadline)
 }
 
+/// Whether a session whose digest a quorum agreed on may go on to sign it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Permit {
+    Granted,
+    /// The task can never settle as traced.
+    Refused(String),
+    /// A contract the settlement pins is held by another task. Carries every contract the task
+    /// must hold to try again.
+    Deferred(BTreeSet<Address>),
+}
+
+/// Decides, once per session and with the router's own trace in hand, whether signing goes
+/// ahead.
+pub trait SignGate: Send {
+    fn permit(&mut self, traced: &Traced) -> impl Future<Output = Permit> + Send;
+}
+
+/// A gate that grants every session.
+pub struct Ungated;
+
+impl SignGate for Ungated {
+    async fn permit(&mut self, _: &Traced) -> Permit {
+        Permit::Granted
+    }
+}
+
+/// How one signing attempt ended.
+enum Attempt {
+    Signed(Signing),
+    /// Nothing was signed; a fresh attempt may still succeed.
+    Retry,
+    Refused(String),
+    Deferred(BTreeSet<Address>),
+}
+
 /// A signing attempt that assembled a signature.
 struct Signing {
     signature: AggregateSignature,
@@ -175,6 +215,11 @@ pub enum SessionOutcome {
     TimedOut,
     /// The router's own trace of the task failed, so the session could never render.
     TraceFailed(String),
+    /// The sign gate found the task cannot settle as traced.
+    Refused(String),
+    /// A contract the settlement pins was held by another task; the task must hold all of
+    /// these to try again.
+    Deferred(BTreeSet<Address>),
 }
 
 /// The coordinator. Cloning shares the channel-2 endpoints, so each concurrent session can drive
@@ -275,11 +320,13 @@ where
     /// Runs signing attempts for `task` at `height` until one assembles a signature, the round
     /// deadline passes, or the router's own trace fails. `None` means the channel closed, so the
     /// session could not run to an outcome.
-    pub async fn drive_height(
+    pub async fn drive_height<G: SignGate>(
         &self,
         height: u64,
         task: &GasKillerTaskData,
+        nested: Option<NestedSpec>,
         trace: &RouterTrace,
+        gate: &mut G,
     ) -> Option<SessionOutcome> {
         let deadline = Instant::now() + self.round_timeout;
         // Opened before the first request goes out, so no commit can arrive unrouted.
@@ -307,6 +354,7 @@ where
         // signs would otherwise stall every attempt until the deadline. They are
         // re-admitted only if the compliant set alone cannot reach the floor.
         let mut suspects: HashSet<Address> = HashSet::new();
+        let mut permitted = false;
 
         let mut attempt: u32 = 0;
         while Instant::now() < deadline {
@@ -325,13 +373,23 @@ where
                     return Some(SessionOutcome::TraceFailed(reason));
                 }
                 outcome = self.run_attempt(
-                    &mut sender, &mut inbox, &mut pace, height, attempt, task, &mut suspects,
-                    deadline,
+                    &mut sender, &mut inbox, &mut pace, height, attempt, task, nested,
+                    &mut suspects, deadline, gate, &mut permitted,
                 ) => {
-                    let Some(Signing { signature, non_signers, digest, straggler_wait }) = outcome
-                    else {
-                        debug!(height, attempt, "signing attempt failed; retrying");
-                        continue;
+                    let Signing { signature, non_signers, digest, straggler_wait } = match outcome {
+                        Attempt::Signed(signing) => signing,
+                        Attempt::Retry => {
+                            debug!(height, attempt, "signing attempt failed; retrying");
+                            continue;
+                        }
+                        Attempt::Refused(reason) => {
+                            warn!(height, %reason, "sign gate refused the task");
+                            return Some(SessionOutcome::Refused(reason));
+                        }
+                        Attempt::Deferred(locks) => {
+                            info!(height, locks = locks.len(), "a pinned contract is busy; deferring");
+                            return Some(SessionOutcome::Deferred(locks));
+                        }
                     };
                     info!(
                         height,
@@ -374,10 +432,10 @@ where
         )
     }
 
-    /// One full two-round attempt. Returns the verified signature, the sorted non-signer
-    /// list and the digest signed, or `None` (reasons logged; `suspects` updated).
+    /// One full two-round attempt: the verified signature, the sorted non-signer list and the
+    /// digest signed, or why not (reasons logged; `suspects` updated).
     #[allow(clippy::too_many_arguments)]
-    async fn run_attempt(
+    async fn run_attempt<G: SignGate>(
         &self,
         sender: &mut S,
         inbox: &mut Inbox,
@@ -385,15 +443,26 @@ where
         height: u64,
         attempt: u32,
         task: &GasKillerTaskData,
+        nested: Option<NestedSpec>,
         suspects: &mut HashSet<Address>,
         deadline: Instant,
-    ) -> Option<Signing> {
+        gate: &mut G,
+        permitted: &mut bool,
+    ) -> Attempt {
         // Round 1: fresh nonces from everyone (suspects included — flapping nodes
         // recover here; they are filtered at subset selection below).
-        let request = SchnorrMsg::CommitRequest {
-            height,
-            attempt,
-            task: task.clone(),
+        let request = match nested {
+            Some(nested) => SchnorrMsg::NestedCommitRequest {
+                height,
+                attempt,
+                task: task.clone(),
+                nested,
+            },
+            None => SchnorrMsg::CommitRequest {
+                height,
+                attempt,
+                task: task.clone(),
+            },
         }
         .encode();
         let _ = sender.send(
@@ -483,7 +552,7 @@ where
                 min_signers,
                 "no digest has enough commits for a quorum"
             );
-            return None;
+            return Attempt::Retry;
         };
         for (addr, (_, _, digest)) in &commits {
             if *digest != message {
@@ -518,7 +587,21 @@ where
                 (pk, nonce)
             })
             .collect();
-        let ctx = Coordinator::build_context(&contributions, &message)?;
+        // A failed trace ends the session from `drive_height`, which races this wait.
+        if !*permitted {
+            let Ok(traced) = pace.trace.wait().await else {
+                return std::future::pending().await;
+            };
+            match gate.permit(&traced).await {
+                Permit::Granted => *permitted = true,
+                Permit::Refused(reason) => return Attempt::Refused(reason),
+                Permit::Deferred(locks) => return Attempt::Deferred(locks),
+            }
+        }
+
+        let Some(ctx) = Coordinator::build_context(&contributions, &message) else {
+            return Attempt::Retry;
+        };
 
         // Round 2: the signing context goes to exactly the subset.
         let sign_request = SchnorrMsg::SignRequest(SignRequest {
@@ -584,12 +667,15 @@ where
                 debug!(height, attempt, signer = %addr, "no partial before stage timeout");
                 suspects.insert(addr);
             }
-            return None;
+            return Attempt::Retry;
         }
 
         // Every invited signer produced a verified partial: assembly cannot fail
         // (assemble still self-verifies the aggregate as a final guard).
-        let signature = Coordinator::assemble(&ctx, partials.into_iter().map(|(_, s)| s))?;
+        let Some(signature) = Coordinator::assemble(&ctx, partials.into_iter().map(|(_, s)| s))
+        else {
+            return Attempt::Retry;
+        };
 
         let mut non_signers: Vec<Address> = self
             .operator_addresses
@@ -598,7 +684,7 @@ where
             .copied()
             .collect();
         non_signers.sort();
-        Some(Signing {
+        Attempt::Signed(Signing {
             signature,
             non_signers,
             digest: message,
@@ -722,7 +808,7 @@ mod tests {
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(1),
-            coordinator.drive_height(1, &GasKillerTaskData::default(), &trace),
+            coordinator.drive_height(1, &GasKillerTaskData::default(), None, &trace, &mut Ungated),
         )
         .await
         .expect("a closed channel must not hold the session until its deadlines");
@@ -965,7 +1051,7 @@ mod tests {
     fn trace_taking(after: Duration) -> RouterTrace {
         RouterTrace::spawn(async move {
             tokio::time::sleep(after).await;
-            Ok(alloy_primitives::Bytes::new())
+            Ok(Traced::Flat(alloy_primitives::Bytes::new()))
         })
     }
 
@@ -997,7 +1083,9 @@ mod tests {
             .drive_height(
                 1,
                 &GasKillerTaskData::default(),
+                None,
                 &trace_taking(Duration::from_millis(500)),
+                &mut Ungated,
             )
             .await;
         let (non_signers, waited) = signed(outcome);
@@ -1020,7 +1108,9 @@ mod tests {
             .drive_height(
                 1,
                 &GasKillerTaskData::default(),
+                None,
                 &trace_taking(Duration::from_millis(500)),
+                &mut Ungated,
             )
             .await;
         let (non_signers, waited) = signed(outcome);
@@ -1034,6 +1124,80 @@ mod tests {
             "the session waited {:?} for a stuck node",
             started.elapsed()
         );
+    }
+
+    /// A gate that records when it was asked and answers `answer`.
+    struct RecordingGate {
+        asked: Option<Instant>,
+        answer: Permit,
+    }
+
+    impl RecordingGate {
+        fn answering(answer: Permit) -> Self {
+            Self {
+                asked: None,
+                answer,
+            }
+        }
+    }
+
+    impl SignGate for RecordingGate {
+        async fn permit(&mut self, _: &Traced) -> Permit {
+            self.asked = Some(Instant::now());
+            self.answer.clone()
+        }
+    }
+
+    /// Every node commits at once, but the gate (and so any partial signature) waits for the
+    /// router's own trace, which names what the gate must lock.
+    #[tokio::test]
+    async fn signing_waits_for_the_router_trace_and_the_gate() {
+        let coordinator = loopback::network(&[Duration::ZERO; 3], Duration::from_millis(50));
+        let started = Instant::now();
+        let mut gate = RecordingGate::answering(Permit::Granted);
+        let outcome = coordinator
+            .drive_height(
+                1,
+                &GasKillerTaskData::default(),
+                None,
+                &trace_taking(Duration::from_millis(300)),
+                &mut gate,
+            )
+            .await;
+        signed(outcome);
+        let asked = gate.asked.expect("the gate is asked before signing");
+        assert!(asked - started >= Duration::from_millis(300));
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_defers_ends_the_session_unsigned() {
+        let coordinator = loopback::network(&[Duration::ZERO; 3], Duration::from_millis(50));
+        let locks = BTreeSet::from([addr(9)]);
+        let outcome = coordinator
+            .drive_height(
+                1,
+                &GasKillerTaskData::default(),
+                None,
+                &trace_taking(Duration::ZERO),
+                &mut RecordingGate::answering(Permit::Deferred(locks.clone())),
+            )
+            .await;
+        assert!(matches!(outcome, Some(SessionOutcome::Deferred(set)) if set == locks));
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_refuses_ends_the_session_with_its_reason() {
+        let coordinator = loopback::network(&[Duration::ZERO; 3], Duration::from_millis(50));
+        let outcome = coordinator
+            .drive_height(
+                1,
+                &GasKillerTaskData::default(),
+                None,
+                &trace_taking(Duration::ZERO),
+                &mut RecordingGate::answering(Permit::Refused("stale".to_owned())),
+            )
+            .await;
+        assert!(matches!(outcome, Some(SessionOutcome::Refused(reason)) if reason == "stale"));
     }
 
     fn secs(start: Instant, s: f64) -> Instant {

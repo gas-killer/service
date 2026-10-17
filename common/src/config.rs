@@ -493,7 +493,7 @@ pub const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 /// A peer on a retired first-round tag is refused by name, but that only shows in its logs;
 /// carrying the version in the config fingerprint is what makes a mixed fleet visible on the
 /// dashboard. Bump this whenever the signing-round encoding changes.
-pub const SCHNORR_WIRE_VERSION: u32 = 1;
+pub const SCHNORR_WIRE_VERSION: u32 = 2;
 
 /// A short digest of every setting that must be identical on the router and all operators.
 ///
@@ -805,6 +805,32 @@ pub fn payload_block_buffer() -> u64 {
         .filter(|&v| v > 0)
         .unwrap_or(DEFAULT_PAYLOAD_BLOCK_BUFFER);
     clamp_payload_block_buffer(requested, block_stale_measure())
+}
+
+/// Whether the router settles tasks as nested trees when a target supports it
+/// (`NESTED_SETTLEMENT`, off by default).
+///
+/// Router-only: nodes always understand a nested request once upgraded, and the router decides
+/// per task. Turn it on only once every operator runs a build that parses nested requests;
+/// until then a nested task cannot reach a quorum. Keep it off on any network where slashing
+/// backs quorum trust until the slasher understands nested roots.
+pub fn nested_settlement() -> bool {
+    matches!(
+        env::var("NESTED_SETTLEMENT").ok().as_deref().map(str::trim),
+        Some("1" | "true" | "on" | "yes")
+    )
+}
+
+/// How far ahead of its own chain head a node accepts a nested tree's expiry
+/// (`NESTED_MAX_EXPIRY_BLOCKS`), defaulting to the staleness window. A router announcing a
+/// later expiry is asking the quorum to sign a payload that outlives the window every other
+/// bound assumes, so the node declines to commit.
+pub fn nested_max_expiry_blocks() -> u64 {
+    env::var("NESTED_MAX_EXPIRY_BLOCKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or_else(block_stale_measure)
 }
 
 /// How ingress admission is configured: the window it enforces, or that it is switched off.
