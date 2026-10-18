@@ -82,13 +82,31 @@ some operators honor it.
 {{- end }}
 
 {{/*
-UNBOUNDED_V3 guest VM (gkvm precompile): "true" when any guest program or
-artifact is configured. Router and every node render the same initContainer,
-env slots and mount from the same global lists, so they cannot disagree on
-the installed set.
+UNBOUNDED_V3 guest VM (gkvm precompile): "true" when any guest program,
+artifact bundle or program mirror is configured. Router and every node render
+the same env from the same global values, so they cannot disagree on the set
+they install at boot or the mirrors they fetch from.
 */}}
 {{- define "gas-killer.guestVm.enabled" -}}
+{{- if or .Values.global.guestPrograms .Values.global.guestArtifacts .Values.global.guestMirrors -}}true{{- end -}}
+{{- end }}
+
+{{/*
+"true" when there is something to download at boot (programs or artifact
+bundles): what the fetch-guest-vm initContainer and the guest-vm emptyDir are
+for. Mirrors alone (fetch at first use) need neither.
+*/}}
+{{- define "gas-killer.guestVm.prefetch" -}}
 {{- if or .Values.global.guestPrograms .Values.global.guestArtifacts -}}true{{- end -}}
+{{- end }}
+
+{{/*
+"true" when hash-addressed program mirrors are configured: programs are then
+fetched at first use into the guest-cache emptyDir (GK_GUEST_MIRRORS,
+GK_GUEST_CACHE_DIR).
+*/}}
+{{- define "gas-killer.guestVm.mirrors" -}}
+{{- if .Values.global.guestMirrors -}}true{{- end -}}
 {{- end }}
 
 {{/*
@@ -103,7 +121,12 @@ guest-VM task would become a signed GkVmUnavailable revert transition.
 {{- $digest := "^0x[0-9a-fA-F]{64}$" -}}
 {{- $name := "^[A-Za-z0-9][A-Za-z0-9._-]*$" -}}
 {{- if and (include "gas-killer.guestVm.enabled" .) (ne (include "gas-killer.simExecutor" .) "local") -}}
-{{- fail "global.guestPrograms / global.guestArtifacts require global.simExecutor \"local\" (guest programs do not run under the rpc executor)" -}}
+{{- fail "global.guestPrograms / global.guestArtifacts / global.guestMirrors require global.simExecutor \"local\" (guest programs do not run under the rpc executor)" -}}
+{{- end -}}
+{{- range $i, $m := (.Values.global.guestMirrors | default list) -}}
+{{- if not (regexMatch "^https?://[^/[:space:]]+" ($m | toString)) -}}
+{{- fail (printf "global.guestMirrors[%d] must be an http(s) base URL, got %q" $i ($m | toString)) -}}
+{{- end -}}
 {{- end -}}
 {{- $seen := dict -}}
 {{- range $i, $p := (.Values.global.guestPrograms | default list) -}}
@@ -193,7 +216,9 @@ and refuses to boot on a mismatch — a corrupted download cannot be served.
 GK_GUEST_PROGRAM[_N] / GK_GUEST_ARTIFACT[_N] env slots, in list order: the
 first entry takes the bare names, the rest _1, _2, ... without gaps
 (GuestProgramSet::from_env stops at the first missing slot). An artifact
-slot's path is the bundle's files joined with ":" in manifest order.
+slot's path is the bundle's files joined with ":" in manifest order. With
+mirrors configured, the fetch-at-first-use knobs follow (GK_GUEST_MIRRORS,
+GK_GUEST_CACHE_DIR, GK_GUEST_MAX_BYTES, GK_GUEST_FETCH_TIMEOUT_SECS).
 */}}
 {{- define "gas-killer.guestVm.env" -}}
 {{- $mount := .Values.global.guestMountPath -}}
@@ -214,6 +239,16 @@ slot's path is the bundle's files joined with ":" in manifest order.
   value: {{ join ":" $paths | quote }}
 - name: GK_GUEST_ARTIFACT_ROOT{{ $slot }}
   value: {{ $a.artifactRoot | quote }}
+{{- end }}
+{{- if .Values.global.guestMirrors }}
+- name: GK_GUEST_MIRRORS
+  value: {{ join "," .Values.global.guestMirrors | quote }}
+- name: GK_GUEST_CACHE_DIR
+  value: {{ dig "mountPath" "/guest-cache" (.Values.global.guestCache | default dict) | quote }}
+- name: GK_GUEST_MAX_BYTES
+  value: {{ dig "maxBytes" 33554432 (.Values.global.guestFetch | default dict) | int64 | quote }}
+- name: GK_GUEST_FETCH_TIMEOUT_SECS
+  value: {{ dig "timeoutSeconds" 30 (.Values.global.guestFetch | default dict) | int64 | quote }}
 {{- end }}
 {{- end }}
 

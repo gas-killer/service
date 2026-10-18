@@ -238,10 +238,11 @@ spec:
               mountPath: /overlay
         {{- end }}
 
-        {{- if include "gas-killer.guestVm.enabled" . }}
+        {{- if include "gas-killer.guestVm.prefetch" . }}
         # UNBOUNDED_V3: download the guest programs / artifact bundles the gkvm
         # precompile serves (verified by the service at startup). The router
-        # simulates too, so it installs the same set as every node.
+        # simulates too, so it installs the same set as every node. Programs
+        # that arrive through global.guestMirrors are fetched at first use.
         {{- include "gas-killer.guestVm.initContainer" . | nindent 8 }}
         {{- end }}
 
@@ -496,10 +497,15 @@ spec:
               mountPath: {{ .Values.overlay.mountPath }}
               readOnly: true
             {{- end }}
-            {{- if include "gas-killer.guestVm.enabled" . }}
+            {{- if include "gas-killer.guestVm.prefetch" . }}
             - name: guest-vm
               mountPath: {{ .Values.global.guestMountPath }}
               readOnly: true
+            {{- end }}
+            {{- if include "gas-killer.guestVm.mirrors" . }}
+            # Programs fetched by hash at first use land here (GK_GUEST_CACHE_DIR).
+            - name: guest-cache
+              mountPath: {{ dig "mountPath" "/guest-cache" (.Values.global.guestCache | default dict) }}
             {{- end }}
             - name: router-data
               mountPath: {{ .Values.router.persistence.mountPath }}
@@ -525,9 +531,14 @@ spec:
         - name: overlay-artifacts
           emptyDir: {}
         {{- end }}
-        {{- if include "gas-killer.guestVm.enabled" . }}
+        {{- if include "gas-killer.guestVm.prefetch" . }}
         - name: guest-vm
           emptyDir: {}
+        {{- end }}
+        {{- if include "gas-killer.guestVm.mirrors" . }}
+        - name: guest-cache
+          emptyDir:
+            sizeLimit: {{ dig "sizeLimit" "2Gi" (.Values.global.guestCache | default dict) }}
         {{- end }}
         - name: router-data
           {{- if .Values.router.persistence.enabled }}

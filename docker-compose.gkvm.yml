@@ -23,6 +23,10 @@ x-guest-vm-environment: &guest-vm-environment
   # Blank = no artifact; a set root is verified against the files at startup.
   - GK_GUEST_ARTIFACT=${GK_GUEST_ARTIFACT:-}
   - GK_GUEST_ARTIFACT_ROOT=${GK_GUEST_ARTIFACT_ROOT:-}
+  # Hash-addressed mirrors (programs fetched at first use, <base>/<hash>.elf) and the
+  # on-disk cache they land in. Blank = off: the staged program above is the whole set.
+  - GK_GUEST_MIRRORS=${GK_GUEST_MIRRORS:-}
+  - GK_GUEST_CACHE_DIR=${GK_GUEST_CACHE_DIR:-}
 
 x-guest-vm-volumes: &guest-vm-volumes
   - ./config/guest:/app/guest:ro

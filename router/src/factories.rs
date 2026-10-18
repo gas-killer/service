@@ -70,6 +70,8 @@ pub async fn create_listening_creator_with_server(
     let (sender, receiver) = task_channel();
     let queue_depth = task_queue_depth();
     let config = GasKillerConfig::default();
+    // The ingress shares the creator's validator for the guest-program check at submission.
+    let ingress_validator = Arc::clone(&validator);
     let creator = ListeningGasKillerCreator::new(
         receiver,
         queue_depth.clone(),
@@ -153,7 +155,8 @@ pub async fn create_listening_creator_with_server(
         avs_metadata,
     )
     .with_store(store)
-    .with_admin_key(admin_key);
+    .with_admin_key(admin_key)
+    .with_validator(ingress_validator);
     if let Some(prewarm) = prewarm {
         ingress_state = ingress_state.with_prewarm(prewarm);
     }

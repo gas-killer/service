@@ -12,9 +12,11 @@ use axum::{
     routing::{delete, get, post},
 };
 use gas_killer_common::ChainRole;
+use gas_killer_common::GasKillerValidator;
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
+use gas_killer_common::guest_programs::ChainReadFailed;
 use gas_killer_common::prewarm::{PrewarmSlot, PrewarmTask};
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
 use serde::{Deserialize, Serialize};
@@ -84,6 +86,10 @@ pub struct IngressState {
     /// simulating at ingress time instead of waiting for the round broadcast. `None`
     /// disables publishing (tests).
     pub prewarm: Option<Arc<PrewarmSlot>>,
+    /// The router's validator, for the UNBOUNDED_V3 guest-program check at submission: a
+    /// guest-VM consumer is queued only when this router can serve its program (installed, or
+    /// fetched by hash from a configured mirror right now). `None` skips the check (tests).
+    pub validator: Option<Arc<GasKillerValidator>>,
 }
 
 impl IngressState {
@@ -106,6 +112,7 @@ impl IngressState {
             store: None,
             allow_unauthenticated: false,
             prewarm: None,
+            validator: None,
         }
     }
 
@@ -126,6 +133,7 @@ impl IngressState {
             store: None,
             allow_unauthenticated: true,
             prewarm: None,
+            validator: None,
         }
     }
 
@@ -146,6 +154,13 @@ impl IngressState {
     /// state for chained construction.
     pub fn with_prewarm(mut self, prewarm: Arc<PrewarmSlot>) -> Self {
         self.prewarm = Some(prewarm);
+        self
+    }
+
+    /// Attaches the router's validator so `/trigger` refuses tasks whose guest program this
+    /// router cannot serve, returning the updated state for chained construction.
+    pub fn with_validator(mut self, validator: Arc<GasKillerValidator>) -> Self {
+        self.validator = Some(validator);
         self
     }
 }
@@ -617,6 +632,41 @@ pub async fn trigger_task_handler(
             m.ingress_rejected.inc();
         }
         return Err(e.into());
+    }
+
+    // UNBOUNDED_V3: a guest-VM consumer is queued only when this router can serve its
+    // program — installed, or fetched by hash from a configured mirror right now (the
+    // router simulates every task first). Refusing here turns "the task vanished after
+    // Task queued" into an error the client can act on: publish the program to a mirror
+    // the fleet reads, then retry.
+    if let Some(validator) = &state.validator
+        && let Err(e) = validator
+            .ensure_guest_programs_for(request.body.target_address, request.body.block_height)
+            .await
+    {
+        warn!(
+            target_address = %request.body.target_address,
+            block_height = request.body.block_height,
+            error = %format!("{e:#}"),
+            "Task rejected (guest program unavailable)"
+        );
+        if let Some(m) = &state.metrics {
+            m.ingress_rejected.inc();
+        }
+        // The chain not answering is the RPC's problem, not the consumer's: keep the
+        // detail internal, like every other RPC failure here.
+        if e.downcast_ref::<ChainReadFailed>().is_some() {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::RpcUnavailable,
+                "Service temporarily unavailable",
+            ));
+        }
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::GuestProgramUnavailable,
+            format!("this router cannot serve the target's guest program: {e:#}"),
+        ));
     }
 
     info!(

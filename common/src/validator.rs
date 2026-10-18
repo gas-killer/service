@@ -1,5 +1,5 @@
 use alloy_provider::Provider;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use commonware_codec::Read;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
+use crate::guest_programs::{GuestProgramFetcher, GuestProgramResolver};
 use crate::local_exec_shim::{
     GkvmHost, GuestVmConsumers, gkvm_host_from_env, guest_vm_consumers_from_env,
     prefer_mmap_overlay, sim_executor_from_env,
@@ -183,6 +184,14 @@ pub struct GasKillerValidator {
     /// analysis would otherwise succeed with the consumer's `GkVmUnavailable`
     /// revert transition, a payload the `local` operators do not produce.
     guest_vm_consumers: Arc<GuestVmConsumers>,
+    /// UNBOUNDED_V3 program distribution (`GK_GUEST_MIRRORS`,
+    /// `GK_GUEST_CACHE_DIR`): fetches a task's program by hash and installs
+    /// it on the gkvm host at first use. `None` = boot-time slots only.
+    guest_program_fetcher: Option<Arc<GuestProgramFetcher>>,
+    /// Reads a consumer's program from the consumer itself (`programHash()`,
+    /// the SDK's `IGkVmConsumer`), so a consumer that exposes it needs no
+    /// `GK_GUEST_VM_CONSUMERS` entry.
+    guest_program_resolver: Arc<GuestProgramResolver>,
 }
 
 /// How often a validation blocked on an in-flight prewarm re-checks the digest
@@ -442,6 +451,23 @@ fn local_state_cache_from_env() -> Arc<LocalStateCache> {
     })
 }
 
+/// The program fetcher (`GK_GUEST_MIRRORS`, `GK_GUEST_CACHE_DIR`,
+/// `GK_GUEST_MAX_BYTES`, `GK_GUEST_FETCH_TIMEOUT_SECS`), `None` when the
+/// distribution path is not configured. Panics on a malformed value, the
+/// fail-loud pattern of every other `GK_GUEST_*` knob: a typo here would
+/// silently leave this operator abstaining on every program it has not
+/// installed at boot.
+fn guest_program_fetcher_from_env() -> Option<Arc<GuestProgramFetcher>> {
+    let fetcher = GuestProgramFetcher::from_env()
+        .unwrap_or_else(|e| panic!("invalid guest program distribution configuration: {e:#}"))?;
+    info!(
+        mirrors = ?fetcher.mirrors(),
+        cache_dir = ?fetcher.cache_dir(),
+        "UNBOUNDED_V3: guest programs are fetched by hash at first use"
+    );
+    Some(Arc::new(fetcher))
+}
+
 impl GasKillerValidator {
     /// Creates a new GasKillerValidator with multi-chain support.
     ///
@@ -520,6 +546,8 @@ impl GasKillerValidator {
             },
             local_state_cache: local_state_cache_from_env(),
             guest_vm_consumers: guest_vm_consumers_from_env(),
+            guest_program_fetcher: guest_program_fetcher_from_env(),
+            guest_program_resolver: Arc::new(GuestProgramResolver::new()),
         })
     }
 
@@ -556,6 +584,8 @@ impl GasKillerValidator {
             },
             local_state_cache: local_state_cache_from_env(),
             guest_vm_consumers: guest_vm_consumers_from_env(),
+            guest_program_fetcher: guest_program_fetcher_from_env(),
+            guest_program_resolver: Arc::new(GuestProgramResolver::new()),
         }
     }
 
@@ -588,6 +618,8 @@ impl GasKillerValidator {
             },
             local_state_cache: local_state_cache_from_env(),
             guest_vm_consumers: guest_vm_consumers_from_env(),
+            guest_program_fetcher: guest_program_fetcher_from_env(),
+            guest_program_resolver: Arc::new(GuestProgramResolver::new()),
         }
     }
 
@@ -617,6 +649,19 @@ impl GasKillerValidator {
     pub fn with_guest_vm_consumers(mut self, consumers: GuestVmConsumers) -> Self {
         self.guest_vm_consumers = Arc::new(consumers);
         self
+    }
+
+    /// Replaces the program fetcher `GK_GUEST_MIRRORS` / `GK_GUEST_CACHE_DIR`
+    /// configured (`None` disables fetching at first use). For embedding and
+    /// tests; operators configure through the environment.
+    pub fn with_guest_program_fetcher(mut self, fetcher: Option<Arc<GuestProgramFetcher>>) -> Self {
+        self.guest_program_fetcher = fetcher;
+        self
+    }
+
+    /// The program fetcher, if the distribution path is configured.
+    pub fn guest_program_fetcher(&self) -> Option<Arc<GuestProgramFetcher>> {
+        self.guest_program_fetcher.clone()
     }
 
     /// Returns the RPC URL for the default chain
@@ -876,6 +921,128 @@ impl GasKillerValidator {
             .contains(key)
     }
 
+    /// The read provider behind `rpc_url`, when it is one of this validator's
+    /// chains (the simulation RPC included: `GK_SIM_RPC` replaces the L1 URL
+    /// at construction).
+    fn provider_for_rpc_url(&self, rpc_url: &str) -> Option<ReadOnlyProvider> {
+        self.chain_rpc_urls
+            .iter()
+            .find(|(_, url)| url.as_str() == rpc_url)
+            .and_then(|(role, _)| self.providers.get(role).cloned())
+    }
+
+    /// The guest programs `consumer` requires at `block_height`: the
+    /// registry's entries plus the one the consumer exposes on-chain. Empty
+    /// for a consumer that needs no guest VM.
+    async fn required_guest_programs(
+        &self,
+        rpc_url: &str,
+        consumer: alloy::primitives::Address,
+        block_height: u64,
+    ) -> Result<Vec<alloy::primitives::B256>> {
+        let mut required: Vec<alloy::primitives::B256> = self
+            .guest_vm_consumers
+            .required_programs(&consumer)
+            .map(<[alloy::primitives::B256]>::to_vec)
+            .unwrap_or_default();
+        match self.provider_for_rpc_url(rpc_url) {
+            Some(provider) => {
+                if let Some(hash) = self
+                    .guest_program_resolver
+                    .program_hash(&provider, consumer, block_height)
+                    .await
+                    .context("resolving the consumer's guest program on-chain")?
+                    && !required.contains(&hash)
+                {
+                    required.push(hash);
+                }
+            }
+            None => debug!(
+                rpc_url,
+                "no read provider for this RPC URL: guest programs resolve from the registry only"
+            ),
+        }
+        Ok(required)
+    }
+
+    /// The UNBOUNDED_V3 gate. `Ok` = analyze the task; `Err` = this operator
+    /// abstains (it must not simulate, and has nothing to sign). A consumer
+    /// that requires no guest program passes. One that does passes only when
+    /// the executor is `local` and every required program is installed —
+    /// fetched by hash first ([`GuestProgramFetcher::ensure_installed`])
+    /// when the distribution path is configured.
+    pub async fn guest_vm_gate(
+        &self,
+        rpc_url: &str,
+        consumer: alloy::primitives::Address,
+        block_height: u64,
+    ) -> Result<()> {
+        let required = self
+            .required_guest_programs(rpc_url, consumer, block_height)
+            .await?;
+        if required.is_empty() {
+            return Ok(());
+        }
+        if self.sim_executor != SimExecutor::Local {
+            anyhow::bail!(
+                "consumer {consumer} requires the guest VM but GK_SIM_EXECUTOR is {}: abstaining \
+                 (the {} executor would produce the GkVmUnavailable revert transition)",
+                self.sim_executor,
+                self.sim_executor
+            );
+        }
+        let Some(host) = self.gkvm_host() else {
+            anyhow::bail!(
+                "consumer {consumer} requires the guest VM but no guest programs are configured \
+                 (GK_GUEST_PROGRAM or GK_GUEST_MIRRORS): abstaining"
+            );
+        };
+        for hash in required {
+            if host.has_program(&hash) {
+                continue;
+            }
+            let Some(fetcher) = &self.guest_program_fetcher else {
+                anyhow::bail!(
+                    "consumer {consumer} requires guest program {hash}, which is not installed on \
+                     this operator (and GK_GUEST_MIRRORS is not configured): abstaining"
+                );
+            };
+            let installed = fetcher
+                .ensure_installed(&host, hash)
+                .await
+                .with_context(|| {
+                    format!(
+                        "consumer {consumer} requires guest program {hash}, which is not installed \
+                         on this operator"
+                    )
+                })?;
+            info!(
+                consumer = %consumer,
+                program = %hash,
+                ?installed,
+                block_height,
+                "guest program required by a task is installed"
+            );
+        }
+        Ok(())
+    }
+
+    /// [`GasKillerValidator::guest_vm_gate`] for the router's ingress, which
+    /// knows the consumer but not its chain yet: a task this router could not
+    /// serve is refused at submission instead of vanishing after "Task queued".
+    pub async fn ensure_guest_programs_for(
+        &self,
+        consumer: alloy::primitives::Address,
+        block_height: u64,
+    ) -> Result<()> {
+        let chain = self.detect_chain_for_address(consumer).await?;
+        let rpc_url = self
+            .rpc_url_for_chain(chain)
+            .ok_or_else(|| anyhow::anyhow!("no RPC URL configured for chain {chain}"))?
+            .to_owned();
+        self.guest_vm_gate(&rpc_url, consumer, block_height).await
+    }
+
     /// Performs the core gas analysis using gas-analyzer.
     ///
     /// Uses the shared executor cache to skip the 2× `eth_getBlockByNumber` build
@@ -900,18 +1067,19 @@ impl GasKillerValidator {
             "Analyzing transaction at block"
         );
 
-        // UNBOUNDED_V3 `requiresGuestVm` gate, before any simulation: a
-        // registered guest-VM consumer is analyzed only when this operator
-        // runs the local executor with the consumer's program installed.
-        // Every analysis path (validation, prewarm, the router's creator)
-        // funnels through here, so an abstaining operator never holds a
-        // payload for the task — nothing to sign, nothing to cache.
-        if let Err(e) = self.guest_vm_consumers.check(
-            &contract_address,
-            self.sim_executor,
-            self.gkvm_host().as_deref(),
-        ) {
-            warn!(contract = %contract_address, block_height, "guest-VM gate: {e}");
+        // UNBOUNDED_V3 guest-VM gate, before any simulation: a consumer that
+        // requires the guest VM — by the `GK_GUEST_VM_CONSUMERS` registry or by
+        // exposing its program on-chain (the SDK's `IGkVmConsumer`) — is
+        // analyzed only when this operator runs the local executor with that
+        // program installed, fetching it by hash first when a mirror is
+        // configured. Every analysis path (validation, prewarm, the router's
+        // creator) funnels through here, so an abstaining operator never holds
+        // a payload for the task — nothing to sign, nothing to cache.
+        if let Err(e) = self
+            .guest_vm_gate(rpc_url, contract_address, block_height)
+            .await
+        {
+            warn!(contract = %contract_address, block_height, "guest-VM gate: {e:#}");
             return Err(e.context("guest-VM gate"));
         }
 

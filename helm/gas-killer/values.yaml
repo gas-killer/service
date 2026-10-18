@@ -131,6 +131,33 @@ global:
   #   - consumer: "0x..."
   #     programHash: "0x..."
   guestVmConsumers: []
+  # Hash-addressed program mirrors (GK_GUEST_MIRRORS): base URLs the router and
+  # every node fetch a guest program from the FIRST TIME a task names it —
+  # <base>/<programHash hex>.elf, keccak-verified against the hash before it is
+  # installed, so a mirror only ever affects availability, never which program
+  # runs. Which program a consumer runs is read from the consumer itself at the
+  # task's block (programHash(), the SDK's IGkVmConsumer; or the PROGRAM_HASH()
+  # constant the examples expose), so publishing is `gk publish` + deploying the
+  # consumer: no list edit here, no restart. guestPrograms stays as a boot-time
+  # prefetch and guestVmConsumers as the registry for consumers that expose
+  # nothing. Requires simExecutor "local", like guestPrograms.
+  #
+  # guestMirrors:
+  #   - "https://storage.googleapis.com/<bucket>/gkvm/programs"
+  #   - "https://<bucket>.qstorage.quilibrium.com/programs"
+  guestMirrors: []
+  # Fetched programs are kept on an emptyDir (GK_GUEST_CACHE_DIR) so a container
+  # restart does not refetch; a rescheduled pod starts empty and refetches on
+  # demand.
+  guestCache:
+    mountPath: /guest-cache
+    sizeLimit: 2Gi
+  # Fetch limits: a program larger than maxBytes is refused (what a hostile
+  # consumer can make operators download is bounded here); timeoutSeconds bounds
+  # one mirror request.
+  guestFetch:
+    maxBytes: 33554432
+    timeoutSeconds: 30
   # Image used by the guest download initContainer (needs curl).
   guestDownloaderImage: "curlimages/curl:8.10.1"
   # Where programs/ and artifacts/ land inside the pods.

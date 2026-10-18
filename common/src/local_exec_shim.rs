@@ -108,16 +108,37 @@ pub fn prefer_mmap_overlay(executor: SimExecutor) -> bool {
     }
 }
 
-/// Whether any `GK_GUEST_*` slot variable carries a value. Empty values are
-/// "unset", as for the overlay slots (Helm renders unset values as `""`).
+/// Whether any `GK_GUEST_PROGRAM*` / `GK_GUEST_ARTIFACT*` slot variable
+/// carries a value. Empty values are "unset", as for the overlay slots (Helm
+/// renders unset values as `""`). The registry (`GK_GUEST_VM_CONSUMERS`) and
+/// the distribution knobs (`GK_GUEST_MIRRORS`, …) are not slots: an rpc
+/// operator carries the registry precisely because it has no guest VM.
 fn guest_vm_configured_from(mut vars: impl Iterator<Item = (String, String)>) -> bool {
-    vars.any(|(key, value)| key.starts_with("GK_GUEST_") && !value.trim().is_empty())
+    vars.any(|(key, value)| {
+        (key.starts_with("GK_GUEST_PROGRAM") || key.starts_with("GK_GUEST_ARTIFACT"))
+            && !value.trim().is_empty()
+    })
+}
+
+/// Whether the hash-addressed distribution path is configured
+/// (`GK_GUEST_MIRRORS` and/or `GK_GUEST_CACHE_DIR`, see
+/// [`crate::guest_programs::GuestProgramFetcher::from_env`]): programs then
+/// arrive at runtime, so the host must exist even with no boot-time slot.
+fn guest_program_distribution_configured_from(
+    mut vars: impl Iterator<Item = (String, String)>,
+) -> bool {
+    vars.any(|(key, value)| {
+        (key == "GK_GUEST_MIRRORS" || key == "GK_GUEST_CACHE_DIR") && !value.trim().is_empty()
+    })
 }
 
 /// Loads the operator's installed guest programs and artifacts
 /// (`GK_GUEST_PROGRAM[_N]` / `GK_GUEST_ARTIFACT[_N]`, each with its committed
-/// hash/root) into a [`GkvmHost`] for the local executor. `None` when no
-/// `GK_GUEST_*` variable is set — the analyzer then fails any gkvm call as an
+/// hash/root) into a [`GkvmHost`] for the local executor. The host also
+/// exists, possibly empty, when the distribution path is configured
+/// (`GK_GUEST_MIRRORS` / `GK_GUEST_CACHE_DIR`): programs are then installed
+/// on it at first use ([`crate::guest_programs::GuestProgramFetcher`]).
+/// `None` when neither is set — the analyzer then fails any gkvm call as an
 /// environment error, so this operator abstains on guest-VM tasks instead of
 /// signing anything.
 ///
@@ -134,7 +155,9 @@ fn guest_vm_configured_from(mut vars: impl Iterator<Item = (String, String)>) ->
 /// `GK_SIM_EXECUTOR=rpc`, where the guest VM does not exist and every
 /// guest-VM task would become a signed `GkVmUnavailable` revert transition.
 pub fn gkvm_host_from_env(executor: SimExecutor) -> Option<Arc<GkvmHost>> {
-    if !guest_vm_configured_from(std::env::vars()) {
+    if !guest_vm_configured_from(std::env::vars())
+        && !guest_program_distribution_configured_from(std::env::vars())
+    {
         return None;
     }
     assert!(
@@ -309,6 +332,26 @@ mod tests {
             "GK_GUEST_ARTIFACT_ROOT_2",
             "0x00"
         )])));
+        // The registry is not a slot: an rpc operator carries it without a
+        // guest VM and must boot. Neither are the distribution knobs — those
+        // make a host exist through the other predicate.
+        assert!(!guest_vm_configured_from(vars(&[
+            ("GK_GUEST_VM_CONSUMERS", "0x00=0x00"),
+            ("GK_GUEST_MIRRORS", "https://m.example/p"),
+            ("GK_GUEST_CACHE_DIR", "/guest-cache"),
+        ])));
+        assert!(guest_program_distribution_configured_from(vars(&[(
+            "GK_GUEST_MIRRORS",
+            "https://m.example/p"
+        )])));
+        assert!(guest_program_distribution_configured_from(vars(&[(
+            "GK_GUEST_CACHE_DIR",
+            "/guest-cache"
+        )])));
+        assert!(!guest_program_distribution_configured_from(vars(&[
+            ("GK_GUEST_MIRRORS", " "),
+            ("GK_GUEST_VM_CONSUMERS", "0x00=0x00"),
+        ])));
     }
 
     const CONSUMER: Address = Address::repeat_byte(0xc0);

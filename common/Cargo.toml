@@ -43,3 +43,7 @@ tokio = { workspace = true }
 # Logging
 tracing = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+# guest_programs tests: on-disk program cache in a scratch directory
+tempfile = { workspace = true }

@@ -186,9 +186,10 @@ spec:
               mountPath: /overlay
         {{- end }}
 
-        {{- if include "gas-killer.guestVm.enabled" $root }}
+        {{- if include "gas-killer.guestVm.prefetch" $root }}
         # UNBOUNDED_V3: download the guest programs / artifact bundles the gkvm
-        # precompile serves (verified by the service at startup).
+        # precompile serves (verified by the service at startup). Programs that
+        # arrive through global.guestMirrors are fetched at first use instead.
         {{- include "gas-killer.guestVm.initContainer" $root | nindent 8 }}
         {{- end }}
 
@@ -382,10 +383,15 @@ spec:
               mountPath: {{ $root.Values.overlay.mountPath }}
               readOnly: true
             {{- end }}
-            {{- if include "gas-killer.guestVm.enabled" $root }}
+            {{- if include "gas-killer.guestVm.prefetch" $root }}
             - name: guest-vm
               mountPath: {{ $root.Values.global.guestMountPath }}
               readOnly: true
+            {{- end }}
+            {{- if include "gas-killer.guestVm.mirrors" $root }}
+            # Programs fetched by hash at first use land here (GK_GUEST_CACHE_DIR).
+            - name: guest-cache
+              mountPath: {{ dig "mountPath" "/guest-cache" ($root.Values.global.guestCache | default dict) }}
             {{- end }}
             {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
             - name: node-secrets
@@ -409,9 +415,14 @@ spec:
         - name: overlay-artifacts
           emptyDir: {}
         {{- end }}
-        {{- if include "gas-killer.guestVm.enabled" $root }}
+        {{- if include "gas-killer.guestVm.prefetch" $root }}
         - name: guest-vm
           emptyDir: {}
+        {{- end }}
+        {{- if include "gas-killer.guestVm.mirrors" $root }}
+        - name: guest-cache
+          emptyDir:
+            sizeLimit: {{ dig "sizeLimit" "2Gi" ($root.Values.global.guestCache | default dict) }}
         {{- end }}
         {{- if and (eq $root.Values.global.environment "TESTNET") $root.Values.secretManager.enabled }}
         - name: node-secrets

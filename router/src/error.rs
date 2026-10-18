@@ -45,6 +45,9 @@ pub enum ErrorCode {
     RpcUnavailable,
     /// No contract is deployed at the requested target address on any supported chain.
     ContractNotFound,
+    /// The target is a guest-VM consumer whose program this router cannot serve: not
+    /// installed, and no configured mirror served it (or this fleet runs without the guest VM).
+    GuestProgramUnavailable,
     /// The request body is malformed or fails field-level validation.
     InvalidRequest,
     /// The requested path does not exist.
