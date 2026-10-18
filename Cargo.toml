@@ -55,7 +55,7 @@ futures-util = "0.3.31"
 # and UNBOUNDED_V2 overlay commits), so this repoint is additive.
 # UNBOUNDED_V3 (M6): RonTuretzky/gkvm-m6-host is the gkvm precompile stack, itself stacked on
 # ron/local-execution — repoint back along with the TODO above once it lands.
-gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch", branch = "RonTuretzky/gkvm-m6-host" }
+gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", package = "gas-analyzer-evmsketch", branch = "feat/gkvm-program-distribution" }
 gas-killer-common = { path = "common" }
 governor = "0.10.4"
 hex = "0.4"
