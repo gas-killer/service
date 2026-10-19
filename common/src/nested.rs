@@ -116,6 +116,7 @@ pub fn build_tree_trace(
     let encoded = encode_frame_tree(
         &frames,
         task.function_selector(),
+        task.value,
         task.chain_id,
         spec.expiry_block,
     )?;
@@ -237,10 +238,42 @@ mod tests {
                 U256::from(4),
                 t.target_address,
                 t.function_selector(),
-                &trace.root_program
+                &trace.root_program,
+                t.value
             ),
             encoded.frame_leaves[0]
         );
+    }
+
+    /// The root leaf is the flat digest, value included, so a tree settled with ETH has the root
+    /// a value-binding root contract recomputes from its `msg.value`.
+    #[test]
+    fn a_valued_trees_root_leaf_is_its_flat_digest() {
+        let mut t = task(4);
+        t.value = U256::from(10).pow(U256::from(18));
+        let tree = |t: &GasKillerTaskData| {
+            let mut root = frame(t.target_address, 4, vec![1]);
+            root.updates.push(nested_op(Address::repeat_byte(0xbb)));
+            let child = frame(Address::repeat_byte(0xbb), 0, vec![]);
+            build_tree_trace(
+                t,
+                vec![root, child],
+                BTreeSet::new(),
+                &NestedSpec { expiry_block: 99 },
+            )
+            .unwrap()
+        };
+        let valued = tree(&t);
+        let unvalued = tree(&GasKillerTaskData {
+            value: U256::ZERO,
+            ..t.clone()
+        });
+        let leaf =
+            |trace: &TreeTrace| Digest::from(trace.encoded.as_ref().unwrap().frame_leaves[0].0);
+
+        assert_eq!(leaf(&valued), t.build_payload_hash(&valued.root_program));
+        assert_ne!(leaf(&valued), leaf(&unvalued));
+        assert_ne!(valued.digest, unvalued.digest);
     }
 
     #[test]
