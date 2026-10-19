@@ -180,9 +180,17 @@ Currently available:
 | `onchainLife` | **`prestate-net`** | Conway's Life: heavy compute, tiny flat diff. Routable under any encoding but only settles under `prestate-net` — see below. |
 | `arraySummation` | any | The default e2e target: sums selected array elements under `trackState`. |
 | `reentrantCheckpoint` | `canonical` | Two contracts — `advance()` re-enters through an observer mid-transition. |
+| `nestedChain` | `canonical` | router → vault → ledger, three SDK consumers settled as one nested tree. |
+| `nestedChainPeer` | `canonical` | A second router over `nestedChain`'s vault, so two roots share callees. |
+| `nestedCycle` | `canonical` | root → relay → root: the root applies two frames of one tree. |
 
-The last two come from the Gas Killer SDK, which the examples repo vendors as a submodule;
+The last five come from the Gas Killer SDK, which the examples repo vendors as a submodule;
 `fetch_examples.sh` builds both trees and `deploy_example` searches both `out/` directories.
+The nested examples need an SDK with nested settlement, which the pinned submodule does not
+carry yet: set `SDK_DIR` to a local SDK checkout for both `fetch_examples.sh` and
+`deploy_example`. They settle as trees only with `NESTED_SETTLEMENT=true` on the router;
+`run_e2e_test.sh` runs them as `E2E_EXAMPLE=nested-chain` or `nested-cycle`, and
+`E2E_NESTED_SHARED=true` adds the shared-callee leg.
 
 **Every example needs the operator set registered first.** That is a separate phase, because
 every registration advances the registry's `effectiveBlock` watermark and verification
@@ -253,7 +261,9 @@ To be settleable, a contract must inherit `GasKillerSDK` and pass the AVS servic
 the `SchnorrStakeRegistry` to its constructor. `deploy_example` asserts this after deploying — it
 checks the same ERC-165 interface the router gates on, plus `stateTransitionCount()` and
 `getMessageHash()` — so a mis-wired or SDK-mismatched target fails at deploy time instead of
-mid-round.
+mid-round. To settle as part of a nested tree it must inherit `GasKillerNestedSDK` instead, and
+its registry must report `ISchnorrApprovalRegistry`; otherwise it reports no nested interface
+and settles flat.
 
 ### Deploying against a testnet
 

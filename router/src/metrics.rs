@@ -70,6 +70,11 @@ pub enum HeightOutcome {
     TimedOut,
     /// The router's own trace of the task failed, so the session was abandoned.
     TraceFailed,
+    /// The task could not settle as traced (a pinned contract moved past the traced state), so
+    /// nothing was signed.
+    Refused,
+    /// A contract the settlement pins was held by another task; the task went back to the queue.
+    Deferred,
 }
 
 impl HeightOutcome {
@@ -80,6 +85,8 @@ impl HeightOutcome {
             Self::Failed => "failed",
             Self::TimedOut => "timed_out",
             Self::TraceFailed => "trace_failed",
+            Self::Refused => "refused",
+            Self::Deferred => "deferred",
         }
     }
 }
