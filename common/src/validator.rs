@@ -24,7 +24,8 @@ use alloy::rpc::types::TransactionRequest;
 /// Key identifying a task's expected digest in [`GasKillerValidator`]'s digest cache.
 ///
 /// The digest is `sha256(abi.encode(transition_index, target_address, selector,
-/// storage_updates))`, and `storage_updates` is derived by EVMSketch from
+/// storage_updates[, value]))` (see [`GasKillerTaskData::build_payload_hash`]), and
+/// `storage_updates` is derived by EVMSketch from
 /// `(target_address, call_data, from_address, value, block_height)`. `transition_index`
 /// is a *per-contract* counter, so keying on `(transition_index, block_height)` alone
 /// would collide two tasks for *different* contracts that share the same index and
@@ -1551,6 +1552,37 @@ mod tests {
             .await
             .expect("cached digest lookup must not require RPC");
         assert_eq!(digest, task_data.build_payload_hash(&storage_updates));
+    }
+
+    #[tokio::test]
+    async fn the_expected_digest_binds_the_task_value() {
+        // Two tasks identical but for `msg.value` trace the same storage updates, yet the
+        // contract checks a digest that binds the value, so each must resolve to its own.
+        let validator = GasKillerValidator::with_rpc_url("https://example.com");
+        let storage_updates = vec![0x01, 0x02, 0x03, 0x04];
+        let funded = create_test_task_data();
+        let unfunded = GasKillerTaskData {
+            value: U256::ZERO,
+            ..funded.clone()
+        };
+
+        validator.prime_cache(&funded, &storage_updates).await;
+        validator.prime_cache(&unfunded, &storage_updates).await;
+
+        let funded_digest = validator
+            .expected_digest_for_task(&funded)
+            .await
+            .expect("cached digest lookup must not require RPC");
+        let unfunded_digest = validator
+            .expected_digest_for_task(&unfunded)
+            .await
+            .expect("cached digest lookup must not require RPC");
+        assert_ne!(funded_digest, unfunded_digest);
+        assert_eq!(funded_digest, funded.build_payload_hash(&storage_updates));
+        assert_eq!(
+            unfunded_digest,
+            unfunded.build_payload_hash(&storage_updates)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

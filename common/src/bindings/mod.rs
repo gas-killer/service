@@ -38,3 +38,8 @@ pub mod gaskillersdk;
     dead_code
 )]
 pub mod schnorrstakeregistry;
+
+/// `IValueBoundDigest`: present on targets whose SDK binds `msg.value` into the signed digest.
+/// A target without it hashes every task as if it carried no value, so it cannot settle a
+/// value-bearing task safely.
+pub mod valueboundsdk;

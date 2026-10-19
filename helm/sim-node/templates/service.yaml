@@ -29,5 +29,8 @@ spec:
     - name: http
       port: {{ .Values.service.httpPort }}
       targetPort: http
+    - name: metrics
+      port: 9001
+      targetPort: metrics
   selector:
     {{- include "sim-node.selectorLabels" . | nindent 4 }}
