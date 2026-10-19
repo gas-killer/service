@@ -95,7 +95,7 @@ const KNOWN_REVERTS: &[KnownRevert] = &[
     ),
     known_revert!(
         GasKillerSDK::RevertingContext,
-        "a CALL replayed from the storage updates reverted inside the target"
+        "a CALL or NESTED update replayed from the storage updates reverted inside its callee"
     ),
     known_revert!(
         GasKillerSDK::DeploymentFailed,
@@ -120,7 +120,8 @@ const KNOWN_REVERTS: &[KnownRevert] = &[
     ),
     known_revert!(
         GasKillerSDK::LeafMismatch,
-        "a nested frame's caller, value, or calldata differs from what the tree signed for it"
+        "a nested callee's recomputed leaf differs from the one the tree signed for it: usually \
+         another transition on the callee has moved its transition index since it was traced"
     ),
     known_revert!(
         GasKillerSDK::NotPendingChild,
@@ -133,8 +134,8 @@ const KNOWN_REVERTS: &[KnownRevert] = &[
     ),
     known_revert!(
         GasKillerSDK::NotTreeMember,
-        "a frame's leaf is not in the signed tree: the tree was settled with a msg.value other than \
-         the payload's value, or a contract's transition index has moved since it was traced"
+        "the root frame's leaf is not in the signed tree: the tree was settled with a msg.value \
+         other than the payload's value"
     ),
     known_revert!(
         GasKillerSDK::NestedOutsideTree,
@@ -217,13 +218,25 @@ impl fmt::Display for PayloadRevert {
             return f.write_str("reverted without reason data");
         }
         if let Some(known) = self.known() {
-            return write!(
+            write!(
                 f,
                 "{} ({}): {}",
                 known.signature,
                 hex::encode_prefixed(&self.0[..4]),
                 known.cause
-            );
+            )?;
+            // A nested callee's own revert (NotApproved, LeafMismatch, ...) only ever reaches
+            // the root wrapped here, so its cause is the one worth reporting.
+            if let Ok(wrapped) = GasKillerSDK::RevertingContext::abi_decode(&self.0) {
+                write!(
+                    f,
+                    "; update {} called {}: {}",
+                    wrapped.index,
+                    wrapped.target,
+                    PayloadRevert(wrapped.revertData)
+                )?;
+            }
+            return Ok(());
         }
         // `require(cond, "reason")` and compiler-inserted panics are the two standard-encoded
         // reverts; the raw data is all there is to report for anything else.
@@ -342,6 +355,7 @@ mod tests {
     use super::*;
     use alloy::sol_types::Revert;
     use alloy::transports::TransportErrorKind;
+    use alloy_primitives::{Address, U256};
 
     fn revert(data: &str) -> PayloadRevert {
         PayloadRevert(Bytes::from(
@@ -447,6 +461,46 @@ mod tests {
                 .to_string()
                 .contains("vault is paused"),
             "the revert string should reach the message"
+        );
+    }
+
+    // A nested callee's revert reaches the root wrapped in RevertingContext; the message must
+    // carry the callee's own cause, not just that a call reverted.
+    #[test]
+    fn a_wrapped_callee_revert_is_unwrapped() {
+        let callee = Address::repeat_byte(0xbb);
+        let wrapped = GasKillerSDK::RevertingContext {
+            index: U256::from(2),
+            target: callee,
+            revertData: GasKillerSDK::NotApproved {
+                root: FixedBytes::ZERO,
+            }
+            .abi_encode()
+            .into(),
+            callargs: Bytes::new(),
+        };
+        let rendered = PayloadRevert(wrapped.abi_encode().into()).to_string();
+        assert!(rendered.starts_with("RevertingContext("), "{rendered}");
+        assert!(
+            rendered.contains(&format!("update 2 called {callee}: NotApproved")),
+            "{rendered}"
+        );
+        assert!(rendered.contains("NotApproved(bytes32)"), "{rendered}");
+        assert!(rendered.contains("schnorrRegistry"), "{rendered}");
+    }
+
+    #[test]
+    fn a_callee_that_reverted_without_data_says_so() {
+        let wrapped = GasKillerSDK::RevertingContext {
+            index: U256::ZERO,
+            target: Address::ZERO,
+            revertData: Bytes::new(),
+            callargs: Bytes::new(),
+        };
+        let rendered = PayloadRevert(wrapped.abi_encode().into()).to_string();
+        assert!(
+            rendered.ends_with(": reverted without reason data"),
+            "{rendered}"
         );
     }
 
