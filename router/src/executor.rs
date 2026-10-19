@@ -59,6 +59,10 @@ struct PreparedSchnorr<P> {
     chain_id: u64,
     target_addr: Address,
     from_address: Address,
+    /// The task's `msg.value`. The rendered payload carries it, so a call that brought ETH in
+    /// settles with that ETH; the broadcast path ignores it, since the router's wallet must never
+    /// fund a task.
+    value: U256,
     msg_hash: FixedBytes<32>,
     reference_block_number: u32,
     storage_updates: Bytes,
@@ -317,6 +321,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let target_function = task_data.function_selector();
         let target_addr = task_data.target_address;
         let from_address = task_data.from_address;
+        let value = task_data.value;
 
         // The payload-hash preflight and the ERC-165 interface check are
         // independent, so run them concurrently. Once the interface result is
@@ -370,6 +375,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             chain_id,
             target_addr,
             from_address,
+            value,
             msg_hash,
             reference_block_number: current_block_number.saturating_sub(1),
             storage_updates,
@@ -419,8 +425,17 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             s,
             r_addr,
             non_signers,
+            value,
             ..
         } = prepared;
+
+        // The router's wallet must never fund a task, and the signed digest binds the task's value,
+        // so a valued task sent from here would either spend router ETH or fail its signature.
+        if !value.is_zero() {
+            anyhow::bail!(
+                "task carries {value} wei; the auto-execute path does not fund tasks, render the payload for the caller to send instead"
+            );
+        }
 
         let sdk = GasKillerSDK::new(target_addr, provider);
 
@@ -551,8 +566,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// `data` is the full `verifyAndUpdate` calldata; `estimated_gas` comes from
     /// `eth_estimateGas` simulated as the requesting account, via
     /// [`Self::resolve_payload_gas`] — which also fails the round if that call reverts. `value` is
-    /// fixed at zero and kept server-controlled, so a future on-chain fee is a server change, not
-    /// an integrator client-code change.
+    /// the task's own `msg.value`, so a call that brought ETH in (a deposit) is estimated and
+    /// settled with that ETH. The operators' digest binds it, so the contract accepts the
+    /// signature only with exactly this value. It stays server-controlled, so a future on-chain
+    /// fee is a server change, not an integrator client-code change.
     #[allow(clippy::too_many_arguments)]
     async fn render_schnorr_payload(
         &self,
@@ -578,6 +595,7 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             chain_id,
             target_addr,
             from_address,
+            value,
             msg_hash,
             reference_block_number,
             storage_updates,
@@ -588,7 +606,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             non_signers,
         } = prepared;
 
-        let value = U256::ZERO;
         let sdk = GasKillerSDK::new(target_addr, provider);
         let call = sdk
             .verifyAndUpdate(
@@ -604,6 +621,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             .from(from_address)
             .value(value);
 
+        // Read back from the call that is estimated, so the payload can never carry a value its
+        // `eth_estimateGas` did not run with.
+        let value = call.as_ref().value.unwrap_or_default();
         let data = call.calldata().clone();
         let estimated_gas = self.resolve_payload_gas(call.estimate_gas().await, target_addr)?;
 
@@ -1058,6 +1078,90 @@ mod tests {
             let settled = store.get_task(id).await.unwrap().unwrap();
             assert_eq!(settled.status, TaskStatus::Failed);
         }
+    }
+
+    /// A task sent with ETH (a deposit) renders a payload that carries that ETH, so the
+    /// settlement brings it and a consumer that checks it at settlement does not revert.
+    #[tokio::test]
+    async fn a_task_with_value_renders_a_payload_carrying_it() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let deposit = U256::from(10u64).pow(U256::from(16u64));
+        let body = crate::ingress::GasKillerTaskRequestBody {
+            value: deposit,
+            ..request_body()
+        };
+        let task = store.create_task(&key, &body).await.unwrap();
+        let (task_data, _) = matching_task_data();
+        let task_data = GasKillerTaskData {
+            value: deposit,
+            ..task_data
+        };
+        // The digest binds the value, so the quorum's digest is the valued one.
+        let msg_hash =
+            FixedBytes::<32>::from(task_data.build_payload_hash(&task_data.storage_updates).0);
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        push_supports_interface(&asserter, true);
+        // A real estimate, so the test fails if the valued call is never estimated.
+        asserter.push_success(&alloy::primitives::U64::from(123_456u64));
+        let mut handler = GasKillerHandler::new(1, provider).with_store(store.clone());
+
+        handler
+            .handle_schnorr_verification(
+                &traced(&task.id, &task_data),
+                Instant::now(),
+                msg_hash,
+                100,
+                U256::from(42u64),
+                Address::from([0x44; 20]),
+                vec![],
+            )
+            .await
+            .expect("the round renders");
+
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        let payload: PayloadView =
+            serde_json::from_str(settled.payload.as_deref().expect("payload persisted")).unwrap();
+        assert_eq!(
+            payload.value, deposit,
+            "the settlement carries the task's ETH"
+        );
+        assert_eq!(
+            payload.estimated_gas, 123_456,
+            "the payload's value is the one its estimate ran with"
+        );
+    }
+
+    /// The auto-execute path sends from the router's wallet, which must never fund a task, and
+    /// the signed digest binds the value, so a valued task is refused rather than sent with zero.
+    #[tokio::test]
+    async fn the_auto_execute_path_refuses_a_valued_task() {
+        let (task_data, _) = matching_task_data();
+        let task_data = GasKillerTaskData {
+            value: U256::from(1u64),
+            ..task_data
+        };
+        let msg_hash =
+            FixedBytes::<32>::from(task_data.build_payload_hash(&task_data.storage_updates).0);
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        push_supports_interface(&asserter, true);
+        let mut handler = GasKillerHandler::new(1, provider);
+
+        let err = handler
+            .execute_schnorr_verification(
+                msg_hash,
+                100,
+                U256::from(42u64),
+                Address::from([0x44; 20]),
+                vec![],
+                Some(&task_data),
+            )
+            .await
+            .expect_err("a valued task must not be broadcast from the router wallet");
+        assert!(err.to_string().contains("does not fund tasks"), "{err}");
     }
 
     #[tokio::test]

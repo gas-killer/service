@@ -7,7 +7,7 @@ use crate::store::{
     ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, KeyVerdict, SqliteStore, SubmittedTask, Task,
     TaskStatus,
 };
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
 use axum::{
     Json, Router,
@@ -17,9 +17,11 @@ use axum::{
     routing::{delete, get, post},
 };
 use gas_killer_common::ChainRole;
+use gas_killer_common::GasKillerTaskData;
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::avs_contracts::ResolvedContracts;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
+use gas_killer_common::bindings::valueboundsdk::IValueBoundDigest;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
 use gas_killer_common::{PayloadView, TaskBundle};
@@ -366,6 +368,9 @@ pub enum OnchainValidationError {
         provided: u64,
         current: u64,
     },
+    ValueNotBound {
+        value: U256,
+    },
     RpcError(String),
 }
 
@@ -393,6 +398,10 @@ impl fmt::Display for OnchainValidationError {
                 f,
                 "target_address has no code at block_height {provided} (it is deployed as of the current chain height {current}), so an analysis anchored there would trace a call into an empty account"
             ),
+            Self::ValueNotBound { value } => write!(
+                f,
+                "value is {value} wei, but target_address does not bind msg.value into its signed digest the way operators sign it (its getMessageHashWithValue is missing or disagrees), so it could credit ETH that never arrives; upgrade the target's SDK or send the call with no value"
+            ),
             Self::RpcError(msg) => write!(f, "RPC error during onchain validation: {msg}"),
         }
     }
@@ -417,6 +426,9 @@ impl From<OnchainValidationError> for ApiError {
             }
             OnchainValidationError::TargetNotDeployedAtBlock { .. } => {
                 (StatusCode::BAD_REQUEST, ErrorCode::TargetNotDeployed)
+            }
+            OnchainValidationError::ValueNotBound { .. } => {
+                (StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest)
             }
             OnchainValidationError::RpcError(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, ErrorCode::RpcUnavailable)
@@ -543,6 +555,41 @@ async fn validate_onchain<P: Provider + Clone>(
         });
     }
 
+    // Operators sign a digest that binds the task's value, and only an SDK that binds it too
+    // accepts that signature. A target built from an older SDK hashes every task as zero-value:
+    // it would reject the round, and it is the kind of target that credits a deposit whether or
+    // not the ETH arrives. The probe is a call rather than a bytecode scan so a proxied target
+    // answers through its implementation, and its answer must equal the digest operators would
+    // sign for the same inputs: a catch-all fallback returns a word, but not that one.
+    if !body.value.is_zero() {
+        let probe = IValueBoundDigest::new(body.target_address, provider.clone());
+        let expected = FixedBytes::<32>::from(
+            GasKillerTaskData {
+                target_address: body.target_address,
+                call_data: vec![0; 4],
+                value: body.value,
+                ..Default::default()
+            }
+            .build_payload_hash(&[])
+            .0,
+        );
+        // A revert is the node answering, so it counts as a healthy call.
+        let answered = match probe
+            .getMessageHashWithValue(U256::ZERO, FixedBytes::ZERO, Bytes::new(), body.value)
+            .call()
+            .await
+        {
+            Ok(digest) => Ok(digest == expected),
+            Err(err) if binds_no_value(&err) => Ok(false),
+            Err(err) => Err(err),
+        };
+        let binds_value = record_rpc(health, chain_id, answered)
+            .map_err(|e| OnchainValidationError::RpcError(e.to_string()))?;
+        if !binds_value {
+            return Err(OnchainValidationError::ValueNotBound { value: body.value });
+        }
+    }
+
     // Only validate the transition index if explicitly provided.
     // None means "auto" — the server resolves the index at dequeue time.
     if let Some(provided) = body.transition_index {
@@ -566,6 +613,18 @@ async fn validate_onchain<P: Provider + Clone>(
     }
 
     Ok(())
+}
+
+/// Whether a failed `getMessageHashWithValue` call shows the target lacks the function, as
+/// opposed to a transport failure that says nothing about it: the call executed and reverted, or
+/// returned something that is not a `bytes32` (a permissive fallback).
+fn binds_no_value(err: &alloy::contract::Error) -> bool {
+    match err {
+        alloy::contract::Error::TransportError(_) => {
+            crate::payload_revert::PayloadRevert::from_call_error(err).is_some()
+        }
+        _ => true,
+    }
 }
 
 /// Validation errors for incoming task requests.
@@ -4541,6 +4600,120 @@ mod tests {
             let api_err = ApiError::from(err);
             assert_eq!(api_err.status, StatusCode::BAD_REQUEST);
             assert_eq!(api_err.code, ErrorCode::TargetNotDeployed);
+        }
+
+        fn valued_body() -> GasKillerTaskRequestBody {
+            GasKillerTaskRequestBody {
+                value: U256::from(10u64).pow(U256::from(16u64)),
+                transition_index: None,
+                ..valid_body()
+            }
+        }
+
+        fn valued_providers(
+            asserter_setup: impl FnOnce(&Asserter),
+        ) -> HashMap<ChainRole, impl Provider + Clone> {
+            let (provider, asserter) = mock_provider();
+            push_code_exists(&asserter);
+            push_block_number(&asserter, 100);
+            push_code_exists(&asserter);
+            asserter_setup(&asserter);
+            let mut providers = HashMap::new();
+            providers.insert(ChainRole::L1, provider);
+            providers
+        }
+
+        /// The digest a value-bound SDK returns for the probe's inputs.
+        fn probe_digest(body: &GasKillerTaskRequestBody) -> FixedBytes<32> {
+            FixedBytes::from(
+                GasKillerTaskData {
+                    target_address: body.target_address,
+                    call_data: vec![0; 4],
+                    value: body.value,
+                    ..Default::default()
+                }
+                .build_payload_hash(&[])
+                .0,
+            )
+        }
+
+        /// A value-bearing task is accepted for a target whose SDK binds the value.
+        #[tokio::test]
+        async fn a_valued_task_is_accepted_for_a_value_bound_target() {
+            let digest = probe_digest(&valued_body());
+            let providers = valued_providers(|a| a.push_success(&Bytes::from(digest.abi_encode())));
+            validate_onchain(&providers, None, &valued_body())
+                .await
+                .expect("a target with getMessageHashWithValue accepts a valued task");
+        }
+
+        /// A target whose SDK predates the value binding reverts the probe, so a valued task is
+        /// refused up front instead of failing every round at the estimate.
+        #[tokio::test]
+        async fn a_valued_task_is_refused_for_a_target_that_does_not_bind_value() {
+            let providers = valued_providers(|a| {
+                a.push(alloy::rpc::json_rpc::ResponsePayload::Failure(
+                    alloy::rpc::json_rpc::ErrorPayload {
+                        code: 3,
+                        message: "execution reverted".into(),
+                        data: None,
+                    },
+                ))
+            });
+            let err = validate_onchain(&providers, None, &valued_body())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::ValueNotBound { .. }),
+                "expected ValueNotBound, got {err}"
+            );
+            let api_err = ApiError::from(err);
+            assert_eq!(api_err.status, StatusCode::BAD_REQUEST);
+            assert_eq!(api_err.code, ErrorCode::InvalidRequest);
+        }
+
+        /// A catch-all fallback answers with a word, but not the digest operators would sign, so
+        /// the task is refused rather than failing later with `InvalidSignature`.
+        #[tokio::test]
+        async fn a_valued_task_is_refused_when_the_probe_answers_the_wrong_digest() {
+            let providers = valued_providers(|a| {
+                a.push_success(&Bytes::from(
+                    FixedBytes::<32>::repeat_byte(0x11).abi_encode(),
+                ))
+            });
+            let err = validate_onchain(&providers, None, &valued_body())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::ValueNotBound { .. }),
+                "expected ValueNotBound, got {err}"
+            );
+        }
+
+        /// A transport failure on the probe proves nothing about the target, so it is transient.
+        #[tokio::test]
+        async fn a_failed_value_probe_is_transient() {
+            let providers = valued_providers(|a| a.push_failure_msg("connection reset"));
+            let err = validate_onchain(&providers, None, &valued_body())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::RpcError(_)),
+                "expected RpcError, got {err}"
+            );
+        }
+
+        /// A zero-value task never probes, so it works against every SDK version.
+        #[tokio::test]
+        async fn a_zero_value_task_skips_the_value_probe() {
+            let providers = valued_providers(|_| {});
+            let body = GasKillerTaskRequestBody {
+                transition_index: None,
+                ..valid_body()
+            };
+            validate_onchain(&providers, None, &body)
+                .await
+                .expect("no probe is queued, so a probe would fail the call");
         }
 
         /// A provider that cannot serve state at the requested height leaves the request neither

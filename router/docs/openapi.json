@@ -821,7 +821,7 @@
           },
           "value": {
             "$ref": "#/components/schemas/HexUint256",
-            "description": "Wei sent with the transaction. Zero in beta; `verifyAndUpdate` is not payable."
+            "description": "Wei sent with the transaction: the task's own `value`, so a call that brought ETH in settles\nwith it (`verifyAndUpdate` is payable, and the signed digest binds the value). Zero for a\ntask sent with none."
           },
           "chain_id": {
             "type": "integer",
