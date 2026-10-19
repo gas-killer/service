@@ -223,6 +223,10 @@ spec:
               value: {{ $root.Values.node.validationConcurrency | default $root.Values.router.maxInFlightTasks | quote }}
             - name: STORAGE_DIR
               value: {{ $root.Values.node.storageDir | quote }}
+            {{- with $root.Values.node.nestedMaxExpiryBlocks }}
+            - name: NESTED_MAX_EXPIRY_BLOCKS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with $root.Values.schnorr.messagesPerSecond }}
             # Per-peer rate on the schnorr protocol channel. Both ends register their own quota,
             # so this must match the router's or one side drops what the other may send.

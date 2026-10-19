@@ -1,7 +1,8 @@
 {{- /*
 Deploy-target job: deploys a demo GasKillerSDK target (ArraySummation) wired to the registry the
 schnorr-operators job created, and publishes its address to a ConfigMap for the local smoke test.
-Runs after the operator set is registered; opt-in via deployTarget.enabled.
+With deployTarget.nestedDeposit.enabled it also deploys the SDK's nested-deposit example, a valued
+two-frame tree. Runs after the operator set is registered; opt-in via deployTarget.enabled.
 */ -}}
 {{- if and .Values.deployTarget.enabled (or .Release.IsInstall .Values.rerun.deployTarget) }}
 apiVersion: batch/v1
@@ -91,6 +92,9 @@ spec:
                 echo "ERROR: schnorrStakeRegistry not found in $AVS_JSON"; jq '.addresses' "$AVS_JSON"; exit 1
               fi
 
+              # A rerun with the nested example switched off must not publish the last one.
+              rm -f /app/.nodes/nested_target.txt
+
               SCRIPT=script/DeployArraySummation.s.sol:DeployArraySummation
 
               set +e
@@ -108,6 +112,28 @@ spec:
               echo "[deploy-target] deployed target=$TARGET"
               printf '%s' "$TARGET" > /app/.nodes/demo_target.txt
               chmod 644 /app/.nodes/demo_target.txt
+              {{- if .Values.deployTarget.nestedDeposit.enabled }}
+
+              # forge create takes its gas limit from the RPC's eth_estimateGas, so it needs none
+              # of the script's simulation workarounds. The gateway deploys its own vault.
+              set +e
+              OUT=$(forge create src/examples/nested-deposit/DepositGateway.sol:DepositGateway \
+                --rpc-url "$HTTP_RPC" --private-key "$PRIVATE_KEY" --broadcast --json \
+                --constructor-args "$AVS_ADDRESS" "$SCHNORR_STAKE_REGISTRY_ADDRESS" \
+                {{ .Values.deployTarget.nestedDeposit.receiptRounds | quote }} 2>&1)
+              CODE=$?
+              set -e
+              echo "$OUT"
+              [ $CODE -ne 0 ] && { echo "ERROR: forge create DepositGateway failed ($CODE)"; exit 1; }
+
+              NESTED=$(echo "$OUT" | grep -oE '"deployedTo": *"0x[0-9a-fA-F]{40}"' | grep -oE '0x[0-9a-fA-F]{40}' | tail -1)
+              if [ -z "$NESTED" ]; then
+                echo "ERROR: could not parse deployedTo from forge output"; exit 1
+              fi
+              echo "[deploy-target] deployed nested-deposit gateway=$NESTED"
+              printf '%s' "$NESTED" > /app/.nodes/nested_target.txt
+              chmod 644 /app/.nodes/nested_target.txt
+              {{- end }}
           env:
             - name: PRIVATE_KEY
               valueFrom:
@@ -135,8 +161,14 @@ spec:
               set -e
               TARGET=$(cat /app/.nodes/demo_target.txt)
               echo "Publishing target $TARGET to ConfigMap {{ .Values.deployTarget.configMapName }} (ns {{ .Release.Namespace }})"
+              set -- --from-literal=target="$TARGET"
+              if [ -f /app/.nodes/nested_target.txt ]; then
+                NESTED=$(cat /app/.nodes/nested_target.txt)
+                echo "Publishing nested-deposit gateway $NESTED under nestedTarget"
+                set -- "$@" --from-literal=nestedTarget="$NESTED"
+              fi
               kubectl create configmap {{ .Values.deployTarget.configMapName }} \
-                --from-literal=target="$TARGET" \
+                "$@" \
                 --namespace {{ .Release.Namespace }} \
                 --dry-run=client -o yaml | kubectl apply -f -
               echo "Done. Read it locally with:"
