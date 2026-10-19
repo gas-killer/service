@@ -96,6 +96,8 @@ spec:
               # Take the gas limit from the node, not from forge's simulation: forge prices the
               # creation with the EVM rules compiled into it, which since Glamsterdam is about a
               # fifth of what Sepolia charges, so the creation dies out of gas at exactly its limit.
+              # --slow sends one transaction at a time should the script grow a second, and
+              # --non-interactive keeps forge from blocking the Job on a prompt.
               set +e
               OUT=$(forge script "$SCRIPT" \
                 --rpc-url "$HTTP_RPC" --private-key "$PRIVATE_KEY" --broadcast \
