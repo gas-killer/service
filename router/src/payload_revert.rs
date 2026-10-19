@@ -83,7 +83,7 @@ const KNOWN_REVERTS: &[KnownRevert] = &[
     known_revert!(
         GasKillerSDK::InvalidSignature,
         "the signed digest does not match the one the target recomputes from its own address, the \
-         target function, and the storage updates"
+         target function, the storage updates, and msg.value; send exactly the payload's value"
     ),
     known_revert!(
         GasKillerSDK::MalformedLogPayload,
@@ -133,8 +133,8 @@ const KNOWN_REVERTS: &[KnownRevert] = &[
     ),
     known_revert!(
         GasKillerSDK::NotTreeMember,
-        "a frame's leaf is not in the signed tree; a contract's transition index has moved since \
-         the tree was traced"
+        "a frame's leaf is not in the signed tree: the tree was settled with a msg.value other than \
+         the payload's value, or a contract's transition index has moved since it was traced"
     ),
     known_revert!(
         GasKillerSDK::NestedOutsideTree,
