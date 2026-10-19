@@ -22,7 +22,9 @@ pub struct PayloadView {
     /// Full ABI-encoded `verifyAndUpdate` calldata (selector + arguments).
     #[schema(value_type = crate::openapi::HexBytes)]
     pub data: Bytes,
-    /// Wei sent with the transaction. Zero in beta; `verifyAndUpdate` is not payable.
+    /// Wei sent with the transaction: the task's own `value`, so a call that brought ETH in settles
+    /// with it (`verifyAndUpdate` is payable, and the signed digest binds the value). Zero for a
+    /// task sent with none.
     #[schema(value_type = crate::openapi::HexUint256)]
     pub value: U256,
     /// Numeric EVM chain id the transaction must be submitted to.
@@ -76,7 +78,8 @@ pub struct TaskBundle {
     pub storage_updates: Bytes,
     /// Numeric EVM chain id.
     pub chain_id: u64,
-    /// Wei to send with the rendered transaction (zero in beta).
+    /// Wei to send with the rendered transaction: the task's own `value`, which the signed digest
+    /// binds, so the settlement must carry exactly this much.
     pub value: U256,
     /// Last block for which the rendered payload stays valid.
     pub valid_until_block: u64,

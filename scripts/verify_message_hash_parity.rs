@@ -12,28 +12,16 @@
 
 use alloy::primitives::{Address, Bytes, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::sol;
 use alloy::sol_types::SolCall;
 use gas_killer_common::GasKillerTaskData;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
+use gas_killer_common::bindings::valueboundsdk::IValueBoundDigest;
 use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
 use std::env;
 use std::fs;
 use url::Url;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
-
-sol! {
-    #[sol(rpc)]
-    interface IValueBoundDigest {
-        function getMessageHashWithValue(
-            uint256 transitionIndex,
-            bytes4 targetFunction,
-            bytes storageUpdates,
-            uint256 value
-        ) external view returns (bytes32);
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
