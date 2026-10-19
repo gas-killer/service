@@ -17,6 +17,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use gas_killer_common::ChainRole;
+use gas_killer_common::GasKillerTaskData;
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::avs_contracts::ResolvedContracts;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
@@ -399,7 +400,7 @@ impl fmt::Display for OnchainValidationError {
             ),
             Self::ValueNotBound { value } => write!(
                 f,
-                "value is {value} wei, but target_address was built from a Gas Killer SDK that does not bind msg.value into its signed digest (it has no getMessageHashWithValue), so it could credit ETH that never arrives; upgrade the target's SDK or send the call with no value"
+                "value is {value} wei, but target_address does not bind msg.value into its signed digest the way operators sign it (its getMessageHashWithValue is missing or disagrees), so it could credit ETH that never arrives; upgrade the target's SDK or send the call with no value"
             ),
             Self::RpcError(msg) => write!(f, "RPC error during onchain validation: {msg}"),
         }
@@ -558,16 +559,27 @@ async fn validate_onchain<P: Provider + Clone>(
     // accepts that signature. A target built from an older SDK hashes every task as zero-value:
     // it would reject the round, and it is the kind of target that credits a deposit whether or
     // not the ETH arrives. The probe is a call rather than a bytecode scan so a proxied target
-    // answers through its implementation.
+    // answers through its implementation, and its answer must equal the digest operators would
+    // sign for the same inputs: a catch-all fallback returns a word, but not that one.
     if !body.value.is_zero() {
         let probe = IValueBoundDigest::new(body.target_address, provider.clone());
+        let expected = FixedBytes::<32>::from(
+            GasKillerTaskData {
+                target_address: body.target_address,
+                call_data: vec![0; 4],
+                value: body.value,
+                ..Default::default()
+            }
+            .build_payload_hash(&[])
+            .0,
+        );
         // A revert is the node answering, so it counts as a healthy call.
         let answered = match probe
             .getMessageHashWithValue(U256::ZERO, FixedBytes::ZERO, Bytes::new(), body.value)
             .call()
             .await
         {
-            Ok(_) => Ok(true),
+            Ok(digest) => Ok(digest == expected),
             Err(err) if binds_no_value(&err) => Ok(false),
             Err(err) => Err(err),
         };
@@ -4611,12 +4623,25 @@ mod tests {
             providers
         }
 
+        /// The digest a value-bound SDK returns for the probe's inputs.
+        fn probe_digest(body: &GasKillerTaskRequestBody) -> FixedBytes<32> {
+            FixedBytes::from(
+                GasKillerTaskData {
+                    target_address: body.target_address,
+                    call_data: vec![0; 4],
+                    value: body.value,
+                    ..Default::default()
+                }
+                .build_payload_hash(&[])
+                .0,
+            )
+        }
+
         /// A value-bearing task is accepted for a target whose SDK binds the value.
         #[tokio::test]
         async fn a_valued_task_is_accepted_for_a_value_bound_target() {
-            let providers = valued_providers(|a| {
-                a.push_success(&Bytes::from(FixedBytes::<32>::ZERO.abi_encode()))
-            });
+            let digest = probe_digest(&valued_body());
+            let providers = valued_providers(|a| a.push_success(&Bytes::from(digest.abi_encode())));
             validate_onchain(&providers, None, &valued_body())
                 .await
                 .expect("a target with getMessageHashWithValue accepts a valued task");
@@ -4645,6 +4670,24 @@ mod tests {
             let api_err = ApiError::from(err);
             assert_eq!(api_err.status, StatusCode::BAD_REQUEST);
             assert_eq!(api_err.code, ErrorCode::InvalidRequest);
+        }
+
+        /// A catch-all fallback answers with a word, but not the digest operators would sign, so
+        /// the task is refused rather than failing later with `InvalidSignature`.
+        #[tokio::test]
+        async fn a_valued_task_is_refused_when_the_probe_answers_the_wrong_digest() {
+            let providers = valued_providers(|a| {
+                a.push_success(&Bytes::from(
+                    FixedBytes::<32>::repeat_byte(0x11).abi_encode(),
+                ))
+            });
+            let err = validate_onchain(&providers, None, &valued_body())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, OnchainValidationError::ValueNotBound { .. }),
+                "expected ValueNotBound, got {err}"
+            );
         }
 
         /// A transport failure on the probe proves nothing about the target, so it is transient.
