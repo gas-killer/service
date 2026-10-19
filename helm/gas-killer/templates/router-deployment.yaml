@@ -346,6 +346,8 @@ spec:
             {{- end }}
             - name: PAYLOAD_BLOCK_BUFFER
               value: {{ .Values.router.payloadBlockBuffer | quote }}
+            - name: NESTED_SETTLEMENT
+              value: {{ .Values.router.nestedSettlement | quote }}
             - name: HEALTHZ_PORT
               value: {{ .Values.router.healthzPort | quote }}
             - name: P2P_MESSAGE_BACKLOG

@@ -160,12 +160,16 @@ deployTarget:
   enabled: true
   image:
     # Pinned rather than `latest` so a rerun.deployTarget upgrade deploys a known contract.
-    tag: sha-8b57a74
+    tag: sha-42fde57
   configMapName: gas-killer-smoke-target
   # ArraySummation params (smoke test sums indexes [1,2,3], so arraySize must be >= 4).
   arraySize: 10
   maxValue: 10000
   arraySeed: 1
+  # Settles nested only against a registry with ISchnorrApprovalRegistry, which the pinned
+  # schnorr.stakeRegistryAddress below predates; flat settlement works against either.
+  nestedDeposit:
+    enabled: true
 
 # The fleet's SchnorrStakeRegistry. The operator-set job registers into the pinned registry below,
 # which it fills while it holds nothing but this operator set.

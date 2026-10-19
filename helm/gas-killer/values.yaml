@@ -355,6 +355,12 @@ node:
   # gas_killer_non_signers_total shows an operator finishing its tasks last; watch
   # gas_killer_validation_queue_wait_seconds for what the queue costs.
   validationConcurrency: ""
+  # How far past its own head a node accepts a nested tree's expiry (NESTED_MAX_EXPIRY_BLOCKS);
+  # empty uses the binary's default, eigenlayer.sdk.blockStaleMeasure. The router sets expiries
+  # min(router.payloadBlockBuffer, blockStaleMeasure - 1) blocks out, so a bound at or below that
+  # declines every tree; the render fails rather than ship a fleet that can never nest. Leave a
+  # few blocks above it for nodes whose head lags the router's.
+  nestedMaxExpiryBlocks: ""
   resources:
     requests:
       memory: "256Mi"
@@ -434,6 +440,11 @@ router:
   # user-signable payload stays valid (its valid_until_block). Must be <= BLOCK_STALE_MEASURE
   # so a payload never outlives the contract's operator-set window.
   payloadBlockBuffer: "50"
+  # Settle tasks whose call reaches other nesting-capable targets as one tree (NESTED_SETTLEMENT).
+  # Turn on only once every operator runs a build that parses nested requests, or nested tasks
+  # cannot reach a quorum, and only against a registry that implements ISchnorrApprovalRegistry.
+  # Keep it off wherever slashing backs quorum trust until the slasher understands nested roots.
+  nestedSettlement: false
   ingress:
     enabled: true
     # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation.
@@ -665,6 +676,15 @@ deployTarget:
   arraySize: 10
   maxValue: 10000
   arraySeed: 1
+  # The SDK's nested-deposit example (DepositGateway, which deploys its DepositVault), published
+  # under key "nestedTarget". Its deposit(address) settles as a two-frame tree carrying ETH, so
+  # it exercises nested settlement and value binding together. Needs an SDK image with
+  # GasKillerNestedSDK and a registry that implements ISchnorrApprovalRegistry.
+  nestedDeposit:
+    enabled: false
+    # Receipt hashing per deposit: enough that applying the vault's frame beats running it, so
+    # the vault nests rather than replaying as a plain CALL.
+    receiptRounds: 1000
   resources:
     requests:
       memory: "256Mi"
