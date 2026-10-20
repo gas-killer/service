@@ -148,11 +148,11 @@ router:
     # first. Long enough for a multi-minute round plus its wait in the queue, and above
     # router.roundTimeout, which a queued task has to outlive to be reached at all.
     taskTtlSeconds: "3000"
-    # The shared demo target the docs' Quickstart points at, published as demoTarget so the docs read
-    # it live. Set by hand: no chart job deploys it. It must be wired to schnorr.stakeRegistryAddress,
-    # or /avs-metadata publishes no contracts at all. Empty until one is deployed against the
-    # current registry; the previous one (0xCAcD6fd494cde74A84e7e5F6816ca7C87aa88aaD) is on the old.
-    demoTarget: ""
+    # The shared ArraySummation the docs' Quickstart points at (16 elements, deployed 2026-10-20 from
+    # solidity-sdk 42fde57), published as demoTarget so the docs read it live. Set by hand: no chart
+    # job deploys it. It must be wired to schnorr.stakeRegistryAddress, or /avs-metadata publishes no
+    # contracts at all.
+    demoTarget: "0x92080876E018688d0E7f1a8693280dAA62005735"
 
 # Deploy the smoke-test target (ArraySummation, wired to schnorr.stakeRegistryAddress)
 # after the operator set is registered, then publish its address to a ConfigMap:
