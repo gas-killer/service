@@ -148,10 +148,11 @@ router:
     # first. Long enough for a multi-minute round plus its wait in the queue, and above
     # router.roundTimeout, which a queued task has to outlive to be reached at all.
     taskTtlSeconds: "3000"
-    # The shared ArraySummation the docs' Quickstart points at (16 elements, wired to
-    # schnorr.stakeRegistryAddress), published as demoTarget so the docs read it live. Set by hand:
-    # no chart job deploys the shared demo target.
-    demoTarget: "0xCAcD6fd494cde74A84e7e5F6816ca7C87aa88aaD"
+    # The shared demo target the docs' Quickstart points at, published as demoTarget so the docs read
+    # it live. Set by hand: no chart job deploys it. It must be wired to schnorr.stakeRegistryAddress,
+    # or /avs-metadata publishes no contracts at all. Empty until one is deployed against the
+    # current registry; the previous one (0xCAcD6fd494cde74A84e7e5F6816ca7C87aa88aaD) is on the old.
+    demoTarget: ""
 
 # Deploy the smoke-test target (ArraySummation, wired to schnorr.stakeRegistryAddress)
 # after the operator set is registered, then publish its address to a ConfigMap:
@@ -185,12 +186,13 @@ schnorr:
   # against a live schnorr fleet.
   noticeWindow: 600
 
-  # Deployed 2026-09-10, owner
-  # 0x5DD2e7db868e33c03daB85d0C623048A7980634E, threshold 2/3, filled by the schnorr install.
-  # Pinning it here is what makes the address durable: a PVC rebuilt and restored without
-  # addresses.schnorrStakeRegistry in avs_deploy.json would otherwise let rerun.schnorrOperators
-  # deploy a FRESH registry, orphaning every target wired to this one.
+  # Deployed 2026-10-20, owner
+  # 0x5DD2e7db868e33c03daB85d0C623048A7980634E, threshold 2/3, implements ISchnorrApprovalRegistry
+  # so targets wired to it can settle nested. Pinning it here is what makes the address durable: a
+  # PVC rebuilt and restored without addresses.schnorrStakeRegistry in avs_deploy.json would
+  # otherwise let rerun.schnorrOperators deploy a FRESH registry.
   #
-  # Changing this value strands every integrator target whose constructor took the old address, so
-  # it moves only alongside a coordinated migration.
-  stakeRegistryAddress: "0x8A86301675ac9617895117afFE9577f5154555F9"
+  # The previous registry, 0x8A86301675ac9617895117afFE9577f5154555F9 (2026-09-10), holds the same
+  # operator set and still verifies for the targets wired to it, but nothing here manages it: an
+  # operator-set change applied only to this registry breaks every target on the old one.
+  stakeRegistryAddress: "0xC3550328D09EDC4dfda4f171fB1CE39269A2E4f0"
