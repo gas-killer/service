@@ -38,7 +38,7 @@ use gas_killer_router::operator_http::{HealthState, build_operator_app};
 use gas_killer_router::scheduler::Scheduler;
 use gas_killer_router::schnorr_coordinator::SchnorrCoordinator;
 use gas_killer_router::sequencer::{TaskDispatcher, TaskQueue};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,13 +52,13 @@ const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
 const SCHNORR_CHANNEL: u64 = 2;
 
 /// Resolve a hostname:port with retry logic for Docker DNS readiness
-fn resolve_with_retry(
+async fn resolve_with_retry(
     address: &str,
     max_retries: u32,
     retry_delay: Duration,
 ) -> Option<SocketAddr> {
     for attempt in 1..=max_retries {
-        match address.to_socket_addrs() {
+        match ::tokio::net::lookup_host(address).await {
             Ok(mut addrs) => {
                 if let Some(addr) = addrs.next() {
                     tracing::info!(address, ?addr, attempt, "DNS resolution succeeded");
@@ -74,7 +74,7 @@ fn resolve_with_retry(
                         error = %e,
                         "DNS resolution failed, retrying..."
                     );
-                    std::thread::sleep(retry_delay);
+                    ::tokio::time::sleep(retry_delay).await;
                 } else {
                     tracing::error!(
                         address,
@@ -258,28 +258,38 @@ fn main() {
             if participants.is_empty() {
                 panic!("Please provide at least one participant");
             }
-            for participant in participants {
-                let verifier = participant.pub_keys.unwrap().g2_pub_key;
-                if let Some(socket) = participant.socket {
-                    // Try to resolve hostname:port with retries (Docker DNS may need time)
-                    if let Some(socket_addr) =
-                        resolve_with_retry(&socket, 30, Duration::from_secs(2))
-                    {
-                        recipients.push((verifier, socket_addr));
-                    } else {
-                        // Last resort: try parsing as direct IP:PORT
-                        match SocketAddr::from_str(&socket) {
-                            Ok(socket_addr) => {
-                                recipients.push((verifier, socket_addr));
-                            }
-                            Err(parse_err) => {
-                                tracing::error!(
-                                    socket,
-                                    error = %parse_err,
-                                    "Failed to resolve or parse socket address"
-                                );
-                                panic!("Bootstrapper address not well-formed: {socket}");
-                            }
+            // Resolved concurrently so one slow or missing peer doesn't delay the rest.
+            let resolutions: Vec<_> = participants
+                .into_iter()
+                .filter_map(|participant| {
+                    let verifier = participant.pub_keys.unwrap().g2_pub_key;
+                    let socket = participant.socket?;
+                    Some(::tokio::spawn(async move {
+                        // Try to resolve hostname:port with retries (Docker DNS may need time)
+                        let resolved =
+                            resolve_with_retry(&socket, 30, Duration::from_secs(2)).await;
+                        (verifier, socket, resolved)
+                    }))
+                })
+                .collect();
+            for resolution in resolutions {
+                let (verifier, socket, resolved) =
+                    resolution.await.expect("peer resolution task panicked");
+                if let Some(socket_addr) = resolved {
+                    recipients.push((verifier, socket_addr));
+                } else {
+                    // Last resort: try parsing as direct IP:PORT
+                    match SocketAddr::from_str(&socket) {
+                        Ok(socket_addr) => {
+                            recipients.push((verifier, socket_addr));
+                        }
+                        Err(parse_err) => {
+                            tracing::error!(
+                                socket,
+                                error = %parse_err,
+                                "Failed to resolve or parse socket address"
+                            );
+                            panic!("Bootstrapper address not well-formed: {socket}");
                         }
                     }
                 }
