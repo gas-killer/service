@@ -578,6 +578,26 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         }
     }
 
+    /// The target's `blockStaleMeasure()`, read per render for the same reason as the registry:
+    /// it lives in storage behind an `internal` setter.
+    async fn stale_measure(&self, provider: P, target_addr: Address) -> Option<u64> {
+        match GasKillerSDK::new(target_addr, provider)
+            .blockStaleMeasure()
+            .call()
+            .await
+        {
+            Ok(measure) => Some(u64::try_from(measure).unwrap_or(u64::MAX)),
+            Err(error) => {
+                warn!(
+                    target = %target_addr,
+                    %error,
+                    "could not read blockStaleMeasure; leaving payload validity at the buffer"
+                );
+                None
+            }
+        }
+    }
+
     /// Renders a completed round into a user-signable transaction request and the durable
     /// [`TaskBundle`] it derives from, without broadcasting.
     ///
@@ -645,7 +665,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let data = call.calldata().clone();
         let estimated_gas = self.resolve_payload_gas(call.estimate_gas().await, target_addr)?;
 
-        let unclamped_valid_until = reference_block_number as u64 + self.payload_block_buffer;
+        // `verifyAndUpdate` rejects a reference older than the target's own window, which may be
+        // shorter than the buffer.
+        let window = self
+            .stale_measure(sdk.provider().clone(), target_addr)
+            .await
+            .map_or(self.payload_block_buffer, |measure| {
+                self.payload_block_buffer.min(measure)
+            });
+        let unclamped_valid_until = (reference_block_number as u64).saturating_add(window);
         let horizon = self
             .schnorr_mutation_horizon(sdk.provider().clone(), target_addr)
             .await;
@@ -1468,6 +1496,42 @@ mod tests {
                 non_signers
             }
         );
+    }
+
+    /// A target that goes stale sooner than the buffer bounds how long its payload is offered.
+    #[tokio::test]
+    async fn the_target_window_bounds_the_rendered_validity() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request_body()).await.unwrap();
+        let (task_data, msg_hash) = matching_task_data();
+
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        push_supports_interface(&asserter, true);
+        asserter.push_success(&alloy::primitives::U64::from(123_456u64));
+        asserter.push_success(&Bytes::from(U256::from(20u64).abi_encode()));
+        let mut handler = GasKillerHandler::new(1, provider)
+            .with_store(store.clone())
+            .with_payload_block_buffer(50);
+
+        handler
+            .handle_schnorr_verification(
+                &traced(&task.id, &task_data),
+                Instant::now(),
+                msg_hash,
+                100,
+                U256::from(42u64),
+                Address::from([0x44; 20]),
+                vec![],
+            )
+            .await
+            .expect("the round renders");
+
+        let settled = store.get_task(&task.id).await.unwrap().unwrap();
+        let payload: PayloadView =
+            serde_json::from_str(settled.payload.as_deref().expect("payload persisted")).unwrap();
+        assert_eq!(payload.valid_until_block, 99 + 20);
     }
 
     /// A transient failure on the first attempt must not cost the retry its router trace: the
