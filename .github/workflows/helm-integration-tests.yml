@@ -105,9 +105,9 @@ jobs:
           test "$(yq "$SETUP | .spec.backoffLimit" "$RUNNER_TEMP/node.yaml")" = 0
           test "$(yq "$SETUP | .spec.template.spec.restartPolicy" "$RUNNER_TEMP/node.yaml")" = Never
           echo "setup runs once on testnet"
-          test "$(grep -A1 'name: NESTED_SETTLEMENT' "$RUNNER_TEMP/node.yaml" | grep -c '"false"')" = 1
+          test "$(grep -A1 'name: NESTED_SETTLEMENT' "$RUNNER_TEMP/node.yaml" | grep -c '"true"')" = 1
           grep -q 'forge create src/examples/nested-deposit/DepositGateway.sol:DepositGateway' "$RUNNER_TEMP/node.yaml"
-          echo "nesting is off and the nested-deposit example deploys"
+          echo "nesting is on and the nested-deposit example deploys"
           helm template gk ./helm/gas-killer -f helm/gas-killer/testnet-overrides.yaml \
             $COMMON --set router.nestedSettlement=true --set node.nestedMaxExpiryBlocks=260 \
             > "$RUNNER_TEMP/nested.yaml"

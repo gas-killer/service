@@ -141,6 +141,8 @@ router:
   # Two sessions at once, on distinct targets. The sim node's tracing slots are sized to it
   # (helm/sim-node: 2 x (1 + operators) x sessions = 16 at 3 operators); raise both together.
   maxInFlightTasks: "2"
+  # Safe here because schnorr.stakeRegistryAddress implements ISchnorrApprovalRegistry.
+  nestedSettlement: true
   ingress:
     timeoutMs: "0"
     # Equal to the payload's own validity window (payloadBlockBuffer x 12s), so a task can never
@@ -168,7 +170,7 @@ deployTarget:
   maxValue: 10000
   arraySeed: 1
   # Settles nested only against a registry with ISchnorrApprovalRegistry, which the pinned
-  # schnorr.stakeRegistryAddress below predates; flat settlement works against either.
+  # schnorr.stakeRegistryAddress below implements; flat settlement works against either.
   nestedDeposit:
     enabled: true
 
