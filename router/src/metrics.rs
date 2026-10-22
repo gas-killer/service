@@ -259,8 +259,9 @@ impl MetricsCollector {
             tasks_expired_at_requeue.clone(),
         );
 
-        let storage_computation_seconds =
-            Histogram::new([0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0, 300.0]);
+        let storage_computation_seconds = Histogram::new([
+            0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0, 3600.0,
+        ]);
         registry.register(
             "gas_killer_storage_computation_seconds",
             "Seconds spent turning one request into storage updates: chain detection, the transition-index read, and gas analysis",
@@ -298,18 +299,21 @@ impl MetricsCollector {
             execution_duration_seconds.clone(),
         );
 
-        let p2p_round_trip_seconds =
-            Histogram::new([0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0]);
+        let p2p_round_trip_seconds = Histogram::new([
+            0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+            1200.0, 2400.0, 3600.0,
+        ]);
         registry.register(
             "gas_killer_p2p_round_trip_seconds",
             "Time from a session's start to its aggregate signature, signed sessions only (P2P transit + node EVMSketch + Schnorr signing + aggregation)",
             p2p_round_trip_seconds.clone(),
         );
 
-        // Roughly p2p_round_trip + execution_duration; block-time dominated, so the
-        // execution-duration buckets resolve it well.
+        // Roughly p2p_round_trip + execution_duration. The signing round can run to ROUND_TIMEOUT
+        // (2400s on testnet), so the buckets reach past it rather than stopping at block times.
         let round_latency_seconds = Histogram::new([
-            0.5, 1.0, 2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0, 45.0, 60.0, 120.0, 300.0,
+            0.5, 1.0, 2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0, 45.0, 60.0, 120.0, 300.0, 600.0,
+            1200.0, 2400.0, 3600.0,
         ]);
         registry.register(
             "gas_killer_round_latency_seconds",
@@ -320,7 +324,8 @@ impl MetricsCollector {
         // Spans the ingress queue wait as well as the round itself, so it needs headroom well
         // past the round-latency buckets: a task can sit queued behind others for minutes.
         let task_e2e_seconds = Histogram::new([
-            1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 120.0, 300.0, 600.0,
+            1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0,
+            3600.0, 5400.0,
         ]);
         registry.register(
             "gas_killer_task_e2e_seconds",

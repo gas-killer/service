@@ -133,7 +133,10 @@ fn cache_result_labels(hit: bool) -> CacheResultLabels {
 
 /// Network plus remote node CPU, and a struct-log trace can be enormous.
 fn trace_fetch_buckets() -> Histogram {
-    Histogram::new([0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0])
+    Histogram::new([
+        0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0,
+        3600.0,
+    ])
 }
 
 /// Local CPU, `O(execution steps)`.
@@ -202,8 +205,9 @@ pub struct ValidatorMetrics {
 impl ValidatorMetrics {
     pub fn new() -> Self {
         let mut registry = Registry::default();
-        let evmsketch_duration_seconds =
-            Histogram::new([0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0]);
+        let evmsketch_duration_seconds = Histogram::new([
+            0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0, 3600.0,
+        ]);
         registry.register(
             "gas_killer_node_evmsketch_duration_seconds",
             "Duration of gas analysis (EVMSketch + RPC calls), cache-miss path only. Excludes chain detection. Emitted by the router and the operators alike; the `node` in the name is historical, and the two are separated by the scrape target.",
