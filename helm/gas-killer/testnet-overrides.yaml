@@ -170,7 +170,7 @@ deployTarget:
   maxValue: 10000
   arraySeed: 1
   # Settles nested only against a registry with ISchnorrApprovalRegistry, which the pinned
-  # schnorr.stakeRegistryAddress below predates; flat settlement works against either.
+  # schnorr.stakeRegistryAddress below implements; flat settlement works against either.
   nestedDeposit:
     enabled: true
 
