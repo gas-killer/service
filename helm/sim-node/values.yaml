@@ -52,7 +52,7 @@ reth:
 lighthouse:
   image:
     repository: sigp/lighthouse
-    tag: v8.3.0-rc.0
+    tag: v8.3.1
     pullPolicy: IfNotPresent
   # Checkpoint sync: minutes to a live head instead of days from genesis.
   checkpointSyncUrl: https://sepolia.checkpoint-sync.ethpandaops.io
