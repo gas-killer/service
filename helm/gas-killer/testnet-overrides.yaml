@@ -141,6 +141,8 @@ router:
   # Two sessions at once, on distinct targets. The sim node's tracing slots are sized to it
   # (helm/sim-node: 2 x (1 + operators) x sessions = 16 at 3 operators); raise both together.
   maxInFlightTasks: "2"
+  # Safe here because schnorr.stakeRegistryAddress implements ISchnorrApprovalRegistry.
+  nestedSettlement: true
   ingress:
     timeoutMs: "0"
     # Equal to the payload's own validity window (payloadBlockBuffer x 12s), so a task can never
