@@ -107,12 +107,15 @@ fn clamp_to_mutation_horizon(valid_until_block: u64, horizon: Option<U256>) -> u
     valid_until_block.min(horizon.saturating_sub(1))
 }
 
-/// The last block a tree referencing `reference` can land in: within the payload buffer, before
-/// the stalest frame's `blockStaleMeasure` lapses, and no later than the signed expiry.
+/// The last block a payload referencing `reference` can land in: within the payload buffer and
+/// before `stale_measure` lapses, since `verifyAndUpdate` rejects an older reference.
+fn stale_valid_until(reference: u64, buffer: u64, stale_measure: u64) -> u64 {
+    reference.saturating_add(buffer.min(stale_measure))
+}
+
+/// [`stale_valid_until`] for a tree, bounded by its stalest frame and its signed expiry.
 fn tree_valid_until(reference: u64, buffer: u64, min_stale_measure: u64, expiry_block: u64) -> u64 {
-    reference
-        .saturating_add(buffer.min(min_stale_measure))
-        .min(expiry_block)
+    stale_valid_until(reference, buffer, min_stale_measure).min(expiry_block)
 }
 
 /// Handler for executing verifyAndUpdate transactions with multi-chain support
@@ -665,15 +668,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         let data = call.calldata().clone();
         let estimated_gas = self.resolve_payload_gas(call.estimate_gas().await, target_addr)?;
 
-        // `verifyAndUpdate` rejects a reference older than the target's own window, which may be
-        // shorter than the buffer.
-        let window = self
+        let stale_measure = self
             .stale_measure(sdk.provider().clone(), target_addr)
             .await
-            .map_or(self.payload_block_buffer, |measure| {
-                self.payload_block_buffer.min(measure)
-            });
-        let unclamped_valid_until = (reference_block_number as u64).saturating_add(window);
+            .unwrap_or(u64::MAX);
+        let unclamped_valid_until = stale_valid_until(
+            reference_block_number as u64,
+            self.payload_block_buffer,
+            stale_measure,
+        );
         let horizon = self
             .schnorr_mutation_horizon(sdk.provider().clone(), target_addr)
             .await;
