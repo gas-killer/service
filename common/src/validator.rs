@@ -416,6 +416,23 @@ fn executor_cache_capacity(num_chains: usize) -> usize {
     per_chain * num_chains.max(1)
 }
 
+/// Whether the speculative pre-build should run for `chain`.
+///
+/// The executor cache is keyed by RPC URL and analysis builds against the simulation URL, so a
+/// pre-build against the chain URL can only hit when the two are the same. Pre-building against
+/// the simulation URL instead is not an option: the re-fork proxy re-forks Anvil whenever a block
+/// past its fork is requested, so polling every block would force a reset every block.
+fn prebuild_applies(
+    chain_rpc_urls: &HashMap<ChainRole, String>,
+    sim_rpc_urls: &HashMap<ChainRole, String>,
+    chain: ChainRole,
+) -> bool {
+    match sim_rpc_urls.get(&chain) {
+        Some(sim) => chain_rpc_urls.get(&chain) == Some(sim),
+        None => true,
+    }
+}
+
 /// Validator implementation for the gas killer use case with multi-chain support
 #[derive(Clone)]
 pub struct GasKillerValidator {
@@ -892,9 +909,19 @@ impl GasKillerValidator {
             return;
         }
 
-        let loops = self
-            .chain_rpc_urls
-            .iter()
+        let (eligible, skipped): (Vec<_>, Vec<_>) =
+            self.chain_rpc_urls.iter().partition(|(chain, _)| {
+                prebuild_applies(&self.chain_rpc_urls, &self.sim_rpc_urls, **chain)
+            });
+        for (chain, _) in &skipped {
+            info!(
+                ?chain,
+                "Speculative pre-build skipped: analysis runs on a separate simulation RPC"
+            );
+        }
+
+        let loops = eligible
+            .into_iter()
             .filter_map(|(chain, rpc_url)| {
                 let provider = self.providers.get(chain)?;
                 Some(self.prebuild_chain_loop(*chain, rpc_url, provider, config))
@@ -902,6 +929,9 @@ impl GasKillerValidator {
             .collect::<Vec<_>>();
 
         if loops.is_empty() {
+            if !skipped.is_empty() {
+                return;
+            }
             warn!("Speculative pre-build: no chains with providers; loop not started");
             return;
         }
@@ -1348,6 +1378,21 @@ mod tests {
         assert_eq!(GasKillerValidator::speculative_target(2, 2), None);
         // depth deeper than head → no underflow
         assert_eq!(GasKillerValidator::speculative_target(1, 5), None);
+    }
+
+    #[test]
+    fn prebuild_runs_only_where_analysis_uses_the_chain_rpc() {
+        let chain = HashMap::from([
+            (ChainRole::L1, "https://l1.example".to_string()),
+            (ChainRole::L2, "https://l2.example".to_string()),
+        ]);
+        let sim = HashMap::from([
+            (ChainRole::L1, "http://sim-node:8545".to_string()),
+            (ChainRole::L2, "https://l2.example".to_string()),
+        ]);
+        assert!(!prebuild_applies(&chain, &sim, ChainRole::L1));
+        assert!(prebuild_applies(&chain, &sim, ChainRole::L2));
+        assert!(prebuild_applies(&chain, &HashMap::new(), ChainRole::L1));
     }
 
     #[test]
