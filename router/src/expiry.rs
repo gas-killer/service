@@ -174,7 +174,9 @@ mod tests {
     async fn sweep_leaves_tasks_inside_the_ttl() {
         let store = store().await;
         let task = queued_task(&store).await;
-        age_task(&store, &task.id, 299).await;
+        // Well inside the TTL: `created_at` and the sweep's `unixepoch()` are whole seconds, so a
+        // one-second margin fails whenever the insert and the sweep straddle a second boundary.
+        age_task(&store, &task.id, TTL.as_secs() as i64 - 60).await;
 
         assert_eq!(sweep_expired_tasks(&store, None, TTL).await, 0);
         assert_eq!(status_of(&store, &task.id).await, TaskStatus::Queued);
