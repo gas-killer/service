@@ -4,6 +4,7 @@ use commonware_cryptography::sha256::Digest;
 use commonware_runtime::telemetry::metrics::encoding::text::encode;
 use commonware_runtime::telemetry::metrics::raw::{Counter, Family, Gauge, Histogram};
 use commonware_runtime::telemetry::metrics::registry::Registry;
+use lru::LruCache;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -194,6 +195,11 @@ pub struct ValidatorMetrics {
     /// Digest-cache outcomes. A hit skips the entire analysis, so the phase histograms cannot be
     /// interpreted without knowing how often that happened.
     pub digest_cache: PerCacheResultCounter,
+    /// Digests held in the cache now, at most `GK_DIGEST_CACHE_CAPACITY`.
+    pub digest_cache_entries: Gauge<i64, AtomicI64>,
+    /// Callers that waited on another caller's trace of the same task and read its digest
+    /// instead of tracing again.
+    pub digest_flight_coalesced: Counter<u64, AtomicU64>,
     /// Traces waiting for a validation slot. Only a node bounds its traces, so this stays zero
     /// on the router.
     pub validation_queue_depth: Gauge<i64, AtomicI64>,
@@ -267,6 +273,20 @@ impl ValidatorMetrics {
             digest_cache.clone(),
         );
 
+        let digest_cache_entries = Gauge::default();
+        registry.register(
+            "gas_killer_evmsketch_digest_cache_entries",
+            "Digests held in the digest cache (bounded by GK_DIGEST_CACHE_CAPACITY)",
+            digest_cache_entries.clone(),
+        );
+
+        let digest_flight_coalesced = Counter::default();
+        registry.register(
+            "gas_killer_evmsketch_digest_flight_coalesced",
+            "Total digest lookups that waited on a concurrent trace of the same task and reused its result",
+            digest_flight_coalesced.clone(),
+        );
+
         let validation_queue_depth = Gauge::default();
         registry.register(
             "gas_killer_validation_queue_depth",
@@ -293,6 +313,8 @@ impl ValidatorMetrics {
             revm_estimate_seconds,
             executor_cache,
             digest_cache,
+            digest_cache_entries,
+            digest_flight_coalesced,
             validation_queue_depth,
             validation_queue_wait_seconds,
         }
@@ -437,6 +459,12 @@ fn prebuild_applies(
     }
 }
 
+fn new_digest_cache() -> Arc<Mutex<LruCache<DigestCacheKey, Digest>>> {
+    Arc::new(Mutex::new(LruCache::new(
+        crate::config::digest_cache_capacity(),
+    )))
+}
+
 /// Validator implementation for the gas killer use case with multi-chain support
 #[derive(Clone)]
 pub struct GasKillerValidator {
@@ -453,7 +481,9 @@ pub struct GasKillerValidator {
     /// Cache: task identity ([`DigestCacheKey`]) -> computed digest.
     /// Prevents re-running expensive EVMSketch for the same task when the
     /// orchestrator validates multiple signatures for identical task data.
-    digest_cache: Arc<Mutex<HashMap<DigestCacheKey, Digest>>>,
+    /// An LRU because each key carries the task's calldata (up to 128 KB) and an entry is only
+    /// needed while its session can still retry; see [`crate::config::digest_cache_capacity`].
+    digest_cache: Arc<Mutex<LruCache<DigestCacheKey, Digest>>>,
     /// One flight lock per in-progress [`DigestCacheKey`]. The cache alone does not stop
     /// concurrent callers from racing: it is written only once a trace completes, so two
     /// callers arriving before the first finishes both miss and both run a full EVMSketch for
@@ -506,7 +536,7 @@ impl GasKillerValidator {
             chain_rpc_urls,
             providers,
             default_chain: ChainRole::L1,
-            digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            digest_cache: new_digest_cache(),
             digest_flights: Arc::new(StdMutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
@@ -530,7 +560,7 @@ impl GasKillerValidator {
             chain_rpc_urls,
             providers,
             default_chain: ChainRole::L1,
-            digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            digest_cache: new_digest_cache(),
             digest_flights: Arc::new(StdMutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
@@ -548,7 +578,7 @@ impl GasKillerValidator {
             chain_rpc_urls,
             providers,
             default_chain: ChainRole::L1,
-            digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            digest_cache: new_digest_cache(),
             digest_flights: Arc::new(StdMutex::new(HashMap::new())),
             executor_cache: Arc::new(EvmSketchExecutorCache::new(capacity)),
             validator_metrics: None,
@@ -801,9 +831,8 @@ impl GasKillerValidator {
     #[cfg(test)]
     async fn prime_cache(&self, task_data: &GasKillerTaskData, storage_updates: &[u8]) {
         let digest = task_data.build_payload_hash(storage_updates);
-        let cache_key = digest_cache_key(task_data, None);
-        let mut cache = self.digest_cache.lock().await;
-        cache.insert(cache_key, digest);
+        self.store_digest(digest_cache_key(task_data, None), digest)
+            .await;
         debug!(
             transition_index = task_data.transition_index,
             block_height = task_data.block_height,
@@ -1138,6 +1167,9 @@ impl GasKillerValidator {
         // A caller that waited is here because someone else traced the task, and that trace
         // has usually filled the cache since.
         if let Some(cached) = self.cached_digest(&key).await {
+            if let Some(metrics) = &self.validator_metrics {
+                metrics.digest_flight_coalesced.inc();
+            }
             return DigestClaim::Known(cached);
         }
         DigestClaim::Trace(Box::new(DigestTurn {
@@ -1166,7 +1198,7 @@ impl GasKillerValidator {
     /// Split out because the flight path reads the cache twice: once to skip the flight
     /// entirely, and once after waiting, where the leader will usually have filled it.
     async fn cached_digest(&self, cache_key: &DigestCacheKey) -> Option<Digest> {
-        let cache = self.digest_cache.lock().await;
+        let mut cache = self.digest_cache.lock().await;
         let cached = cache.get(cache_key).copied()?;
         if let Some(metrics) = &self.validator_metrics {
             metrics.observe_digest_cache(true);
@@ -1199,14 +1231,19 @@ impl GasKillerValidator {
             }
         };
 
-        // Store in cache for subsequent calls with the same round
-        {
-            let mut cache = self.digest_cache.lock().await;
-            cache.insert(cache_key.clone(), payload_hash);
-        }
+        self.store_digest(cache_key.clone(), payload_hash).await;
 
         debug!("Built and cached payload hash: {:?}", payload_hash);
         Ok(payload_hash)
+    }
+
+    /// Caches a traced digest, evicting the least recently used one once the cache is full.
+    async fn store_digest(&self, cache_key: DigestCacheKey, digest: Digest) {
+        let mut cache = self.digest_cache.lock().await;
+        cache.put(cache_key, digest);
+        if let Some(metrics) = &self.validator_metrics {
+            metrics.digest_cache_entries.set(cache.len() as i64);
+        }
     }
 
     /// The flight lock for a key: the one already registered, or a fresh one.
@@ -1590,6 +1627,92 @@ mod tests {
             .expect("follower task panicked")
             .expect("the follower must read the digest the flight produced");
         assert_eq!(digest, task_data.build_payload_hash(&storage_updates));
+    }
+
+    /// Every key carries its task's calldata, so a stream of distinct large-calldata tasks is
+    /// the worst case for memory: the cache must hold at capacity and drop the oldest.
+    #[tokio::test]
+    async fn the_digest_cache_evicts_at_capacity() {
+        let metrics = Arc::new(ValidatorMetrics::new());
+        let mut validator = GasKillerValidator::with_rpc_url("https://example.com")
+            .with_validator_metrics(Arc::clone(&metrics));
+        validator.digest_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(8).unwrap(),
+        )));
+        let tasks: Vec<_> = (0..64u64)
+            .map(|i| {
+                let mut task = create_test_task_data();
+                task.transition_index = i;
+                task.call_data = vec![i as u8; crate::task_data::MAX_EVM_TX_CALLDATA_SIZE];
+                task
+            })
+            .collect();
+        for task in &tasks {
+            validator.prime_cache(task, &[0x01]).await;
+        }
+
+        assert_eq!(validator.digest_cache.lock().await.len(), 8);
+        assert!(
+            metrics
+                .encode()
+                .contains("gas_killer_evmsketch_digest_cache_entries 8")
+        );
+        assert!(matches!(
+            validator.claim_digest(&tasks[0]).await,
+            DigestClaim::Trace(_)
+        ));
+        assert!(matches!(
+            validator.claim_digest(&tasks[63]).await,
+            DigestClaim::Known(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_trace_is_not_cached() {
+        let validator = GasKillerValidator::with_rpc_url("http://127.0.0.1:1/unreachable");
+        let task = create_test_task_data();
+
+        let DigestClaim::Trace(turn) = validator.claim_digest(&task).await else {
+            panic!("nothing is cached yet");
+        };
+        assert!(validator.trace_digest(&task, turn).await.is_err());
+
+        assert!(
+            matches!(validator.claim_digest(&task).await, DigestClaim::Trace(_)),
+            "the next caller must retry the trace rather than inherit the failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_waited_on_a_flight_is_counted_as_coalesced() {
+        let metrics = Arc::new(ValidatorMetrics::new());
+        let validator = Arc::new(
+            GasKillerValidator::with_rpc_url("https://example.com")
+                .with_validator_metrics(Arc::clone(&metrics)),
+        );
+        let task = create_test_task_data();
+
+        let DigestClaim::Trace(turn) = validator.claim_digest(&task).await else {
+            panic!("nothing is cached yet");
+        };
+        let follower = tokio::spawn({
+            let (validator, task) = (Arc::clone(&validator), task.clone());
+            async move { validator.claim_digest(&task).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        validator.prime_cache(&task, &[0x01]).await;
+        drop(turn);
+
+        let claim = tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(claim, DigestClaim::Known(_)));
+        assert!(
+            metrics
+                .encode()
+                .contains("gas_killer_evmsketch_digest_flight_coalesced_total 1")
+        );
     }
 
     #[tokio::test]

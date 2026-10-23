@@ -33,6 +33,7 @@ dotenv = { workspace = true }
 
 # Gas analysis
 gas-analyzer = { workspace = true }
+lru = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
