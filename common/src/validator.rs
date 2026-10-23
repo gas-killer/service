@@ -923,7 +923,10 @@ impl GasKillerValidator {
         let loops = eligible
             .into_iter()
             .filter_map(|(chain, rpc_url)| {
-                let provider = self.providers.get(chain)?;
+                let Some(provider) = self.providers.get(chain) else {
+                    warn!(?chain, "Speculative pre-build skipped: no provider for chain");
+                    return None;
+                };
                 Some(self.prebuild_chain_loop(*chain, rpc_url, provider, config))
             })
             .collect::<Vec<_>>();
