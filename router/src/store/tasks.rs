@@ -179,6 +179,18 @@ pub struct Task {
 /// `the_paged_walk_uses_the_incomplete_index` fails if they drift.
 const IN_FLIGHT_PREDICATE: &str = "status NOT IN ('ready', 'failed', 'expired')";
 
+/// What a guarded terminal transition did to the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settlement {
+    /// The task was in flight and now holds the new status. Carries its end-to-end latency in
+    /// whole seconds, ingress acceptance to this settle.
+    Settled { elapsed_secs: i64 },
+    /// The task had already settled as this status, and the row was left as it was.
+    AlreadySettled(TaskStatus),
+    /// No task carries the id.
+    Unknown,
+}
+
 /// Reads the upper bound of a re-queue walk. See [`SqliteStore::last_incomplete_task`].
 fn last_incomplete_task_sql() -> String {
     format!(
@@ -553,12 +565,12 @@ impl SqliteStore {
     }
 
     /// Settles a task as [`TaskStatus::Ready`], recording its executable payload and stamping
-    /// `updated_at`. Returns `true` if a task with that id existed.
+    /// `updated_at`. Returns `true` if the task was still in flight.
     pub async fn mark_task_ready(&self, id: &str, payload: &str) -> anyhow::Result<bool> {
-        let result = sqlx::query(
+        let result = sqlx::query(&format!(
             "UPDATE tasks SET status = 'ready', payload = ?2, updated_at = unixepoch() \
-             WHERE id = ?1",
-        )
+             WHERE id = ?1 AND {IN_FLIGHT_PREDICATE}"
+        ))
         .bind(id)
         .bind(payload)
         .execute(self.pool())
@@ -572,38 +584,42 @@ impl SqliteStore {
     /// `payload` and the structured round `bundle` it was rendered from, and stamping
     /// `updated_at`. Both are stored as JSON.
     ///
-    /// Returns how many whole seconds the task spent between being accepted at the ingress and
-    /// settling here — its end-to-end latency, measured in the same statement that settles it —
-    /// or `None` when no task with that id existed.
+    /// Only an in-flight task settles; one already terminal is left untouched and reported as
+    /// [`Settlement::AlreadySettled`], so a second settle cannot overwrite the first's result.
+    /// The latency is measured in the same statement that settles the task.
     pub async fn mark_task_ready_with_bundle(
         &self,
         id: &str,
         payload: &str,
         bundle: &str,
-    ) -> anyhow::Result<Option<i64>> {
-        sqlx::query_scalar(
+    ) -> anyhow::Result<Settlement> {
+        let elapsed = sqlx::query_scalar(&format!(
             "UPDATE tasks SET status = 'ready', payload = ?2, bundle = ?3, \
-             updated_at = unixepoch() WHERE id = ?1 \
-             RETURNING unixepoch() - created_at",
-        )
+             updated_at = unixepoch() WHERE id = ?1 AND {IN_FLIGHT_PREDICATE} \
+             RETURNING unixepoch() - created_at"
+        ))
         .bind(id)
         .bind(payload)
         .bind(bundle)
         .fetch_optional(self.pool())
         .await
-        .context("marking task ready with bundle")
+        .context("marking task ready with bundle")?;
+
+        self.settlement(id, elapsed).await
     }
 
     /// Settles a task as [`TaskStatus::Expired`], recording why and stamping `updated_at`.
     ///
     /// The read path uses this when a ready payload is no longer submittable — its
     /// `valid_until_block` has passed or the on-chain transition index has advanced — so a later
-    /// poll short-circuits to the re-request error without another chain read. Returns `true` if a
-    /// task with that id existed.
+    /// poll short-circuits to the re-request error without another chain read; the startup
+    /// re-queue uses it on an in-flight task whose transition index is already applied. Returns
+    /// `true` if the task was in flight or `ready`. A `failed` or `expired` task keeps the reason
+    /// it already carries.
     pub async fn mark_task_expired(&self, id: &str, reason: &str) -> anyhow::Result<bool> {
         let result = sqlx::query(
             "UPDATE tasks SET status = 'expired', error = ?2, updated_at = unixepoch() \
-             WHERE id = ?1",
+             WHERE id = ?1 AND status NOT IN ('failed', 'expired')",
         )
         .bind(id)
         .bind(reason)
@@ -651,19 +667,38 @@ impl SqliteStore {
     /// Settles a task as [`TaskStatus::Failed`], recording the failure reason and stamping
     /// `updated_at`.
     ///
-    /// Returns the task's end-to-end latency in whole seconds, as
-    /// [`mark_task_ready_with_bundle`](Self::mark_task_ready_with_bundle) does, or `None` when no
-    /// task with that id existed.
-    pub async fn mark_task_failed(&self, id: &str, error: &str) -> anyhow::Result<Option<i64>> {
-        sqlx::query_scalar(
+    /// Guarded and reported as [`mark_task_ready_with_bundle`](Self::mark_task_ready_with_bundle)
+    /// is, so a `ready` task can never be turned `failed`.
+    pub async fn mark_task_failed(&self, id: &str, error: &str) -> anyhow::Result<Settlement> {
+        let elapsed = sqlx::query_scalar(&format!(
             "UPDATE tasks SET status = 'failed', error = ?2, updated_at = unixepoch() \
-             WHERE id = ?1 RETURNING unixepoch() - created_at",
-        )
+             WHERE id = ?1 AND {IN_FLIGHT_PREDICATE} RETURNING unixepoch() - created_at"
+        ))
         .bind(id)
         .bind(error)
         .fetch_optional(self.pool())
         .await
-        .context("marking task failed")
+        .context("marking task failed")?;
+
+        self.settlement(id, elapsed).await
+    }
+
+    /// Classifies a guarded settle from the latency its `RETURNING` clause produced. A refused
+    /// settle reads the status back afterwards; terminal rows never return to in-flight, so the
+    /// status read is still terminal, though a `ready` row may have expired in between.
+    async fn settlement(&self, id: &str, elapsed: Option<i64>) -> anyhow::Result<Settlement> {
+        if let Some(elapsed_secs) = elapsed {
+            return Ok(Settlement::Settled { elapsed_secs });
+        }
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await
+            .context("reading the status of a task that refused to settle")?;
+        match status {
+            Some(status) => Ok(Settlement::AlreadySettled(TaskStatus::from_db(&status)?)),
+            None => Ok(Settlement::Unknown),
+        }
     }
 
     /// The last task still in flight in `(created_at, id)` order, or `None` when none are.
@@ -902,11 +937,13 @@ mod tests {
         let task = store.create_task(&key, &request()).await.unwrap();
 
         assert!(
-            store
-                .mark_task_ready_with_bundle(&task.id, "{\"payload\":1}", "{\"bundle\":2}")
-                .await
-                .unwrap()
-                .is_some(),
+            matches!(
+                store
+                    .mark_task_ready_with_bundle(&task.id, "{\"payload\":1}", "{\"bundle\":2}")
+                    .await
+                    .unwrap(),
+                Settlement::Settled { .. }
+            ),
             "settling an existing task should report its latency"
         );
         let fetched = store.get_task(&task.id).await.unwrap().unwrap();
@@ -962,11 +999,15 @@ mod tests {
             .await
             .unwrap();
 
-        let elapsed = store
+        let Settlement::Settled {
+            elapsed_secs: elapsed,
+        } = store
             .mark_task_ready_with_bundle(&task.id, "{}", "{}")
             .await
             .unwrap()
-            .expect("settling an existing task reports its latency");
+        else {
+            panic!("settling an existing task reports its latency");
+        };
         // A one-second window: the statement can land in the second after the backdating.
         assert!(
             (90..=91).contains(&elapsed),
@@ -974,12 +1015,12 @@ mod tests {
         );
 
         // A task that never existed has no latency to report, so nothing is observed for it.
-        assert!(
+        assert_eq!(
             store
                 .mark_task_failed("no-such-task", "nope")
                 .await
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            Settlement::Unknown
         );
     }
 
@@ -1053,17 +1094,85 @@ mod tests {
         let task = store.create_task(&key, &request()).await.unwrap();
 
         assert!(
-            store
-                .mark_task_failed(&task.id, "aggregation timed out")
-                .await
-                .unwrap()
-                .is_some(),
+            matches!(
+                store
+                    .mark_task_failed(&task.id, "aggregation timed out")
+                    .await
+                    .unwrap(),
+                Settlement::Settled { .. }
+            ),
             "settling an existing task should report its latency"
         );
         let fetched = store.get_task(&task.id).await.unwrap().unwrap();
         assert_eq!(fetched.status, TaskStatus::Failed);
         assert_eq!(fetched.error.as_deref(), Some("aggregation timed out"));
         assert!(fetched.payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_ready_refuses_a_task_that_already_settled() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request()).await.unwrap();
+        store.mark_task_failed(&task.id, "first").await.unwrap();
+
+        assert_eq!(
+            store
+                .mark_task_ready_with_bundle(&task.id, "{\"late\":1}", "{}")
+                .await
+                .unwrap(),
+            Settlement::AlreadySettled(TaskStatus::Failed)
+        );
+        assert!(!store.mark_task_ready(&task.id, "0x00").await.unwrap());
+        let fetched = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, TaskStatus::Failed);
+        assert_eq!(fetched.error.as_deref(), Some("first"));
+        assert!(fetched.payload.is_none(), "the late payload must not land");
+    }
+
+    #[tokio::test]
+    async fn mark_failed_refuses_a_ready_task() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request()).await.unwrap();
+        store
+            .mark_task_ready_with_bundle(&task.id, "{\"payload\":1}", "{}")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.mark_task_failed(&task.id, "late").await.unwrap(),
+            Settlement::AlreadySettled(TaskStatus::Ready)
+        );
+        let fetched = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, TaskStatus::Ready);
+        assert_eq!(fetched.payload.as_deref(), Some("{\"payload\":1}"));
+        assert!(fetched.error.is_none());
+    }
+
+    /// The read path expires a `ready` payload the chain will no longer accept, and two polls can
+    /// race to do it; the first reason stands, and a failed task never becomes expired.
+    #[tokio::test]
+    async fn mark_expired_leaves_failed_and_expired_tasks_alone() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let failed = store.create_task(&key, &request()).await.unwrap();
+        store.mark_task_failed(&failed.id, "boom").await.unwrap();
+        let expired = store.create_task(&key, &request()).await.unwrap();
+        assert!(store.mark_task_expired(&expired.id, "first").await.unwrap());
+
+        assert!(!store.mark_task_expired(&failed.id, "late").await.unwrap());
+        assert!(
+            !store
+                .mark_task_expired(&expired.id, "second")
+                .await
+                .unwrap()
+        );
+        let failed = store.get_task(&failed.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("boom"));
+        let expired = store.get_task(&expired.id).await.unwrap().unwrap();
+        assert_eq!(expired.error.as_deref(), Some("first"));
     }
 
     #[tokio::test]

@@ -28,6 +28,18 @@ spec:
             summary: "Gas Killer router is down"
             description: "The router has been unreachable for more than 2 minutes."
 
+    - name: gas-killer.settlement
+      interval: 30s
+      rules:
+        # No correct path settles a task twice, so a single refusal is a settlement bug.
+        - alert: GasKillerSettlementConflict
+          expr: increase(gas_killer_settlement_conflicts_total[15m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "Gas Killer router refused to settle an already-settled task"
+            description: "{{ "{{" }} $value {{ "}}" }} terminal-state transitions were refused in 15 minutes. Search the router log for \"refused to settle a task that had already settled\" for the task ids."
+
     - name: gas-killer.resources
       interval: 60s
       rules:

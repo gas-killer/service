@@ -415,7 +415,7 @@ pub async fn requeue_incomplete_tasks(
                         Ok(false) => {
                             warn!(
                                 task_id,
-                                "recovered task vanished before it could be settled expired"
+                                "recovered task vanished or settled before it could be settled expired"
                             );
                             continue;
                         }

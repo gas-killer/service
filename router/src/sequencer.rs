@@ -6,7 +6,7 @@
 
 use crate::ingress::GasKillerTaskRequest;
 use crate::metrics::MetricsCollector;
-use crate::store::SqliteStore;
+use crate::store::{Settlement, SqliteStore, TaskStatus};
 use gas_killer_common::task_data::GasKillerTaskData;
 use gas_killer_common::{ChainRole, GasKillerValidator, NestedSpec, TreeTrace};
 use gas_killer_common::{PayloadView, TaskBundle};
@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// A task queued for the sequencer, carrying the persisted task id alongside the
 /// request so status transitions can be attributed back to the right store row.
@@ -204,7 +204,7 @@ pub(crate) async fn set_task_ready(
         .mark_task_ready_with_bundle(task_id, &payload_json, &bundle_json)
         .await
     {
-        Ok(elapsed) => observe_task_e2e(metrics, elapsed),
+        Ok(outcome) => record_settlement(metrics, task_id, TaskStatus::Ready, outcome),
         Err(e) => error!(task_id, error = %e, "failed to mark task ready"),
     }
 }
@@ -216,18 +216,41 @@ pub(crate) async fn set_task_failed(
     reason: &str,
 ) {
     match store.mark_task_failed(task_id, reason).await {
-        Ok(elapsed) => observe_task_e2e(metrics, elapsed),
+        Ok(outcome) => record_settlement(metrics, task_id, TaskStatus::Failed, outcome),
         Err(e) => error!(task_id, error = %e, "failed to mark task failed"),
     }
 }
 
-/// Records a settled task's end-to-end latency — ingress acceptance to terminal status — from the
-/// elapsed seconds the settling statement reported. `None` means no task carried that id, so
-/// there is nothing to time. A clock that moved backwards between the two timestamps is clamped
-/// to zero rather than observed as a negative duration.
-fn observe_task_e2e(metrics: Option<&MetricsCollector>, elapsed_secs: Option<i64>) {
-    if let (Some(m), Some(secs)) = (metrics, elapsed_secs) {
-        m.task_e2e_seconds.observe(secs.max(0) as f64);
+/// Records a settled task's end-to-end latency, or flags a settle the store refused.
+///
+/// A refusal means a second writer tried to settle a task that had already settled, which no
+/// correct path does, so it is logged loudly and counted in `settlement_conflicts` rather than
+/// absorbed. A clock that moved backwards between the two timestamps is clamped to zero rather
+/// than observed as a negative duration.
+fn record_settlement(
+    metrics: Option<&MetricsCollector>,
+    task_id: &str,
+    attempted: TaskStatus,
+    outcome: Settlement,
+) {
+    match outcome {
+        Settlement::Settled { elapsed_secs } => {
+            if let Some(m) = metrics {
+                m.task_e2e_seconds.observe(elapsed_secs.max(0) as f64);
+            }
+        }
+        Settlement::AlreadySettled(current) => {
+            error!(
+                task_id,
+                ?attempted,
+                ?current,
+                "refused to settle a task that had already settled"
+            );
+            if let Some(m) = metrics {
+                m.settlement_conflicts.inc();
+            }
+        }
+        Settlement::Unknown => warn!(task_id, ?attempted, "settled a task that does not exist"),
     }
 }
 
@@ -783,6 +806,58 @@ mod tests {
                 .encode()
                 .contains("gas_killer_task_e2e_seconds_count 2"),
             "a settle that matched no task must not be observed"
+        );
+        assert!(
+            metrics
+                .encode()
+                .contains("gas_killer_settlement_conflicts_total 0"),
+            "an unknown id is not a conflict"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_settle_is_refused_and_counted() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let metrics = MetricsCollector::new();
+        let ready = store.create_task(&key, &request_body()).await.unwrap();
+        let failed = store.create_task(&key, &request_body()).await.unwrap();
+        set_task_ready(
+            &store,
+            Some(&metrics),
+            &ready.id,
+            &sample_payload(),
+            &sample_bundle(),
+        )
+        .await;
+        set_task_failed(&store, Some(&metrics), &failed.id, "boom").await;
+
+        set_task_failed(&store, Some(&metrics), &ready.id, "late").await;
+        set_task_ready(
+            &store,
+            Some(&metrics),
+            &failed.id,
+            &sample_payload(),
+            &sample_bundle(),
+        )
+        .await;
+
+        let output = metrics.encode();
+        assert!(
+            output.contains("gas_killer_settlement_conflicts_total 2"),
+            "both refused settles should be counted, got:\n{output}"
+        );
+        assert!(
+            output.contains("gas_killer_task_e2e_seconds_count 2"),
+            "a refused settle must not be timed again"
+        );
+        assert_eq!(
+            store.get_task(&ready.id).await.unwrap().unwrap().status,
+            TaskStatus::Ready
+        );
+        assert_eq!(
+            store.get_task(&failed.id).await.unwrap().unwrap().status,
+            TaskStatus::Failed
         );
     }
 
