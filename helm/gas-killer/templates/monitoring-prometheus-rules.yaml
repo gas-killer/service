@@ -1,17 +1,23 @@
 {{- if .Values.monitoring.enabled }}
+{{- $router := printf "%s-router" (include "gas-killer.fullname" .) }}
+{{- $roundTimeout := int .Values.router.roundTimeout }}
+{{- /* Long enough to hold a full round, so a single slow task is in the window it ended in. */}}
+{{- $outcomeWindow := max 900 (mul 2 $roundTimeout) }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: {{ include "gas-killer.fullname" . }}
   labels:
     {{- include "gas-killer.labels" . | nindent 4 }}
+    # kube-prometheus-stack only loads rules carrying its release label.
+    release: {{ .Release.Name }}
 spec:
   groups:
     - name: gas-killer.availability
       interval: 30s
       rules:
         - alert: GasKillerNodeDown
-          expr: up{job=~".*gas-killer.*nodes.*"} == 0
+          expr: up{job=~"{{ include "gas-killer.fullname" . }}-node-[0-9]+"} == 0
           for: 2m
           labels:
             severity: critical
@@ -20,7 +26,7 @@ spec:
             description: "Node {{ "{{" }} $labels.pod {{ "}}" }} has been unreachable for more than 2 minutes."
 
         - alert: GasKillerRouterDown
-          expr: up{job=~".*gas-killer.*router.*"} == 0
+          expr: up{job="{{ $router }}"} == 0
           for: 2m
           labels:
             severity: critical
@@ -39,6 +45,89 @@ spec:
           annotations:
             summary: "Gas Killer router refused to settle an already-settled task"
             description: "{{ "{{" }} $value {{ "}}" }} terminal-state transitions were refused in 15 minutes. Search the router log for \"refused to settle a task that had already settled\" for the task ids."
+
+    - name: gas-killer.pipeline
+      interval: 30s
+      rules:
+        # Pods up and healthy while tasks stop completing: none of the availability alerts see it.
+        - alert: GasKillerSessionsWedged
+          expr: |
+            max(gas_killer_queue_depth{job="{{ $router }}"}) > 0
+            and on() max(gas_killer_in_flight_heights{job="{{ $router }}"}) == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Gas Killer has queued tasks but no signing session running"
+            description: "{{ "{{" }} $value {{ "}}" }} tasks have been queued for 10 minutes with nothing in flight, so the scheduler is not dispatching."
+
+        # Nodes prune a session 2 x ROUND_TIMEOUT after it starts, so one older than that can
+        # no longer collect signatures and will never resolve.
+        - alert: GasKillerHeightStuck
+          expr: max(gas_killer_height_age_seconds{job="{{ $router }}"}) > {{ mul 2 $roundTimeout }}
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Gas Killer signing session older than 2 x ROUND_TIMEOUT"
+            description: "The oldest live session is {{ "{{" }} $value | humanizeDuration {{ "}}" }} old; ROUND_TIMEOUT is {{ $roundTimeout }}s and nodes have already dropped it."
+
+        # Deferred sessions requeue their task rather than ending it, so they are not outcomes.
+        - alert: GasKillerSessionTimeoutRateHigh
+          expr: |
+            sum(increase(gas_killer_height_outcomes_total{job="{{ $router }}", outcome=~"timed_out|trace_failed"}[{{ $outcomeWindow }}s]))
+            / sum(increase(gas_killer_height_outcomes_total{job="{{ $router }}", outcome!="deferred"}[{{ $outcomeWindow }}s]))
+            > 0.1
+          labels:
+            severity: critical
+          annotations:
+            summary: "Over 10% of Gas Killer signing sessions timed out or failed to trace"
+            description: "{{ "{{" }} $value | humanizePercentage {{ "}}" }} of sessions in the last {{ $outcomeWindow }}s ended timed_out or trace_failed."
+
+        # A rolling upgrade splits the fingerprint briefly; a split that outlasts it fails quorum.
+        - alert: GasKillerConfigFingerprintSplit
+          expr: count(count by (fingerprint) (gas_killer_config_fingerprint{namespace="{{ .Release.Namespace }}"})) > 1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Gas Killer router and nodes disagree on consensus-critical config"
+            description: "{{ "{{" }} $value {{ "}}" }} distinct config fingerprints are live. Compare gas_killer_config_fingerprint by pod."
+
+        # A first miss creates the series and is invisible to increase(), so this needs three.
+        - alert: GasKillerOperatorNotSigning
+          expr: sum by (operator) (increase(gas_killer_non_signers_total{job="{{ $router }}"}[1h])) >= 2
+          labels:
+            severity: warning
+          annotations:
+            summary: "Operator {{ "{{" }} $labels.operator {{ "}}" }} left out of signed sessions"
+            description: "Left out of {{ "{{" }} $value | printf \"%.0f\" {{ "}}" }} signed sessions in the last hour: slower than the straggler margin allows, or down."
+
+        # Gated on a backlog: on an idle deployment a low completion rate is just low demand.
+        - alert: GasKillerThroughputBelowBaseline
+          expr: |
+            sum(rate(gas_killer_height_outcomes_total{job="{{ $router }}", outcome="ready"}[1h]))
+            < 0.5 * sum(rate(gas_killer_height_outcomes_total{job="{{ $router }}", outcome="ready"}[24h]))
+            and on() max(gas_killer_queue_depth{job="{{ $router }}"}) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Gas Killer is completing tasks at under half its 24h rate with a backlog"
+            description: "Ready sessions over the last hour are below half the 24h average while tasks are queued."
+
+        # The sim node serves every trace, so throttling there slows every session together.
+        - alert: GasKillerCpuThrottled
+          expr: |
+            sum by (pod, container) (rate(container_cpu_cfs_throttled_periods_total{namespace="{{ .Release.Namespace }}", container!="", pod=~"{{ include "gas-killer.fullname" . }}-(node-[0-9]+|router)-.*|sim-node-.*"}[10m]))
+            / sum by (pod, container) (rate(container_cpu_cfs_periods_total{namespace="{{ .Release.Namespace }}", container!="", pod=~"{{ include "gas-killer.fullname" . }}-(node-[0-9]+|router)-.*|sim-node-.*"}[10m]))
+            > 0.5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ "{{" }} $labels.pod {{ "}}" }}/{{ "{{" }} $labels.container {{ "}}" }} CPU-throttled over half the time"
+            description: "Throttled in {{ "{{" }} $value | humanizePercentage {{ "}}" }} of CFS periods for 15 minutes."
 
     - name: gas-killer.resources
       interval: 60s
