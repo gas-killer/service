@@ -49,8 +49,8 @@ pub fn operator_labels(operator: Address) -> OperatorLabels {
 /// Label set scoping a counter to one per-height disposition, rendered as `outcome="ready"`.
 type OutcomeLabels = [(&'static str, String); 1];
 
-/// A counter broken down by how an assigned aggregation height ended. Cardinality is the four
-/// [`HeightOutcome`] variants.
+/// A counter broken down by how an assigned aggregation height ended. Cardinality is one series
+/// per [`HeightOutcome`] variant.
 pub type PerOutcomeCounter = Family<OutcomeLabels, Counter<u64, AtomicU64>>;
 
 /// The label set naming `outcome`, for indexing a [`PerOutcomeCounter`].
@@ -78,6 +78,15 @@ pub enum HeightOutcome {
 }
 
 impl HeightOutcome {
+    pub const ALL: [Self; 6] = [
+        Self::Ready,
+        Self::Failed,
+        Self::TimedOut,
+        Self::TraceFailed,
+        Self::Refused,
+        Self::Deferred,
+    ];
+
     /// The `outcome` label value for this disposition.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -417,7 +426,12 @@ impl MetricsCollector {
             height_age_seconds.clone(),
         );
 
-        let height_outcomes = Family::default();
+        let height_outcomes: PerOutcomeCounter = Family::default();
+        // Exported at 0 from startup: a series that appears already at 1 is invisible to
+        // increase(), so each outcome's first occurrence after a restart would go uncounted.
+        for outcome in HeightOutcome::ALL {
+            let _ = height_outcomes.get_or_create(&outcome_labels(outcome));
+        }
         registry.register(
             "gas_killer_height_outcomes",
             "Total assigned aggregation heights by final disposition",
@@ -480,6 +494,14 @@ impl MetricsCollector {
             non_signers,
             straggler_wait_seconds,
             settlement_conflicts,
+        }
+    }
+
+    /// Exports each operator's non-signer count at 0, so its first miss after a restart is
+    /// visible to increase().
+    pub fn track_operators(&self, operators: impl IntoIterator<Item = Address>) {
+        for operator in operators {
+            let _ = self.non_signers.get_or_create(&operator_labels(operator));
         }
     }
 
@@ -626,6 +648,27 @@ mod tests {
         let output = metrics.encode();
         assert!(output.contains(&format!(
             "gas_killer_non_signers_total{{operator=\"{slow}\"}} 2"
+        )));
+    }
+
+    #[test]
+    fn every_height_outcome_exports_zero_from_startup() {
+        let output = MetricsCollector::new().encode();
+        for outcome in HeightOutcome::ALL {
+            assert!(output.contains(&format!(
+                "gas_killer_height_outcomes_total{{outcome=\"{}\"}} 0",
+                outcome.as_str()
+            )));
+        }
+    }
+
+    #[test]
+    fn tracked_operators_export_zero_until_left_out() {
+        let metrics = MetricsCollector::new();
+        let operator = Address::repeat_byte(0x44);
+        metrics.track_operators([operator]);
+        assert!(metrics.encode().contains(&format!(
+            "gas_killer_non_signers_total{{operator=\"{operator}\"}} 0"
         )));
     }
 

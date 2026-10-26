@@ -426,6 +426,7 @@ fn main() {
                 (keys.g2_pub_key.clone(), operator.address)
             })
             .collect();
+        metrics.track_operators(operators_with_addresses.iter().map(|(_, address)| *address));
         let coordinator = SchnorrCoordinator::new(
             schnorr_sender,
             schnorr_receiver,

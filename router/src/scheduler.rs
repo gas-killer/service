@@ -856,9 +856,11 @@ mod tests {
             TaskStatus::Processing
         );
         assert!(
-            !metrics
+            metrics
                 .encode()
-                .contains("gas_killer_height_outcomes_total{")
+                .lines()
+                .filter(|line| line.starts_with("gas_killer_height_outcomes_total{"))
+                .all(|line| line.ends_with(" 0"))
         );
     }
 

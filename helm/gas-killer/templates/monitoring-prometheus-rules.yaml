@@ -94,7 +94,6 @@ spec:
             summary: "Gas Killer router and nodes disagree on consensus-critical config"
             description: "{{ "{{" }} $value {{ "}}" }} distinct config fingerprints are live. Compare gas_killer_config_fingerprint by pod."
 
-        # A first miss creates the series and is invisible to increase(), so this needs three.
         - alert: GasKillerOperatorNotSigning
           expr: sum by (operator) (increase(gas_killer_non_signers_total{job="{{ $router }}"}[1h])) >= 2
           labels:
