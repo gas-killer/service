@@ -361,13 +361,21 @@ node:
   # declines every tree; the render fails rather than ship a fleet that can never nest. Leave a
   # few blocks above it for nodes whose head lags the router's.
   nestedMaxExpiryBlocks: ""
+  # Worker threads for p2p and the signing participant (TOKIO_WORKER_THREADS); empty uses the
+  # larger of 4 and the CPU limit. Traces run on their own runtime of validationConcurrency + 1
+  # threads, so this does not grow with router.maxInFlightTasks.
+  workerThreads: ""
+  # A trace is about a core of CPU-bound work, so the limit allows one core per concurrent
+  # trace plus one for p2p and signing: raise it with router.maxInFlightTasks. Too low, and CFS
+  # throttles every concurrent trace together, pushing sessions past roundTimeout. Watch
+  # container_cpu_cfs_throttled_periods_total (GasKillerCpuThrottled) when changing either.
   resources:
     requests:
       memory: "256Mi"
       cpu: "100m"
     limits:
       memory: "2Gi"
-      cpu: "500m"
+      cpu: "2000m"
 
 # Gas Killer Router configuration
 router:
@@ -562,13 +570,18 @@ router:
     # accumulate a claim; set this to false there, or delete it by label as
     # scripts/run_helm_test.sh does.
     retainOnUninstall: true
+  # Worker threads for p2p, ingress and the signing sessions (TOKIO_WORKER_THREADS); empty uses
+  # the larger of 4 and the CPU limit. The router's own traces run on a separate runtime sized
+  # to maxInFlightTasks.
+  workerThreads: ""
+  # Sized like node.resources: about a core per live session's trace plus one for the rest.
   resources:
     requests:
       memory: "512Mi"
       cpu: "250m"
     limits:
       memory: "6Gi"
-      cpu: "1000m"
+      cpu: "2000m"
 
 # Orchestrator configuration
 orchestrator:
