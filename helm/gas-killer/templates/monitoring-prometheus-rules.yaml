@@ -73,11 +73,14 @@ spec:
             description: "The oldest live session is {{ "{{" }} $value | humanizeDuration {{ "}}" }} old; ROUND_TIMEOUT is {{ $roundTimeout }}s and nodes have already dropped it."
 
         # Deferred sessions requeue their task rather than ending it, so they are not outcomes.
+        # The floor is two failures, not a session count: when every session times out, a window
+        # of 2 x ROUND_TIMEOUT holds only 2 x MAX_IN_FLIGHT_TASKS of them.
         - alert: GasKillerSessionTimeoutRateHigh
           expr: |
             sum(increase(gas_killer_height_outcomes_total{job="{{ $router }}", outcome=~"timed_out|trace_failed"}[{{ $outcomeWindow }}s]))
             / sum(increase(gas_killer_height_outcomes_total{job="{{ $router }}", outcome!="deferred"}[{{ $outcomeWindow }}s]))
             > 0.1
+            and on() sum(increase(gas_killer_height_outcomes_total{job="{{ $router }}", outcome=~"timed_out|trace_failed"}[{{ $outcomeWindow }}s])) >= 2
           labels:
             severity: critical
           annotations:
