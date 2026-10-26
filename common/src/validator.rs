@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::{debug, info, warn};
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 
 use crate::ReadOnlyProvider;
 use crate::config::{ChainRole, SpeculativePrebuildConfig};
@@ -32,7 +32,9 @@ use alloy::rpc::types::TransactionRequest;
 /// would collide two tasks for *different* contracts that share the same index and
 /// block — returning the wrong contract's digest. The key covers every field the
 /// digest depends on, including the nested expiry, which a tree's root signs.
-type DigestCacheKey = (u64, u64, Address, Address, U256, Vec<u8>, Option<u64>);
+///
+/// Calldata is held by its keccak256 so an entry costs a fixed ~150 B rather than up to 128 KB.
+type DigestCacheKey = (u64, u64, Address, Address, U256, B256, Option<u64>);
 
 fn digest_cache_key(task: &GasKillerTaskData, nested: Option<&NestedSpec>) -> DigestCacheKey {
     (
@@ -41,7 +43,7 @@ fn digest_cache_key(task: &GasKillerTaskData, nested: Option<&NestedSpec>) -> Di
         task.target_address,
         task.from_address,
         task.value,
-        task.call_data.clone(),
+        keccak256(&task.call_data),
         nested.map(|spec| spec.expiry_block),
     )
 }
@@ -481,8 +483,8 @@ pub struct GasKillerValidator {
     /// Cache: task identity ([`DigestCacheKey`]) -> computed digest.
     /// Prevents re-running expensive EVMSketch for the same task when the
     /// orchestrator validates multiple signatures for identical task data.
-    /// An LRU because each key carries the task's calldata (up to 128 KB) and an entry is only
-    /// needed while its session can still retry; see [`crate::config::digest_cache_capacity`].
+    /// An LRU because an entry is only needed while its session can still retry; see
+    /// [`crate::config::digest_cache_capacity`].
     digest_cache: Arc<Mutex<LruCache<DigestCacheKey, Digest>>>,
     /// One flight lock per in-progress [`DigestCacheKey`]. The cache alone does not stop
     /// concurrent callers from racing: it is written only once a trace completes, so two
@@ -1187,7 +1189,8 @@ impl GasKillerValidator {
         turn: Box<DigestTurn>,
     ) -> Result<Digest> {
         debug_assert!(
-            turn.key.0 == task_data.transition_index && turn.key.5 == task_data.call_data,
+            turn.key.0 == task_data.transition_index
+                && turn.key.5 == keccak256(&task_data.call_data),
             "turn is for another task"
         );
         self.resolve_digest_uncached(task_data, &turn.key).await
@@ -1231,7 +1234,7 @@ impl GasKillerValidator {
             }
         };
 
-        self.store_digest(cache_key.clone(), payload_hash).await;
+        self.store_digest(*cache_key, payload_hash).await;
 
         debug!("Built and cached payload hash: {:?}", payload_hash);
         Ok(payload_hash)
@@ -1255,10 +1258,10 @@ impl GasKillerValidator {
             .digest_flights
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let lock = Arc::clone(flights.entry(cache_key.clone()).or_default());
+        let lock = Arc::clone(flights.entry(*cache_key).or_default());
         DigestFlight {
             flights: Arc::clone(&self.digest_flights),
-            key: cache_key.clone(),
+            key: *cache_key,
             lock: Some(lock),
         }
     }
@@ -1389,6 +1392,17 @@ mod tests {
 
     /// A tree's root signs its expiry, so the same task signed flat or under two expiries
     /// yields three different digests and must never share a cache entry.
+    #[test]
+    fn digest_cache_key_distinguishes_calldata() {
+        let task = create_test_task_data();
+        let mut other = task.clone();
+        other.call_data.push(0x00);
+        assert_ne!(
+            digest_cache_key(&task, None),
+            digest_cache_key(&other, None)
+        );
+    }
+
     #[test]
     fn digest_cache_key_distinguishes_nested_expiries() {
         let task = create_test_task_data();
@@ -1629,8 +1643,7 @@ mod tests {
         assert_eq!(digest, task_data.build_payload_hash(&storage_updates));
     }
 
-    /// Every key carries its task's calldata, so a stream of distinct large-calldata tasks is
-    /// the worst case for memory: the cache must hold at capacity and drop the oldest.
+    /// A stream of distinct tasks must leave the cache at capacity, dropping the oldest.
     #[tokio::test]
     async fn the_digest_cache_evicts_at_capacity() {
         let metrics = Arc::new(ValidatorMetrics::new());
@@ -1643,7 +1656,6 @@ mod tests {
             .map(|i| {
                 let mut task = create_test_task_data();
                 task.transition_index = i;
-                task.call_data = vec![i as u8; crate::task_data::MAX_EVM_TX_CALLDATA_SIZE];
                 task
             })
             .collect();
