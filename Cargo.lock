@@ -4128,6 +4128,7 @@ dependencies = [
  "futures",
  "gas-analyzer-evmsketch",
  "k256 0.13.4",
+ "lru 0.16.3",
  "rand 0.9.2",
  "serde",
  "serde_json",
