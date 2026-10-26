@@ -147,7 +147,30 @@ docker compose build
 
 # Step 5: Start Docker Compose services
 echo -e "${YELLOW}Step 5: Starting Docker Compose services...${NC}"
-docker compose up -d
+# `up -d` waits for eigenlayer to exit, since the nodes depend on its successful completion, and
+# has no timeout of its own: a hung setup would otherwise hold the job until the workflow limit.
+# Normally it returns in about three minutes. macOS ships without `timeout`, so a local run there
+# stays unbounded unless coreutils provides one.
+compose_up_timeout=500
+bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$compose_up_timeout" "$@"
+    else
+        "$@"
+    fi
+}
+if ! bounded docker compose up -d; then
+    echo -e "${RED}docker compose up failed or did not finish within ${compose_up_timeout}s${NC}"
+    docker compose ps -a || true
+    # Otherwise the cleanup trap dumps these on exit.
+    if [ "$KEEP_UP" = true ]; then
+        echo -e "${YELLOW}EigenLayer setup logs:${NC}"
+        docker compose logs eigenlayer || true
+        echo -e "${YELLOW}Recent ethereum logs:${NC}"
+        docker compose logs --tail=100 ethereum || true
+    fi
+    exit 1
+fi
 
 # Show running containers
 docker compose ps
