@@ -652,6 +652,22 @@ mod tests {
     }
 
     #[test]
+    fn height_outcome_all_lists_every_variant() {
+        // Exhaustive, so a new variant does not compile until it is given a slot in ALL.
+        let slot = |outcome| match outcome {
+            HeightOutcome::Ready => 0,
+            HeightOutcome::Failed => 1,
+            HeightOutcome::TimedOut => 2,
+            HeightOutcome::TraceFailed => 3,
+            HeightOutcome::Refused => 4,
+            HeightOutcome::Deferred => 5,
+        };
+        for (index, outcome) in HeightOutcome::ALL.into_iter().enumerate() {
+            assert_eq!(slot(outcome), index);
+        }
+    }
+
+    #[test]
     fn every_height_outcome_exports_zero_from_startup() {
         let output = MetricsCollector::new().encode();
         for outcome in HeightOutcome::ALL {

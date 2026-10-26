@@ -122,8 +122,8 @@ spec:
         # The sim node serves every trace, so throttling there slows every session together.
         - alert: GasKillerCpuThrottled
           expr: |
-            sum by (pod, container) (rate(container_cpu_cfs_throttled_periods_total{namespace="{{ .Release.Namespace }}", container!="", pod=~"{{ include "gas-killer.fullname" . }}-(node-[0-9]+|router)-.*|sim-node-.*"}[10m]))
-            / sum by (pod, container) (rate(container_cpu_cfs_periods_total{namespace="{{ .Release.Namespace }}", container!="", pod=~"{{ include "gas-killer.fullname" . }}-(node-[0-9]+|router)-.*|sim-node-.*"}[10m]))
+            sum by (pod, container) (rate(container_cpu_cfs_throttled_periods_total{namespace="{{ .Release.Namespace }}", container!="", pod=~"({{ include "gas-killer.node.fullname" . }}-[0-9]+|{{ include "gas-killer.router.fullname" . }})-.*|sim-node-.*"}[10m]))
+            / sum by (pod, container) (rate(container_cpu_cfs_periods_total{namespace="{{ .Release.Namespace }}", container!="", pod=~"({{ include "gas-killer.node.fullname" . }}-[0-9]+|{{ include "gas-killer.router.fullname" . }})-.*|sim-node-.*"}[10m]))
             > 0.5
           for: 15m
           labels:
