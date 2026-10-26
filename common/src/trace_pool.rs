@@ -6,7 +6,7 @@
 //! `concurrency` at once: past that they queue in arrival order, because traces sharing a CPU or a
 //! trace RPC all finish late together, while queued ones finish in turn.
 
-use gas_killer_common::ValidatorMetrics;
+use crate::validator::ValidatorMetrics;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,7 +15,7 @@ use tokio::sync::Semaphore;
 
 /// Owns the runtime traces run on. Keep it alive for the life of the process, and outside any
 /// async context: a tokio runtime panics if it is dropped from inside one.
-pub(crate) struct TraceRuntime {
+pub struct TraceRuntime {
     runtime: Runtime,
     concurrency: usize,
 }
@@ -49,7 +49,7 @@ impl TraceRuntime {
 
 /// Runs traces on the [`TraceRuntime`], `concurrency` at a time. Cheap to clone.
 #[derive(Clone)]
-pub(crate) struct TracePool {
+pub struct TracePool {
     runtime: Handle,
     /// FIFO: tokio hands permits out in the order they were requested.
     permits: Arc<Semaphore>,

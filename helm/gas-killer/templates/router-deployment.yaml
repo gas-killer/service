@@ -338,6 +338,10 @@ spec:
               value: {{ .Values.router.roundTimeout | quote }}
             - name: MAX_IN_FLIGHT_TASKS
               value: {{ .Values.router.maxInFlightTasks | quote }}
+            {{- with .Values.router.workerThreads }}
+            - name: TOKIO_WORKER_THREADS
+              value: {{ . | quote }}
+            {{- end }}
             - name: REBROADCAST_INTERVAL
               value: {{ .Values.router.rebroadcastInterval | quote }}
             {{- if .Values.router.receiptTimeoutSecs }}

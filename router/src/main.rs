@@ -23,10 +23,11 @@ use eigen_logging::log_level::LogLevel;
 use gas_killer_common::get_operator_states;
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, IngressStalenessWindow,
-    SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint, load_key_from_file,
-    max_in_flight_tasks, p2p_message_backlog, quorum_threshold_fraction, rebroadcast_interval,
-    round_timeout, schnorr_messages_per_second, schnorr_stage_timeout,
+    SpeculativePrebuildConfig, TraceRuntime, ValidatorMetrics, config_fingerprint,
+    load_key_from_file, max_in_flight_tasks, p2p_message_backlog, quorum_threshold_fraction,
+    rebroadcast_interval, round_timeout, schnorr_messages_per_second, schnorr_stage_timeout,
     schnorr_straggler_margin_percent, schnorr_trace_timeout, storage_directory, task_ttl,
+    worker_threads,
 };
 use gas_killer_router::expiry::run_expiry_sweeper;
 use gas_killer_router::factories::{
@@ -179,10 +180,18 @@ fn main() {
 
     // The runtime otherwise defaults to a random per-process temp dir.
     let storage_dir = storage_directory().join("router");
+    // Runs p2p, ingress and the signing sessions; the router's traces run on `trace_runtime`.
+    let worker_threads = worker_threads();
     let runtime_cfg = tokio::Config::default()
-        .with_worker_threads(4)
+        .with_worker_threads(worker_threads)
         .with_storage_directory(storage_dir);
     let runner = tokio::Runner::new(runtime_cfg);
+    // One trace per live session. Built out here so it is dropped outside the router's runtime,
+    // which it must be.
+    let trace_concurrency = max_in_flight_tasks();
+    let trace_runtime =
+        TraceRuntime::new(trace_concurrency).expect("failed to build the trace runtime");
+    let traces = trace_runtime.pool();
 
     // Configure network
     let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
@@ -403,8 +412,14 @@ fn main() {
             ingress.queue_depth,
             Some(Arc::clone(&metrics)),
         );
+        tracing::info!(
+            worker_threads,
+            trace_concurrency,
+            "runtimes sized; the router's traces run on their own"
+        );
         let mut dispatcher =
-            TaskDispatcher::new(validator, Some(Arc::clone(&metrics)), ingress.store.clone());
+            TaskDispatcher::new(validator, Some(Arc::clone(&metrics)), ingress.store.clone())
+                .with_traces(traces.with_metrics(Arc::clone(&validator_metrics)));
         if gas_killer_common::nested_settlement() {
             tracing::info!(payload_block_buffer, "nested settlement enabled");
             dispatcher = dispatcher.with_nested_settlement(payload_block_buffer);

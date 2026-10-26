@@ -8,7 +8,6 @@
 
 mod digest;
 mod schnorr_participant;
-mod trace_pool;
 
 use ::tokio::net::TcpListener;
 use axum::{
@@ -25,9 +24,10 @@ use commonware_utils::ordered::{Map, Set};
 use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, OrchestratorConfig,
-    SpeculativePrebuildConfig, ValidatorMetrics, config_fingerprint, get_operator_states,
-    load_key_from_file, load_orchestrator_config, p2p_message_backlog, round_timeout,
-    schnorr_messages_per_second, storage_directory, validation_concurrency,
+    SpeculativePrebuildConfig, TraceRuntime, ValidatorMetrics, config_fingerprint,
+    get_operator_states, load_key_from_file, load_orchestrator_config, p2p_message_backlog,
+    round_timeout, schnorr_messages_per_second, storage_directory, validation_concurrency,
+    worker_threads,
 };
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -37,7 +37,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::digest::DigestResolver;
-use crate::trace_pool::TraceRuntime;
 
 /// P2P channel carrying the interactive Schnorr signing rounds.
 const SCHNORR_CHANNEL: u64 = 2;
@@ -220,10 +219,11 @@ fn serve_health(addr: SocketAddr, state: HealthState) {
 fn main() {
     // The runtime otherwise defaults to a random per-process temp dir.
     let storage_dir = storage_directory();
+    // Runs p2p and the Schnorr participant; traces and healthz run elsewhere (see
+    // `TraceRuntime`, `serve_health`).
+    let worker_threads = worker_threads();
     let runtime_cfg = tokio::Config::default()
-        // 2026.5.0 defaults to 2 worker threads; the node runs p2p and the Schnorr participant
-        // concurrently. Traces and healthz run elsewhere (see `TraceRuntime`, `serve_health`).
-        .with_worker_threads(4)
+        .with_worker_threads(worker_threads)
         .with_storage_directory(storage_dir.clone());
     let runner = tokio::Runner::new(runtime_cfg);
     // Built out here so it is dropped outside the node's runtime, which it must be.
@@ -544,7 +544,11 @@ fn main() {
             network.register(SCHNORR_CHANNEL, schnorr_quota, p2p_backlog);
 
         // EVMSketch validation of each requested task's expected digest.
-        tracing::info!(concurrency, "task traces run on their own runtime");
+        tracing::info!(
+            worker_threads,
+            trace_concurrency = concurrency,
+            "runtimes sized; task traces run on their own"
+        );
         let resolver = DigestResolver::new(
             Arc::clone(&validator),
             traces.with_metrics(Arc::clone(&validator_metrics)),

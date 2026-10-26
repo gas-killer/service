@@ -8,6 +8,7 @@ pub mod payload;
 pub mod providers;
 pub mod schnorr;
 pub mod task_data;
+pub mod trace_pool;
 pub mod validator;
 
 // Re-export commonly used types
@@ -20,13 +21,14 @@ pub use config::{
     payload_block_buffer, quorum_threshold_fraction, rate_limit_rpm, rebroadcast_interval,
     round_timeout, rpc_failure_threshold, schnorr_messages_per_second, schnorr_notice_window,
     schnorr_stage_timeout, schnorr_straggler_margin_percent, schnorr_trace_timeout,
-    storage_directory, task_ttl, validation_concurrency,
+    storage_directory, task_ttl, validation_concurrency, worker_threads,
 };
 pub use metrics::ConfigMetrics;
 pub use nested::{NestedSpec, TreeTrace, build_tree_trace, nested_expiry};
 pub use payload::{BundleProof, NestedBundle, NestedFrame, PayloadView, TaskBundle};
 pub use providers::{build_read_providers, chain_rpc_urls_from_env, sim_rpc_urls_from_env};
 pub use task_data::GasKillerTaskData;
+pub use trace_pool::{TracePool, TraceRuntime};
 pub use validator::{DigestClaim, DigestTurn, GasKillerValidator, ValidatorMetrics};
 
 // Re-export provider types for convenience

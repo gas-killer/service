@@ -241,6 +241,30 @@ fn validation_concurrency_from(value: Option<&str>, in_flight: usize) -> usize {
         .unwrap_or(in_flight)
 }
 
+/// Fewest worker threads the main runtime gets by default: p2p, the signing session and the
+/// scheduler each need one to keep moving, whatever the CPU allocation.
+const MIN_WORKER_THREADS: usize = 4;
+
+/// Reads the main runtime's worker-thread count from `TOKIO_WORKER_THREADS`, defaulting to the
+/// larger of [`MIN_WORKER_THREADS`] and the CPUs the process may use, which follows a container's
+/// CPU limit. Zero or unparseable values fall back to that default.
+///
+/// Traces run on a runtime of their own ([`crate::TraceRuntime`]), so this sizes only the
+/// network and signing work.
+pub fn worker_threads() -> usize {
+    worker_threads_from(
+        env::var("TOKIO_WORKER_THREADS").ok().as_deref(),
+        std::thread::available_parallelism().map_or(1, usize::from),
+    )
+}
+
+fn worker_threads_from(value: Option<&str>, cpus: usize) -> usize {
+    value
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&v: &usize| v > 0)
+        .unwrap_or(cpus.max(MIN_WORKER_THREADS))
+}
+
 /// Digest-cache slots kept whatever the session count.
 ///
 /// A digest only has to outlive the retries of the session that traced it, so a live session
@@ -1338,6 +1362,15 @@ mod tests {
         assert_eq!(validation_concurrency_from(Some(" 1 "), 2), 1);
         assert_eq!(validation_concurrency_from(Some("0"), 2), 2);
         assert_eq!(validation_concurrency_from(Some("many"), 3), 3);
+    }
+
+    #[test]
+    fn worker_threads_keep_a_floor_and_follow_the_cpus_unless_set() {
+        assert_eq!(worker_threads_from(None, 1), 4);
+        assert_eq!(worker_threads_from(None, 8), 8);
+        assert_eq!(worker_threads_from(Some(" 2 "), 8), 2);
+        assert_eq!(worker_threads_from(Some("0"), 2), 4);
+        assert_eq!(worker_threads_from(Some("lots"), 6), 6);
     }
 
     #[test]

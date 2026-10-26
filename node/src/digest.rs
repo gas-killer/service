@@ -8,12 +8,12 @@
 //! changes the digest value.
 
 use commonware_cryptography::sha256::Digest;
-use gas_killer_common::{DigestClaim, GasKillerTaskData, GasKillerValidator, NestedSpec};
+use gas_killer_common::{
+    DigestClaim, GasKillerTaskData, GasKillerValidator, NestedSpec, TracePool,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
-
-use crate::trace_pool::TracePool;
 
 /// First retry delay after a validation error; doubles per attempt.
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(500);
@@ -157,8 +157,7 @@ impl DigestResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace_pool::TraceRuntime;
-    use gas_killer_common::ValidatorMetrics;
+    use gas_killer_common::{TraceRuntime, ValidatorMetrics};
 
     /// A task every honest node rejects the same way gets no commit, so it can never reach a
     /// quorum; it must not wait out the retry budget first.

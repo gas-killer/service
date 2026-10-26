@@ -8,7 +8,7 @@ use crate::ingress::GasKillerTaskRequest;
 use crate::metrics::MetricsCollector;
 use crate::store::{Settlement, SqliteStore, TaskStatus};
 use gas_killer_common::task_data::GasKillerTaskData;
-use gas_killer_common::{ChainRole, GasKillerValidator, NestedSpec, TreeTrace};
+use gas_killer_common::{ChainRole, GasKillerValidator, NestedSpec, TracePool, TreeTrace};
 use gas_killer_common::{PayloadView, TaskBundle};
 
 use alloy_primitives::{Address, Bytes};
@@ -119,10 +119,21 @@ impl Traced {
 /// Nodes supply the digest the quorum signs, so the round never waits on this trace. It
 /// still gates the outcome: the payload is rendered only from these storage updates, and only
 /// when they hash to the digest the quorum signed, so the router keeps its independent check
-/// of the quorum. The trace runs in its own task, so it outlives whatever future awaited it.
+/// of the quorum. The trace runs in its own task, so it outlives whatever future awaited it, but
+/// not the last handle: once nothing can read the result, the trace is aborted, so one that
+/// outlasts its session neither burns CPU nor holds a trace-pool slot the next session needs.
 #[derive(Clone)]
 pub struct RouterTrace {
     result: watch::Receiver<Option<Result<Traced, String>>>,
+    _task: Option<Arc<AbortWhenUnread>>,
+}
+
+struct AbortWhenUnread(tokio::task::AbortHandle);
+
+impl Drop for AbortWhenUnread {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl RouterTrace {
@@ -132,17 +143,23 @@ impl RouterTrace {
         F: Future<Output = Result<Traced>> + Send + 'static,
     {
         let (tx, result) = watch::channel(None);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let outcome = trace.await.map_err(|e| e.to_string());
             let _ = tx.send(Some(outcome));
         });
-        Self { result }
+        Self {
+            result,
+            _task: Some(Arc::new(AbortWhenUnread(task.abort_handle()))),
+        }
     }
 
     /// A trace that has already finished, for callers that hold the result up front.
     pub fn finished(outcome: Result<Traced, String>) -> Self {
         let (_, result) = watch::channel(Some(outcome));
-        Self { result }
+        Self {
+            result,
+            _task: None,
+        }
     }
 
     /// Waits for the trace: what it produced, or why it could not be computed.
@@ -348,6 +365,8 @@ pub struct TaskDispatcher {
     store: Option<SqliteStore>,
     /// Blocks a nested tree may stay settleable for; see [`GasKillerValidator::nested_spec_for`].
     nested_buffer: Option<u64>,
+    /// Where the router's traces run. `None` runs them on the caller's runtime.
+    traces: Option<TracePool>,
 }
 
 impl TaskDispatcher {
@@ -361,7 +380,15 @@ impl TaskDispatcher {
             metrics,
             store,
             nested_buffer: None,
+            traces: None,
         }
+    }
+
+    /// Runs the router's traces on `traces`, so their CPU work stays off the workers driving p2p
+    /// and the signing sessions.
+    pub fn with_traces(mut self, traces: TracePool) -> Self {
+        self.traces = Some(traces);
+        self
     }
 
     /// Settles tasks whose root supports it as nested trees, each payload expiring within
@@ -478,7 +505,7 @@ impl TaskDispatcher {
         let traced = resolved.task_data();
         let rpc_url = resolved.sim_rpc_url.clone();
         if let Some(spec) = resolved.nested {
-            return RouterTrace::spawn(async move {
+            return self.start_trace(async move {
                 let start = Instant::now();
                 let tree = validator.trace_tree(&traced, &spec).await?;
                 if let Some(m) = &metrics {
@@ -498,7 +525,7 @@ impl TaskDispatcher {
                 Ok(Traced::Tree(Arc::new(tree)))
             });
         }
-        RouterTrace::spawn(async move {
+        self.start_trace(async move {
             let start = Instant::now();
             let analysis = validator
                 .analyze_transaction(
@@ -532,6 +559,16 @@ impl TaskDispatcher {
             );
             Ok(Traced::Flat(storage_updates.into()))
         })
+    }
+
+    fn start_trace<F>(&self, trace: F) -> RouterTrace
+    where
+        F: Future<Output = Result<Traced>> + Send + 'static,
+    {
+        match self.traces.clone() {
+            Some(traces) => RouterTrace::spawn(async move { traces.run(trace).await }),
+            None => RouterTrace::spawn(trace),
+        }
     }
 }
 
@@ -743,6 +780,81 @@ mod tests {
         // Nothing listens on this port; RPC calls fail fast with connection refused
         // rather than hanging, so `resolve` errors quickly and deterministically.
         Arc::new(GasKillerValidator::with_rpc_url("http://localhost:8545"))
+    }
+
+    #[tokio::test]
+    async fn the_routers_trace_runs_on_the_trace_runtime() {
+        let runtime = gas_killer_common::TraceRuntime::new(1).unwrap();
+        let dispatcher =
+            TaskDispatcher::new(unreachable_validator(), None, None).with_traces(runtime.pool());
+
+        let trace = dispatcher.start_trace(async {
+            let thread = std::thread::current().name().unwrap_or_default().to_owned();
+            Ok(Traced::Flat(Bytes::from(thread.into_bytes())))
+        });
+        assert_eq!(
+            trace.wait().await.unwrap().flat_program(),
+            Some(&Bytes::from_static(b"gk-trace"))
+        );
+
+        drop(dispatcher);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    /// A session that ends before its trace drops every handle; the next session's trace must
+    /// get the slot rather than queue behind one nobody will read.
+    #[tokio::test]
+    async fn an_abandoned_trace_frees_its_slot_for_the_next() {
+        let runtime = gas_killer_common::TraceRuntime::new(1).unwrap();
+        let dispatcher =
+            TaskDispatcher::new(unreachable_validator(), None, None).with_traces(runtime.pool());
+
+        let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        let hung = dispatcher.start_trace(async move {
+            let _signal = DropSignal(Some(dropped_tx));
+            std::future::pending().await
+        });
+        let kept = hung.clone();
+        drop(hung);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            matches!(
+                dropped_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "a live handle keeps the trace running"
+        );
+        drop(kept);
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("dropping the last handle must abort the trace")
+            .ok();
+
+        let next = dispatcher.start_trace(async { Ok(Traced::Flat(Bytes::from_static(b"next"))) });
+        let traced = tokio::time::timeout(std::time::Duration::from_secs(1), next.wait())
+            .await
+            .expect("the abandoned trace's slot must be free again");
+        assert_eq!(
+            traced.unwrap().flat_program(),
+            Some(&Bytes::from_static(b"next"))
+        );
+
+        drop(dispatcher);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
     }
 
     #[tokio::test]
