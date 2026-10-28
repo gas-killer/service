@@ -101,7 +101,10 @@ pub fn log_sim_endpoints(
 ) {
     for (role, sim_url) in sim_rpc_urls {
         let endpoint = endpoint_label(sim_url);
-        if chain_rpc_urls.get(role) != Some(sim_url) {
+        let shares_chain_rpc = chain_rpc_urls
+            .get(role)
+            .is_some_and(|chain_url| same_endpoint(chain_url, sim_url));
+        if !shares_chain_rpc {
             tracing::info!(chain = %role, %endpoint, ?profile, "Simulating against a dedicated endpoint");
         } else if profile == gas_analyzer::SimProfile::Unbounded {
             tracing::warn!(
@@ -116,6 +119,15 @@ pub fn log_sim_endpoints(
                 "Simulating against the chain RPC: trace load shares the endpoint settlement uses; set SIM_HTTP_RPC to separate them"
             );
         }
+    }
+}
+
+/// Compared parsed, so spellings of one URL that differ only in a trailing slash, host case or an
+/// explicit default port still count as the same endpoint.
+fn same_endpoint(a: &str, b: &str) -> bool {
+    match (Url::parse(a), Url::parse(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 
@@ -230,6 +242,26 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("SIM_HTTP_RPC"), "{err}");
+    }
+
+    #[test]
+    fn same_endpoint_ignores_spelling_differences() {
+        assert!(same_endpoint(
+            "http://sim-node:8545",
+            "http://sim-node:8545/"
+        ));
+        assert!(same_endpoint(
+            "https://RPC.example.com:443",
+            "https://rpc.example.com"
+        ));
+        assert!(!same_endpoint(
+            "http://sim-node:8545",
+            "http://sim-node:8546"
+        ));
+        assert!(!same_endpoint(
+            "https://rpc.example.com/v2/a",
+            "https://rpc.example.com/v2/b"
+        ));
     }
 
     #[test]
