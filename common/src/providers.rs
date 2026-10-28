@@ -88,6 +88,49 @@ where
     Ok(urls)
 }
 
+/// Logs each chain's effective simulation endpoint, warning where it is the chain RPC itself.
+///
+/// Trace calls are the heaviest RPC load the fleet makes, so simulating against `HTTP_RPC` puts
+/// that load on the endpoint settlement and chain reads depend on (#326). Under
+/// [`gas_analyzer::SimProfile::Unbounded`] it is also only truthful if that endpoint's gas cap is
+/// lifted. It stays a warning rather than an error because a local anvil is legitimately both.
+pub fn log_sim_endpoints(
+    chain_rpc_urls: &HashMap<ChainRole, String>,
+    sim_rpc_urls: &HashMap<ChainRole, String>,
+    profile: gas_analyzer::SimProfile,
+) {
+    for (role, sim_url) in sim_rpc_urls {
+        let endpoint = endpoint_label(sim_url);
+        if chain_rpc_urls.get(role) != Some(sim_url) {
+            tracing::info!(chain = %role, %endpoint, ?profile, "Simulating against a dedicated endpoint");
+        } else if profile == gas_analyzer::SimProfile::Unbounded {
+            tracing::warn!(
+                chain = %role,
+                %endpoint,
+                "Simulating unbounded against the chain RPC: set SIM_HTTP_RPC to a node with its gas cap lifted, or traces run out of gas"
+            );
+        } else {
+            tracing::warn!(
+                chain = %role,
+                %endpoint,
+                "Simulating against the chain RPC: trace load shares the endpoint settlement uses; set SIM_HTTP_RPC to separate them"
+            );
+        }
+    }
+}
+
+/// Scheme, host and port only: hosted RPC URLs carry their API key in the path or query.
+fn endpoint_label(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(url) => match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
+            (Some(host), None) => format!("{}://{host}", url.scheme()),
+            (None, _) => url.scheme().to_string(),
+        },
+        Err(_) => "<unparseable>".to_string(),
+    }
+}
+
 /// Builds a read-only HTTP provider for each chain URL.
 ///
 /// URLs that fail to parse are skipped with a warning; a chain with no provider
@@ -187,6 +230,19 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("SIM_HTTP_RPC"), "{err}");
+    }
+
+    #[test]
+    fn endpoint_label_drops_credentials_path_and_query() {
+        assert_eq!(
+            endpoint_label("https://user:secret@eth-sepolia.example.com/v2/KEY?token=abc"),
+            "https://eth-sepolia.example.com"
+        );
+        assert_eq!(
+            endpoint_label("http://sim-node:8545"),
+            "http://sim-node:8545"
+        );
+        assert_eq!(endpoint_label("not a url"), "<unparseable>");
     }
 
     /// Silently inserting it would leave a typo'd variable looking configured but never read.

@@ -21,9 +21,10 @@ reth:
     - --rpc.gascap=max
     - --rpc.eth-proof-window=86400
     - --rpc.max-response-size=512
-    # Sized so every trace the fleet sends at once gets a slot: each prestate-net trace issues two
-    # tracer calls together, from the router and every node, for each live session. That is
-    # 2 x (1 + operators) x MAX_IN_FLIGHT_TASKS = 16 for 3 operators at 2 sessions. A call that
+    # Sized so every trace the fleet sends at once gets a slot: one muxTracer call per prestate-net
+    # trace, from the router and every node, for each live session, or two tracer calls where an
+    # endpoint refuses muxTracer. That is (1 + operators) x MAX_IN_FLIGHT_TASKS = 8 for 3 operators
+    # at 2 sessions, and 16 is the two-call worst case. A call that
     # misses a slot waits for a whole heavy trace to finish, so its operator finishes that task
     # last and is left out of the signature, and a light task waits minutes behind heavy ones.
     # Slots past the core count share the CPU rather than add throughput, which is the point:

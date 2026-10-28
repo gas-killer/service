@@ -527,6 +527,8 @@ impl GasKillerValidator {
     pub fn new() -> Result<Self> {
         let chain_rpc_urls = crate::chain_rpc_urls_from_env()?;
         let sim_rpc_urls = crate::sim_rpc_urls_from_env(&chain_rpc_urls)?;
+        let sim_profile = crate::config::sim_profile();
+        crate::log_sim_endpoints(&chain_rpc_urls, &sim_rpc_urls, sim_profile);
         let capacity = executor_cache_capacity(chain_rpc_urls.len());
         let providers = Arc::new(crate::build_read_providers(&chain_rpc_urls));
         if !providers.contains_key(&ChainRole::L1) {
@@ -545,7 +547,7 @@ impl GasKillerValidator {
             // Production path: node and router both call `new()`, so reading the
             // env here keeps their encoding (and therefore their digests) in sync.
             state_encoding: crate::config::state_encoding(),
-            sim_profile: crate::config::sim_profile(),
+            sim_profile,
         })
     }
 

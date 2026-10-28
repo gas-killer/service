@@ -73,9 +73,11 @@ sequence has to land inside the contract's 300-block staleness window (~60 min).
 above that puts the ceiling near 150 Ggas per phase; the 663 Ggas reference prompt needs the two
 phases overlapped and a faster machine type.
 
-Concurrency is capped at `--rpc.max-tracing-requests=16`: `2 x (1 + operators) x
-MAX_IN_FLIGHT_TASKS`, since a prestate-net trace issues two tracer calls at once and the router
-and every node each trace every live session. Raise it with either of those. At 8 with two
+Concurrency is capped at `--rpc.max-tracing-requests=16`: `(1 + operators) x
+MAX_IN_FLIGHT_TASKS` = 8 at 3 operators and 2 sessions, since the router and every node each trace
+every live session with one `muxTracer` call. 16 covers the `2 x` worst case, where an endpoint
+refuses `muxTracer` and each trace issues its two tracer calls separately. Raise it with
+operators or sessions. At 8 with two
 sessions live, the calls that missed a slot waited out a whole heavy trace: their operator
 finished that task last and was left out of its signature, and a light task sharing the window
 with a heavy one took six minutes instead of seconds. Slots beyond the core count time-share the
