@@ -144,7 +144,6 @@ router:
   # Safe here because schnorr.stakeRegistryAddress implements ISchnorrApprovalRegistry.
   nestedSettlement: true
   ingress:
-    timeoutMs: "0"
     # Equal to the payload's own validity window (payloadBlockBuffer x 12s), so a task can never
     # reach `ready` holding a payload the contract will no longer accept — it expires as a task
     # first. Long enough for a multi-minute round plus its wait in the queue, and above

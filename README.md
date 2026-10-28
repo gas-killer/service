@@ -207,6 +207,38 @@ quorum signed, and a router trace that fails ends the session at once.
   and all nodes together. `SchnorrStakeRegistry` changes are also subject to
   `SCHNORR_NOTICE_WINDOW` (see `example.env`).
 
+### Fleet upgrade procedures
+
+Most settings can roll pod by pod. The ones below cannot: the router and the nodes have to agree
+on them, and a fleet that disagrees does not fail loudly. Peers stay connected and every pod reports
+healthy while quorum stops forming. `gas_killer_config_fingerprint` hashes the settings marked
+*fingerprinted*; more than one distinct value across the fleet is a split, and
+`GasKillerConfigFingerprintSplit` fires when one outlasts 10 minutes.
+
+| Change | Procedure | If done wrong |
+|---|---|---|
+| **Digest inputs**: `STATE_ENCODING`, `GK_SIM_PROFILE`, and an image bump that changes `APPLICATION_NAMESPACE` (fingerprinted); a gas-analyzer bump that changes encoded `storage_updates`; the sim endpoint's client or version (not fingerprinted) | Flip the whole fleet at once | Nodes on the other value commit to a different digest. Below `min_signers`, every session times out and its task settles `failed` |
+| **Schnorr wire format**: an image bump that changes `SCHNORR_WIRE_VERSION` (fingerprinted) | Flip the whole fleet at once | A peer on the other version has its messages dropped as malformed, so it never signs |
+| **`ROUND_TIMEOUT`** (fingerprinted) | One upgrade for the router and every node. If they cannot change together, raise it on the nodes first and lower it on the router first | A node set lower than the router prunes a session that is still signing (it keeps two round timeouts of heights) and becomes a non-signer |
+| **`P2P_SCHNORR_MESSAGES_PER_SECOND`** | Raise it on the nodes first, then the router. Lower it on the router first | A receiver over its quota sleeps that peer's whole connection, stalling every channel and Ping behind one channel. A sender over quota silently drops messages, costing an attempt each |
+| **`MAX_IN_FLIGHT_TASKS`** | Raise the sim endpoint's concurrent-trace limit to `(1 + N) × W` first (`--rpc.max-tracing-requests` in `helm/sim-node`), then the router. The chart derives each node's `GK_VALIDATION_CONCURRENCY` from it | Traces past the endpoint's limit queue behind a whole heavy trace, so their operators sign late or not at all |
+| **Operator set** | Restart the router and every node together (see *Operator-set changes* above) | The participant set is frozen per process at startup, so a process that was not restarted keeps the old set |
+
+**Flipping the whole fleet.** In the chart, one value feeds the router and every node, so a single
+`helm upgrade` changes them all, but the pods roll rather than switch at once. Do it with nothing
+queued or in flight (`gas_killer_in_flight_heights` at 0): sessions that span the roll can fail
+quorum and settle `failed`. Then confirm
+`gas_killer_config_fingerprint` shows one value across the fleet, and canary one task (see
+`helm/gas-killer/README.md`, *Flipping the simulation profile*). Operators running their own nodes
+outside the chart need an agreed cutover time, and tasks fail until the last of them has switched.
+
+Two digest inputs have no fingerprint and need checking by hand:
+- **gas-analyzer bumps.** Read the bump's diff for changes to encoding or tracing. A bump that
+  touches either is a digest change.
+- **The sim endpoint's client or version.** Before moving to a new one, run gas-analyzer's
+  `tracer_equivalence` suite against it (see `SIM_HTTP_RPC` below). A client whose `muxTracer` and
+  separate-tracer paths disagree splits nodes that fall back from nodes that do not.
+
 ## Configuration
 
 ### Environment Variables
@@ -237,7 +269,6 @@ Optional environment variables:
 - `REBROADCAST_INTERVAL`: How often (in seconds) the coordinator re-sends a `CommitRequest` to the operators that have not committed yet (accepts fractional seconds). Library default: 5; Helm deployments set 15. A node dedupes by session, so a re-send only matters to one whose request was lost.
 - `INGRESS`: Enable HTTP ingress mode (true/false)
 - `INGRESS_ADDRESS`: Address for ingress server (default: 0.0.0.0:8080)
-- `INGRESS_TIMEOUT_MS`: Timeout for waiting on ingress tasks in milliseconds (default: 0, no timeout)
 - `ADMIN_KEY`: Shared secret guarding the `/admin/keys` endpoints, used to mint and revoke the per-client API keys that authenticate `POST /tasks`. Omit or leave empty to disable the admin API.
 - `RATE_LIMIT_RPM`: Default per-API-key request rate on `POST /tasks`, in requests per minute (default: 60). Applies to every key without a per-key override (set at creation via the `rpm_limit` field of `POST /admin/keys`). Over-limit requests get `429 Too Many Requests` with a `Retry-After` header. Counters are in-memory per router process and reset on restart.
 - `AVS_REFERENCE_TARGET`, `AVS_REFERENCE_TARGET_FILE`, `DEMO_TARGET_ADDRESS`, `DEMO_TARGET_FILE`, `DEMO_FACTORY_ADDRESS`, `DEMO_FACTORY_FILE`, `SCHNORR_STAKE_REGISTRY_ADDRESS`, `SCHNORR_STAKE_REGISTRY_FILE`: feed the `contracts` block on `GET /avs-metadata` — `chainId`, `avsAddress`, `schnorrStakeRegistry`, an advisory `registryCoordinator`, plus the demo contracts the docs point at. Publishing the live pair is what stops a target being wired to a superseded registry, which passes every router-side check and then reverts on chain.

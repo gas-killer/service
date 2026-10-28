@@ -50,7 +50,3 @@ monitoring:
     ingress:
       enabled: true
       host: grafana.gaskiller.xyz
-
-router:
-  ingress:
-    timeoutMs: "0"
