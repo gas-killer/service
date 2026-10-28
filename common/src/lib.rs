@@ -26,7 +26,9 @@ pub use config::{
 pub use metrics::ConfigMetrics;
 pub use nested::{NestedSpec, TreeTrace, build_tree_trace, nested_expiry};
 pub use payload::{BundleProof, NestedBundle, NestedFrame, PayloadView, TaskBundle};
-pub use providers::{build_read_providers, chain_rpc_urls_from_env, sim_rpc_urls_from_env};
+pub use providers::{
+    build_read_providers, chain_rpc_urls_from_env, log_sim_endpoints, sim_rpc_urls_from_env,
+};
 pub use task_data::GasKillerTaskData;
 pub use trace_pool::{TracePool, TraceRuntime};
 pub use validator::{DigestClaim, DigestTurn, GasKillerValidator, ValidatorMetrics};
