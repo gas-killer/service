@@ -130,6 +130,65 @@ fn cache_result_labels(hit: bool) -> CacheResultLabels {
     [("result", if hit { "hit" } else { "miss" }.to_string())]
 }
 
+/// Whether a validation error can clear on retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationErrorClass {
+    /// The endpoint, the network or the node itself; a retry may succeed.
+    Infra,
+    /// A property of the task at its block, which every honest operator reproduces.
+    Deterministic,
+}
+
+impl ValidationErrorClass {
+    /// Classifies `error` by whether its chain carries a [`DeterministicFailure`]. Anything
+    /// unmarked is infra: declining early on an error that could have cleared costs this node its
+    /// signature, so only failures known to recur skip the retries.
+    pub fn of(error: &anyhow::Error) -> Self {
+        if error
+            .chain()
+            .any(|cause| cause.is::<DeterministicFailure>())
+        {
+            Self::Deterministic
+        } else {
+            Self::Infra
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Infra => "infra",
+            Self::Deterministic => "deterministic",
+        }
+    }
+}
+
+/// A validation failure that follows from the task and its block alone, raised only once the
+/// trace behind it has completed.
+#[derive(Debug)]
+pub struct DeterministicFailure(String);
+
+impl std::fmt::Display for DeterministicFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DeterministicFailure {}
+
+impl DeterministicFailure {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self(reason.into())
+    }
+}
+
+/// An [`anyhow::Error`] marked as a [`DeterministicFailure`].
+pub(crate) fn deterministic(reason: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(DeterministicFailure::new(reason))
+}
+
+/// Label set scoping a counter to a [`ValidationErrorClass`], rendered as `class="infra"`.
+type ValidationErrorLabels = [(&'static str, String); 1];
+
 // Per-phase bucket constructors. A `Family` of histograms needs a plain `fn` to build each new
 // series (`Histogram` has no meaningful default), and each phase gets its own buckets because
 // they span very different scales — one shared set would leave most samples in a single bucket.
@@ -208,6 +267,9 @@ pub struct ValidatorMetrics {
     /// How long each trace waited for a validation slot. Read with the phase histograms: a slow
     /// task that mostly queued needs a higher limit or more CPU, not a faster trace RPC.
     pub validation_queue_wait_seconds: Histogram,
+    /// Failed validation attempts by class. A provider outage shows as `infra`; a task the
+    /// quorum cannot sign shows as `deterministic`.
+    pub validation_errors: Family<ValidationErrorLabels, Counter<u64, AtomicU64>>,
 }
 
 impl ValidatorMetrics {
@@ -305,6 +367,13 @@ impl ValidatorMetrics {
             validation_queue_wait_seconds.clone(),
         );
 
+        let validation_errors = Family::default();
+        registry.register(
+            "gas_killer_validation_errors",
+            "Total failed task validation attempts, by whether a retry can clear them",
+            validation_errors.clone(),
+        );
+
         Self {
             registry,
             evmsketch_duration_seconds,
@@ -319,6 +388,7 @@ impl ValidatorMetrics {
             digest_flight_coalesced,
             validation_queue_depth,
             validation_queue_wait_seconds,
+            validation_errors,
         }
     }
 
@@ -349,6 +419,13 @@ impl ValidatorMetrics {
             .observe(phases.timings.revm_estimate.as_secs_f64());
         self.executor_cache
             .get_or_create(&cache_result_labels(phases.executor_cache_hit))
+            .inc();
+    }
+
+    /// Records one failed validation attempt.
+    pub fn observe_validation_error(&self, class: ValidationErrorClass) {
+        self.validation_errors
+            .get_or_create(&[("class", class.as_str().to_string())])
             .inc();
     }
 
@@ -388,11 +465,11 @@ fn ensure_program_applies_something(
     block_height: u64,
 ) -> Result<()> {
     if update_count == 0 {
-        anyhow::bail!(
+        return Err(deterministic(format!(
             "analysis produced no state updates: the call to {contract_address} at block \
              {block_height} changes nothing, so its payload would spend gas to apply nothing \
              while still advancing the target's transition count"
-        );
+        )));
     }
     Ok(())
 }
@@ -595,6 +672,13 @@ impl GasKillerValidator {
     pub fn with_validator_metrics(mut self, metrics: Arc<ValidatorMetrics>) -> Self {
         self.validator_metrics = Some(metrics);
         self
+    }
+
+    /// Records a failed validation attempt in the metrics, when there are any.
+    pub fn observe_validation_error(&self, class: ValidationErrorClass) {
+        if let Some(metrics) = &self.validator_metrics {
+            metrics.observe_validation_error(class);
+        }
     }
 
     /// Returns the RPC URL for the default chain
@@ -1034,7 +1118,7 @@ impl GasKillerValidator {
     /// Uses the block_height from task_data to ensure deterministic results matching the router.
     async fn compute_storage_updates(&self, task_data: &GasKillerTaskData) -> Result<Vec<u8>> {
         if task_data.block_height == 0 {
-            return Err(anyhow::anyhow!("block_height is required for validation"));
+            return Err(deterministic("block_height is required for validation"));
         }
 
         // Detect which chain has the contract
@@ -1075,7 +1159,7 @@ impl GasKillerValidator {
         spec: &NestedSpec,
     ) -> Result<TreeTrace> {
         if task.block_height == 0 {
-            return Err(anyhow::anyhow!("block_height is required for validation"));
+            return Err(deterministic("block_height is required for validation"));
         }
         let chain = self.detect_chain_for_address(task.target_address).await?;
         let rpc_url = self
@@ -1804,6 +1888,26 @@ mod tests {
             message.contains(&target.to_string()) && message.contains("4242"),
             "the refusal should name the call it applies to: {message}"
         );
+        assert_eq!(
+            ValidationErrorClass::of(&err),
+            ValidationErrorClass::Deterministic
+        );
+    }
+
+    #[test]
+    fn a_deterministic_failure_is_recognised_under_added_context() {
+        let err = deterministic("no state updates").context("Gas analysis failed");
+        assert_eq!(
+            ValidationErrorClass::of(&err),
+            ValidationErrorClass::Deterministic
+        );
+    }
+
+    /// An unmarked error may be the endpoint's fault, so it must stay retryable.
+    #[test]
+    fn an_unmarked_error_is_infra() {
+        let err = anyhow::anyhow!("Gas analysis failed: error sending request");
+        assert_eq!(ValidationErrorClass::of(&err), ValidationErrorClass::Infra);
     }
 
     #[test]

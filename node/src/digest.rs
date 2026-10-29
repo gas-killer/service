@@ -9,7 +9,7 @@
 
 use commonware_cryptography::sha256::Digest;
 use gas_killer_common::{
-    DigestClaim, GasKillerTaskData, GasKillerValidator, NestedSpec, TracePool,
+    DigestClaim, GasKillerTaskData, GasKillerValidator, NestedSpec, TracePool, ValidationErrorClass,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -69,10 +69,9 @@ impl DigestResolver {
     /// the router's round: one set per attempt would let a later attempt trace the task afresh
     /// after the round it was for is over.
     ///
-    /// `expected_digest_for_task` returns untyped (anyhow) errors, so transient RPC failures
-    /// and deterministic validation failures are indistinguishable here; both are retried
-    /// until the deadline. The one cheaply detectable deterministic failure (missing block
-    /// height) gives up immediately.
+    /// Infra errors are retried with backoff until the deadline. A deterministic one (see
+    /// [`ValidationErrorClass`]) declines at once: every honest node reproduces it, so the task
+    /// cannot reach a quorum and retrying only spends traces.
     pub async fn resolve(
         &self,
         height: u64,
@@ -131,33 +130,60 @@ impl DigestResolver {
                     );
                     return Some(digest);
                 }
-                Err(error) if ::tokio::time::Instant::now() + backoff < deadline => {
-                    debug!(
-                        height,
-                        %error,
-                        backoff_ms = backoff.as_millis() as u64,
-                        "task validation failed; retrying"
-                    );
+                Err(error) => {
+                    if !self.should_retry(height, &error, backoff, deadline) {
+                        return None;
+                    }
                     ::tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(MAX_RETRY_BACKOFF);
                 }
-                Err(error) => {
-                    warn!(
-                        height,
-                        %error,
-                        "task validation failed with no time left in its round; declining to commit"
-                    );
-                    return None;
-                }
             }
         }
+    }
+
+    /// Records a failed attempt and decides whether to retry it after `backoff`.
+    fn should_retry(
+        &self,
+        height: u64,
+        error: &anyhow::Error,
+        backoff: Duration,
+        deadline: ::tokio::time::Instant,
+    ) -> bool {
+        let class = ValidationErrorClass::of(error);
+        self.validator.observe_validation_error(class);
+        if class == ValidationErrorClass::Deterministic {
+            warn!(
+                height,
+                %error,
+                class = class.as_str(),
+                "task is invalid at its block; declining to commit"
+            );
+            return false;
+        }
+        if ::tokio::time::Instant::now() + backoff >= deadline {
+            warn!(
+                height,
+                %error,
+                class = class.as_str(),
+                "task validation failed with no time left in its round; declining to commit"
+            );
+            return false;
+        }
+        debug!(
+            height,
+            %error,
+            class = class.as_str(),
+            backoff_ms = backoff.as_millis() as u64,
+            "task validation failed; retrying"
+        );
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gas_killer_common::{TraceRuntime, ValidatorMetrics};
+    use gas_killer_common::{DeterministicFailure, TraceRuntime, ValidatorMetrics};
 
     /// A task every honest node rejects the same way gets no commit, so it can never reach a
     /// quorum; it must not wait out the retry budget first.
@@ -299,6 +325,72 @@ mod tests {
         let over = Instant::now() - Duration::from_millis(1);
         assert!(resolver.resolve(7, &task, None, over).await.is_none());
         assert_eq!(slots_requested(&metrics), None);
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    fn validation_errors(metrics: &ValidatorMetrics, class: &str) -> u64 {
+        let prefix = format!("gas_killer_validation_errors_total{{class=\"{class}\"}} ");
+        metrics
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+            .map_or(0, |count| count.parse().unwrap())
+    }
+
+    fn resolver_with_metrics(url: &str) -> (DigestResolver, Arc<ValidatorMetrics>, TraceRuntime) {
+        let runtime = TraceRuntime::new(1).unwrap();
+        let metrics = Arc::new(ValidatorMetrics::new());
+        let validator =
+            GasKillerValidator::with_rpc_url(url).with_validator_metrics(Arc::clone(&metrics));
+        let resolver = DigestResolver::new(Arc::new(validator), runtime.pool());
+        (resolver, metrics, runtime)
+    }
+
+    /// Every honest node reproduces a deterministic failure, so the task cannot reach a quorum
+    /// however long this node retries.
+    #[tokio::test]
+    async fn a_deterministic_failure_is_not_retried() {
+        let (resolver, metrics, runtime) = resolver_with_metrics("http://localhost:1");
+        let error = anyhow::Error::new(DeterministicFailure::new("no state updates"))
+            .context("Gas analysis failed");
+        let deadline = ::tokio::time::Instant::now() + Duration::from_secs(600);
+
+        assert!(!resolver.should_retry(7, &error, INITIAL_RETRY_BACKOFF, deadline));
+        assert_eq!(validation_errors(&metrics, "deterministic"), 1);
+        assert_eq!(validation_errors(&metrics, "infra"), 0);
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    /// An endpoint that refuses every connection is an outage, not a verdict on the task: the
+    /// node keeps retrying until the round ends, and counts every attempt as infra.
+    #[tokio::test]
+    async fn an_unreachable_endpoint_is_retried_as_infra_until_the_deadline() {
+        let refused = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", refused.local_addr().unwrap());
+        drop(refused);
+        let (resolver, metrics, runtime) = resolver_with_metrics(&url);
+        let task = GasKillerTaskData {
+            block_height: 1,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let resolved = resolver
+            .resolve(7, &task, None, started + Duration::from_millis(1600))
+            .await;
+
+        assert!(resolved.is_none());
+        assert!(
+            started.elapsed() >= Duration::from_millis(1000),
+            "gave up early"
+        );
+        assert!(validation_errors(&metrics, "infra") >= 2, "retried");
+        assert_eq!(validation_errors(&metrics, "deterministic"), 0);
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))
             .await
