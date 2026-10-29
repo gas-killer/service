@@ -264,8 +264,6 @@ spec:
               value: "1"
             - name: DATA_DIR
               value: {{ .Values.router.persistence.mountPath | quote }}
-            - name: INGRESS_TIMEOUT_MS
-              value: {{ .Values.router.ingress.timeoutMs | quote }}
             - name: MAX_QUEUE_DEPTH
               value: {{ .Values.router.ingress.maxQueueDepth | quote }}
             - name: RATE_LIMIT_RPM
@@ -332,8 +330,6 @@ spec:
             - name: AVS_OPSET_SLASHING_CONDITIONS
               value: {{ .Values.router.avsMetadata.operatorSet.slashingConditions | quote }}
             {{- end }}
-            - name: POLLING_INTERVAL_MS
-              value: {{ .Values.router.pollingIntervalMs | quote }}
             - name: ROUND_TIMEOUT
               value: {{ .Values.router.roundTimeout | quote }}
             - name: MAX_IN_FLIGHT_TASKS

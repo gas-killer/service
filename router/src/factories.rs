@@ -61,8 +61,8 @@ const MAX_CONSECUTIVE_COUNT_FAILURES: u32 = 3;
 /// Rows the startup re-queue loads per query, repeating until the backlog is drained.
 ///
 /// Bounds the rows a single query materializes, not the re-queue's peak footprint: the task
-/// channel is unbounded and the sequencer dispatches one task at a time, so everything the walk
-/// sends stays resident until the sequencer reaches it.
+/// channel is unbounded and the sequencer dispatches at most `MAX_IN_FLIGHT_TASKS` at a time, so
+/// everything the walk sends stays resident until the sequencer reaches it.
 ///
 /// Sized above [`gas_killer_common::max_queue_depth`]'s default, which the ingress caps
 /// admissions against, so an unraised deployment drains in one page. Raising that cap past this

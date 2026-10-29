@@ -813,9 +813,9 @@ pub struct TaskAcceptedResponse {
 }
 
 /// `Retry-After` estimate (seconds) returned alongside a `503 QUEUE_FULL`. The router drains
-/// the queue one task at a time, so a slot typically frees once the in-flight round settles;
-/// sizing the hint to roughly one round nudges a shed client to retry about when capacity is
-/// likely to open rather than hot-looping against a full queue.
+/// the queue `MAX_IN_FLIGHT_TASKS` tasks at a time, so a slot typically frees once an in-flight
+/// round settles; sizing the hint to roughly one round nudges a shed client to retry about when
+/// capacity is likely to open rather than hot-looping against a full queue.
 const QUEUE_FULL_RETRY_AFTER_SECS: u64 = 60;
 
 /// A reserved slot in the ingress queue.

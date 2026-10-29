@@ -410,10 +410,6 @@ router:
   # transition index landed on chain meanwhile. Raise this only alongside a SIGTERM
   # handler that drains something.
   terminationGracePeriodSeconds: 30
-  # How often (in milliseconds) to poll for a new round between task cycles.
-  # Only applies when INGRESS=false (Basic creator). When INGRESS=true the creator
-  # blocks on an event-driven channel and this value has no effect.
-  pollingIntervalMs: "2000"
   # Max seconds the router waits for operator signatures on a round before abandoning
   # it and moving to the next queued task. The orchestrator submits immediately once
   # the signature threshold is reached, so this is a stalled-round recovery window,
@@ -455,9 +451,6 @@ router:
   nestedSettlement: false
   ingress:
     enabled: true
-    # IMPORTANT: Must be quoted string to prevent YAML from converting to scientific notation.
-    # "0" means no timeout — router waits indefinitely for an incoming task.
-    timeoutMs: "0"
     # Maximum tasks the ingress queue holds before shedding load. At capacity, POST /tasks
     # returns 503 QUEUE_FULL with a Retry-After hint. Tasks waiting behind a busy target count
     # too, so this bounds both memory and worst-case queue latency (MAX_QUEUE_DEPTH).
