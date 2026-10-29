@@ -265,42 +265,6 @@ fn worker_threads_from(value: Option<&str>, cpus: usize) -> usize {
         .unwrap_or(cpus.max(MIN_WORKER_THREADS))
 }
 
-/// Digest-cache slots kept whatever the session count.
-///
-/// A digest only has to outlive the retries of the session that traced it, so a live session
-/// needs one slot; the floor keeps every live entry far from eviction.
-const DIGEST_CACHE_FLOOR: std::num::NonZeroUsize = std::num::NonZeroUsize::new(256).unwrap();
-
-/// Most digest-cache slots honoured, configured or derived. The cache reserves its whole
-/// capacity at startup, so an oversized value would allocate far more than it ever uses.
-const DIGEST_CACHE_CEILING: std::num::NonZeroUsize = std::num::NonZeroUsize::new(1 << 16).unwrap();
-
-/// Digest-cache slots per concurrent session, so the margin over live entries holds as the
-/// session count rises.
-const DIGEST_CACHE_SLOTS_PER_SESSION: usize = 64;
-
-/// Reads the digest-cache capacity from `GK_DIGEST_CACHE_CAPACITY`, defaulting to one derived
-/// from the larger of [`max_in_flight_tasks`] and [`validation_concurrency`]: the router knows its
-/// session count from the first, a node from the second. Zero or unparseable values fall back to
-/// the default, and every value is capped at [`DIGEST_CACHE_CEILING`].
-pub fn digest_cache_capacity() -> std::num::NonZeroUsize {
-    digest_cache_capacity_from(
-        env::var("GK_DIGEST_CACHE_CAPACITY").ok().as_deref(),
-        max_in_flight_tasks().max(validation_concurrency()),
-    )
-}
-
-fn digest_cache_capacity_from(value: Option<&str>, sessions: usize) -> std::num::NonZeroUsize {
-    let derived =
-        std::num::NonZeroUsize::new(sessions.saturating_mul(DIGEST_CACHE_SLOTS_PER_SESSION))
-            .map_or(DIGEST_CACHE_FLOOR, |n| n.max(DIGEST_CACHE_FLOOR));
-    value
-        .and_then(|v| v.trim().parse().ok())
-        .and_then(std::num::NonZeroUsize::new)
-        .unwrap_or(derived)
-        .min(DIGEST_CACHE_CEILING)
-}
-
 /// Default number of consecutive RPC failures against one chain before that chain is treated as
 /// unavailable.
 ///
@@ -719,11 +683,10 @@ const SCHNORR_TRACE_ROUND_FRACTION: u32 = 2;
 /// compute raises `ROUND_TIMEOUT`, and the round and this stage grow with it.
 ///
 /// The fraction, rather than the whole round, keeps a retry in budget. A retry after a
-/// dropped message resolves from the node's digest cache, which the finished trace already
+/// dropped message resolves from the session's digest slot, which the finished trace already
 /// filled, and is cheap. A retry after the stage ran to its deadline is not: the first
 /// attempt's commit task is detached and never cancelled, so its trace is still running, and
-/// the new attempt queues behind it on `GasKillerValidator::expected_digest_for_task`'s flight
-/// lock. It costs the remainder of that trace, not a second one — unless the trace fails, in
+/// the new attempt waits on that slot. It costs the remainder of that trace, not a second one — unless the trace fails, in
 /// which case the retry traces again from the start.
 pub fn schnorr_trace_timeout() -> std::time::Duration {
     if env::var_os(RENAMED_SIGN_STAGE_TIMEOUT_VAR).is_some() {
@@ -1371,19 +1334,6 @@ mod tests {
         assert_eq!(worker_threads_from(Some(" 2 "), 8), 2);
         assert_eq!(worker_threads_from(Some("0"), 2), 4);
         assert_eq!(worker_threads_from(Some("lots"), 6), 6);
-    }
-
-    #[test]
-    fn digest_cache_capacity_keeps_a_floor_and_scales_with_sessions() {
-        let capacity = |value, sessions| digest_cache_capacity_from(value, sessions).get();
-        assert_eq!(capacity(None, 1), 256);
-        assert_eq!(capacity(None, 4), 256);
-        assert_eq!(capacity(None, 8), 512);
-        assert_eq!(capacity(Some(" 32 "), 8), 32);
-        assert_eq!(capacity(Some("0"), 2), 256);
-        assert_eq!(capacity(Some("lots"), 2), 256);
-        assert_eq!(capacity(Some("1000000000"), 1), 65536);
-        assert_eq!(capacity(None, usize::MAX), 65536);
     }
 
     #[test]
