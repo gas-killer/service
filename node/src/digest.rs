@@ -70,8 +70,10 @@ impl DigestResolver {
     /// after the round it was for is over.
     ///
     /// Infra errors are retried with backoff until the deadline. A deterministic one (see
-    /// [`ValidationErrorClass`]) declines at once: every honest node reproduces it, so the task
-    /// cannot reach a quorum and retrying only spends traces.
+    /// [`ValidationErrorClass`]) declines once a second trace reproduces it. The router runs the
+    /// same checks before it creates a task, so a node that fails one usually traced a different
+    /// state than the router did — an endpoint on another fork at the head, which can clear
+    /// within seconds — and one retry is cheap next to waiting out the round.
     pub async fn resolve(
         &self,
         height: u64,
@@ -88,6 +90,7 @@ impl DigestResolver {
 
         let deadline = ::tokio::time::Instant::from_std(deadline);
         let mut backoff = INITIAL_RETRY_BACKOFF;
+        let mut deterministic_seen = false;
         loop {
             // The task's flight is claimed before a trace slot, so a later attempt of a session
             // whose first trace is still queued or running waits for that trace, not behind
@@ -134,7 +137,13 @@ impl DigestResolver {
                     return Some(digest);
                 }
                 Err(error) => {
-                    if !self.should_retry(height, &error, backoff, deadline) {
+                    if !self.should_retry(
+                        height,
+                        &error,
+                        backoff,
+                        deadline,
+                        &mut deterministic_seen,
+                    ) {
                         return None;
                     }
                     ::tokio::time::sleep(backoff).await;
@@ -145,23 +154,29 @@ impl DigestResolver {
     }
 
     /// Records a failed attempt and decides whether to retry it after `backoff`.
+    /// `deterministic_seen` carries whether an earlier attempt of this resolve already failed
+    /// deterministically.
     fn should_retry(
         &self,
         height: u64,
         error: &anyhow::Error,
         backoff: Duration,
         deadline: ::tokio::time::Instant,
+        deterministic_seen: &mut bool,
     ) -> bool {
         let class = ValidationErrorClass::of(error);
         self.validator.observe_validation_error(class);
         if class == ValidationErrorClass::Deterministic {
-            warn!(
-                height,
-                %error,
-                class = class.as_str(),
-                "task is invalid at its block; declining to commit"
-            );
-            return false;
+            if *deterministic_seen {
+                warn!(
+                    height,
+                    %error,
+                    class = class.as_str(),
+                    "task failed the same way on a second trace; declining to commit"
+                );
+                return false;
+            }
+            *deterministic_seen = true;
         }
         if ::tokio::time::Instant::now() + backoff >= deadline {
             warn!(
@@ -351,17 +366,19 @@ mod tests {
         (resolver, metrics, runtime)
     }
 
-    /// Every honest node reproduces a deterministic failure, so the task cannot reach a quorum
-    /// however long this node retries.
+    /// A deterministic failure is retried once, in case this node's endpoint traced a state
+    /// that has since moved, and declined when the retry reproduces it.
     #[tokio::test]
-    async fn a_deterministic_failure_is_not_retried() {
+    async fn a_deterministic_failure_is_declined_once_a_retry_reproduces_it() {
         let (resolver, metrics, runtime) = resolver_with_metrics("http://localhost:1");
         let error = anyhow::Error::new(DeterministicFailure::new("no state updates"))
             .context("Gas analysis failed");
         let deadline = ::tokio::time::Instant::now() + Duration::from_secs(600);
 
-        assert!(!resolver.should_retry(7, &error, INITIAL_RETRY_BACKOFF, deadline));
-        assert_eq!(validation_errors(&metrics, "deterministic"), 1);
+        let mut seen = false;
+        assert!(resolver.should_retry(7, &error, INITIAL_RETRY_BACKOFF, deadline, &mut seen));
+        assert!(!resolver.should_retry(7, &error, INITIAL_RETRY_BACKOFF, deadline, &mut seen));
+        assert_eq!(validation_errors(&metrics, "deterministic"), 2);
         assert_eq!(validation_errors(&metrics, "infra"), 0);
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))

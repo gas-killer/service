@@ -135,7 +135,9 @@ fn cache_result_labels(hit: bool) -> CacheResultLabels {
 pub enum ValidationErrorClass {
     /// The endpoint, the network or the node itself; a retry may succeed.
     Infra,
-    /// A property of the task at its block, which every honest operator reproduces.
+    /// Raised from a completed trace rather than by the endpoint: a property of the state the
+    /// trace saw. On every node it is the task's; on one node alone, that node's endpoint
+    /// disagrees with the router's.
     Deterministic,
     /// The round ended before the attempt did: an endpoint that hangs, or a trace too heavy for
     /// the round. Never returned by [`Self::of`], since no error was raised.
@@ -166,8 +168,8 @@ impl ValidationErrorClass {
     }
 }
 
-/// A validation failure that follows from the task and its block alone, raised only once the
-/// trace behind it has completed.
+/// A validation failure raised from a completed trace, so retrying against the same state
+/// reproduces it.
 #[derive(Debug)]
 pub struct DeterministicFailure(String);
 
@@ -272,7 +274,7 @@ pub struct ValidatorMetrics {
     /// task that mostly queued needs a higher limit or more CPU, not a faster trace RPC.
     pub validation_queue_wait_seconds: Histogram,
     /// Failed validation attempts by class. A provider outage shows as `infra`, or as `timeout`
-    /// when the provider hangs; a task the quorum cannot sign shows as `deterministic`.
+    /// when the provider hangs; a trace whose result cannot be signed shows as `deterministic`.
     pub validation_errors: Family<ValidationErrorLabels, Counter<u64, AtomicU64>>,
 }
 
