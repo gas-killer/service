@@ -9,9 +9,10 @@
 
 use commonware_cryptography::sha256::Digest;
 use gas_killer_common::{
-    DigestClaim, GasKillerTaskData, GasKillerValidator, NestedSpec, TracePool,
+    DigestClaim, GasKillerTaskData, GasKillerValidator, NestedSpec, TracePool, ValidationErrorClass,
 };
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -21,6 +22,37 @@ const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 /// Ceiling for the exponential retry backoff.
 const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
+/// Wait before retrying a deterministic failure: one slot, long enough for an endpoint on a
+/// losing fork at the head to reorg onto the canonical block. A sooner retry would trace the same
+/// state.
+const DETERMINISTIC_RETRY_DELAY: Duration = Duration::from_secs(12);
+
+/// Where a height stands after a deterministic failure. Shared by every attempt of the height,
+/// since the coordinator escalates to a new attempt while an earlier one still waits to retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Failed once; the one retry runs at `at`.
+    Retrying { at: ::tokio::time::Instant },
+    /// The retry reproduced the failure.
+    Declined,
+}
+
+/// What an attempt does before tracing, given its height's [`Verdict`].
+#[derive(Debug, PartialEq, Eq)]
+enum Gate {
+    Trace,
+    WaitUntil(::tokio::time::Instant),
+    Decline,
+}
+
+/// The outcome of one pass through [`DigestResolver::resolve`]'s loop.
+enum Pass {
+    Digest(Digest),
+    Failed(anyhow::Error),
+    /// Another attempt of the height settled it as declined while this one waited.
+    Declined,
+}
+
 /// Resolves a task to the digest this node is willing to sign. Cheap to clone.
 #[derive(Clone)]
 pub(crate) struct DigestResolver {
@@ -28,11 +60,37 @@ pub(crate) struct DigestResolver {
     validator: Arc<GasKillerValidator>,
     /// Where traces run, and how many at once.
     traces: TracePool,
+    /// Heights that failed deterministically, pruned with their sessions.
+    verdicts: Arc<Mutex<HashMap<u64, Verdict>>>,
 }
 
 impl DigestResolver {
     pub fn new(validator: Arc<GasKillerValidator>, traces: TracePool) -> Self {
-        Self { validator, traces }
+        Self {
+            validator,
+            traces,
+            verdicts: Arc::default(),
+        }
+    }
+
+    /// Forgets the verdicts of heights below `floor`.
+    pub fn prune_below(&self, floor: u64) {
+        self.verdicts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|h, _| *h >= floor);
+    }
+
+    fn gate(&self, height: u64) -> Gate {
+        let verdicts = self.verdicts.lock().unwrap_or_else(|e| e.into_inner());
+        match verdicts.get(&height) {
+            None => Gate::Trace,
+            Some(Verdict::Declined) => Gate::Decline,
+            Some(Verdict::Retrying { at }) if ::tokio::time::Instant::now() < *at => {
+                Gate::WaitUntil(*at)
+            }
+            Some(Verdict::Retrying { .. }) => Gate::Trace,
+        }
     }
 
     /// Whether a nested request's expiry is one this node will sign: no further ahead of its own
@@ -69,10 +127,11 @@ impl DigestResolver {
     /// the router's round: one set per attempt would let a later attempt trace the task afresh
     /// after the round it was for is over.
     ///
-    /// `expected_digest_for_task` returns untyped (anyhow) errors, so transient RPC failures
-    /// and deterministic validation failures are indistinguishable here; both are retried
-    /// until the deadline. The one cheaply detectable deterministic failure (missing block
-    /// height) gives up immediately.
+    /// Infra errors are retried with backoff until the deadline. A deterministic one (see
+    /// [`ValidationErrorClass`]) declines once a second trace, a slot later, reproduces it. The
+    /// router runs the same checks before it creates a task, so a node that fails one usually
+    /// traced a different state than the router did — an endpoint on another fork at the head,
+    /// which a reorg clears — and one retry is cheap next to retrying until the round ends.
     pub async fn resolve(
         &self,
         height: u64,
@@ -90,14 +149,40 @@ impl DigestResolver {
         let deadline = ::tokio::time::Instant::from_std(deadline);
         let mut backoff = INITIAL_RETRY_BACKOFF;
         loop {
+            match self.gate(height) {
+                Gate::Trace => {}
+                Gate::Decline => {
+                    debug!(
+                        height,
+                        "an earlier attempt declined this height; declining to commit"
+                    );
+                    return None;
+                }
+                Gate::WaitUntil(at) if at >= deadline => {
+                    debug!(
+                        height,
+                        "the pending retry falls past the round; declining to commit"
+                    );
+                    return None;
+                }
+                Gate::WaitUntil(at) => {
+                    ::tokio::time::sleep_until(at).await;
+                    continue;
+                }
+            }
             // The task's flight is claimed before a trace slot, so a later attempt of a session
             // whose first trace is still queued or running waits for that trace, not behind
             // unrelated ones, and never holds a slot to do nothing.
             let outcome = ::tokio::time::timeout_at(deadline, async {
                 let turn = match self.validator.claim_digest_for(task, nested.as_ref()).await {
-                    DigestClaim::Known(digest) => return Some(Ok(digest)),
+                    DigestClaim::Known(digest) => return Some(Pass::Digest(digest)),
                     DigestClaim::Trace(turn) => turn,
                 };
+                // Errors are not shared through the flight, so an attempt that waited on
+                // another's failed retry would otherwise trace the task a third time.
+                if self.gate(height) == Gate::Decline {
+                    return Some(Pass::Declined);
+                }
                 // `timeout_at` polls this before its timer, so a turn handed over in the tick
                 // the round ends would otherwise start a trace before the timeout lands.
                 if ::tokio::time::Instant::now() >= deadline {
@@ -106,23 +191,38 @@ impl DigestResolver {
                 let validator = Arc::clone(&self.validator);
                 let owned = task.clone();
                 Some(
-                    self.traces
+                    match self
+                        .traces
                         .run(async move { validator.trace_digest(&owned, turn).await })
-                        .await,
+                        .await
+                    {
+                        Ok(digest) => Pass::Digest(digest),
+                        Err(error) => Pass::Failed(error),
+                    },
                 )
             })
             .await
             .ok()
             .flatten();
             let Some(outcome) = outcome else {
+                self.validator
+                    .observe_validation_error(ValidationErrorClass::Timeout);
                 warn!(
                     height,
+                    class = ValidationErrorClass::Timeout.as_str(),
                     "task validation ran past its round; declining to commit"
                 );
                 return None;
             };
             match outcome {
-                Ok(digest) => {
+                Pass::Declined => {
+                    debug!(
+                        height,
+                        "an earlier attempt declined this height; declining to commit"
+                    );
+                    return None;
+                }
+                Pass::Digest(digest) => {
                     debug!(
                         height,
                         transition_index = task.transition_index,
@@ -131,33 +231,80 @@ impl DigestResolver {
                     );
                     return Some(digest);
                 }
-                Err(error) if ::tokio::time::Instant::now() + backoff < deadline => {
-                    debug!(
-                        height,
-                        %error,
-                        backoff_ms = backoff.as_millis() as u64,
-                        "task validation failed; retrying"
-                    );
-                    ::tokio::time::sleep(backoff).await;
+                Pass::Failed(error) => {
+                    let delay = self.retry_delay(height, &error, backoff, deadline)?;
+                    ::tokio::time::sleep(delay).await;
                     backoff = (backoff * 2).min(MAX_RETRY_BACKOFF);
                 }
-                Err(error) => {
+            }
+        }
+    }
+
+    /// Records a failed attempt and returns how long to wait before retrying it, or `None` to
+    /// decline. Infra errors wait `backoff`. A height's first deterministic failure schedules
+    /// its one retry [`DETERMINISTIC_RETRY_DELAY`] later, for every attempt of the height; a
+    /// failure at or after that retry declines the height.
+    fn retry_delay(
+        &self,
+        height: u64,
+        error: &anyhow::Error,
+        backoff: Duration,
+        deadline: ::tokio::time::Instant,
+    ) -> Option<Duration> {
+        let class = ValidationErrorClass::of(error);
+        self.validator.observe_validation_error(class);
+        let now = ::tokio::time::Instant::now();
+        let delay = if class == ValidationErrorClass::Deterministic {
+            let mut verdicts = self.verdicts.lock().unwrap_or_else(|e| e.into_inner());
+            match verdicts.get(&height).copied() {
+                None => {
+                    verdicts.insert(
+                        height,
+                        Verdict::Retrying {
+                            at: now + DETERMINISTIC_RETRY_DELAY,
+                        },
+                    );
+                    DETERMINISTIC_RETRY_DELAY
+                }
+                Some(Verdict::Retrying { at }) if now < at => at - now,
+                Some(_) => {
+                    verdicts.insert(height, Verdict::Declined);
                     warn!(
                         height,
                         %error,
-                        "task validation failed with no time left in its round; declining to commit"
+                        class = class.as_str(),
+                        "task failed the same way on a second trace; declining to commit"
                     );
                     return None;
                 }
             }
+        } else {
+            backoff
+        };
+        if now + delay >= deadline {
+            warn!(
+                height,
+                %error,
+                class = class.as_str(),
+                "task validation failed with no time left in its round; declining to commit"
+            );
+            return None;
         }
+        debug!(
+            height,
+            %error,
+            class = class.as_str(),
+            delay_ms = delay.as_millis() as u64,
+            "task validation failed; retrying"
+        );
+        Some(delay)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gas_killer_common::{TraceRuntime, ValidatorMetrics};
+    use gas_killer_common::{DeterministicFailure, TraceRuntime, ValidatorMetrics};
 
     /// A task every honest node rejects the same way gets no commit, so it can never reach a
     /// quorum; it must not wait out the retry budget first.
@@ -253,11 +400,7 @@ mod tests {
         // Accepts connections into its backlog and never answers them.
         let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", silent.local_addr().unwrap());
-        let runtime = TraceRuntime::new(1).unwrap();
-        let resolver = DigestResolver::new(
-            Arc::new(GasKillerValidator::with_rpc_url(url)),
-            runtime.pool(),
-        );
+        let (resolver, metrics, runtime) = resolver_with_metrics(&url);
         let task = GasKillerTaskData {
             block_height: 1,
             ..Default::default()
@@ -271,6 +414,9 @@ mod tests {
         .expect("the deadline must bound a trace that never answers");
         assert!(resolved.is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
+        // A hung provider raises no error, so only the timeout class can show it.
+        assert_eq!(validation_errors(&metrics, "timeout"), 1);
+        assert_eq!(validation_errors(&metrics, "infra"), 0);
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))
             .await
@@ -299,6 +445,135 @@ mod tests {
         let over = Instant::now() - Duration::from_millis(1);
         assert!(resolver.resolve(7, &task, None, over).await.is_none());
         assert_eq!(slots_requested(&metrics), None);
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    fn validation_errors(metrics: &ValidatorMetrics, class: &str) -> u64 {
+        let prefix = format!("gas_killer_validation_errors_total{{class=\"{class}\"}} ");
+        metrics
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+            .map_or(0, |count| count.parse().unwrap())
+    }
+
+    fn resolver_with_metrics(url: &str) -> (DigestResolver, Arc<ValidatorMetrics>, TraceRuntime) {
+        let runtime = TraceRuntime::new(1).unwrap();
+        let metrics = Arc::new(ValidatorMetrics::new());
+        let validator =
+            GasKillerValidator::with_rpc_url(url).with_validator_metrics(Arc::clone(&metrics));
+        let resolver = DigestResolver::new(Arc::new(validator), runtime.pool());
+        (resolver, metrics, runtime)
+    }
+
+    /// A deterministic failure is retried once, in case this node's endpoint traced a state
+    /// that has since moved, and declined when the retry reproduces it.
+    #[tokio::test(start_paused = true)]
+    async fn a_deterministic_failure_is_declined_once_a_retry_reproduces_it() {
+        let (resolver, metrics, runtime) = resolver_with_metrics("http://localhost:1");
+        let error = anyhow::Error::new(DeterministicFailure::new("no state updates"))
+            .context("Gas analysis failed");
+        let deadline = ::tokio::time::Instant::now() + Duration::from_secs(600);
+
+        assert_eq!(
+            resolver.retry_delay(7, &error, INITIAL_RETRY_BACKOFF, deadline),
+            Some(DETERMINISTIC_RETRY_DELAY),
+            "the retry waits out a reorg at the head, not the infra backoff"
+        );
+        ::tokio::time::advance(DETERMINISTIC_RETRY_DELAY).await;
+        assert_eq!(
+            resolver.retry_delay(7, &error, INITIAL_RETRY_BACKOFF, deadline),
+            None
+        );
+        assert_eq!(validation_errors(&metrics, "deterministic"), 2);
+        assert_eq!(resolver.gate(7), Gate::Decline);
+
+        // A round too short to wait out the delay declines rather than retrying early.
+        let soon = ::tokio::time::Instant::now() + DETERMINISTIC_RETRY_DELAY / 2;
+        assert_eq!(
+            resolver.retry_delay(8, &error, INITIAL_RETRY_BACKOFF, soon),
+            None
+        );
+        assert_eq!(validation_errors(&metrics, "infra"), 0);
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    /// Every attempt of a height shares its one deterministic retry. A later attempt waits for
+    /// the scheduled retry instead of tracing at once, and once the retry reproduces the failure
+    /// it declines without tracing at all.
+    #[tokio::test(start_paused = true)]
+    async fn attempts_of_one_height_share_its_deterministic_retry() {
+        let (resolver, metrics, runtime) = resolver_with_metrics("http://localhost:1");
+        let error = anyhow::Error::new(DeterministicFailure::new("no state updates"));
+        let deadline = ::tokio::time::Instant::now() + Duration::from_secs(600);
+
+        // Attempt 1 fails and schedules the retry.
+        let retry_at = ::tokio::time::Instant::now() + DETERMINISTIC_RETRY_DELAY;
+        assert_eq!(
+            resolver.retry_delay(7, &error, INITIAL_RETRY_BACKOFF, deadline),
+            Some(DETERMINISTIC_RETRY_DELAY)
+        );
+
+        // Attempt 2 arrives mid-wait: it waits for that retry rather than tracing now.
+        ::tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(resolver.gate(7), Gate::WaitUntil(retry_at));
+        // One already tracing when the retry was scheduled fails into the same wait, not a
+        // fresh one.
+        assert_eq!(
+            resolver.retry_delay(7, &error, INITIAL_RETRY_BACKOFF, deadline),
+            Some(retry_at - ::tokio::time::Instant::now())
+        );
+
+        // The retry reproduces the failure; every attempt of the height then declines.
+        ::tokio::time::advance(Duration::from_secs(7)).await;
+        assert_eq!(resolver.gate(7), Gate::Trace);
+        assert_eq!(
+            resolver.retry_delay(7, &error, INITIAL_RETRY_BACKOFF, deadline),
+            None
+        );
+        assert_eq!(resolver.gate(7), Gate::Decline);
+        assert_eq!(validation_errors(&metrics, "deterministic"), 3);
+
+        // Other heights are unaffected, and pruning forgets the verdict.
+        assert_eq!(resolver.gate(8), Gate::Trace);
+        resolver.prune_below(8);
+        assert_eq!(resolver.gate(7), Gate::Trace);
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    /// An endpoint that refuses every connection is an outage, not a verdict on the task: the
+    /// node keeps retrying until the round ends, and counts every attempt as infra.
+    #[tokio::test]
+    async fn an_unreachable_endpoint_is_retried_as_infra_until_the_deadline() {
+        let refused = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", refused.local_addr().unwrap());
+        drop(refused);
+        let (resolver, metrics, runtime) = resolver_with_metrics(&url);
+        let task = GasKillerTaskData {
+            block_height: 1,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let resolved = resolver
+            .resolve(7, &task, None, started + Duration::from_millis(1600))
+            .await;
+
+        assert!(resolved.is_none());
+        assert!(
+            started.elapsed() >= Duration::from_millis(1000),
+            "gave up early"
+        );
+        assert!(validation_errors(&metrics, "infra") >= 2, "retried");
+        assert_eq!(validation_errors(&metrics, "deterministic"), 0);
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))
             .await

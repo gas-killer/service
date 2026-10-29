@@ -31,7 +31,10 @@ pub use providers::{
 };
 pub use task_data::GasKillerTaskData;
 pub use trace_pool::{TracePool, TraceRuntime};
-pub use validator::{DigestClaim, DigestTurn, GasKillerValidator, ValidatorMetrics};
+pub use validator::{
+    DeterministicFailure, DigestClaim, DigestTurn, GasKillerValidator, ValidationErrorClass,
+    ValidatorMetrics,
+};
 
 // Re-export provider types for convenience
 pub use bindings::{ReadOnlyProvider, WalletProvider};

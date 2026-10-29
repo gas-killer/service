@@ -467,6 +467,7 @@ fn prune_sessions(shared: &Shared, max_height: u64, window: u64) {
             .lock()
             .expect("deadlines lock")
             .retain(|h, _| *h >= floor);
+        shared.resolver.prune_below(floor);
     }
 }
 

@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use alloy_primitives::{Address, Bytes};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::sha256::Digest;
@@ -17,6 +17,7 @@ use gas_analyzer::nested::{EncodedTree, FrameProgram, encode_frame_tree};
 use serde::{Deserialize, Serialize};
 
 use crate::task_data::GasKillerTaskData;
+use crate::validator::deterministic;
 
 /// What a nested signing round fixes up front, carried to every node with the task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +91,7 @@ pub fn build_tree_trace(
     spec: &NestedSpec,
 ) -> Result<TreeTrace> {
     let Some(root) = frames.first() else {
-        bail!("a frame tree needs its root frame");
+        return Err(deterministic("a frame tree needs its root frame"));
     };
     let root_program = gas_analyzer::nested::encoded_program(&root.updates);
     if frames.len() == 1 {
@@ -106,12 +107,12 @@ pub fn build_tree_trace(
 
     let traced_index = root
         .transition_index
-        .ok_or_else(|| anyhow::anyhow!("the root frame never incremented its counter"))?;
+        .ok_or_else(|| deterministic("the root frame never incremented its counter"))?;
     if traced_index != alloy_primitives::U256::from(task.transition_index) {
-        bail!(
+        return Err(deterministic(format!(
             "the trace puts the root at transition {traced_index}, the task at {}",
             task.transition_index
-        );
+        )));
     }
     let encoded = encode_frame_tree(
         &frames,
@@ -119,7 +120,8 @@ pub fn build_tree_trace(
         task.value,
         task.chain_id,
         spec.expiry_block,
-    )?;
+    )
+    .map_err(|e| deterministic(format!("cannot encode the frame tree: {e:#}")))?;
     let digest = Digest::from(encoded.root.0);
     // The frames' NESTED ops carry no child leaf until encoding fills them in; the root contract
     // recomputes its leaf from the submitted program, so it must be the encoded one.
