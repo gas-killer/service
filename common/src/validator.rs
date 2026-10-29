@@ -137,6 +137,9 @@ pub enum ValidationErrorClass {
     Infra,
     /// A property of the task at its block, which every honest operator reproduces.
     Deterministic,
+    /// The round ended before the attempt did: an endpoint that hangs, or a trace too heavy for
+    /// the round. Never returned by [`Self::of`], since no error was raised.
+    Timeout,
 }
 
 impl ValidationErrorClass {
@@ -158,6 +161,7 @@ impl ValidationErrorClass {
         match self {
             Self::Infra => "infra",
             Self::Deterministic => "deterministic",
+            Self::Timeout => "timeout",
         }
     }
 }
@@ -267,8 +271,8 @@ pub struct ValidatorMetrics {
     /// How long each trace waited for a validation slot. Read with the phase histograms: a slow
     /// task that mostly queued needs a higher limit or more CPU, not a faster trace RPC.
     pub validation_queue_wait_seconds: Histogram,
-    /// Failed validation attempts by class. A provider outage shows as `infra`; a task the
-    /// quorum cannot sign shows as `deterministic`.
+    /// Failed validation attempts by class. A provider outage shows as `infra`, or as `timeout`
+    /// when the provider hangs; a task the quorum cannot sign shows as `deterministic`.
     pub validation_errors: Family<ValidationErrorLabels, Counter<u64, AtomicU64>>,
 }
 
@@ -370,7 +374,7 @@ impl ValidatorMetrics {
         let validation_errors = Family::default();
         registry.register(
             "gas_killer_validation_errors",
-            "Total failed task validation attempts, by whether a retry can clear them",
+            "Total failed task validation attempts, by class (infra, deterministic, timeout)",
             validation_errors.clone(),
         );
 

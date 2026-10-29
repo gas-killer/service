@@ -114,8 +114,11 @@ impl DigestResolver {
             .ok()
             .flatten();
             let Some(outcome) = outcome else {
+                self.validator
+                    .observe_validation_error(ValidationErrorClass::Timeout);
                 warn!(
                     height,
+                    class = ValidationErrorClass::Timeout.as_str(),
                     "task validation ran past its round; declining to commit"
                 );
                 return None;
@@ -279,11 +282,7 @@ mod tests {
         // Accepts connections into its backlog and never answers them.
         let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", silent.local_addr().unwrap());
-        let runtime = TraceRuntime::new(1).unwrap();
-        let resolver = DigestResolver::new(
-            Arc::new(GasKillerValidator::with_rpc_url(url)),
-            runtime.pool(),
-        );
+        let (resolver, metrics, runtime) = resolver_with_metrics(&url);
         let task = GasKillerTaskData {
             block_height: 1,
             ..Default::default()
@@ -297,6 +296,9 @@ mod tests {
         .expect("the deadline must bound a trace that never answers");
         assert!(resolved.is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
+        // A hung provider raises no error, so only the timeout class can show it.
+        assert_eq!(validation_errors(&metrics, "timeout"), 1);
+        assert_eq!(validation_errors(&metrics, "infra"), 0);
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))
             .await
