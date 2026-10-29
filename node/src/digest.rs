@@ -21,6 +21,11 @@ const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 /// Ceiling for the exponential retry backoff.
 const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
+/// Wait before retrying a deterministic failure: one slot, long enough for an endpoint on a
+/// losing fork at the head to reorg onto the canonical block. A sooner retry would trace the same
+/// state.
+const DETERMINISTIC_RETRY_DELAY: Duration = Duration::from_secs(12);
+
 /// Resolves a task to the digest this node is willing to sign. Cheap to clone.
 #[derive(Clone)]
 pub(crate) struct DigestResolver {
@@ -70,10 +75,10 @@ impl DigestResolver {
     /// after the round it was for is over.
     ///
     /// Infra errors are retried with backoff until the deadline. A deterministic one (see
-    /// [`ValidationErrorClass`]) declines once a second trace reproduces it. The router runs the
-    /// same checks before it creates a task, so a node that fails one usually traced a different
-    /// state than the router did — an endpoint on another fork at the head, which can clear
-    /// within seconds — and one retry is cheap next to waiting out the round.
+    /// [`ValidationErrorClass`]) declines once a second trace, a slot later, reproduces it. The
+    /// router runs the same checks before it creates a task, so a node that fails one usually
+    /// traced a different state than the router did — an endpoint on another fork at the head,
+    /// which a reorg clears — and one retry is cheap next to retrying until the round ends.
     pub async fn resolve(
         &self,
         height: u64,
@@ -137,33 +142,32 @@ impl DigestResolver {
                     return Some(digest);
                 }
                 Err(error) => {
-                    if !self.should_retry(
+                    let delay = self.retry_delay(
                         height,
                         &error,
                         backoff,
                         deadline,
                         &mut deterministic_seen,
-                    ) {
-                        return None;
-                    }
-                    ::tokio::time::sleep(backoff).await;
+                    )?;
+                    ::tokio::time::sleep(delay).await;
                     backoff = (backoff * 2).min(MAX_RETRY_BACKOFF);
                 }
             }
         }
     }
 
-    /// Records a failed attempt and decides whether to retry it after `backoff`.
-    /// `deterministic_seen` carries whether an earlier attempt of this resolve already failed
-    /// deterministically.
-    fn should_retry(
+    /// Records a failed attempt and returns how long to wait before retrying it, or `None` to
+    /// decline. Infra errors wait `backoff`; a deterministic one waits
+    /// [`DETERMINISTIC_RETRY_DELAY`] once. `deterministic_seen` carries whether an earlier
+    /// attempt of this resolve already failed deterministically.
+    fn retry_delay(
         &self,
         height: u64,
         error: &anyhow::Error,
         backoff: Duration,
         deadline: ::tokio::time::Instant,
         deterministic_seen: &mut bool,
-    ) -> bool {
+    ) -> Option<Duration> {
         let class = ValidationErrorClass::of(error);
         self.validator.observe_validation_error(class);
         if class == ValidationErrorClass::Deterministic {
@@ -174,27 +178,31 @@ impl DigestResolver {
                     class = class.as_str(),
                     "task failed the same way on a second trace; declining to commit"
                 );
-                return false;
+                return None;
             }
             *deterministic_seen = true;
         }
-        if ::tokio::time::Instant::now() + backoff >= deadline {
+        let delay = match class {
+            ValidationErrorClass::Deterministic => DETERMINISTIC_RETRY_DELAY,
+            _ => backoff,
+        };
+        if ::tokio::time::Instant::now() + delay >= deadline {
             warn!(
                 height,
                 %error,
                 class = class.as_str(),
                 "task validation failed with no time left in its round; declining to commit"
             );
-            return false;
+            return None;
         }
         debug!(
             height,
             %error,
             class = class.as_str(),
-            backoff_ms = backoff.as_millis() as u64,
+            delay_ms = delay.as_millis() as u64,
             "task validation failed; retrying"
         );
-        true
+        Some(delay)
     }
 }
 
@@ -376,9 +384,24 @@ mod tests {
         let deadline = ::tokio::time::Instant::now() + Duration::from_secs(600);
 
         let mut seen = false;
-        assert!(resolver.should_retry(7, &error, INITIAL_RETRY_BACKOFF, deadline, &mut seen));
-        assert!(!resolver.should_retry(7, &error, INITIAL_RETRY_BACKOFF, deadline, &mut seen));
+        assert_eq!(
+            resolver.retry_delay(7, &error, INITIAL_RETRY_BACKOFF, deadline, &mut seen),
+            Some(DETERMINISTIC_RETRY_DELAY),
+            "the retry waits out a reorg at the head, not the infra backoff"
+        );
+        assert_eq!(
+            resolver.retry_delay(7, &error, INITIAL_RETRY_BACKOFF, deadline, &mut seen),
+            None
+        );
         assert_eq!(validation_errors(&metrics, "deterministic"), 2);
+
+        // A round too short to wait out the delay declines rather than retrying early.
+        let mut seen = false;
+        let soon = ::tokio::time::Instant::now() + DETERMINISTIC_RETRY_DELAY / 2;
+        assert_eq!(
+            resolver.retry_delay(7, &error, INITIAL_RETRY_BACKOFF, soon, &mut seen),
+            None
+        );
         assert_eq!(validation_errors(&metrics, "infra"), 0);
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))
