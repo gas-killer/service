@@ -237,7 +237,8 @@ spec:
             {{- end }}
             {{- with $root.Values.schnorr.messagesPerSecond }}
             # Per-peer rate on the schnorr protocol channel. Both ends register their own quota,
-            # so this must match the router's or one side drops what the other may send.
+            # so this must match the router's: a sender over the receiver's quota stalls that
+            # peer's whole connection, and one over its own drops messages.
             - name: P2P_SCHNORR_MESSAGES_PER_SECOND
               value: {{ . | quote }}
             {{- end }}
