@@ -3,13 +3,17 @@
 //! The coordinator's `CommitRequest` carries the task; the node recomputes its storage updates
 //! with EVMSketch and hashes the expected payload, retrying errors with backoff. Every honest
 //! operator derives the same digest, because the digest of a task is deterministic:
-//! `GasKillerValidator::expected_digest_for_task(task)`. The caller's deadline bounds the whole
+//! `GasKillerValidator::trace_digest(task, nested)`. The caller's deadline bounds the whole
 //! resolution, queueing and slow traces included, before the node declines to commit; it never
 //! changes the digest value.
+//!
+//! A traced digest is held per height for the session's later attempts and pruned with the
+//! session, so the node keeps digests only for sessions that can still ask for them.
 
 use commonware_cryptography::sha256::Digest;
 use gas_killer_common::{
-    DigestClaim, GasKillerTaskData, GasKillerValidator, NestedSpec, TracePool, ValidationErrorClass,
+    DigestKey, GasKillerTaskData, GasKillerValidator, NestedSpec, TracePool, ValidationErrorClass,
+    digest_key,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -53,6 +57,18 @@ enum Pass {
     Declined,
 }
 
+/// One height's digest for one task. Its lock is held for the whole trace, so a later attempt
+/// of the height waits on a running trace instead of starting its own. A failed trace leaves it
+/// empty, and the next attempt traces again.
+type DigestSlot = Arc<::tokio::sync::Mutex<Option<Digest>>>;
+
+/// What an attempt found in its height's [`DigestSlot`].
+enum Claim {
+    Known(Digest),
+    /// The slot is empty and this attempt holds it: trace, and fill it on success.
+    Trace(::tokio::sync::OwnedMutexGuard<Option<Digest>>),
+}
+
 /// Resolves a task to the digest this node is willing to sign. Cheap to clone.
 #[derive(Clone)]
 pub(crate) struct DigestResolver {
@@ -62,6 +78,9 @@ pub(crate) struct DigestResolver {
     traces: TracePool,
     /// Heights that failed deterministically, pruned with their sessions.
     verdicts: Arc<Mutex<HashMap<u64, Verdict>>>,
+    /// Traced digests of live sessions. Keyed by the task's identity too, so a height can never
+    /// hand one task's digest to another.
+    slots: Arc<Mutex<HashMap<(u64, DigestKey), DigestSlot>>>,
 }
 
 impl DigestResolver {
@@ -70,15 +89,65 @@ impl DigestResolver {
             validator,
             traces,
             verdicts: Arc::default(),
+            slots: Arc::default(),
         }
     }
 
-    /// Forgets the verdicts of heights below `floor`.
+    /// Forgets the verdicts and digests of heights below `floor`.
     pub fn prune_below(&self, floor: u64) {
         self.verdicts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|h, _| *h >= floor);
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.retain(|(h, _), _| *h >= floor);
+        self.observe_slots(slots.len());
+    }
+
+    fn observe_slots(&self, count: usize) {
+        if let Some(metrics) = self.validator.metrics() {
+            metrics
+                .digest_cache_entries
+                .set(i64::try_from(count).unwrap_or(i64::MAX));
+        }
+    }
+
+    /// The height's digest for `task` if a trace already produced it, or else the right to
+    /// trace it, once any attempt already tracing it has finished.
+    async fn claim(
+        &self,
+        height: u64,
+        task: &GasKillerTaskData,
+        nested: Option<&NestedSpec>,
+    ) -> Claim {
+        let slot = {
+            let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = Arc::clone(slots.entry((height, digest_key(task, nested))).or_default());
+            self.observe_slots(slots.len());
+            slot
+        };
+        let (guard, waited) = match Arc::clone(&slot).try_lock_owned() {
+            Ok(guard) => (guard, false),
+            Err(_) => (slot.lock_owned().await, true),
+        };
+        let metrics = self.validator.metrics();
+        match *guard {
+            Some(digest) => {
+                if let Some(metrics) = metrics {
+                    metrics.observe_digest_cache(true);
+                    if waited {
+                        metrics.digest_flight_coalesced.inc();
+                    }
+                }
+                Claim::Known(digest)
+            }
+            None => {
+                if let Some(metrics) = metrics {
+                    metrics.observe_digest_cache(false);
+                }
+                Claim::Trace(guard)
+            }
+        }
     }
 
     fn gate(&self, height: u64) -> Gate {
@@ -174,9 +243,9 @@ impl DigestResolver {
             // whose first trace is still queued or running waits for that trace, not behind
             // unrelated ones, and never holds a slot to do nothing.
             let outcome = ::tokio::time::timeout_at(deadline, async {
-                let turn = match self.validator.claim_digest_for(task, nested.as_ref()).await {
-                    DigestClaim::Known(digest) => return Some(Pass::Digest(digest)),
-                    DigestClaim::Trace(turn) => turn,
+                let mut turn = match self.claim(height, task, nested.as_ref()).await {
+                    Claim::Known(digest) => return Some(Pass::Digest(digest)),
+                    Claim::Trace(turn) => turn,
                 };
                 // Errors are not shared through the flight, so an attempt that waited on
                 // another's failed retry would otherwise trace the task a third time.
@@ -193,7 +262,13 @@ impl DigestResolver {
                 Some(
                     match self
                         .traces
-                        .run(async move { validator.trace_digest(&owned, turn).await })
+                        .run(async move {
+                            let traced = validator.trace_digest(&owned, nested.as_ref()).await;
+                            if let Ok(digest) = &traced {
+                                *turn = Some(*digest);
+                            }
+                            traced
+                        })
                         .await
                     {
                         Ok(digest) => Pass::Digest(digest),
@@ -445,6 +520,219 @@ mod tests {
         let over = Instant::now() - Duration::from_millis(1);
         assert!(resolver.resolve(7, &task, None, over).await.is_none());
         assert_eq!(slots_requested(&metrics), None);
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    fn task_at(transition_index: u64) -> GasKillerTaskData {
+        GasKillerTaskData {
+            transition_index,
+            block_height: 1,
+            ..Default::default()
+        }
+    }
+
+    fn metric(metrics: &ValidatorMetrics, series: &str) -> Option<String> {
+        let prefix = format!("{series} ");
+        metrics
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+    }
+
+    /// Stands in for a finished trace: claims the slot and fills it with `digest`.
+    async fn fill(
+        resolver: &DigestResolver,
+        height: u64,
+        task: &GasKillerTaskData,
+        digest: Digest,
+    ) {
+        let Claim::Trace(mut turn) = resolver.claim(height, task, None).await else {
+            panic!("the slot is already filled");
+        };
+        *turn = Some(digest);
+    }
+
+    #[tokio::test]
+    async fn a_later_attempt_of_a_height_reuses_its_digest() {
+        let (resolver, metrics, runtime) = resolver_with_metrics("http://localhost:1");
+        let task = task_at(3);
+        let digest = task.build_payload_hash(&[0xaa]);
+        fill(&resolver, 7, &task, digest).await;
+
+        assert!(matches!(resolver.claim(7, &task, None).await, Claim::Known(d) if d == digest));
+        assert_eq!(
+            metric(
+                &metrics,
+                "gas_killer_evmsketch_digest_cache_total{result=\"hit\"}"
+            )
+            .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            metric(
+                &metrics,
+                "gas_killer_evmsketch_digest_cache_total{result=\"miss\"}"
+            )
+            .as_deref(),
+            Some("1")
+        );
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    /// An attempt arriving while the height's trace runs waits for it and reads its digest,
+    /// rather than tracing the task a second time.
+    #[tokio::test]
+    async fn a_concurrent_attempt_waits_on_the_running_trace() {
+        let (resolver, metrics, runtime) = resolver_with_metrics("http://localhost:1");
+        let task = task_at(3);
+        let digest = task.build_payload_hash(&[0xaa]);
+        let Claim::Trace(mut turn) = resolver.claim(7, &task, None).await else {
+            panic!("nothing is traced yet");
+        };
+        let follower = tokio::spawn({
+            let (resolver, task) = (resolver.clone(), task.clone());
+            async move { matches!(resolver.claim(7, &task, None).await, Claim::Known(d) if d == digest) }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !follower.is_finished(),
+            "the follower must wait for the trace"
+        );
+
+        *turn = Some(digest);
+        drop(turn);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), follower)
+                .await
+                .expect("finishing the trace must wake the follower")
+                .unwrap(),
+            "the follower must read the leader's digest"
+        );
+        assert_eq!(
+            metric(
+                &metrics,
+                "gas_killer_evmsketch_digest_flight_coalesced_total"
+            )
+            .as_deref(),
+            Some("1")
+        );
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_trace_leaves_the_slot_for_the_next_attempt() {
+        let (resolver, _metrics, runtime) = resolver_with_metrics("http://localhost:1");
+        let task = task_at(3);
+        let Claim::Trace(turn) = resolver.claim(7, &task, None).await else {
+            panic!("nothing is traced yet");
+        };
+        drop(turn);
+        assert!(
+            matches!(resolver.claim(7, &task, None).await, Claim::Trace(_)),
+            "the next attempt must trace again rather than inherit the failure"
+        );
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    /// A slot answers only for the task and height it was traced for.
+    #[tokio::test]
+    async fn a_digest_is_not_reused_for_another_task_or_height() {
+        let (resolver, _metrics, runtime) = resolver_with_metrics("http://localhost:1");
+        let task = task_at(3);
+        fill(&resolver, 7, &task, task.build_payload_hash(&[0xaa])).await;
+
+        assert!(matches!(
+            resolver.claim(7, &task_at(4), None).await,
+            Claim::Trace(_)
+        ));
+        assert!(matches!(
+            resolver.claim(8, &task, None).await,
+            Claim::Trace(_)
+        ));
+        let nested = NestedSpec { expiry_block: 99 };
+        assert!(matches!(
+            resolver.claim(7, &task, Some(&nested)).await,
+            Claim::Trace(_)
+        ));
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pruned_session_drops_its_digest() {
+        let (resolver, metrics, runtime) = resolver_with_metrics("http://localhost:1");
+        let task = task_at(3);
+        fill(&resolver, 7, &task, task.build_payload_hash(&[0xaa])).await;
+        fill(&resolver, 9, &task, task.build_payload_hash(&[0xbb])).await;
+        assert_eq!(
+            metric(&metrics, "gas_killer_evmsketch_digest_cache_entries").as_deref(),
+            Some("2")
+        );
+
+        resolver.prune_below(8);
+        assert_eq!(
+            metric(&metrics, "gas_killer_evmsketch_digest_cache_entries").as_deref(),
+            Some("1")
+        );
+        assert!(matches!(
+            resolver.claim(7, &task, None).await,
+            Claim::Trace(_)
+        ));
+        assert!(matches!(
+            resolver.claim(9, &task, None).await,
+            Claim::Known(_)
+        ));
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    /// End to end through `resolve`: an attempt behind a running trace resolves from its result.
+    /// The RPC is unreachable, so a second trace would fail rather than return the digest.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resolve_behind_a_running_trace_returns_its_digest() {
+        let (resolver, _metrics, runtime) = resolver_with_metrics("http://127.0.0.1:1");
+        let task = task_at(3);
+        let digest = task.build_payload_hash(&[0x01, 0x02]);
+        let Claim::Trace(mut turn) = resolver.claim(7, &task, None).await else {
+            panic!("nothing is traced yet");
+        };
+        let follower = tokio::spawn({
+            let (resolver, task) = (resolver.clone(), task.clone());
+            async move {
+                resolver
+                    .resolve(7, &task, None, Instant::now() + Duration::from_secs(30))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !follower.is_finished(),
+            "a second attempt must wait, not trace"
+        );
+
+        *turn = Some(digest);
+        drop(turn);
+        let resolved = tokio::time::timeout(Duration::from_secs(5), follower)
+            .await
+            .expect("the follower must be released when the trace ends")
+            .unwrap();
+        assert_eq!(resolved, Some(digest));
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))
             .await

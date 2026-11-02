@@ -638,7 +638,7 @@ schnorr:
   # of roundTimeout/2. A node commits only once it has traced the announced task with EVMSketch
   # and derived its digest, so this has to cover a full cold trace rather than a p2p round trip.
   # Half a round rather than the whole one keeps a retry in budget, but the two retry cases
-  # differ: a retry after a dropped message resolves from the node's digest cache and is cheap,
+  # differ: a retry after a dropped message resolves from the session's digest on the node and is cheap,
   # while a retry after the stage ran to its deadline queues behind the first attempt's trace,
   # which is still running.
   traceTimeoutSecs: ""
