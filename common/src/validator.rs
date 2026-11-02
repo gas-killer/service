@@ -90,14 +90,14 @@ pub enum ValidationErrorClass {
 }
 
 impl ValidationErrorClass {
-    /// Classifies `error` by whether its chain carries a [`DeterministicFailure`]. Anything
-    /// unmarked is infra: declining early on an error that could have cleared costs this node its
-    /// signature, so only failures known to recur skip the retries.
+    /// Classifies `error` by whether its chain carries a [`DeterministicFailure`] or a call the
+    /// EVM failed ([`gas_analyzer::EvmFailure`]). Anything unmarked is infra: declining early on
+    /// an error that could have cleared costs this node its signature, so only failures known to
+    /// recur skip the retries.
     pub fn of(error: &anyhow::Error) -> Self {
-        if error
-            .chain()
-            .any(|cause| cause.is::<DeterministicFailure>())
-        {
+        if error.chain().any(|cause| {
+            cause.is::<DeterministicFailure>() || cause.is::<gas_analyzer::EvmFailure>()
+        }) {
             Self::Deterministic
         } else {
             Self::Infra
@@ -1387,6 +1387,17 @@ mod tests {
     #[test]
     fn a_deterministic_failure_is_recognised_under_added_context() {
         let err = deterministic("no state updates").context("Gas analysis failed");
+        assert_eq!(
+            ValidationErrorClass::of(&err),
+            ValidationErrorClass::Deterministic
+        );
+    }
+
+    /// A reverted or halted call fails the same way at the same block on every node.
+    #[test]
+    fn an_evm_failure_is_deterministic() {
+        let err = anyhow::Error::new(gas_analyzer::EvmFailure::new("reverted"))
+            .context("Gas analysis failed");
         assert_eq!(
             ValidationErrorClass::of(&err),
             ValidationErrorClass::Deterministic

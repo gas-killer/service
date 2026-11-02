@@ -4034,7 +4034,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#c33a259ee3fd429a0a809fe0c581a8d46add91f4"
+source = "git+https://github.com/gas-killer/gas-analyzer#a367edaa575b0f681d23038c98b23d3225a6efb2"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -4050,7 +4050,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#c33a259ee3fd429a0a809fe0c581a8d46add91f4"
+source = "git+https://github.com/gas-killer/gas-analyzer#a367edaa575b0f681d23038c98b23d3225a6efb2"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
@@ -4066,7 +4066,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#c33a259ee3fd429a0a809fe0c581a8d46add91f4"
+source = "git+https://github.com/gas-killer/gas-analyzer#a367edaa575b0f681d23038c98b23d3225a6efb2"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -4093,7 +4093,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#c33a259ee3fd429a0a809fe0c581a8d46add91f4"
+source = "git+https://github.com/gas-killer/gas-analyzer#a367edaa575b0f681d23038c98b23d3225a6efb2"
 dependencies = [
  "alloy",
  "alloy-eips",
