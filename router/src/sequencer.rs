@@ -144,7 +144,7 @@ impl RouterTrace {
     {
         let (tx, result) = watch::channel(None);
         let task = tokio::spawn(async move {
-            let outcome = trace.await.map_err(|e| e.to_string());
+            let outcome = trace.await.map_err(|e| format!("{e:#}"));
             let _ = tx.send(Some(outcome));
         });
         Self {

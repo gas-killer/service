@@ -132,6 +132,12 @@ impl DeterministicFailure {
     }
 }
 
+/// Wraps a gas-analyzer error as context rather than restringifying it, so
+/// [`ValidationErrorClass::of`] can still find an [`gas_analyzer::EvmFailure`] in its chain.
+fn gas_analysis_failed(error: anyhow::Error) -> anyhow::Error {
+    error.context("Gas analysis failed")
+}
+
 /// An [`anyhow::Error`] marked as a [`DeterministicFailure`].
 pub(crate) fn deterministic(reason: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(DeterministicFailure::new(reason))
@@ -886,7 +892,7 @@ impl GasKillerValidator {
             self.sim_profile,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+        .map_err(gas_analysis_failed)?;
         let phases = AnalysisPhases {
             extraction: analysis.extraction,
             executor_cache_hit: analysis.executor_cache_hit,
@@ -1090,7 +1096,7 @@ impl GasKillerValidator {
             &gas_analyzer::nested::NESTING_COST_MODEL_V1,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+        .map_err(gas_analysis_failed)?;
         if let Some(metrics) = &self.validator_metrics {
             metrics
                 .evmsketch_duration_seconds
@@ -1396,8 +1402,9 @@ mod tests {
     /// A reverted or halted call fails the same way at the same block on every node.
     #[test]
     fn an_evm_failure_is_deterministic() {
-        let err = anyhow::Error::new(gas_analyzer::EvmFailure::new("reverted"))
-            .context("Gas analysis failed");
+        let err = gas_analysis_failed(anyhow::Error::new(gas_analyzer::EvmFailure::new(
+            "reverted",
+        )));
         assert_eq!(
             ValidationErrorClass::of(&err),
             ValidationErrorClass::Deterministic
