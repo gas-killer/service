@@ -283,9 +283,16 @@ fn main() {
                     let verifier = participant.pub_keys.as_ref().unwrap().g2_pub_key.clone();
                     tracing::info!(key = ?verifier, "registered authorized peer");
                     let socket = participant.socket.as_deref()?;
-                    let Some(address) = peer_address(socket) else {
-                        tracing::error!(socket, "skipping peer with a malformed socket address");
-                        return None;
+                    let address = match peer_address(socket) {
+                        Ok(address) => address,
+                        Err(reason) => {
+                            tracing::error!(
+                                socket,
+                                reason,
+                                "skipping peer with an unusable socket address"
+                            );
+                            return None;
+                        }
                     };
                     warn_if_unresolvable(socket, &address);
                     Some((verifier, address))
@@ -313,8 +320,8 @@ fn main() {
                     .unwrap_or("127.0.0.1"),
                 orchestrator_config.port
             );
-            let orchestrator_addr = peer_address(&orchestrator_socket).unwrap_or_else(|| {
-                panic!("Orchestrator address is not a well-formed host:port: {orchestrator_socket}")
+            let orchestrator_addr = peer_address(&orchestrator_socket).unwrap_or_else(|reason| {
+                panic!("Unusable orchestrator address {orchestrator_socket}: {reason}")
             });
             tracing::info!(target = %orchestrator_socket, "registered orchestrator address");
             warn_if_unresolvable(&orchestrator_socket, &orchestrator_addr);

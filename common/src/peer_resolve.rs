@@ -10,7 +10,7 @@ use std::time::Duration;
 const DNS_CHECK_ATTEMPTS: u32 = 30;
 const DNS_CHECK_DELAY: Duration = Duration::from_secs(2);
 
-/// Maps a registered `ip:port` or `host:port` socket to a p2p address, or `None` if it is
+/// Maps a registered `ip:port` or `host:port` socket to a p2p address, or explains why it is
 /// neither.
 ///
 /// A hostname is kept as a DNS ingress that the dialer resolves on every attempt, rather than
@@ -19,14 +19,23 @@ const DNS_CHECK_DELAY: Duration = Duration::from_secs(2);
 ///
 /// The egress IP is a placeholder: it is only consulted when `bypass_ip_check` is false, and
 /// both binaries set it to true because in-cluster source IPs never match registered addresses.
-pub fn peer_address(socket: &str) -> Option<Address> {
+///
+/// Hostnames must be RFC 1123 (letters, digits and `-` per label), so a name containing `_` is
+/// rejected. One trailing `.` of a fully qualified name is accepted and dropped.
+pub fn peer_address(socket: &str) -> Result<Address, String> {
     if let Ok(addr) = socket.parse::<SocketAddr>() {
-        return Some(Address::Symmetric(addr));
+        return Ok(Address::Symmetric(addr));
     }
-    let (host, port) = socket.rsplit_once(':')?;
-    let port = port.parse::<u16>().ok()?;
-    let host = Hostname::new(host).ok()?;
-    Some(Address::Asymmetric {
+    let (host, port) = socket
+        .rsplit_once(':')
+        .ok_or("expected ip:port or host:port")?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|e| format!("invalid port {port:?}: {e}"))?;
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let host = Hostname::new(host)
+        .map_err(|e| format!("host {host:?} failed hostname validation: {e}"))?;
+    Ok(Address::Asymmetric {
         ingress: Ingress::Dns { host, port },
         egress: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
     })
@@ -97,9 +106,26 @@ mod tests {
     }
 
     #[test]
-    fn malformed_socket_is_rejected() {
-        assert!(peer_address("no-port").is_none());
-        assert!(peer_address("host:notaport").is_none());
-        assert!(peer_address("bad host:3000").is_none());
+    fn trailing_dot_fqdn_is_accepted() {
+        let addr = peer_address("node-1.ns.svc.cluster.local.:3000").unwrap();
+        assert_eq!(
+            addr.ingress(),
+            Ingress::Dns {
+                host: Hostname::new("node-1.ns.svc.cluster.local").unwrap(),
+                port: 3000,
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_socket_is_rejected_with_a_reason() {
+        assert!(peer_address("no-port").unwrap_err().contains("host:port"));
+        assert!(
+            peer_address("host:notaport")
+                .unwrap_err()
+                .contains("invalid port")
+        );
+        let err = peer_address("bad_host:3000").unwrap_err();
+        assert!(err.contains("failed hostname validation"), "{err}");
     }
 }

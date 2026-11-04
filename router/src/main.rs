@@ -234,9 +234,16 @@ fn main() {
                 .into_iter()
                 .filter_map(|participant| {
                     let socket = participant.socket?;
-                    let Some(address) = peer_address(&socket) else {
-                        tracing::error!(socket, "skipping peer with a malformed socket address");
-                        return None;
+                    let address = match peer_address(&socket) {
+                        Ok(address) => address,
+                        Err(reason) => {
+                            tracing::error!(
+                                socket,
+                                reason,
+                                "skipping peer with an unusable socket address"
+                            );
+                            return None;
+                        }
                     };
                     warn_if_unresolvable(&socket, &address);
                     Some((participant.pub_keys.unwrap().g2_pub_key, address))
