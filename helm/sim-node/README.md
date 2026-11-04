@@ -58,7 +58,7 @@ Then flip the fleet with `--set simRpc.url=http://sim-node:8545`, which
 ## What it costs to trace here
 
 Figures from the `e2-standard-8` this chart is sized for, on Sepolia. They are what sizing the
-fleet's timeouts rests on, so re-measure after a machine-type change.
+fleet's timeouts rests on, so re-measure after a machine-type or storage-class change.
 
 | | |
 |---|---|
