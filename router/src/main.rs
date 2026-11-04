@@ -20,7 +20,7 @@ use commonware_runtime::{
 use commonware_utils::NZU32;
 use commonware_utils::ordered::Map;
 use gas_killer_common::get_operator_states;
-use gas_killer_common::peer_resolve::peer_address;
+use gas_killer_common::peer_resolve::{peer_address, warn_if_unresolvable};
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, IngressStalenessWindow,
     SpeculativePrebuildConfig, TraceRuntime, ValidatorMetrics, config_fingerprint,
@@ -234,11 +234,12 @@ fn main() {
                 .into_iter()
                 .filter_map(|participant| {
                     let socket = participant.socket?;
-                    let address = peer_address(&socket);
-                    if address.is_none() {
+                    let Some(address) = peer_address(&socket) else {
                         tracing::error!(socket, "skipping peer with a malformed socket address");
-                    }
-                    Some((participant.pub_keys.unwrap().g2_pub_key, address?))
+                        return None;
+                    };
+                    warn_if_unresolvable(&socket, &address);
+                    Some((participant.pub_keys.unwrap().g2_pub_key, address))
                 })
                 .collect();
             if recipients.is_empty() {

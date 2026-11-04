@@ -21,7 +21,7 @@ use commonware_p2p::{Address, AddressableManager as _};
 use commonware_runtime::{Clock, Metrics, Quota, Runner, Spawner, Supervisor, tokio};
 use commonware_utils::NZU32;
 use commonware_utils::ordered::{Map, Set};
-use gas_killer_common::peer_resolve::peer_address;
+use gas_killer_common::peer_resolve::{peer_address, warn_if_unresolvable};
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, OrchestratorConfig,
     SpeculativePrebuildConfig, TraceRuntime, ValidatorMetrics, config_fingerprint,
@@ -284,11 +284,12 @@ fn main() {
                     let verifier = participant.pub_keys.as_ref().unwrap().g2_pub_key.clone();
                     tracing::info!(key = ?verifier, "registered authorized peer");
                     let socket = participant.socket.as_deref()?;
-                    let address = peer_address(socket);
-                    if address.is_none() {
+                    let Some(address) = peer_address(socket) else {
                         tracing::error!(socket, "skipping peer with a malformed socket address");
-                    }
-                    Some((verifier, address?))
+                        return None;
+                    };
+                    warn_if_unresolvable(socket, &address);
+                    Some((verifier, address))
                 })
                 .collect();
             if recipients.is_empty() {
