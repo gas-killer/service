@@ -42,13 +42,17 @@ reth:
     limits:
       cpu: "7"
       memory: 26Gi
-  # Sepolia full node was ~890 GB uncompressed from the 2026-09 snapshot; leave headroom.
+  # Sepolia full node was ~890 GB uncompressed from the 2026-09 snapshot (856 GB in use by
+  # 2026-11); 1280Gi leaves headroom and can grow online. pd-balanced rather than pd-ssd: the
+  # worst minute on record was 7.3k IOPS (an Oct 13 multi-day catch-up) against ~10.7k at this
+  # size, and an e2-standard-8 caps pd-ssd near 15k anyway. Revisit if the node is ever stopped
+  # nightly, since every restart becomes a catch-up burst.
   # volumeClaimTemplates are immutable, so this size only applies to a PVC that does not exist
   # yet: growing a live one is `kubectl edit pvc` plus `kubectl delete sts <name>
   # --cascade=orphan` and a re-install, or the next upgrade is rejected outright.
   storage:
-    className: premium-rwo
-    size: 2Ti
+    className: standard-rwo
+    size: 1280Gi
 
 lighthouse:
   image:
