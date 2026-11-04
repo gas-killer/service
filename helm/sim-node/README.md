@@ -47,9 +47,12 @@ trace fails with a missing block, which is the same failure an unmoved anvil for
 the cap is real in the same pass: a `2^40` `debug_traceCall` must be granted exactly
 `1099511627776`, not a round number like 600,000,000.
 
+The reth image ships no `cast` or `curl`, so query it through a port-forward:
+
 ```
-kubectl exec -it sim-node-0 -c reth -- \
-  cast rpc eth_syncing --rpc-url http://localhost:8545
+kubectl port-forward svc/sim-node 8545:8545 &
+curl -s localhost:8545 -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"eth_syncing","params":[]}'
 ```
 
 Then flip the fleet with `--set simRpc.url=http://sim-node:8545`, which
@@ -91,11 +94,46 @@ late.
   head-anchored traces fail loudly until it is current.
 - **`reth.storage.size` is immutable** once the PVC exists (`volumeClaimTemplates` are), so
   growing it means editing the PVC and recreating the StatefulSet with `--cascade=orphan`.
+  Shrinking it or changing `className` cannot be done in place; see
+  [Replacing the datadir](#replacing-the-datadir).
 - **The JWT secret is `helm.sh/resource-policy: keep`** and survives `helm uninstall`; delete it by
   hand if you are tearing the release down for good.
 - **Snapshot archives are trusted as downloaded** — publicnode publishes no checksum. reth
   recomputes the state root for every block it syncs forward, so corruption surfaces rather than
   being served, but check the head against a trusted RPC before the fleet reads it.
+
+## Replacing the datadir
+
+A new `reth.storage.className` or a smaller `reth.storage.size` only reaches a PVC that does not
+exist yet. Upgrading over the live release is rejected, and the `--cascade=orphan` workaround
+for growing a PVC gets the upgrade through but re-adopts `reth-data-sim-node-0` by name, so the
+node stays on the old disk while the values claim otherwise. A PVC cannot be shrunk or moved to
+another class, so the only path is a new PVC and a snapshot restore.
+
+That is ~90 minutes of restore plus catch-up with no simulation endpoint. Either hold testnet
+traffic for the window or move the fleet to the anvil fork as in [Teardown](#teardown) and back
+afterwards; heavy targets do not fit the fork, so holding traffic is the safer choice.
+
+```
+# Keep the old disk as a rollback: with the default Delete policy, deleting the PVC destroys it.
+kubectl patch pv <old-pv> -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+
+kubectl delete sts sim-node                      # stops sim-node-0, releasing the PVC
+kubectl delete pvc reth-data-sim-node-0
+
+helm upgrade sim-node ./helm/sim-node            # replicas=1 creates the new PVC
+helm upgrade sim-node ./helm/sim-node --set replicas=0 --set snapshot.restore.enabled=true
+kubectl logs -f job/sim-node-snapshot-restore    # RESTORE_COMPLETE
+helm upgrade sim-node ./helm/sim-node --set replicas=1 --set snapshot.restore.enabled=false
+```
+
+Run the checks in [Before pointing the fleet at it](#before-pointing-the-fleet-at-it), re-measure
+the trace figures above, then delete the retained PV and its disk with `gcloud compute disks
+delete`.
+
+Do not upgrade with `--reuse-values` here: it keeps the last release's computed values, so the
+new storage defaults never reach the StatefulSet. Use `--reset-then-reuse-values` when a release
+carries `--set` overrides worth keeping.
 
 ## Teardown
 
