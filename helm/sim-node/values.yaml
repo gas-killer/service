@@ -12,7 +12,7 @@ network: sepolia
 reth:
   image:
     repository: ghcr.io/paradigmxyz/reth
-    tag: v2.7.0
+    tag: v2.8.1
     pullPolicy: IfNotPresent
   # --full keeps recent state only; tasks anchor at the head and PAYLOAD_EXPIRED closes the
   # window at ~50 blocks, so the pruned history is never asked for.
@@ -78,6 +78,8 @@ lighthouse:
 # part is extracted over the base. Procedure: `--set replicas=0 --set snapshot.restore.enabled=true`
 # (the node must not be writing), wait for the Job, then `--set replicas=1 --set
 # snapshot.restore.enabled=false`. The Job wipes the datadir first. Match nodeVersion to reth.image.tag.
+# The part's file name carries its block height and the unnumbered alias 404s, so take the current
+# one from publicnode.com/snapshots.
 #
 # Install at replicas=1 before restoring, even on a fresh cluster: the datadir PVC comes from the
 # StatefulSet's volumeClaimTemplate, so it exists only once the set has created pod 0, and the Job
@@ -92,7 +94,7 @@ snapshot:
     enabled: false
     urls:
       - https://snapshots.publicnode.com/ethereum-sepolia-reth-base.tar.lz4
-      - https://snapshots.publicnode.com/ethereum-sepolia-reth-part.tar.lz4
+      - https://snapshots.publicnode.com/ethereum-sepolia-reth-part-12061086.tar.lz4
     image: alpine:3.20
     resources:
       requests:
