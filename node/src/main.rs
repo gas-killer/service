@@ -31,7 +31,6 @@ use gas_killer_common::{
 };
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -306,7 +305,6 @@ fn main() {
             .expect("Invalid orchestrator G2 coordinates");
             tracing::info!(key = ?orchestrator_pub_key, "registered orchestrator key");
 
-            // Resolve orchestrator address (hostname:port or IP:port) with retries
             let orchestrator_socket = format!(
                 "{}:{}",
                 orchestrator_config
@@ -315,50 +313,13 @@ fn main() {
                     .unwrap_or("127.0.0.1"),
                 orchestrator_config.port
             );
-            tracing::info!(target = %orchestrator_socket, "resolving orchestrator address");
-
-            // Retry DNS resolution with exponential backoff for Docker networking
-            let mut orchestrator_addr = None;
-            let max_retries = 10;
-            for attempt in 0..max_retries {
-                match ::tokio::net::lookup_host(orchestrator_socket.as_str()).await {
-                    Ok(mut addrs) => {
-                        if let Some(addr) = addrs.next() {
-                            tracing::info!(addr = %addr, "resolved orchestrator address");
-                            orchestrator_addr = Some(addr);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            attempt = attempt + 1,
-                            max_retries = max_retries,
-                            "DNS resolution failed, retrying..."
-                        );
-                    }
-                }
-
-                if attempt < max_retries - 1 {
-                    let delay = std::time::Duration::from_millis(500 * (1 << attempt.min(4)));
-                    ::tokio::time::sleep(delay).await;
-                }
-            }
-
-            let orchestrator_addr = orchestrator_addr.unwrap_or_else(|| {
-                // Final fallback: try to parse as direct IP:PORT
-                SocketAddr::from_str(&orchestrator_socket).unwrap_or_else(|_| {
-                    panic!(
-                        "Failed to resolve orchestrator address '{}' after {} retries",
-                        orchestrator_socket, max_retries
-                    )
-                })
+            let orchestrator_addr = peer_address(&orchestrator_socket).unwrap_or_else(|| {
+                panic!("Orchestrator address is not a well-formed host:port: {orchestrator_socket}")
             });
+            tracing::info!(target = %orchestrator_socket, "registered orchestrator address");
+            warn_if_unresolvable(&orchestrator_socket, &orchestrator_addr);
 
-            recipients.push((
-                orchestrator_pub_key.clone(),
-                Address::Symmetric(orchestrator_addr),
-            ));
+            recipients.push((orchestrator_pub_key.clone(), orchestrator_addr));
         }
 
         tracing::info!(storage_dir = %storage_dir.display(), "runtime storage directory");
