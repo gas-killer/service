@@ -21,7 +21,7 @@ use commonware_p2p::{Address, AddressableManager as _};
 use commonware_runtime::{Clock, Metrics, Quota, Runner, Spawner, Supervisor, tokio};
 use commonware_utils::NZU32;
 use commonware_utils::ordered::{Map, Set};
-use gas_killer_common::peer_resolve::{PEER_RESOLVE_ATTEMPTS, PEER_RESOLVE_DELAY, resolve_peers};
+use gas_killer_common::peer_resolve::peer_address;
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, OrchestratorConfig,
     SpeculativePrebuildConfig, TraceRuntime, ValidatorMetrics, config_fingerprint,
@@ -244,7 +244,7 @@ fn main() {
 
     // Start runtime
     runner.start(|context: tokio::Context| async move {
-        let mut recipients: Vec<(PublicKey, SocketAddr)>;
+        let mut recipients: Vec<(PublicKey, Address)>;
 
         // Configure quorum number from environment (default: 0)
         let quorum_number: usize = std::env::var("QUORUM_NUMBER")
@@ -278,17 +278,21 @@ fn main() {
                 panic!("No operators found in quorum");
             }
 
-            let sockets = participants
+            recipients = participants
                 .iter()
                 .filter_map(|participant| {
                     let verifier = participant.pub_keys.as_ref().unwrap().g2_pub_key.clone();
                     tracing::info!(key = ?verifier, "registered authorized peer");
-                    Some((verifier, participant.socket.clone()?))
+                    let socket = participant.socket.as_deref()?;
+                    let address = peer_address(socket);
+                    if address.is_none() {
+                        tracing::error!(socket, "skipping peer with a malformed socket address");
+                    }
+                    Some((verifier, address?))
                 })
                 .collect();
-            recipients = resolve_peers(sockets, PEER_RESOLVE_ATTEMPTS, PEER_RESOLVE_DELAY).await;
             if recipients.is_empty() {
-                panic!("No operator in the quorum has a resolvable address");
+                panic!("No operator in the quorum has a well-formed socket address");
             }
 
             // Parse orchestrator (router) public key from G2 coordinates
@@ -350,7 +354,10 @@ fn main() {
                 })
             });
 
-            recipients.push((orchestrator_pub_key.clone(), orchestrator_addr));
+            recipients.push((
+                orchestrator_pub_key.clone(),
+                Address::Symmetric(orchestrator_addr),
+            ));
         }
 
         tracing::info!(storage_dir = %storage_dir.display(), "runtime storage directory");
@@ -408,12 +415,7 @@ fn main() {
         // Register authorized peers (operators + router) with the oracle. Peer
         // dialable addresses now come exclusively from this map; from_iter_dedup
         // keeps the first occurrence if the router key ever appears twice.
-        let peers: Map<PublicKey, Address> = Map::from_iter_dedup(
-            recipients
-                .iter()
-                .cloned()
-                .map(|(pk, addr)| (pk, Address::Symmetric(addr))),
-        );
+        let peers: Map<PublicKey, Address> = Map::from_iter_dedup(recipients.iter().cloned());
         let _ = oracle.track(0, peers);
 
         // The participant set: the operators' BN254 p2p identities.

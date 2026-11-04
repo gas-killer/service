@@ -1,114 +1,59 @@
-//! Startup resolution of registered operator sockets into dialable addresses.
+//! Converts registered operator sockets into p2p peer addresses.
 
-use std::net::SocketAddr;
-use std::time::Duration;
+use commonware_p2p::{Address, Ingress};
+use commonware_utils::Hostname;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-/// Attempts per peer before it is skipped; with [`PEER_RESOLVE_DELAY`] this gives DNS about 60s
-/// to come up (a Docker or k8s service name may not resolve until its pod starts).
-pub const PEER_RESOLVE_ATTEMPTS: u32 = 30;
-pub const PEER_RESOLVE_DELAY: Duration = Duration::from_secs(2);
-
-/// Resolves a `host:port` or `ip:port`, retrying while DNS is not yet ready.
-pub async fn resolve_with_retry(
-    address: &str,
-    max_attempts: u32,
-    retry_delay: Duration,
-) -> Option<SocketAddr> {
-    if let Ok(addr) = address.parse::<SocketAddr>() {
-        return Some(addr);
-    }
-    for attempt in 1..=max_attempts {
-        match tokio::net::lookup_host(address).await {
-            Ok(mut addrs) => {
-                if let Some(addr) = addrs.next() {
-                    tracing::info!(address, ?addr, attempt, "DNS resolution succeeded");
-                    return Some(addr);
-                }
-                tracing::warn!(address, attempt, "DNS resolution returned no addresses");
-            }
-            Err(e) => {
-                tracing::warn!(address, attempt, max_attempts, error = %e, "DNS resolution failed");
-            }
-        }
-        if attempt < max_attempts {
-            tokio::time::sleep(retry_delay).await;
-        }
-    }
-    None
-}
-
-/// Resolves every peer concurrently and returns those that resolved, in input order.
+/// Maps a registered `ip:port` or `host:port` socket to a p2p address, or `None` if it is
+/// neither.
 ///
-/// A peer that never resolves is logged and left out rather than failing startup: one stale
-/// registry entry would otherwise crash-loop every process in the quorum, even though the
-/// remaining peers can still reach a signing threshold. Deciding whether too few resolved is
-/// left to the caller.
-pub async fn resolve_peers<K: Send + 'static>(
-    peers: Vec<(K, String)>,
-    max_attempts: u32,
-    retry_delay: Duration,
-) -> Vec<(K, SocketAddr)> {
-    let total = peers.len();
-    let handles: Vec<_> = peers
-        .into_iter()
-        .map(|(key, socket)| {
-            tokio::spawn(async move {
-                let resolved = resolve_with_retry(&socket, max_attempts, retry_delay).await;
-                (key, socket, resolved)
-            })
-        })
-        .collect();
-
-    let mut resolved = Vec::with_capacity(total);
-    for handle in handles {
-        match handle.await {
-            Ok((key, _, Some(addr))) => resolved.push((key, addr)),
-            Ok((_, socket, None)) => {
-                tracing::error!(socket, "skipping peer whose address could not be resolved");
-            }
-            Err(e) => tracing::error!(error = %e, "peer resolution task failed; skipping peer"),
-        }
+/// A hostname is kept as a DNS ingress that the dialer resolves on every attempt, rather than
+/// resolved once at startup. The peer therefore stays in the authorization set while its DNS is
+/// missing, and connects as soon as the name resolves, without restarting this process.
+///
+/// The egress IP is a placeholder: it is only consulted when `bypass_ip_check` is false, and
+/// both binaries set it to true because in-cluster source IPs never match registered addresses.
+pub fn peer_address(socket: &str) -> Option<Address> {
+    if let Ok(addr) = socket.parse::<SocketAddr>() {
+        return Some(Address::Symmetric(addr));
     }
-    if resolved.len() < total {
-        tracing::warn!(
-            resolved = resolved.len(),
-            total,
-            "starting without some registered peers"
-        );
-    }
-    resolved
+    let (host, port) = socket.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    let host = Hostname::new(host).ok()?;
+    Some(Address::Asymmetric {
+        ingress: Ingress::Dns { host, port },
+        egress: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn ip_literal_resolves_without_dns() {
-        let addr = resolve_with_retry("10.0.0.1:3000", 1, Duration::ZERO).await;
-        assert_eq!(addr, Some("10.0.0.1:3000".parse().unwrap()));
+    #[test]
+    fn ip_socket_is_dialed_directly() {
+        let addr = peer_address("10.0.0.1:3000").unwrap();
+        assert_eq!(addr, Address::Symmetric("10.0.0.1:3000".parse().unwrap()));
+        let v6 = peer_address("[::1]:3001").unwrap();
+        assert_eq!(v6, Address::Symmetric("[::1]:3001".parse().unwrap()));
     }
 
-    #[tokio::test]
-    async fn unresolvable_peer_is_skipped_and_order_is_kept() {
-        let peers = vec![
-            (1, "10.0.0.1:3000".to_string()),
-            (2, "peer.invalid:3000".to_string()),
-            (3, "[::1]:3001".to_string()),
-        ];
-        let resolved = resolve_peers(peers, 1, Duration::ZERO).await;
+    #[test]
+    fn hostname_socket_is_resolved_at_dial_time() {
+        let addr = peer_address("gas-killer-node-1.default.svc:3000").unwrap();
         assert_eq!(
-            resolved,
-            vec![
-                (1, "10.0.0.1:3000".parse().unwrap()),
-                (3, "[::1]:3001".parse().unwrap()),
-            ]
+            addr.ingress(),
+            Ingress::Dns {
+                host: Hostname::new("gas-killer-node-1.default.svc").unwrap(),
+                port: 3000,
+            }
         );
     }
 
-    #[tokio::test]
-    async fn malformed_socket_is_skipped() {
-        let resolved = resolve_peers(vec![(1, "no-port".to_string())], 1, Duration::ZERO).await;
-        assert!(resolved.is_empty());
+    #[test]
+    fn malformed_socket_is_rejected() {
+        assert!(peer_address("no-port").is_none());
+        assert!(peer_address("host:notaport").is_none());
+        assert!(peer_address("bad host:3000").is_none());
     }
 }
