@@ -12,7 +12,7 @@ use gas_killer_common::{ChainRole, GasKillerValidator, NestedSpec, TracePool, Tr
 use gas_killer_common::{PayloadView, TaskBundle};
 
 use alloy_primitives::{Address, Bytes};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use commonware_cryptography::{Hasher, Sha256};
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -144,7 +144,7 @@ impl RouterTrace {
     {
         let (tx, result) = watch::channel(None);
         let task = tokio::spawn(async move {
-            let outcome = trace.await.map_err(|e| e.to_string());
+            let outcome = trace.await.map_err(|e| format!("{e:#}"));
             let _ = tx.send(Some(outcome));
         });
         Self {
@@ -537,7 +537,7 @@ impl TaskDispatcher {
                     traced.block_height,
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to compute storage updates: {}", e))?;
+                .context("Failed to compute storage updates")?;
             if let Some(m) = &metrics {
                 m.storage_computation_seconds
                     .observe(start.elapsed().as_secs_f64());

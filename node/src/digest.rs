@@ -184,7 +184,7 @@ impl DigestResolver {
                 false
             }
             Err(error) => {
-                warn!(%error, "cannot read the chain head to bound a nested expiry; declining to commit");
+                warn!(error = %format!("{error:#}"), "cannot read the chain head to bound a nested expiry; declining to commit");
                 false
             }
         }
@@ -346,7 +346,7 @@ impl DigestResolver {
                     verdicts.insert(height, Verdict::Declined);
                     warn!(
                         height,
-                        %error,
+                        error = %format!("{error:#}"),
                         class = class.as_str(),
                         "task failed the same way on a second trace; declining to commit"
                     );
@@ -359,7 +359,7 @@ impl DigestResolver {
         if now + delay >= deadline {
             warn!(
                 height,
-                %error,
+                error = %format!("{error:#}"),
                 class = class.as_str(),
                 "task validation failed with no time left in its round; declining to commit"
             );
@@ -367,7 +367,7 @@ impl DigestResolver {
         }
         debug!(
             height,
-            %error,
+            error = %format!("{error:#}"),
             class = class.as_str(),
             delay_ms = delay.as_millis() as u64,
             "task validation failed; retrying"

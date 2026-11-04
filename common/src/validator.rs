@@ -90,14 +90,14 @@ pub enum ValidationErrorClass {
 }
 
 impl ValidationErrorClass {
-    /// Classifies `error` by whether its chain carries a [`DeterministicFailure`]. Anything
-    /// unmarked is infra: declining early on an error that could have cleared costs this node its
-    /// signature, so only failures known to recur skip the retries.
+    /// Classifies `error` by whether its chain carries a [`DeterministicFailure`] or a call the
+    /// EVM failed ([`gas_analyzer::EvmFailure`]). Anything unmarked is infra: declining early on
+    /// an error that could have cleared costs this node its signature, so only failures known to
+    /// recur skip the retries.
     pub fn of(error: &anyhow::Error) -> Self {
-        if error
-            .chain()
-            .any(|cause| cause.is::<DeterministicFailure>())
-        {
+        if error.chain().any(|cause| {
+            cause.is::<DeterministicFailure>() || cause.is::<gas_analyzer::EvmFailure>()
+        }) {
             Self::Deterministic
         } else {
             Self::Infra
@@ -130,6 +130,12 @@ impl DeterministicFailure {
     pub fn new(reason: impl Into<String>) -> Self {
         Self(reason.into())
     }
+}
+
+/// Wraps a gas-analyzer error as context rather than restringifying it, so
+/// [`ValidationErrorClass::of`] can still find an [`gas_analyzer::EvmFailure`] in its chain.
+fn gas_analysis_failed(error: anyhow::Error) -> anyhow::Error {
+    error.context("Gas analysis failed")
 }
 
 /// An [`anyhow::Error`] marked as a [`DeterministicFailure`].
@@ -886,7 +892,7 @@ impl GasKillerValidator {
             self.sim_profile,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+        .map_err(gas_analysis_failed)?;
         let phases = AnalysisPhases {
             extraction: analysis.extraction,
             executor_cache_hit: analysis.executor_cache_hit,
@@ -1090,7 +1096,7 @@ impl GasKillerValidator {
             &gas_analyzer::nested::NESTING_COST_MODEL_V1,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Gas analysis failed: {}", e))?;
+        .map_err(gas_analysis_failed)?;
         if let Some(metrics) = &self.validator_metrics {
             metrics
                 .evmsketch_duration_seconds
@@ -1387,6 +1393,18 @@ mod tests {
     #[test]
     fn a_deterministic_failure_is_recognised_under_added_context() {
         let err = deterministic("no state updates").context("Gas analysis failed");
+        assert_eq!(
+            ValidationErrorClass::of(&err),
+            ValidationErrorClass::Deterministic
+        );
+    }
+
+    /// A reverted or halted call fails the same way at the same block on every node.
+    #[test]
+    fn an_evm_failure_is_deterministic() {
+        let err = gas_analysis_failed(anyhow::Error::new(gas_analyzer::EvmFailure::new(
+            "reverted",
+        )));
         assert_eq!(
             ValidationErrorClass::of(&err),
             ValidationErrorClass::Deterministic
