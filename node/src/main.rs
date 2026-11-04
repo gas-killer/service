@@ -21,6 +21,7 @@ use commonware_p2p::{Address, AddressableManager as _};
 use commonware_runtime::{Clock, Metrics, Quota, Runner, Spawner, Supervisor, tokio};
 use commonware_utils::NZU32;
 use commonware_utils::ordered::{Map, Set};
+use gas_killer_common::peer_resolve::{PEER_RESOLVE_ATTEMPTS, PEER_RESOLVE_DELAY, resolve_peers};
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, OrchestratorConfig,
     SpeculativePrebuildConfig, TraceRuntime, ValidatorMetrics, config_fingerprint,
@@ -124,43 +125,6 @@ async fn metrics_handler(State(s): State<HealthState>) -> impl IntoResponse {
         )],
         output,
     )
-}
-
-/// Resolve a hostname:port with retry logic for Docker DNS readiness
-async fn resolve_with_retry(
-    address: &str,
-    max_retries: u32,
-    retry_delay: Duration,
-) -> Option<SocketAddr> {
-    for attempt in 1..=max_retries {
-        match ::tokio::net::lookup_host(address).await {
-            Ok(mut addrs) => {
-                if let Some(addr) = addrs.next() {
-                    tracing::info!(address, ?addr, attempt, "DNS resolution succeeded");
-                    return Some(addr);
-                }
-            }
-            Err(e) => {
-                if attempt < max_retries {
-                    tracing::warn!(
-                        address,
-                        attempt,
-                        max_retries,
-                        error = %e,
-                        "DNS resolution failed, retrying..."
-                    );
-                    ::tokio::time::sleep(retry_delay).await;
-                } else {
-                    tracing::error!(
-                        address,
-                        error = %e,
-                        "DNS resolution failed after all retries"
-                    );
-                }
-            }
-        }
-    }
-    None
 }
 
 fn configure_identity(matches: &clap::ArgMatches) -> (Bn254, u16) {
@@ -280,7 +244,7 @@ fn main() {
 
     // Start runtime
     runner.start(|context: tokio::Context| async move {
-        let mut recipients: Vec<(PublicKey, SocketAddr)> = Vec::new();
+        let mut recipients: Vec<(PublicKey, SocketAddr)>;
 
         // Configure quorum number from environment (default: 0)
         let quorum_number: usize = std::env::var("QUORUM_NUMBER")
@@ -314,42 +278,17 @@ fn main() {
                 panic!("No operators found in quorum");
             }
 
-            // Resolved concurrently so one slow or missing peer doesn't delay the rest.
-            let resolutions: Vec<_> = participants
+            let sockets = participants
                 .iter()
                 .filter_map(|participant| {
                     let verifier = participant.pub_keys.as_ref().unwrap().g2_pub_key.clone();
                     tracing::info!(key = ?verifier, "registered authorized peer");
-                    let socket = participant.socket.clone()?;
-                    Some(::tokio::spawn(async move {
-                        // Try to resolve hostname:port with retries (Docker DNS may need time)
-                        let resolved =
-                            resolve_with_retry(&socket, 30, Duration::from_secs(2)).await;
-                        (verifier, socket, resolved)
-                    }))
+                    Some((verifier, participant.socket.clone()?))
                 })
                 .collect();
-            for resolution in resolutions {
-                let (verifier, socket, resolved) =
-                    resolution.await.expect("peer resolution task panicked");
-                if let Some(socket_addr) = resolved {
-                    recipients.push((verifier, socket_addr));
-                } else {
-                    // Last resort: try parsing as direct IP:PORT
-                    match SocketAddr::from_str(&socket) {
-                        Ok(socket_addr) => {
-                            recipients.push((verifier, socket_addr));
-                        }
-                        Err(parse_err) => {
-                            tracing::error!(
-                                socket,
-                                error = %parse_err,
-                                "Failed to resolve or parse socket address"
-                            );
-                            panic!("Socket address not well-formed: {socket}");
-                        }
-                    }
-                }
+            recipients = resolve_peers(sockets, PEER_RESOLVE_ATTEMPTS, PEER_RESOLVE_DELAY).await;
+            if recipients.is_empty() {
+                panic!("No operator in the quorum has a resolvable address");
             }
 
             // Parse orchestrator (router) public key from G2 coordinates
