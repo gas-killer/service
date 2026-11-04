@@ -49,8 +49,7 @@ reth:
   # nightly, since every restart becomes a catch-up burst.
   # volumeClaimTemplates are immutable, so this size only applies to a PVC that does not exist
   # yet: growing a live one is `kubectl edit pvc` plus `kubectl delete sts <name>
-  # --cascade=orphan` and a re-install, or the next upgrade is rejected outright. Shrinking it or
-  # changing className needs a new PVC and a restore: see "Replacing the datadir" in the README.
+  # --cascade=orphan` and a re-install, or the next upgrade is rejected outright.
   storage:
     className: standard-rwo
     size: 1280Gi
