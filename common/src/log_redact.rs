@@ -78,6 +78,18 @@ pub fn redacting_stdout() -> RedactingWriter<io::Stdout> {
     RedactingWriter(io::stdout())
 }
 
+/// Installs the process-wide subscriber: DEBUG, plain text, URLs redacted. It must be the global
+/// default, since the events that carry RPC URLs fire on runtime worker threads.
+pub fn init_logging() -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(redacting_stdout)
+            .finish(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

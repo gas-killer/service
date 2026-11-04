@@ -39,6 +39,7 @@ tokio = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 url = { workspace = true }
 utoipa = { workspace = true }
 

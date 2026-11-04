@@ -21,7 +21,6 @@ use commonware_p2p::{Address, AddressableManager as _};
 use commonware_runtime::{Clock, Metrics, Quota, Runner, Spawner, Supervisor, tokio};
 use commonware_utils::NZU32;
 use commonware_utils::ordered::{Map, Set};
-use eigen_logging::log_level::LogLevel;
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, OrchestratorConfig,
     SpeculativePrebuildConfig, TraceRuntime, ValidatorMetrics, config_fingerprint,
@@ -217,6 +216,9 @@ fn serve_health(addr: SocketAddr, state: HealthState) {
 }
 
 fn main() {
+    if let Err(e) = gas_killer_common::log_redact::init_logging() {
+        eprintln!("failed to install the log subscriber: {e}");
+    }
     // The runtime otherwise defaults to a random per-process temp dir.
     let storage_dir = storage_directory();
     // Runs p2p and the Schnorr participant; traces and healthz run elsewhere (see
@@ -286,11 +288,9 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
-        // Scoped to avoid configuring two loggers
         let orchestrator_pub_key;
         let quorum_infos;
         {
-            eigen_logging::init_logger(LogLevel::Debug);
             quorum_infos = get_operator_states()
                 .await
                 .expect("Failed to get operator states");
@@ -413,13 +413,6 @@ fn main() {
 
             recipients.push((orchestrator_pub_key.clone(), orchestrator_addr));
         }
-
-        // Configure tracing
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(gas_killer_common::log_redact::redacting_stdout)
-            .finish();
-        _ = tracing::subscriber::set_default(subscriber);
 
         tracing::info!(storage_dir = %storage_dir.display(), "runtime storage directory");
 
