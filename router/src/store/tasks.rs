@@ -15,6 +15,7 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, U256};
 use anyhow::Context;
+use gas_killer_common::log_redact::redact_urls;
 use sqlx::FromRow;
 use uuid::Uuid;
 
@@ -665,7 +666,8 @@ impl SqliteStore {
     }
 
     /// Settles a task as [`TaskStatus::Failed`], recording the failure reason and stamping
-    /// `updated_at`.
+    /// `updated_at`. The reason is returned to the task's submitter, and an RPC error in it can
+    /// carry the provider URL, so its URLs are redacted.
     ///
     /// Guarded and reported as [`mark_task_ready_with_bundle`](Self::mark_task_ready_with_bundle)
     /// is, so a `ready` task can never be turned `failed`.
@@ -675,7 +677,7 @@ impl SqliteStore {
              WHERE id = ?1 AND {IN_FLIGHT_PREDICATE} RETURNING unixepoch() - created_at"
         ))
         .bind(id)
-        .bind(error)
+        .bind(redact_urls(error).as_ref())
         .fetch_optional(self.pool())
         .await
         .context("marking task failed")?;
@@ -1107,6 +1109,26 @@ mod tests {
         assert_eq!(fetched.status, TaskStatus::Failed);
         assert_eq!(fetched.error.as_deref(), Some("aggregation timed out"));
         assert!(fetched.payload.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_failed_redacts_a_provider_url() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request()).await.unwrap();
+
+        store
+            .mark_task_failed(
+                &task.id,
+                "error sending request for url (https://eth-sepolia.g.alchemy.com/v2/secret)",
+            )
+            .await
+            .unwrap();
+        let fetched = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched.error.as_deref(),
+            Some("error sending request for url (https://eth-sepolia.g.alchemy.com/<redacted>)")
+        );
     }
 
     #[tokio::test]

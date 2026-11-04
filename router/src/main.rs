@@ -310,7 +310,7 @@ fn main() {
         }
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
-            .with_writer(std::io::stdout)
+            .with_writer(gas_killer_common::log_redact::redacting_stdout)
             .finish();
         _ = tracing::subscriber::set_default(subscriber);
 

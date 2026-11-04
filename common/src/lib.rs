@@ -1,6 +1,7 @@
 pub mod avs_contracts;
 pub mod bindings;
 pub mod config;
+pub mod log_redact;
 pub mod metrics;
 pub mod nested;
 pub mod openapi;
