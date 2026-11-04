@@ -19,7 +19,6 @@ use commonware_runtime::{
 };
 use commonware_utils::NZU32;
 use commonware_utils::ordered::Map;
-use eigen_logging::log_level::LogLevel;
 use gas_killer_common::get_operator_states;
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, IngressStalenessWindow,
@@ -90,6 +89,9 @@ async fn resolve_with_retry(
 }
 
 fn main() {
+    if let Err(e) = gas_killer_common::log_redact::init_logging() {
+        eprintln!("failed to install the log subscriber: {e}");
+    }
     // Parse arguments (flags unchanged from the pre-migration router).
     let matches = Command::new("orchestrator")
         .about("Gas Killer router - task sequencer and aggregate-Schnorr coordinator")
@@ -243,7 +245,6 @@ fn main() {
             .unwrap_or(0);
 
         {
-            eigen_logging::init_logger(LogLevel::Debug);
             // Get operator states and configure allowed peers
             quorum_infos = get_operator_states()
                 .await
@@ -308,11 +309,6 @@ fn main() {
             let orchestrator_verifier = signer.public_key();
             recipients.push((orchestrator_verifier, my_addr));
         }
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(std::io::stdout)
-            .finish();
-        _ = tracing::subscriber::set_default(subscriber);
 
         // Provide authorized peers. `from_iter_dedup` keeps the first entry per
         // key (the operator list may already contain the router's key).
