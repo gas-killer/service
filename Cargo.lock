@@ -4102,6 +4102,7 @@ dependencies = [
  "commonware-avs-eigenlayer",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
  "dotenv",

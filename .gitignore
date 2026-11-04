@@ -37,3 +37,6 @@ terraform.tfstate.*
 router.db
 router.db-*
 /data/
+# Editor swap files; vim records the local user, host and path in them.
+*.swp
+.*.sw?

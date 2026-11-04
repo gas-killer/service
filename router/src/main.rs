@@ -20,6 +20,7 @@ use commonware_runtime::{
 use commonware_utils::NZU32;
 use commonware_utils::ordered::Map;
 use gas_killer_common::get_operator_states;
+use gas_killer_common::peer_resolve::{peer_address, warn_if_unresolvable};
 use gas_killer_common::{
     APPLICATION_NAMESPACE, ConfigMetrics, GasKillerValidator, IngressStalenessWindow,
     SpeculativePrebuildConfig, TraceRuntime, ValidatorMetrics, config_fingerprint,
@@ -39,7 +40,6 @@ use gas_killer_router::scheduler::Scheduler;
 use gas_killer_router::schnorr_coordinator::SchnorrCoordinator;
 use gas_killer_router::sequencer::{TaskDispatcher, TaskQueue};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -50,43 +50,6 @@ const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
 
 /// P2p channel carrying the interactive Schnorr signing rounds.
 const SCHNORR_CHANNEL: u64 = 2;
-
-/// Resolve a hostname:port with retry logic for Docker DNS readiness
-async fn resolve_with_retry(
-    address: &str,
-    max_retries: u32,
-    retry_delay: Duration,
-) -> Option<SocketAddr> {
-    for attempt in 1..=max_retries {
-        match ::tokio::net::lookup_host(address).await {
-            Ok(mut addrs) => {
-                if let Some(addr) = addrs.next() {
-                    tracing::info!(address, ?addr, attempt, "DNS resolution succeeded");
-                    return Some(addr);
-                }
-            }
-            Err(e) => {
-                if attempt < max_retries {
-                    tracing::warn!(
-                        address,
-                        attempt,
-                        max_retries,
-                        error = %e,
-                        "DNS resolution failed, retrying..."
-                    );
-                    ::tokio::time::sleep(retry_delay).await;
-                } else {
-                    tracing::error!(
-                        address,
-                        error = %e,
-                        "DNS resolution failed after all retries"
-                    );
-                }
-            }
-        }
-    }
-    None
-}
 
 fn main() {
     if let Err(e) = gas_killer_common::log_redact::init_logging() {
@@ -236,7 +199,7 @@ fn main() {
     // Start runtime
     runner.start(|context| async move {
         let (mut network, mut oracle) = Network::new(context.child("network"), p2p_cfg);
-        let mut recipients: Vec<(PublicKey, SocketAddr)>;
+        let mut recipients: Vec<(PublicKey, Address)>;
         let quorum_infos;
         // Configure quorum number from environment (default: 0)
         let quorum_number: usize = std::env::var("QUORUM_NUMBER")
@@ -263,61 +226,41 @@ fn main() {
                 "using quorum"
             );
 
-            recipients = Vec::new();
             let participants = quorum_infos[quorum_number].operators.clone();
             if participants.is_empty() {
                 panic!("Please provide at least one participant");
             }
-            // Resolved concurrently so one slow or missing peer doesn't delay the rest.
-            let resolutions: Vec<_> = participants
+            recipients = participants
                 .into_iter()
                 .filter_map(|participant| {
-                    let verifier = participant.pub_keys.unwrap().g2_pub_key;
                     let socket = participant.socket?;
-                    Some(::tokio::spawn(async move {
-                        // Try to resolve hostname:port with retries (Docker DNS may need time)
-                        let resolved =
-                            resolve_with_retry(&socket, 30, Duration::from_secs(2)).await;
-                        (verifier, socket, resolved)
-                    }))
-                })
-                .collect();
-            for resolution in resolutions {
-                let (verifier, socket, resolved) =
-                    resolution.await.expect("peer resolution task panicked");
-                if let Some(socket_addr) = resolved {
-                    recipients.push((verifier, socket_addr));
-                } else {
-                    // Last resort: try parsing as direct IP:PORT
-                    match SocketAddr::from_str(&socket) {
-                        Ok(socket_addr) => {
-                            recipients.push((verifier, socket_addr));
-                        }
-                        Err(parse_err) => {
+                    let address = match peer_address(&socket) {
+                        Ok(address) => address,
+                        Err(reason) => {
                             tracing::error!(
                                 socket,
-                                error = %parse_err,
-                                "Failed to resolve or parse socket address"
+                                reason,
+                                "skipping peer with an unusable socket address"
                             );
-                            panic!("Bootstrapper address not well-formed: {socket}");
+                            return None;
                         }
-                    }
-                }
+                    };
+                    warn_if_unresolvable(&socket, &address);
+                    Some((participant.pub_keys.unwrap().g2_pub_key, address))
+                })
+                .collect();
+            if recipients.is_empty() {
+                panic!("No operator in the quorum has a well-formed socket address");
             }
             // Authorize ourselves too (nodes dial the router from
             // public_orchestrator.json; this entry is never dialed by us).
             let orchestrator_verifier = signer.public_key();
-            recipients.push((orchestrator_verifier, my_addr));
+            recipients.push((orchestrator_verifier, Address::Symmetric(my_addr)));
         }
 
         // Provide authorized peers. `from_iter_dedup` keeps the first entry per
         // key (the operator list may already contain the router's key).
-        let peers: Map<PublicKey, Address> = Map::from_iter_dedup(
-            recipients
-                .iter()
-                .cloned()
-                .map(|(pk, sa)| (pk, Address::Symmetric(sa))),
-        );
+        let peers: Map<PublicKey, Address> = Map::from_iter_dedup(recipients.iter().cloned());
         let _ = oracle.track(0, peers);
 
         // The participant set: the operators' BN254 p2p identities.

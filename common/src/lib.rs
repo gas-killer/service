@@ -6,6 +6,7 @@ pub mod metrics;
 pub mod nested;
 pub mod openapi;
 pub mod payload;
+pub mod peer_resolve;
 pub mod providers;
 pub mod schnorr;
 pub mod task_data;
