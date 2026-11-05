@@ -948,9 +948,10 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Processing);
     }
 
-    /// A recovered task is traced at head, not at its stored `block_height`, which a restart
-    /// longer than the ingress staleness window leaves too old to produce an acceptable payload.
-    /// That is why the re-queue does not check the stored height against the window.
+    /// A recovered task is re-queued flagged to re-anchor, so the sequencer traces it at head
+    /// rather than at a stored `block_height` a long restart may have aged out. That is why the
+    /// re-queue does not check the stored height against the staleness window. The re-queue never
+    /// reads the height; the old one here only marks the case.
     #[tokio::test]
     async fn a_recovered_task_is_requeued_to_be_traced_at_head() {
         let (store, key_id) = store_with_key().await;
