@@ -948,6 +948,37 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Processing);
     }
 
+    /// A recovered task is re-queued flagged to re-anchor, so the sequencer traces it at head
+    /// rather than at a stored `block_height` a long restart may have aged out. That is why the
+    /// re-queue does not check the stored height against the staleness window. The re-queue never
+    /// reads the height; the old one here only marks the case.
+    #[tokio::test]
+    async fn a_recovered_task_is_requeued_to_be_traced_at_head() {
+        let (store, key_id) = store_with_key().await;
+        let addr = target(0x11);
+        let stale = GasKillerTaskRequestBody {
+            block_height: 1,
+            ..request(addr, Some(7))
+        };
+        let task_id = processing_task(&store, &key_id, &stale).await;
+
+        let bound = store
+            .last_incomplete_task()
+            .await
+            .expect("bound read should succeed");
+        let (sender, mut receiver) = task_channel();
+        let depth = task_queue_depth();
+        let counts = FakeCounts::new([(addr, 7)]);
+
+        requeue_incomplete_tasks(&store, &sender, &depth, bound.as_ref(), &counts, None)
+            .await
+            .expect("re-queue should succeed");
+
+        let queued = receiver.try_recv().expect("the task should be re-queued");
+        assert_eq!(queued.task_id, task_id);
+        assert!(queued.reanchor, "a recovered task must be traced at head");
+    }
+
     /// A server-resolved index is re-queued without a read.
     #[tokio::test]
     async fn auto_index_task_is_requeued_without_reading_the_chain() {
