@@ -11,7 +11,7 @@ use alloy_primitives::{Address, Bytes, FixedBytes, U256};
 use alloy_provider::Provider;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{FromRequest, Path, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
     routing::{delete, get, post},
@@ -888,8 +888,10 @@ impl Drop for QueueSlot<'_> {
 /// Validates the request, persists it as a `queued` task before responding — so a restart can
 /// recover work already acknowledged to the client — then enqueues it for aggregation and returns
 /// the task id for status polling. Persistence requires a configured store and an authenticated
-/// key that owns the task, both resolved up front: neither validation nor its onchain RPC
-/// round-trips are worth spending on a request that cannot be persisted or attributed. Beyond
+/// key that owns the task, both resolved up front, before the body is even parsed: neither
+/// parsing, validation nor its onchain RPC round-trips are worth spending on a request that
+/// cannot be persisted or attributed, and an unauthenticated caller gets `401` whatever it sent
+/// rather than a schema error that describes the request field by field. Beyond
 /// that, validation and load-shedding stay synchronous and run before any task row is written, so
 /// a malformed or at-capacity request never persists.
 ///
@@ -992,11 +994,12 @@ impl Drop for QueueSlot<'_> {
 pub async fn submit_task_handler(
     State(state): State<IngressState>,
     headers: HeaderMap,
-    ApiJson(request): ApiJson<GasKillerTaskRequest>,
+    raw: Request,
 ) -> Result<(StatusCode, Json<TaskAcceptedResponse>), ApiError> {
     let started = Instant::now();
     let store = require_store(&state)?;
     let key = authenticate_caller(store, &headers).await?;
+    let ApiJson(request) = ApiJson::<GasKillerTaskRequest>::from_request(raw, &state).await?;
 
     // Enforce the caller's per-key rate limit before reserving a queue slot, so an abusive key is
     // turned away before it can occupy capacity or trigger validation RPCs.
@@ -2582,31 +2585,9 @@ mod tests {
             assert!(body.error.message.contains("block_height is zero"));
         }
 
-        #[tokio::test]
-        async fn test_malformed_json_returns_4xx() {
-            let (app, _queue) = make_app();
-            let req = Request::builder()
-                .method(Method::POST)
-                .uri("/tasks")
-                .header("content-type", "application/json")
-                .body(Body::from("not json at all {{{"))
-                .unwrap();
-
-            let resp = app.oneshot(req).await.unwrap();
-            assert!(
-                resp.status().is_client_error(),
-                "malformed JSON should return 4xx, got {}",
-                resp.status()
-            );
-            let body = error_envelope(resp).await;
-            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
-        }
-
-        #[tokio::test]
-        async fn test_missing_required_field_returns_422() {
-            let (app, _queue) = make_app();
-            // `block_height` is missing
-            let payload = serde_json::json!({
+        /// Submission bodies that fail to parse: empty, not JSON, and JSON missing a field.
+        fn unparseable_bodies() -> [(&'static str, String); 3] {
+            let missing_field = serde_json::json!({
                 "body": {
                     "target_address": "0x0000000000000000000000000000000000000001",
                     "from_address":   "0x0000000000000000000000000000000000000002",
@@ -2616,31 +2597,66 @@ mod tests {
                 }
             })
             .to_string();
-
-            let resp = app.oneshot(json_request(&payload)).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-            let body = error_envelope(resp).await;
-            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
+            [
+                ("empty", String::new()),
+                ("malformed", "not json at all {{{".to_string()),
+                ("missing field", missing_field),
+            ]
         }
 
+        /// A key holder gets the parse error for each body, with its status and detail.
         #[tokio::test]
-        async fn test_empty_body_returns_4xx() {
-            let (app, _queue) = make_app();
-            let req = Request::builder()
-                .method(Method::POST)
-                .uri("/tasks")
-                .header("content-type", "application/json")
-                .body(Body::empty())
-                .unwrap();
+        async fn test_authenticated_unparseable_body_returns_its_parse_error() {
+            let (app, key, _queue) = make_app_with_key().await;
+            let expected = [
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Failed to parse the request body as JSON",
+                ),
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Failed to parse the request body as JSON",
+                ),
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "missing field `block_height`",
+                ),
+            ];
+            for ((case, body), (status, detail)) in unparseable_bodies().into_iter().zip(expected) {
+                let resp = app
+                    .clone()
+                    .oneshot(bearer_request(&body, &key))
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), status, "{case}");
+                let body = error_envelope(resp).await;
+                assert_eq!(
+                    body.error.code,
+                    crate::error::ErrorCode::InvalidRequest,
+                    "{case}"
+                );
+                assert!(
+                    body.error.message.contains(detail),
+                    "{case}: {}",
+                    body.error.message
+                );
+            }
+        }
 
-            let resp = app.oneshot(req).await.unwrap();
-            assert!(
-                resp.status().is_client_error(),
-                "empty body should return 4xx, got {}",
-                resp.status()
-            );
-            let body = error_envelope(resp).await;
-            assert_eq!(body.error.code, crate::error::ErrorCode::InvalidRequest);
+        /// Without a key, no body is parsed: each gets `401`, never a schema error.
+        #[tokio::test]
+        async fn test_unauthenticated_submission_is_rejected_before_parsing() {
+            let (app, _key, _queue) = make_app_with_key().await;
+            for (case, body) in unparseable_bodies() {
+                let resp = app.clone().oneshot(json_request(&body)).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{case}");
+                let body = error_envelope(resp).await;
+                assert_eq!(
+                    body.error.code,
+                    crate::error::ErrorCode::Unauthorized,
+                    "{case}"
+                );
+            }
         }
 
         #[tokio::test]
