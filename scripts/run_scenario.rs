@@ -124,10 +124,10 @@ struct RequestConfig {
     block_height: u64,
     /// When true, poll `GET /tasks/{id}` after a 202 and submit the rendered payload.
     ///
-    /// With `INGRESS=true` the router renders a `verifyAndUpdate` transaction rather than
-    /// broadcasting it, so nothing reaches the chain until a caller signs and sends that
-    /// payload. `verify` can therefore only ever time out unless this is set (or the router
-    /// runs in auto-execute mode, where something else broadcasts).
+    /// The router renders a `verifyAndUpdate` transaction rather than broadcasting it, so
+    /// nothing reaches the chain until a caller signs and sends that payload. `verify` therefore
+    /// requires this; see [`check_verify_submits`]. Signing uses `$FUNDED_KEY`, falling back to
+    /// `$PRIVATE_KEY`, so it spends real funds on a live chain.
     #[serde(default)]
     submit: bool,
     /// When true, poll stateTransitionCount() after a 202 to confirm verifyAndUpdate ran.
@@ -296,6 +296,39 @@ impl Endpoints {
 }
 
 // ── Core execution ────────────────────────────────────────────────────────────
+
+/// Rejects any request that sets `verify` without `submit`, naming each one.
+///
+/// The router only renders the `verifyAndUpdate` payload; the runner is what sends it. Without
+/// `submit` the transition count never moves, and `verify` would spend its whole timeout before
+/// failing in a way that looks like a broken deployment.
+fn check_verify_submits(config: &Config) -> Result<(), String> {
+    let offenders: Vec<String> = config
+        .scenarios
+        .iter()
+        .flat_map(|s| {
+            s.requests
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.verify && !r.submit)
+                .map(|(i, r)| {
+                    let label = r
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| format!("request {}", i + 1));
+                    format!("{}/{label}", s.name)
+                })
+        })
+        .collect();
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "`verify = true` needs `submit = true`, since the router renders the verifyAndUpdate \
+         payload but never sends it: {}",
+        offenders.join(", ")
+    ))
+}
 
 async fn send_request(
     endpoints: &Endpoints,
@@ -872,6 +905,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut config: Config =
         toml::from_str(&config_str).map_err(|e| format!("failed to parse config: {e}"))?;
 
+    check_verify_submits(&config)?;
+
     if let Some(pos) = args.iter().position(|a| a == "--scenarios") {
         let names: Vec<&str> = args
             .get(pos + 1)
@@ -1058,6 +1093,62 @@ mod tests {
         let request = &config.scenarios[0].requests[0];
         assert!(request.submit);
         assert!(request.verify);
+    }
+
+    fn parse(toml: &str) -> Config {
+        toml::from_str(toml).unwrap()
+    }
+
+    #[test]
+    fn verify_without_submit_is_rejected_by_name() {
+        let config = parse(
+            r#"
+            [[scenarios]]
+            name = "smoke"
+
+              [[scenarios.requests]]
+              label          = "checked"
+              target_address = "local"
+              call_data      = "0xdeadbeef"
+              from_address   = "local"
+              submit         = true
+              verify         = true
+
+              [[scenarios.requests]]
+              target_address = "local"
+              call_data      = "0xdeadbeef"
+              from_address   = "local"
+              verify         = true
+
+              [[scenarios.requests]]
+              target_address = "local"
+              call_data      = "0xdeadbeef"
+              from_address   = "local"
+            "#,
+        );
+        let err = check_verify_submits(&config).unwrap_err();
+        assert!(err.contains("smoke/request 2"), "{err}");
+        assert!(!err.contains("checked"), "{err}");
+        assert!(!err.contains("request 3"), "{err}");
+    }
+
+    /// Every checked-in scenario, generated ones included, must load past the check.
+    #[test]
+    fn checked_in_scenarios_submit_whatever_they_verify() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios");
+        let mut checked = 0;
+        for dir in [root.clone(), root.join("generated")] {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|e| e == "toml") {
+                    let config = parse(&std::fs::read_to_string(&path).unwrap());
+                    check_verify_submits(&config)
+                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0);
     }
 
     #[test]

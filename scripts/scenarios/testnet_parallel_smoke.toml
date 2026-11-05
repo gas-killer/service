@@ -10,6 +10,8 @@
 # Requires:
 #   HTTP_RPC          — HTTP RPC endpoint
 #   GAS_KILLER_API_KEY  — API key sent as `Authorization: Bearer <key>` on /tasks (if the server requires auth)
+#   FUNDED_KEY        — signs and sends each rendered payload (falls back to PRIVATE_KEY); spends
+#                       Sepolia ETH, since the router renders verifyAndUpdate but never sends it
 
 router_url           = "https://testnet.gaskiller.xyz"
 http_rpc             = "$HTTP_RPC"
@@ -28,6 +30,7 @@ mode = "parallel"
   transition_index    = "auto"
   value               = "0"
   block_height        = 0
+  submit              = true
   verify              = true
   verify_timeout_secs = 300
 
@@ -39,5 +42,6 @@ mode = "parallel"
   transition_index    = "auto"
   value               = "0"
   block_height        = 0
+  submit              = true
   verify              = true
   verify_timeout_secs = 300

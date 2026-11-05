@@ -10,6 +10,11 @@ http_rpc             = "$HTTP_RPC"  # env var interpolation supported; required 
 # literal "gk_..." key to override, or "" to leave requests unauthenticated.
 api_key              = "$GAS_KILLER_API_KEY"
 # ingress_timeout_secs = 30         # HTTP client timeout for all requests in this scenario file (default: 30, 0 = no timeout)
+#
+# The router renders the verifyAndUpdate transaction as a payload rather than broadcasting it, so
+# nothing reaches the chain until the caller signs and sends it. `verify = true` therefore needs
+# `submit = true`, which signs with $FUNDED_KEY (falling back to $PRIVATE_KEY): on a live chain
+# that spends real funds.
 
 # ── Scenario 1: serial smoke test with on-chain verification ─────────────────
 [[scenarios]]
@@ -25,6 +30,7 @@ delay_between_ms = 500   # wait 500ms between requests
   # transition_index omitted — defaults to "auto", fetches stateTransitionCount() from the contract
   value               = "0"
   block_height        = 0              # 0 = auto-fetch current block
+  submit              = true           # sign and send the rendered payload
   verify              = true           # poll stateTransitionCount() to confirm verifyAndUpdate ran
   verify_timeout_secs = 150            # default; omit to use 150s
 
@@ -51,6 +57,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
+  submit           = true
   verify           = true
 
   [[scenarios.requests]]
@@ -61,6 +68,7 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
+  submit           = true
   verify           = true
 
   [[scenarios.requests]]
@@ -71,4 +79,5 @@ mode  = "parallel"
   transition_index = "auto"
   value            = "0"
   block_height     = 0
+  submit           = true
   verify           = true

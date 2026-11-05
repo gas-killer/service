@@ -10,6 +10,8 @@
 # Requires:
 #   GNOSIS_RPC_URL    — Gnosis chain HTTP RPC endpoint
 #   GAS_KILLER_API_KEY  — API key sent as `Authorization: Bearer <key>` on /tasks (if the server requires auth)
+#   FUNDED_KEY        — signs and sends each serial_baseline payload (falls back to PRIVATE_KEY);
+#                       spends real funds, since the router renders verifyAndUpdate but never sends it
 #
 # After running, pull metrics from Grafana:
 #   - gas_killer_p2p_round_trip_seconds        (router)
@@ -30,7 +32,8 @@ ingress_timeout_secs = 120
 #
 # Purpose: establish P99 round-trip latency under zero queueing pressure.
 # Each request completes (or times out) before the next begins.
-# verify = true so we confirm the full flow end-to-end.
+# submit + verify so we confirm the full flow end-to-end. The latencies come from the router and
+# node metrics below, so the client's own signing and inclusion time does not enter them.
 [[scenarios]]
 name             = "serial_baseline"
 mode             = "serial"
@@ -44,6 +47,7 @@ delay_between_ms = 5000
   transition_index    = "auto"
   value               = "0"
   block_height        = 0
+  submit              = true
   verify              = true
   verify_timeout_secs = 300
 
@@ -55,6 +59,7 @@ delay_between_ms = 5000
   transition_index    = "auto"
   value               = "0"
   block_height        = 0
+  submit              = true
   verify              = true
   verify_timeout_secs = 300
 
@@ -66,6 +71,7 @@ delay_between_ms = 5000
   transition_index    = "auto"
   value               = "0"
   block_height        = 0
+  submit              = true
   verify              = true
   verify_timeout_secs = 300
 
