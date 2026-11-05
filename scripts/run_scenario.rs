@@ -1132,20 +1132,18 @@ mod tests {
         assert!(!err.contains("request 3"), "{err}");
     }
 
-    /// Every checked-in scenario, generated ones included, must load past the check.
+    /// Every checked-in scenario must load past the check. Generated scenarios are untracked
+    /// local output; `deploy_example`'s own tests cover what it renders.
     #[test]
     fn checked_in_scenarios_submit_whatever_they_verify() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios");
         let mut checked = 0;
-        for dir in [root.clone(), root.join("generated")] {
-            for entry in std::fs::read_dir(&dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.extension().is_some_and(|e| e == "toml") {
-                    let config = parse(&std::fs::read_to_string(&path).unwrap());
-                    check_verify_submits(&config)
-                        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-                    checked += 1;
-                }
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                let config = parse(&std::fs::read_to_string(&path).unwrap());
+                check_verify_submits(&config).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                checked += 1;
             }
         }
         assert!(checked > 0);
