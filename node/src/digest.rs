@@ -52,7 +52,12 @@ enum Gate {
 /// The outcome of one pass through [`DigestResolver::resolve`]'s loop.
 enum Pass {
     Digest(Digest),
-    Failed(anyhow::Error),
+    /// The trace failed; retry after this delay.
+    Retry(Duration),
+    /// The trace failed with no retry left, already reported.
+    GaveUp,
+    /// Another attempt of the height scheduled its deterministic retry while this one waited.
+    Wait,
     /// Another attempt of the height settled it as declined while this one waited.
     Declined,
 }
@@ -208,6 +213,27 @@ impl DigestResolver {
         nested: Option<NestedSpec>,
         deadline: Instant,
     ) -> Option<Digest> {
+        let validator = Arc::clone(&self.validator);
+        self.resolve_with(height, task, nested, deadline, move |task, nested| {
+            let validator = Arc::clone(&validator);
+            async move { validator.trace_digest(&task, nested.as_ref()).await }
+        })
+        .await
+    }
+
+    /// [`Self::resolve`], tracing with `trace`.
+    async fn resolve_with<T, F>(
+        &self,
+        height: u64,
+        task: &GasKillerTaskData,
+        nested: Option<NestedSpec>,
+        deadline: Instant,
+        trace: T,
+    ) -> Option<Digest>
+    where
+        T: Fn(GasKillerTaskData, Option<NestedSpec>) -> F,
+        F: Future<Output = anyhow::Result<Digest>> + Send + 'static,
+    {
         if task.block_height == 0 {
             // Deterministic: validation requires a fork height, and every honest node rejects
             // this identically. No point burning the retry budget.
@@ -248,33 +274,29 @@ impl DigestResolver {
                     Claim::Trace(turn) => turn,
                 };
                 // Errors are not shared through the flight, so an attempt that waited on
-                // another's failed retry would otherwise trace the task a third time.
-                if self.gate(height) == Gate::Decline {
-                    return Some(Pass::Declined);
+                // another's failed trace would otherwise trace the same state again at once.
+                match self.gate(height) {
+                    Gate::Trace => {}
+                    Gate::Decline => return Some(Pass::Declined),
+                    Gate::WaitUntil(_) => return Some(Pass::Wait),
                 }
                 // `timeout_at` polls this before its timer, so a turn handed over in the tick
                 // the round ends would otherwise start a trace before the timeout lands.
                 if ::tokio::time::Instant::now() >= deadline {
                     return None;
                 }
-                let validator = Arc::clone(&self.validator);
-                let owned = task.clone();
-                Some(
-                    match self
-                        .traces
-                        .run(async move {
-                            let traced = validator.trace_digest(&owned, nested.as_ref()).await;
-                            if let Ok(digest) = &traced {
-                                *turn = Some(*digest);
-                            }
-                            traced
-                        })
-                        .await
-                    {
-                        Ok(digest) => Pass::Digest(digest),
-                        Err(error) => Pass::Failed(error),
+                Some(match self.traces.run(trace(task.clone(), nested)).await {
+                    Ok(digest) => {
+                        *turn = Some(digest);
+                        Pass::Digest(digest)
+                    }
+                    // Recorded before the turn is released, so the attempt waiting on it gates
+                    // on this failure's verdict.
+                    Err(error) => match self.retry_delay(height, &error, backoff, deadline) {
+                        Some(delay) => Pass::Retry(delay),
+                        None => Pass::GaveUp,
                     },
-                )
+                })
             })
             .await
             .ok()
@@ -306,11 +328,12 @@ impl DigestResolver {
                     );
                     return Some(digest);
                 }
-                Pass::Failed(error) => {
-                    let delay = self.retry_delay(height, &error, backoff, deadline)?;
+                Pass::Retry(delay) => {
                     ::tokio::time::sleep(delay).await;
                     backoff = (backoff * 2).min(MAX_RETRY_BACKOFF);
                 }
+                Pass::GaveUp => return None,
+                Pass::Wait => {}
             }
         }
     }
@@ -832,6 +855,48 @@ mod tests {
         assert_eq!(resolver.gate(8), Gate::Trace);
         resolver.prune_below(8);
         assert_eq!(resolver.gate(7), Gate::Trace);
+        drop(resolver);
+        tokio::task::spawn_blocking(move || drop(runtime))
+            .await
+            .unwrap();
+    }
+
+    /// An attempt waiting on the slot while the leader's trace fails deterministically must not
+    /// trace the same state the moment it takes the slot. Here the retry falls past the round,
+    /// so the task is traced exactly once.
+    #[tokio::test]
+    async fn a_waiting_attempt_does_not_trace_again_after_a_deterministic_failure() {
+        let (resolver, _metrics, runtime) = resolver_with_metrics("http://localhost:1");
+        let task = task_at(0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let traces = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(::tokio::sync::Notify::new());
+
+        let resolve = || {
+            let (resolver, task) = (resolver.clone(), task.clone());
+            let (traces, release) = (Arc::clone(&traces), Arc::clone(&release));
+            tokio::spawn(async move {
+                resolver
+                    .resolve_with(7, &task, None, deadline, move |_, _| {
+                        traces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let release = Arc::clone(&release);
+                        async move {
+                            release.notified().await;
+                            Err(anyhow::Error::new(DeterministicFailure::new("reverted")))
+                        }
+                    })
+                    .await
+            })
+        };
+        let leader = resolve();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let follower = resolve();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        release.notify_waiters();
+
+        assert!(leader.await.unwrap().is_none());
+        assert!(follower.await.unwrap().is_none());
+        assert_eq!(traces.load(std::sync::atomic::Ordering::SeqCst), 1);
         drop(resolver);
         tokio::task::spawn_blocking(move || drop(runtime))
             .await
