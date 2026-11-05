@@ -12,7 +12,10 @@ network: sepolia
 reth:
   image:
     repository: ghcr.io/paradigmxyz/reth
-    tag: v2.8.1
+    # Held at v2.7.0: v2.8.0 enforces the EIP-7825 16.7M gas cap in eth_call and debug_traceCall
+    # under Amsterdam (reth#27586), regardless of --rpc.gascap, which breaks
+    # GK_SIM_PROFILE=unbounded. v2.9.0 replaces revm. Recheck a 2^40 trace's gasUsed before moving.
+    tag: v2.7.0
     pullPolicy: IfNotPresent
   # --full keeps recent state only; tasks anchor at the head and PAYLOAD_EXPIRED closes the
   # window at ~50 blocks, so the pruned history is never asked for.
@@ -79,7 +82,8 @@ lighthouse:
 # (the node must not be writing), wait for the Job, then `--set replicas=1 --set
 # snapshot.restore.enabled=false`. The Job wipes the datadir first. Match nodeVersion to reth.image.tag.
 # The part's file name carries its block height and the unnumbered alias 404s, so take the current
-# one from publicnode.com/snapshots.
+# one from publicnode.com/snapshots. As of 2026-11 publicnode serves only v2.8.0 snapshots, which
+# this tag cannot be seeded from; reseed by copying another v2.7.0 datadir instead.
 #
 # Install at replicas=1 before restoring, even on a fresh cluster: the datadir PVC comes from the
 # StatefulSet's volumeClaimTemplate, so it exists only once the set has created pod 0, and the Job

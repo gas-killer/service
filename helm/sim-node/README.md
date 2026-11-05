@@ -45,7 +45,9 @@ crash-looping pod onto a new revision.
 `eth_syncing` must be `false` and the head must match the chain's — until then a head-anchored
 trace fails with a missing block, which is the same failure an unmoved anvil fork gives. Confirm
 the cap is real in the same pass: a `2^40` `debug_traceCall` must be granted exactly
-`1099511627776`, not a round number like 600,000,000.
+`1099511627776`, not a round number like 600,000,000, and a call past the EIP-7825 cap must
+execute past it: `onchainLife.step(uint32 3)` under `callTracer` reports a `gasUsed` near 49M with
+no error. A node that grants the gas but stops at `16777216` with `out of gas` enforces the cap.
 
 ```
 kubectl exec -it sim-node-0 -c reth -- \
