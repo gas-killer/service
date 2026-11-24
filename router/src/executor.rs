@@ -849,8 +849,12 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         Ok(RenderedRound { payload, bundle })
     }
 
-    /// Checks every frame contract reports the nested interface and shares the root's registry,
-    /// whose approval is the only one a nested frame will find.
+    /// Checks every frame contract reports the nested interface and the v0.2.0 core interface,
+    /// and shares the root's registry, whose approval is the only one a nested frame will find.
+    ///
+    /// The nested interface ID didn't change in v0.2.0, but the root leaf did: it now binds the
+    /// chain id. Only the core ID tells a nested consumer that hashes the leaf the way operators
+    /// sign it from one that doesn't, which would reject every tree with `NotTreeMember`.
     async fn preflight_tree(
         &self,
         provider: &P,
@@ -874,6 +878,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 bail!(
                     "frame contract {contract} does not support the nested Gas Killer interface \
                      ({GAS_KILLER_NESTED_INTERFACE_ID})"
+                );
+            }
+            if !self
+                .supports_gas_killer_interface(provider.clone(), contract)
+                .await?
+            {
+                bail!(
+                    "frame contract {contract} does not support the Gas Killer v0.2.0 interface \
+                     ({GAS_KILLER_INTERFACE_ID}); its SDK predates the chain-bound root leaf"
                 );
             }
             let registry =
@@ -1800,10 +1813,11 @@ mod tests {
     }
 
     /// Answers the tree preflight: the root's registry, then each frame contract in address
-    /// order with its interface support, registry and `blockStaleMeasure`.
+    /// order with its nested and core interface support, registry and `blockStaleMeasure`.
     fn push_tree_preflight(asserter: &Asserter, frames: &[(Address, u64)]) {
         asserter.push_success(&Bytes::from(REGISTRY.abi_encode()));
         for (registry, measure) in frames {
+            push_supports_interface(asserter, true);
             push_supports_interface(asserter, true);
             asserter.push_success(&Bytes::from(registry.abi_encode()));
             asserter.push_success(&Bytes::from(U256::from(*measure).abi_encode()));
@@ -1892,6 +1906,48 @@ mod tests {
             nested.frames.iter().map(|f| f.contract).collect::<Vec<_>>(),
             [matching_task_data().0.target_address, CALLEE]
         );
+    }
+
+    /// A frame contract reporting the nested interface but not the v0.2.0 core one is refused
+    /// before the tree is rendered: its root leaf doesn't bind the chain id, so the signed tree
+    /// could never settle.
+    #[tokio::test]
+    async fn a_tree_with_a_frame_before_v0_2_0_is_refused() {
+        let store = store().await;
+        let key = key_id(&store).await;
+        let task = store.create_task(&key, &request_body()).await.unwrap();
+        let task_data = matching_task_data().0;
+        let spec = NestedSpec { expiry_block: 140 };
+        let tree = two_frame_tree(&task_data, &spec);
+        let session = DispatchedTask {
+            nested: Some(spec),
+            trace: RouterTrace::finished(Ok(Traced::Tree(Arc::new(tree.clone())))),
+            ..dispatched(&task.id, &task_data, Ok(Bytes::new()))
+        };
+
+        let asserter = Asserter::new();
+        asserter.push_success(&Bytes::from(REGISTRY.abi_encode()));
+        push_supports_interface(&asserter, true);
+        push_supports_interface(&asserter, false);
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        let mut handler = GasKillerHandler::new(1, provider)
+            .with_store(store.clone())
+            .with_payload_block_buffer(50);
+        let err = handler
+            .handle_schnorr_verification(
+                &session,
+                Instant::now(),
+                FixedBytes::from(tree.digest.0),
+                100,
+                U256::from(42u64),
+                Address::from([0x44; 20]),
+                vec![],
+            )
+            .await
+            .expect_err("an older frame contract is refused");
+        assert!(err.to_string().contains("v0.2.0"), "{err:#}");
+        let task = store.get_task(&task.id).await.unwrap().unwrap();
+        assert!(task.payload.is_none(), "no payload is rendered");
     }
 
     /// A tree task sent with ETH renders a payload carrying it, since the root frame funds any
