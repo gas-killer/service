@@ -46,7 +46,7 @@ eigen-services-operatorsinfo = "2.0.0"
 eigen-utils = "2.0.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
-gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", rev = "3863eda8287c900f6fae22eb504647188aea2164", package = "gas-analyzer-evmsketch" }
+gas-analyzer = { git = "https://github.com/gas-killer/gas-analyzer", rev = "8f51267eea947d6e8b03acd13752796422b94cc2", package = "gas-analyzer-evmsketch" }
 gas-killer-common = { path = "common" }
 governor = "0.10.4"
 hex = "0.4"
