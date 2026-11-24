@@ -76,19 +76,17 @@ impl GasKillerTaskData {
 
     /// Builds the payload hash for this task from the given storage updates.
     ///
-    /// Matches the digest `GasKillerSDK` checks in `verifyAndUpdate` (returned by
-    /// `getMessageHashWithValue`, and by `getMessageHash` for a zero-value task). The task's
-    /// `value` is bound in, so a contract credits inbound ETH only when it actually arrives:
+    /// Matches the digest `GasKillerSDK` v0.2.0 rebuilds in `verifyAndUpdate` (returned by
+    /// `getMessageHashWithValue`, and by `getMessageHash` for a zero-value task). The chain id
+    /// stops a signature from settling on another chain, and the task's `value` is bound in, so a
+    /// contract credits inbound ETH only when it actually arrives:
     ///
     /// ```solidity
     /// // value == 0
-    /// sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates))
+    /// sha256(abi.encode(transitionIndex, block.chainid, address(this), targetFunction, storageUpdates))
     /// // value != 0
-    /// sha256(abi.encode(transitionIndex, address(this), targetFunction, storageUpdates, value))
+    /// sha256(abi.encode(transitionIndex, block.chainid, address(this), targetFunction, storageUpdates, value))
     /// ```
-    ///
-    /// A zero-value task keeps the four-field encoding, so it hashes identically against SDK
-    /// versions that predate the value binding.
     ///
     /// `storage_updates` is a separate argument because the validator hashes the storage updates
     /// it recomputes via EVMSketch.
@@ -111,6 +109,7 @@ impl GasKillerTaskData {
                 target_address = %self.target_address,
                 target_function = %selector,
                 value = %self.value,
+                chain_id = self.chain_id,
                 storage_updates_len = storage_updates.len(),
                 storage_updates_hash = %storage_hash_hex,
                 "build_payload_hash inputs"
@@ -118,13 +117,14 @@ impl GasKillerTaskData {
         }
 
         // Build flattened ABI encoding matching
-        // abi.encode(transitionIndex, address(this), selector, storageUpdates[, value]).
+        // abi.encode(transitionIndex, block.chainid, address(this), selector, storageUpdates[, value]).
         // Heads (32 bytes each)
         let head_transition = U256::from(self.transition_index).abi_encode();
+        let head_chain_id = U256::from(self.chain_id).abi_encode();
         let head_address = self.target_address.abi_encode();
         let head_selector = selector.abi_encode();
-        // The dynamic bytes tail starts after the head: 4 words (0x80), or 5 with the value (0xa0)
-        let head_words: u64 = if self.value.is_zero() { 4 } else { 5 };
+        // The dynamic bytes tail starts after the head: 5 words (0xa0), or 6 with the value (0xc0)
+        let head_words: u64 = if self.value.is_zero() { 5 } else { 6 };
         let head_offset = U256::from(32u64 * head_words).abi_encode();
 
         // Tail for dynamic bytes: length (u256) + data + padding
@@ -139,6 +139,7 @@ impl GasKillerTaskData {
         // Concatenate head and tail into final payload
         let mut payload = Vec::with_capacity(32 * head_words as usize + tail.len());
         payload.extend_from_slice(&head_transition);
+        payload.extend_from_slice(&head_chain_id);
         payload.extend_from_slice(&head_address);
         payload.extend_from_slice(&head_selector);
         payload.extend_from_slice(&head_offset);
@@ -302,8 +303,8 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
 
-    /// A task for target `0xA11CE`, selector `0x12345678`, transition 7 and storage updates
-    /// `0xc0ffee`: the inputs of solidity-sdk's pinned root-leaf vectors in
+    /// A task on chain 1 for target `0xA11CE`, selector `0x12345678`, transition 7 and storage
+    /// updates `0xc0ffee`: the inputs of solidity-sdk's pinned root-leaf vectors in
     /// `test/NestedFramesParity.t.sol`, whose root leaf is this digest.
     fn parity_task(value: u64) -> GasKillerTaskData {
         GasKillerTaskData {
@@ -312,6 +313,7 @@ mod tests {
             target_address: Address::left_padding_from(&[0x0a, 0x11, 0xce]),
             call_data: vec![0x12, 0x34, 0x56, 0x78],
             value: U256::from(value),
+            chain_id: 1,
             ..Default::default()
         }
     }
@@ -322,7 +324,7 @@ mod tests {
         assert_eq!(
             FixedBytes::<32>::from(task.build_payload_hash(&task.storage_updates).0),
             alloy::primitives::b256!(
-                "18fece75dabcbe169342c5e311d4af162b89a28a80cb659d125f7fe70e191b2b"
+                "562537256ea398ca1c8f242715abcff06a6ea9d6f28669ff0ae5f61b2e19ba6c"
             )
         );
     }
@@ -333,7 +335,7 @@ mod tests {
         assert_eq!(
             FixedBytes::<32>::from(task.build_payload_hash(&task.storage_updates).0),
             alloy::primitives::b256!(
-                "9e2758ecd6d0b8e5563e02127be8e49b5cb8bcbe907e0d44d24968d955d0d6eb"
+                "6156e09524b304a42cdb28f61833d32ae9cd019196bb907f05bf29d263fdc6fe"
             )
         );
     }
@@ -345,14 +347,21 @@ mod tests {
         let updates = task.storage_updates.clone();
         let valued = (
             U256::from(7u64),
+            U256::from(1u64),
             task.target_address,
             selector,
             updates.clone(),
             task.value,
         )
             .abi_encode_params();
-        let unvalued =
-            (U256::from(7u64), task.target_address, selector, updates).abi_encode_params();
+        let unvalued = (
+            U256::from(7u64),
+            U256::from(1u64),
+            task.target_address,
+            selector,
+            updates,
+        )
+            .abi_encode_params();
 
         let sha = |bytes: &[u8]| {
             let mut hasher = Sha256::new();
@@ -363,6 +372,19 @@ mod tests {
         assert_eq!(
             parity_task(0).build_payload_hash(&task.storage_updates),
             sha(&unvalued)
+        );
+    }
+
+    #[test]
+    fn the_digest_binds_the_chain_id() {
+        let mainnet = parity_task(0);
+        let gnosis = GasKillerTaskData {
+            chain_id: 100,
+            ..parity_task(0)
+        };
+        assert_ne!(
+            mainnet.build_payload_hash(&mainnet.storage_updates),
+            gnosis.build_payload_hash(&gnosis.storage_updates)
         );
     }
 

@@ -25,7 +25,7 @@
 set -euo pipefail
 
 EXAMPLES_REPO="${EXAMPLES_REPO:-https://github.com/gas-killer/example-contracts}"
-EXAMPLES_REF="${EXAMPLES_REF:-4159838a67b4e3bda0c7e4183def2f34f1551a24}"
+EXAMPLES_REF="${EXAMPLES_REF:-c7699b3ffe7ff45ad22337aaf6fcc18afffc5be7}"
 EXAMPLES_DIR="${EXAMPLES_DIR:-.examples/example-contracts}"
 
 # The Gas Killer SDK is a submodule of the examples repo, and it carries its own examples

@@ -22,20 +22,21 @@ use alloy::rpc::types::TransactionRequest;
 /// A task's identity for its expected digest, used to reuse a traced digest across a signing
 /// session's attempts.
 ///
-/// The digest is `sha256(abi.encode(transition_index, target_address, selector,
+/// The digest is `sha256(abi.encode(transition_index, chain_id, target_address, selector,
 /// storage_updates[, value]))` (see [`GasKillerTaskData::build_payload_hash`]), and
 /// `storage_updates` is derived by EVMSketch from
-/// `(target_address, call_data, from_address, value, block_height)`. `transition_index`
+/// `(target_address, call_data, from_address, value, block_height)` on that chain. `transition_index`
 /// is a *per-contract* counter, so keying on `(transition_index, block_height)` alone
 /// would collide two tasks for *different* contracts that share the same index and
 /// block — returning the wrong contract's digest. The key covers every field the
 /// digest depends on, including the nested expiry, which a tree's root signs.
 ///
 /// Calldata is held by its keccak256 so a key costs a fixed ~150 B rather than up to 128 KB.
-pub type DigestKey = (u64, u64, Address, Address, U256, B256, Option<u64>);
+pub type DigestKey = (u64, u64, u64, Address, Address, U256, B256, Option<u64>);
 
 pub fn digest_key(task: &GasKillerTaskData, nested: Option<&NestedSpec>) -> DigestKey {
     (
+        task.chain_id,
         task.transition_index,
         task.block_height,
         task.target_address,
@@ -1272,6 +1273,16 @@ mod tests {
 
     /// A tree's root signs its expiry, so the same task signed flat or under two expiries
     /// yields three different digests and must never share a cache entry.
+    #[test]
+    fn digest_key_distinguishes_chains() {
+        // The digest binds the chain id, so the same target, index and height on two chains
+        // must not share a cached digest.
+        let task = create_test_task_data();
+        let mut other = task.clone();
+        other.chain_id = task.chain_id + 1;
+        assert_ne!(digest_key(&task, None), digest_key(&other, None));
+    }
+
     #[test]
     fn digest_key_distinguishes_calldata() {
         let task = create_test_task_data();

@@ -238,6 +238,7 @@ mod tests {
         assert_eq!(
             gas_analyzer::nested::root_leaf(
                 U256::from(4),
+                t.chain_id,
                 t.target_address,
                 t.function_selector(),
                 &trace.root_program,

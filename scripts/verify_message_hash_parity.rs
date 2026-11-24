@@ -1,8 +1,7 @@
 //! Asserts that `GasKillerTaskData::build_payload_hash` is byte-identical to the deployed
-//! contract's `getMessageHash` across a range of payload shapes, and, for a target whose SDK
-//! binds `msg.value` into the digest, to its `getMessageHashWithValue` for value-bearing tasks.
-//! A target built from an older SDK has no `getMessageHashWithValue`; its value-bearing checks
-//! are skipped and reported as such.
+//! contract's `getMessageHash` across a range of payload shapes, and to its
+//! `getMessageHashWithValue` for value-bearing tasks. Both digests bind the chain id, which is
+//! read from the RPC so the local digest is built for the same chain.
 //!
 //! Run against a chain with a GasKiller target contract deployed (the e2e stack deploys one).
 //! Reads `HTTP_RPC` and the target address from `GAS_KILLER_TARGET_ADDRESS` (falling back to the
@@ -12,10 +11,8 @@
 
 use alloy::primitives::{Address, Bytes, FixedBytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::sol_types::SolCall;
 use gas_killer_common::GasKillerTaskData;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
-use gas_killer_common::bindings::valueboundsdk::IValueBoundDigest;
 use scripts::deployment::{TARGET_ADDRESS_KEY, target_address};
 use std::env;
 use std::fs;
@@ -42,12 +39,10 @@ async fn main() -> Result<(), BoxError> {
         return Err(format!("target address {target_address} has no code deployed").into());
     }
 
-    // A function's selector appears in the runtime code's dispatcher, so its absence means the
-    // target was built from an SDK that predates the value-bound digest.
-    let binds_value = code
-        .windows(4)
-        .any(|w| w == IValueBoundDigest::getMessageHashWithValueCall::SELECTOR);
-    let valued = IValueBoundDigest::new(target_address, provider.clone());
+    let chain_id = provider
+        .get_chain_id()
+        .await
+        .map_err(|e| format!("failed to read the chain id: {e}"))?;
     let contract = GasKillerSDK::new(target_address, provider);
 
     let mut checked = 0usize;
@@ -72,7 +67,7 @@ async fn main() -> Result<(), BoxError> {
             from_address: Address::ZERO,
             value: U256::ZERO,
             block_height: 0,
-            chain_id: 0,
+            chain_id,
         };
         let local = FixedBytes::<32>::from(task_data.build_payload_hash(&storage_updates).0);
 
@@ -89,50 +84,44 @@ async fn main() -> Result<(), BoxError> {
         }
     }
 
-    if binds_value {
-        for ((transition_index, selector, storage_updates), value) in test_vectors()
-            .into_iter()
-            .zip(test_values().into_iter().cycle())
-        {
-            let onchain = valued
-                .getMessageHashWithValue(
-                    U256::from(transition_index),
-                    FixedBytes::<4>::from(selector),
-                    Bytes::from(storage_updates.clone()),
-                    value,
-                )
-                .call()
-                .await
-                .map_err(|e| format!("getMessageHashWithValue call failed: {e}"))?;
-
-            let task_data = GasKillerTaskData {
-                storage_updates: Bytes::from(storage_updates.clone()),
-                transition_index,
-                target_address,
-                call_data: selector.to_vec(),
-                from_address: Address::ZERO,
+    for ((transition_index, selector, storage_updates), value) in test_vectors()
+        .into_iter()
+        .zip(test_values().into_iter().cycle())
+    {
+        let onchain = contract
+            .getMessageHashWithValue(
+                U256::from(transition_index),
+                FixedBytes::<4>::from(selector),
+                Bytes::from(storage_updates.clone()),
                 value,
-                block_height: 0,
-                chain_id: 0,
-            };
-            let local = FixedBytes::<32>::from(task_data.build_payload_hash(&storage_updates).0);
+            )
+            .call()
+            .await
+            .map_err(|e| format!("getMessageHashWithValue call failed: {e}"))?;
 
-            checked += 1;
-            if !report(
-                transition_index,
-                &selector,
-                &storage_updates,
-                value,
-                local,
-                onchain,
-            ) {
-                mismatches += 1;
-            }
+        let task_data = GasKillerTaskData {
+            storage_updates: Bytes::from(storage_updates.clone()),
+            transition_index,
+            target_address,
+            call_data: selector.to_vec(),
+            from_address: Address::ZERO,
+            value,
+            block_height: 0,
+            chain_id,
+        };
+        let local = FixedBytes::<32>::from(task_data.build_payload_hash(&storage_updates).0);
+
+        checked += 1;
+        if !report(
+            transition_index,
+            &selector,
+            &storage_updates,
+            value,
+            local,
+            onchain,
+        ) {
+            mismatches += 1;
         }
-    } else {
-        println!(
-            "  skip  value-bearing checks: {target_address} has no getMessageHashWithValue, so its SDK predates the value-bound digest"
-        );
     }
 
     if mismatches > 0 {

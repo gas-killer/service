@@ -62,9 +62,10 @@ macro_rules! known_revert {
 const KNOWN_REVERTS: &[KnownRevert] = &[
     known_revert!(
         GasKillerSDK::InvalidQuorumSignature,
-        "the aggregate Schnorr signature does not verify against the target's schnorrRegistry at \
-         the reference block; check the target's avsAddress and schnorrRegistry against the live \
-         deployment"
+        "the aggregate Schnorr signature does not verify the digest the target rebuilds from the \
+         payload at the reference block: either the payload differs from what the quorum signed \
+         (send exactly the payload's value, on its chain), or the target's avsAddress and \
+         schnorrRegistry don't match the live deployment"
     ),
     known_revert!(
         GasKillerSDK::FutureBlockNumber,
@@ -81,9 +82,48 @@ const KNOWN_REVERTS: &[KnownRevert] = &[
         "the target's stateTransitionCount has moved past this payload; request a fresh payload"
     ),
     known_revert!(
-        GasKillerSDK::InvalidSignature,
-        "the signed digest does not match the one the target recomputes from its own address, the \
-         target function, the storage updates, and msg.value; send exactly the payload's value"
+        GasKillerSDK::InsufficientBatchValue,
+        "a batch was sent with less ETH than the transitions it applies carry"
+    ),
+    known_revert!(
+        GasKillerSDK::UnattributedValueSpent,
+        "a batch item spent ETH that a later item in the same batch brought"
+    ),
+    known_revert!(
+        GasKillerSDK::ProtectedSlotWrite,
+        "the program writes a storage slot the target protects, such as its configuration or \
+         transition counter; the target refuses to let a settlement change it"
+    ),
+    known_revert!(
+        GasKillerSDK::InvalidRanges,
+        "the target's protected storage ranges are malformed: unsorted, overlapping, or with a \
+         bad mask"
+    ),
+    known_revert!(
+        GasKillerSDK::NoProtectedRanges,
+        "the target ran a program with an empty protected-range list"
+    ),
+    known_revert!(
+        GasKillerSDK::ObservationMismatch,
+        "something the trace observed has changed since it ran (a call's result, a balance, a \
+         code hash or a created address); request a fresh payload"
+    ),
+    known_revert!(
+        GasKillerSDK::MalformedOp,
+        "a CALL or CREATE update isn't in the SDK v0.2.0 layout"
+    ),
+    known_revert!(
+        GasKillerSDK::InsufficientCallGas,
+        "the transaction's gas limit leaves too little for a CALL update's signed gas limit; \
+         resend with more gas"
+    ),
+    known_revert!(
+        GasKillerSDK::OutgoingValueExceeded,
+        "the program sends out more ETH than the target's call policy allows"
+    ),
+    known_revert!(
+        GasKillerSDK::SelfCall,
+        "the program calls the target itself with a selector its call policy doesn't allow"
     ),
     known_revert!(
         GasKillerSDK::MalformedLogPayload,

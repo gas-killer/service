@@ -66,7 +66,8 @@ pub enum BundleProof {
 /// re-deriving anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskBundle {
-    /// Quorum-signed payload hash.
+    /// Quorum-signed payload hash. Kept for reference: `verifyAndUpdate` doesn't take it, since
+    /// the contract rebuilds it from the other arguments.
     pub msg_hash: B256,
     /// Operator-set reference block the certificate is anchored to.
     pub reference_block_number: u32,

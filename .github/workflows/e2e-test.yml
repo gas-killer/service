@@ -16,7 +16,7 @@ on:
 env:
   # solidity-sdk commit the nested legs build their examples from, until the examples repo pins
   # an SDK with nested settlement and they can drop SDK_DIR.
-  NESTED_SDK_REF: 42fde576a13ffad68dfc483ae9684b521439f60a
+  NESTED_SDK_REF: 1231ce748dac570fd16ed47fcb715c3de08bbf09
 
 jobs:
   e2e-test:

@@ -434,7 +434,6 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             provider,
             chain_id,
             target_addr,
-            msg_hash,
             reference_block_number,
             storage_updates,
             transition_index,
@@ -461,9 +460,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             "Sending Schnorr verifyAndUpdate transaction"
         );
         let tx_send_start = Instant::now();
+        // The contract rebuilds the digest from these arguments, so `msg_hash` isn't sent.
         let send_result = sdk
             .verifyAndUpdate(
-                msg_hash,
                 reference_block_number,
                 storage_updates,
                 U256::from(transition_index),
@@ -648,9 +647,10 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
         } = prepared;
 
         let sdk = GasKillerSDK::new(target_addr, provider);
+        // The contract rebuilds the digest from these arguments, so `msg_hash` isn't sent; the
+        // bundle still records it as the signed digest.
         let call = sdk
             .verifyAndUpdate(
-                msg_hash,
                 reference_block_number,
                 storage_updates.clone(),
                 U256::from(transition_index),
@@ -1478,7 +1478,6 @@ mod tests {
         // The rendered calldata ABI-decodes to a verifyAndUpdate call carrying the round inputs.
         let decoded = GasKillerSDK::verifyAndUpdateCall::abi_decode(payload.data.as_ref())
             .expect("payload data should decode as verifyAndUpdate");
-        assert_eq!(decoded.msgHash, msg_hash);
         assert_eq!(decoded.referenceBlockNumber, current_block - 1);
         assert_eq!(decoded.storageUpdates, task_data.storage_updates);
         assert_eq!(decoded.transitionIndex, U256::ZERO);
