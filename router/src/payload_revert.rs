@@ -175,7 +175,8 @@ const KNOWN_REVERTS: &[KnownRevert] = &[
     known_revert!(
         GasKillerSDK::NotTreeMember,
         "the root frame's leaf is not in the signed tree: the tree was settled with a msg.value \
-         other than the payload's value"
+         other than the payload's value, on a chain other than the one it was signed for, or on \
+         a root built from an SDK before v0.2.0, whose leaf doesn't bind the chain id"
     ),
     known_revert!(
         GasKillerSDK::NestedOutsideTree,

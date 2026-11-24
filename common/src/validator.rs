@@ -1271,12 +1271,10 @@ mod tests {
         assert_eq!(digest_key(&a, None), digest_key(&a.clone(), None));
     }
 
-    /// A tree's root signs its expiry, so the same task signed flat or under two expiries
-    /// yields three different digests and must never share a cache entry.
+    /// The digest binds the chain id, so the same target, index and height on two chains must
+    /// not share a cached digest.
     #[test]
     fn digest_key_distinguishes_chains() {
-        // The digest binds the chain id, so the same target, index and height on two chains
-        // must not share a cached digest.
         let task = create_test_task_data();
         let mut other = task.clone();
         other.chain_id = task.chain_id + 1;
@@ -1291,6 +1289,8 @@ mod tests {
         assert_ne!(digest_key(&task, None), digest_key(&other, None));
     }
 
+    /// A tree's root signs its expiry, so the same task signed flat or under two expiries
+    /// yields three different digests and must never share a cache entry.
     #[test]
     fn digest_key_distinguishes_nested_expiries() {
         let task = create_test_task_data();
