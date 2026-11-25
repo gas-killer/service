@@ -149,11 +149,12 @@ router:
     # first. Long enough for a multi-minute round plus its wait in the queue, and above
     # router.roundTimeout, which a queued task has to outlive to be reached at all.
     taskTtlSeconds: "3000"
-    # The shared ArraySummation the docs' Quickstart points at (16 elements, deployed 2026-10-20 from
-    # solidity-sdk 42fde57), published as demoTarget so the docs read it live. Set by hand: no chart
-    # job deploys it. It must be wired to schnorr.stakeRegistryAddress, or /avs-metadata publishes no
-    # contracts at all.
-    demoTarget: "0x92080876E018688d0E7f1a8693280dAA62005735"
+    # The shared ArraySummation the docs' Quickstart points at (16 elements, deployed 2026-11-25 from
+    # solidity-sdk v0.2.0, verified on Etherscan), published as demoTarget so the docs read it live.
+    # Set by hand: no chart job deploys it. It must be wired to schnorr.stakeRegistryAddress, or
+    # /avs-metadata publishes no contracts at all, and report the SDK interface the router serves,
+    # or the Quickstart's first task is refused.
+    demoTarget: "0x20b53E69EA0996AD311E3b72B092aa13247689Df"
 
 # Deploy the smoke-test target (ArraySummation, wired to schnorr.stakeRegistryAddress)
 # after the operator set is registered, then publish its address to a ConfigMap:
@@ -161,8 +162,9 @@ router:
 deployTarget:
   enabled: true
   image:
-    # Pinned rather than `latest` so a rerun.deployTarget upgrade deploys a known contract.
-    tag: sha-42fde57
+    # Pinned rather than `latest` so a rerun.deployTarget upgrade deploys a known contract:
+    # solidity-sdk v0.2.0, the version the router serves.
+    tag: sha-1231ce7
   configMapName: gas-killer-smoke-target
   # ArraySummation params (smoke test sums indexes [1,2,3], so arraySize must be >= 4).
   arraySize: 10
