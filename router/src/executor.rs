@@ -852,9 +852,12 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
     /// Checks every frame contract reports the nested interface and the v0.2.0 core interface,
     /// and shares the root's registry, whose approval is the only one a nested frame will find.
     ///
-    /// The nested interface ID didn't change in v0.2.0, but the root leaf did: it now binds the
-    /// chain id. Only the core ID tells a nested consumer that hashes the leaf the way operators
-    /// sign it from one that doesn't, which would reject every tree with `NotTreeMember`.
+    /// The nested interface ID didn't change in v0.2.0, so only the core ID tells a v0.2.0 frame
+    /// from an older one. Every frame's program is encoded in the v0.2.0 layout (the analyzer emits
+    /// no other), which an older SDK can't decode once it carries a `CALL` or a check op, and an
+    /// older SDK applies it without v0.2.0's storage guard and call policy. A v0.2.0 root also
+    /// binds the chain id into its leaf, which an older root doesn't. So, as on the flat path, only
+    /// v0.2.0 contracts are routed.
     async fn preflight_tree(
         &self,
         provider: &P,

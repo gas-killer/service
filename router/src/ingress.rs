@@ -399,7 +399,7 @@ impl fmt::Display for OnchainValidationError {
             ),
             Self::ValueNotBound { value } => write!(
                 f,
-                "value is {value} wei, but target_address does not report the Gas Killer SDK v0.2.0 interface, so it does not bind msg.value into its signed digest the way operators sign it and could credit ETH that never arrives; upgrade the target's SDK or send the call with no value"
+                "value is {value} wei, but target_address does not report the Gas Killer SDK v0.2.0 interface, which a task carrying value requires: only a v0.2.0 target binds msg.value into the digest operators sign; upgrade the target's SDK or send the call with no value"
             ),
             Self::RpcError(msg) => write!(f, "RPC error during onchain validation: {msg}"),
         }
