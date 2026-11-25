@@ -133,7 +133,8 @@ Operator discovery goes through EigenLayer (`RegistryCoordinator`/`BLSApkRegistr
   context; sessions live in memory only, and are pruned once they fall two `ROUND_TIMEOUT`s of
   heights behind the newest, so nodes must run the router's `ROUND_TIMEOUT`.
 - **Digest**: nodes sign the 32-byte task digest, which binds
-  `(transitionIndex, target, selector, storageUpdates)`. The signature does not bind the
+  `(transitionIndex, chainId, target, selector, storageUpdates)`, plus the value when it is
+  non-zero, so a signature can't settle on another chain. The signature does not bind the
   height, and the contract enforces transition-index ordering, so an identical digest at a
   different height is harmless.
 - **Submitter** (router): settles each session's task. For a signed session it takes the aggregate signature `(s, rAddr)` and the strictly

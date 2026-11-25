@@ -97,8 +97,8 @@ impl Heights {
 /// Contracts pinned by live tasks, by the id of the task pinning each.
 ///
 /// Beyond the transition index, a lock keeps two live sessions from ever signing the same
-/// digest: it binds only `(transitionIndex, target, selector, storageUpdates)`, so two tasks for
-/// one target resolved against the same state could share one.
+/// digest: it binds only `(transitionIndex, chainId, target, selector, storageUpdates)` and the
+/// value, so two tasks for one target resolved against the same state could share one.
 #[derive(Default)]
 struct LockTable {
     held: HashMap<Address, String>,

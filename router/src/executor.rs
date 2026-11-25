@@ -375,14 +375,15 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
             ));
         }
 
-        // Ensure the contract implements the Gas Killer interface (ERC-165).
+        // Only a target reporting the SDK v0.2.0 interface (ERC-165) can apply the program.
         if !supports_result? {
             warn!(
                 interface_id = %GAS_KILLER_INTERFACE_ID,
-                "Target contract does not support the Gas Killer interface"
+                "Target contract does not report the Gas Killer SDK v0.2.0 interface"
             );
             return Err(anyhow::anyhow!(
-                "Target contract does not support the Gas Killer interface ({})",
+                "Target contract does not report the Gas Killer SDK v0.2.0 interface ({}); a \
+                 target built from SDK v0.1.0 or earlier must be upgraded",
                 GAS_KILLER_INTERFACE_ID
             ));
         }
@@ -888,8 +889,9 @@ impl<P: Provider<Ethereum> + Clone + Send + Sync + 'static> GasKillerHandler<P> 
                 .await?
             {
                 bail!(
-                    "frame contract {contract} does not support the Gas Killer v0.2.0 interface \
-                     ({GAS_KILLER_INTERFACE_ID}); its SDK predates the chain-bound root leaf"
+                    "frame contract {contract} does not report the Gas Killer SDK v0.2.0 interface \
+                     ({GAS_KILLER_INTERFACE_ID}); its SDK predates v0.2.0, so it can't apply a \
+                     v0.2.0 frame"
                 );
             }
             let registry =

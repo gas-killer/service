@@ -4660,8 +4660,8 @@ mod tests {
             assert_eq!(api_err.code, ErrorCode::InvalidRequest);
         }
 
-        /// An older SDK answers `false` for the v0.2.0 interface, so the task is refused rather
-        /// than failing later with `InvalidQuorumSignature`.
+        /// An older SDK answers `false` for the v0.2.0 interface, so the task is refused at ingress
+        /// rather than at render, after the operators have already signed it.
         #[tokio::test]
         async fn a_valued_task_is_refused_for_a_target_without_the_v0_2_0_interface() {
             let providers = valued_providers(|a| a.push_success(&Bytes::from(false.abi_encode())));
