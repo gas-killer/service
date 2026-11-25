@@ -4012,7 +4012,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 [[package]]
 name = "gas-analyzer-core"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#ba2506ff04f80caf32fdee3bdd3224039a38c08e"
+source = "git+https://github.com/gas-killer/gas-analyzer#de1918caa6565b783c4514b6e55985243b707119"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
@@ -4028,10 +4028,11 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-estimator"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#ba2506ff04f80caf32fdee3bdd3224039a38c08e"
+source = "git+https://github.com/gas-killer/gas-analyzer#de1918caa6565b783c4514b6e55985243b707119"
 dependencies = [
  "alloy-dyn-abi",
  "alloy-primitives",
+ "alloy-sol-types",
  "anyhow",
  "gas-analyzer-core",
  "getrandom 0.2.17",
@@ -4044,7 +4045,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-evmsketch"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#ba2506ff04f80caf32fdee3bdd3224039a38c08e"
+source = "git+https://github.com/gas-killer/gas-analyzer#de1918caa6565b783c4514b6e55985243b707119"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -4054,6 +4055,7 @@ dependencies = [
  "alloy-json-rpc",
  "alloy-provider",
  "anyhow",
+ "colorchoice",
  "futures",
  "gas-analyzer-core",
  "gas-analyzer-estimator",
@@ -4061,6 +4063,7 @@ dependencies = [
  "lru 0.13.0",
  "reth-primitives",
  "revm 31.0.2",
+ "revm-inspectors",
  "sp1-cc-client-executor",
  "sp1-cc-host-executor",
  "tokio",
@@ -4071,7 +4074,7 @@ dependencies = [
 [[package]]
 name = "gas-analyzer-rpc"
 version = "0.1.0"
-source = "git+https://github.com/gas-killer/gas-analyzer#ba2506ff04f80caf32fdee3bdd3224039a38c08e"
+source = "git+https://github.com/gas-killer/gas-analyzer#de1918caa6565b783c4514b6e55985243b707119"
 dependencies = [
  "alloy",
  "alloy-eips",
@@ -4083,6 +4086,7 @@ dependencies = [
  "gas-analyzer-estimator",
  "revm 31.0.2",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -8809,7 +8813,7 @@ dependencies = [
 [[package]]
 name = "sp1-cc-client-executor"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/sp1-contract-call?rev=1f04b99f89df07a54e5c1f7e3b816dff75803850#1f04b99f89df07a54e5c1f7e3b816dff75803850"
+source = "git+https://github.com/BreadchainCoop/sp1-contract-call?rev=78ca0fa8c2df70e0f4c872301a932a3dd40e69bd#78ca0fa8c2df70e0f4c872301a932a3dd40e69bd"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8844,7 +8848,7 @@ dependencies = [
 [[package]]
 name = "sp1-cc-host-executor"
 version = "0.1.0"
-source = "git+https://github.com/BreadchainCoop/sp1-contract-call?rev=1f04b99f89df07a54e5c1f7e3b816dff75803850#1f04b99f89df07a54e5c1f7e3b816dff75803850"
+source = "git+https://github.com/BreadchainCoop/sp1-contract-call?rev=78ca0fa8c2df70e0f4c872301a932a3dd40e69bd#78ca0fa8c2df70e0f4c872301a932a3dd40e69bd"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",

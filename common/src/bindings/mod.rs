@@ -2,9 +2,11 @@ use alloy_primitives::FixedBytes;
 
 pub use commonware_avs_bindings::{ReadOnlyProvider, WalletProvider};
 
-/// ERC-165 interface ID for the Gas Killer interface. A target contract must report support for
-/// this ID before the router submits `verifyAndUpdate`.
-pub const GAS_KILLER_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0x82, 0xb3, 0x5a, 0x01]);
+/// ERC-165 interface ID for `IGasKillerSDK` v0.2.0: the selector of `verifyAndUpdate`, which no
+/// longer takes the digest. A target must report it before the router submits `verifyAndUpdate`.
+/// It also means the target's digest binds the chain id and the value. SDK v0.1.0 targets report
+/// `0x82b35a01` and aren't routed.
+pub const GAS_KILLER_INTERFACE_ID: FixedBytes<4> = FixedBytes::new([0x57, 0xa9, 0xb0, 0x02]);
 
 /// ERC-165 interface ID for `IGasKillerNested`. A root reporting it can settle a nested tree
 /// through `verifyAndUpdateTree`, and a callee reporting it can apply its own frame.
@@ -38,8 +40,3 @@ pub mod gaskillersdk;
     dead_code
 )]
 pub mod schnorrstakeregistry;
-
-/// `IValueBoundDigest`: present on targets whose SDK binds `msg.value` into the signed digest.
-/// A target without it hashes every task as if it carried no value, so it cannot settle a
-/// value-bearing task safely.
-pub mod valueboundsdk;

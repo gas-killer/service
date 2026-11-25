@@ -32,35 +32,6 @@
   },
   {
     "type": "function",
-    "name": "applyNested",
-    "inputs": [
-      {
-        "name": "root",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "expectedLeaf",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "witness",
-        "type": "bytes",
-        "internalType": "bytes"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes4",
-        "internalType": "bytes4"
-      }
-    ],
-    "stateMutability": "payable"
-  },
-  {
-    "type": "function",
     "name": "arraySize",
     "inputs": [],
     "outputs": [
@@ -107,6 +78,36 @@
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "gasKillerProtectedRanges",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple[]",
+        "internalType": "struct StorageGuard.ProtectedRange[]",
+        "components": [
+          {
+            "name": "start",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "end",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "mask",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
       }
     ],
     "stateMutability": "view"
@@ -187,6 +188,40 @@
   },
   {
     "type": "function",
+    "name": "getMessageHashWithValue",
+    "inputs": [
+      {
+        "name": "transitionIndex",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "targetFunction",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      },
+      {
+        "name": "storageUpdates",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "value",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "inTransition",
     "inputs": [],
     "outputs": [
@@ -207,19 +242,6 @@
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "pendingChild",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
       }
     ],
     "stateMutability": "view"
@@ -337,11 +359,6 @@
     "name": "verifyAndUpdate",
     "inputs": [
       {
-        "name": "msgHash",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
         "name": "referenceBlockNumber",
         "type": "uint32",
         "internalType": "uint32"
@@ -390,11 +407,6 @@
         "internalType": "struct TaskSubmission[]",
         "components": [
           {
-            "name": "msgHash",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
             "name": "referenceBlockNumber",
             "type": "uint32",
             "internalType": "uint32"
@@ -428,88 +440,11 @@
             "name": "nonSigners",
             "type": "address[]",
             "internalType": "address[]"
-          }
-        ]
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "payable"
-  },
-  {
-    "type": "function",
-    "name": "verifyAndUpdateTree",
-    "inputs": [
-      {
-        "name": "submission",
-        "type": "tuple",
-        "internalType": "struct TreeSubmission",
-        "components": [
-          {
-            "name": "root",
-            "type": "bytes32",
-            "internalType": "bytes32"
           },
           {
-            "name": "expiryBlock",
+            "name": "value",
             "type": "uint256",
             "internalType": "uint256"
-          },
-          {
-            "name": "expiryProof",
-            "type": "bytes32[]",
-            "internalType": "bytes32[]"
-          },
-          {
-            "name": "sig",
-            "type": "tuple",
-            "internalType": "struct QuorumSignature",
-            "components": [
-              {
-                "name": "s",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "Raddr",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "nonSigners",
-                "type": "address[]",
-                "internalType": "address[]"
-              },
-              {
-                "name": "refBlock",
-                "type": "uint256",
-                "internalType": "uint256"
-              }
-            ]
-          },
-          {
-            "name": "transitionIndex",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "targetFunction",
-            "type": "bytes4",
-            "internalType": "bytes4"
-          },
-          {
-            "name": "storageUpdates",
-            "type": "bytes",
-            "internalType": "bytes"
-          },
-          {
-            "name": "proof",
-            "type": "bytes32[]",
-            "internalType": "bytes32[]"
-          },
-          {
-            "name": "children",
-            "type": "bytes[]",
-            "internalType": "bytes[]"
           }
         ]
       }
@@ -571,6 +506,38 @@
   },
   {
     "type": "error",
+    "name": "InsufficientBatchValue",
+    "inputs": [
+      {
+        "name": "sent",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "required",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InsufficientCallGas",
+    "inputs": [
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "gasLimit",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InvalidArguments",
     "inputs": []
   },
@@ -586,7 +553,7 @@
   },
   {
     "type": "error",
-    "name": "InvalidSignature",
+    "name": "InvalidRanges",
     "inputs": []
   },
   {
@@ -596,49 +563,17 @@
   },
   {
     "type": "error",
-    "name": "LeafMismatch",
-    "inputs": [
-      {
-        "name": "expected",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "computed",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "MalformedLogPayload",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "MissingWitness",
+    "name": "MalformedOp",
     "inputs": [
       {
         "name": "index",
         "type": "uint256",
         "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "NestedNotApplied",
-    "inputs": [
-      {
-        "name": "index",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "target",
-        "type": "address",
-        "internalType": "address"
       }
     ]
   },
@@ -649,26 +584,25 @@
   },
   {
     "type": "error",
-    "name": "NotApproved",
-    "inputs": [
-      {
-        "name": "root",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ]
+    "name": "NoProtectedRanges",
+    "inputs": []
   },
   {
     "type": "error",
-    "name": "NotPendingChild",
+    "name": "ObservationMismatch",
     "inputs": [
       {
-        "name": "parent",
-        "type": "address",
-        "internalType": "address"
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
       },
       {
-        "name": "leaf",
+        "name": "expected",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "actual",
         "type": "bytes32",
         "internalType": "bytes32"
       }
@@ -676,10 +610,36 @@
   },
   {
     "type": "error",
-    "name": "NotTreeMember",
+    "name": "OutgoingValueExceeded",
     "inputs": [
       {
-        "name": "leaf",
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "total",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "cap",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ProtectedSlotWrite",
+    "inputs": [
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "slot",
         "type": "bytes32",
         "internalType": "bytes32"
       }
@@ -718,7 +678,28 @@
   },
   {
     "type": "error",
+    "name": "SelfCall",
+    "inputs": [
+      {
+        "name": "index",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "StaleBlockNumber",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnattributedValueSpent",
     "inputs": []
   },
   {

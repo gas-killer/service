@@ -32,7 +32,10 @@ global:
   # extractable; it REQUIRES every node's and the router's RPC to support
   # debug_traceCall with prestateTracer (diffMode) and callTracer (withLog), and fails
   # the task rather than downgrading if they are missing. Hosted providers often gate
-  # prestateTracer to paid tiers — confirm before enabling.
+  # prestateTracer to paid tiers — confirm before enabling. It also needs state overrides
+  # in debug_traceCall (for the local replay that checks whether a call read a balance or
+  # code), and should allow custom JavaScript tracers, the fallback when that replay can't
+  # match the node's run; without them a long call can sign a digest the fleet doesn't.
   #
   # Support alone is not enough on a mixed fleet: the clients must also agree on
   # tracer OUTPUT. callTracer log ordering depends on whether the client populates the

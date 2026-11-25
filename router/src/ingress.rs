@@ -7,7 +7,7 @@ use crate::store::{
     ApiKeyMetadata, AuthenticatedKey, CreatedApiKey, KeyVerdict, SqliteStore, SubmittedTask, Task,
     TaskStatus,
 };
-use alloy_primitives::{Address, Bytes, FixedBytes, U256};
+use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use axum::{
     Json, Router,
@@ -17,11 +17,10 @@ use axum::{
     routing::{delete, get, post},
 };
 use gas_killer_common::ChainRole;
-use gas_killer_common::GasKillerTaskData;
 use gas_killer_common::ReadOnlyProvider;
 use gas_killer_common::avs_contracts::ResolvedContracts;
+use gas_killer_common::bindings::GAS_KILLER_INTERFACE_ID;
 use gas_killer_common::bindings::gaskillersdk::GasKillerSDK;
-use gas_killer_common::bindings::valueboundsdk::IValueBoundDigest;
 use gas_killer_common::config::CHAIN_DETECTION_ORDER;
 use gas_killer_common::task_data::MAX_EVM_TX_CALLDATA_SIZE;
 use gas_killer_common::{PayloadView, TaskBundle};
@@ -400,7 +399,7 @@ impl fmt::Display for OnchainValidationError {
             ),
             Self::ValueNotBound { value } => write!(
                 f,
-                "value is {value} wei, but target_address does not bind msg.value into its signed digest the way operators sign it (its getMessageHashWithValue is missing or disagrees), so it could credit ETH that never arrives; upgrade the target's SDK or send the call with no value"
+                "value is {value} wei, but target_address does not report the Gas Killer SDK v0.2.0 interface, which a task carrying value requires: only a v0.2.0 target binds msg.value into the digest operators sign; upgrade the target's SDK or send the call with no value"
             ),
             Self::RpcError(msg) => write!(f, "RPC error during onchain validation: {msg}"),
         }
@@ -558,29 +557,16 @@ async fn validate_onchain<P: Provider + Clone>(
     // Operators sign a digest that binds the task's value, and only an SDK that binds it too
     // accepts that signature. A target built from an older SDK hashes every task as zero-value:
     // it would reject the round, and it is the kind of target that credits a deposit whether or
-    // not the ETH arrives. The probe is a call rather than a bytecode scan so a proxied target
-    // answers through its implementation, and its answer must equal the digest operators would
-    // sign for the same inputs: a catch-all fallback returns a word, but not that one.
+    // not the ETH arrives. Every target reporting the v0.2.0 interface binds the value (and the
+    // chain id), so the check is that interface. It is a call rather than a bytecode scan so a
+    // proxied target answers through its implementation. A zero-value task for an older target
+    // is refused later, by the executor's interface check.
     if !body.value.is_zero() {
-        let probe = IValueBoundDigest::new(body.target_address, provider.clone());
-        let expected = FixedBytes::<32>::from(
-            GasKillerTaskData {
-                target_address: body.target_address,
-                call_data: vec![0; 4],
-                value: body.value,
-                ..Default::default()
-            }
-            .build_payload_hash(&[])
-            .0,
-        );
+        let sdk = GasKillerSDK::new(body.target_address, provider.clone());
         // A revert is the node answering, so it counts as a healthy call.
-        let answered = match probe
-            .getMessageHashWithValue(U256::ZERO, FixedBytes::ZERO, Bytes::new(), body.value)
-            .call()
-            .await
-        {
-            Ok(digest) => Ok(digest == expected),
-            Err(err) if binds_no_value(&err) => Ok(false),
+        let answered = match sdk.supportsInterface(GAS_KILLER_INTERFACE_ID).call().await {
+            Ok(supported) => Ok(supported),
+            Err(err) if answered_without_support(&err) => Ok(false),
             Err(err) => Err(err),
         };
         let binds_value = record_rpc(health, chain_id, answered)
@@ -615,10 +601,10 @@ async fn validate_onchain<P: Provider + Clone>(
     Ok(())
 }
 
-/// Whether a failed `getMessageHashWithValue` call shows the target lacks the function, as
-/// opposed to a transport failure that says nothing about it: the call executed and reverted, or
-/// returned something that is not a `bytes32` (a permissive fallback).
-fn binds_no_value(err: &alloy::contract::Error) -> bool {
+/// Whether a failed `supportsInterface` call shows the target lacks the interface, as opposed to
+/// a transport failure that says nothing about it: the call executed and reverted, or returned
+/// something that is not a `bool` (a permissive fallback).
+fn answered_without_support(err: &alloy::contract::Error) -> bool {
     match err {
         alloy::contract::Error::TransportError(_) => {
             crate::payload_revert::PayloadRevert::from_call_error(err).is_some()
@@ -4640,31 +4626,16 @@ mod tests {
             providers
         }
 
-        /// The digest a value-bound SDK returns for the probe's inputs.
-        fn probe_digest(body: &GasKillerTaskRequestBody) -> FixedBytes<32> {
-            FixedBytes::from(
-                GasKillerTaskData {
-                    target_address: body.target_address,
-                    call_data: vec![0; 4],
-                    value: body.value,
-                    ..Default::default()
-                }
-                .build_payload_hash(&[])
-                .0,
-            )
-        }
-
-        /// A value-bearing task is accepted for a target whose SDK binds the value.
+        /// A value-bearing task is accepted for a target that reports the v0.2.0 interface.
         #[tokio::test]
         async fn a_valued_task_is_accepted_for_a_value_bound_target() {
-            let digest = probe_digest(&valued_body());
-            let providers = valued_providers(|a| a.push_success(&Bytes::from(digest.abi_encode())));
+            let providers = valued_providers(|a| a.push_success(&Bytes::from(true.abi_encode())));
             validate_onchain(&providers, None, &valued_body())
                 .await
-                .expect("a target with getMessageHashWithValue accepts a valued task");
+                .expect("a v0.2.0 target accepts a valued task");
         }
 
-        /// A target whose SDK predates the value binding reverts the probe, so a valued task is
+        /// A target whose `supportsInterface` reverts can't bind the value, so a valued task is
         /// refused up front instead of failing every round at the estimate.
         #[tokio::test]
         async fn a_valued_task_is_refused_for_a_target_that_does_not_bind_value() {
@@ -4689,15 +4660,11 @@ mod tests {
             assert_eq!(api_err.code, ErrorCode::InvalidRequest);
         }
 
-        /// A catch-all fallback answers with a word, but not the digest operators would sign, so
-        /// the task is refused rather than failing later with `InvalidSignature`.
+        /// An older SDK answers `false` for the v0.2.0 interface, so the task is refused at ingress
+        /// rather than at render, after the operators have already signed it.
         #[tokio::test]
-        async fn a_valued_task_is_refused_when_the_probe_answers_the_wrong_digest() {
-            let providers = valued_providers(|a| {
-                a.push_success(&Bytes::from(
-                    FixedBytes::<32>::repeat_byte(0x11).abi_encode(),
-                ))
-            });
+        async fn a_valued_task_is_refused_for_a_target_without_the_v0_2_0_interface() {
+            let providers = valued_providers(|a| a.push_success(&Bytes::from(false.abi_encode())));
             let err = validate_onchain(&providers, None, &valued_body())
                 .await
                 .unwrap_err();
